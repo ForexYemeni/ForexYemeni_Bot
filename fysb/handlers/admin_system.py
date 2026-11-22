@@ -1,0 +1,538 @@
+"""Admin system sections: Reports, Notifications, Broadcast, Support, Security,
+Backup & Restore, Settings, Audit logs, System health."""
+import asyncio
+import json
+
+from telegram.ext import ContextTypes
+
+from fysb import config, db
+from fysb.engines import market_data
+from fysb.handlers.common import render, safe
+from fysb.handlers.user_pages import _safe_int
+from fysb.services import analytics as analytics_service
+from fysb.services import audit as audit_log
+from fysb.services import backup as backup_service
+from fysb.services import broadcast as broadcast_service
+from fysb.services import support as support_service
+from fysb.theme import ICON, esc, human_dt
+from fysb.ui import keyboards as kb
+
+BROADCAST_AUDIENCES = [("all", "👥 كل المستخدمين"), ("free", "🆓 المشتركين المجانيين"),
+                       ("paid", "💎 المشتركين المدفوعين"), ("notified", "🔔 المتلقون فقط")]
+
+
+# --- Reports ------------------------------------------------------------------------
+async def admin_reports(q, uid, context, bot):
+    rows_kb = [
+        [kb.btn("👥 المستخدمون", "a:repusers"), kb.btn("📡 الإشارات", "a:repsignals")],
+        [kb.btn("💳 المدفوعات", "a:reppayments"), kb.btn("💎 الاشتراكات", "a:repsubs")],
+        [kb.btn("🧠 دورات المحرك", "a:repengine")],
+    ]
+    body = "📈 <b>مركز التقارير</b>\nكل الأرقام مستخرجة فعلياً من قاعدة البيانات — اختر تقريراً:"
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def _report(q, uid, context, bot, fn, title):
+    await render(q, fn(), kb.admin_nav(), bot)
+
+
+async def admin_rep_users(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.users_report, "users")
+
+
+async def admin_rep_signals(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.signals_report, "signals")
+
+
+async def admin_rep_payments(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.payments_report, "payments")
+
+
+async def admin_rep_subs(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.subscriptions_report, "subs")
+
+
+async def admin_rep_engine(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.engine_report, "engine")
+
+
+# --- Analytics governance (per-plan daily quota) --------------------------------------
+async def admin_analytics(q, uid, context, bot):
+    enabled = analytics_service.analytics_enabled()
+    with db.conn() as c:
+        plans = c.execute("SELECT code, title, enabled, max_analyses_per_day FROM plans ORDER BY price").fetchall()
+        today = c.execute("SELECT COUNT(*) n FROM analyses WHERE created_at>=?", (db.day_start_utc(),)).fetchone()["n"]
+        total = c.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"]
+    body = [f"🔬 <b><u>إدارة التحليلات</u></b>",
+            f"▎القسم للمستخدمين: <b>{'🟢 مفعّل' if enabled else '⚪ معطل'}</b>",
+            f"▎تحليلات اليوم: <b>{today}</b> · الإجمالي: <b>{total}</b>", "",
+            "▎اضبط <b>حصة التحليلات اليومية لكل باقة</b> (0 = معطلة للباقة):"]
+    rows_kb = []
+    for p in plans:
+        quota = p["max_analyses_per_day"] or 0
+        body.append(f"▎{ICON['diamond']} <b>{esc(p['title'])} ({esc(p['code'])})</b> · حصة التحليلات: <b>{quota}/يوم</b>")
+        rows_kb.append([kb.btn("➖", f"a:anladj:{p['code']}:-1"),
+                        kb.btn(f"🔬 {quota}/يوم", "a:plannoop"),
+                        kb.btn("➕", f"a:anladj:{p['code']}:1")])
+    rows_kb.append([kb.btn(f"{'⏹ تعطيل القسم عالمياً' if enabled else '▶️ تفعيل القسم عالمياً'}", "a:anlglobal")])
+    rows_kb.append([kb.btn("📈 تقرير التحليلات", "a:repanal")])
+    await render(q, "\n".join(body), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_anl_adjust(q, uid, context, bot, code: str, delta: float):
+    with db.conn() as c:
+        r = c.execute("SELECT max_analyses_per_day FROM plans WHERE code=?", (code,)).fetchone()
+        if not r:
+            await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
+            return
+        val = max(0, min(500, int((r["max_analyses_per_day"] or 0) + delta)))
+        c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (val, code))
+    audit_log.log(uid, f"analytics_quota:{code}:{val}")
+    await admin_analytics(q, uid, context, bot)
+
+
+async def admin_anl_global(q, uid, context, bot):
+    val = "0" if analytics_service.analytics_enabled() else "1"
+    db.set_setting("analytics_enabled", val)
+    audit_log.log(uid, f"analytics_global:{val}")
+    await admin_analytics(q, uid, context, bot)
+
+
+async def admin_rep_anal(q, uid, context, bot):
+    from fysb.services import reports
+    await _report(q, uid, context, bot, reports.analyses_report, "analyses")
+
+
+# --- Notifications -------------------------------------------------------------------
+async def admin_notifications(q, uid, context, bot):
+    push = db.get_setting("signal_push_enabled", "1") == "1"
+    remind_days = db.get_setting_int("expiry_remind_days", 3)
+    with db.conn() as c:
+        unread = c.execute("SELECT COUNT(*) n FROM notification_events WHERE read=0").fetchone()["n"]
+        recent = c.execute("SELECT * FROM notification_events ORDER BY id DESC LIMIT 8").fetchall()
+    lines = ["🔔 <b>مركز الإشعارات</b>",
+             f"📡 دفع الإشارات الجديدة: <b>{'مفعل' if push else 'متوقف'}</b>",
+             f"⏳ تذكير انتهاء الاشتراك قبل: <b>{remind_days}</b> يوم",
+             f"📬 أحداث مسجلة غير مقروءة: <b>{unread}</b>", "", "<b>أحدث الأحداث:</b>"]
+    for r in recent:
+        lines.append(f"  {esc(r['kind'])} → user {r['user_id']} · {human_dt(r['created_at'])}")
+    if not recent:
+        lines.append("  لا أحداث بعد.")
+    rows_kb = [
+        [kb.btn(f"📡 دفع الإشارات: {'إيقاف' if push else 'تفعيل'}", "a:togglepush")],
+        [kb.btn("➖ تذكير", f"a:reminddays:{remind_days - 1}"), kb.btn(f"⏳ {remind_days} يوم", "a:plannoop"), kb.btn("➕ تذكير", f"a:reminddays:{remind_days + 1}")],
+    ]
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_toggle_push(q, uid, context, bot):
+    val = "0" if db.get_setting("signal_push_enabled", "1") == "1" else "1"
+    db.set_setting("signal_push_enabled", val)
+    audit_log.log(uid, f"signal_push:{val}")
+    await admin_notifications(q, uid, context, bot)
+
+
+async def admin_remind_days(q, uid, context, bot, days: int):
+    days = max(1, min(14, days))
+    db.set_setting("expiry_remind_days", days)
+    await admin_notifications(q, uid, context, bot)
+
+
+# --- Broadcast ------------------------------------------------------------------------
+async def admin_broadcast(q, uid, context, bot):
+    with db.conn() as c:
+        recent = c.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT 6").fetchall()
+        active = c.execute("SELECT COUNT(*) n FROM broadcasts WHERE status IN ('PENDING','RUNNING')").fetchone()["n"]
+    lines = ["📣 <b>مركز الإعلانات</b>",
+             f"🚦 حملات نشطة/معلقة: <b>{active}</b>", "", "<b>الأحدث:</b>"]
+    rows_kb = []
+    for r in recent:
+        icon = {"DONE": "✅", "RUNNING": "🏃", "ABORTED": "🚫", "PENDING": "🟡", "FAILED": "❌"}.get(r["status"], "🔵")
+        lines.append(f"  {icon} #{r['id']} {esc(r['audience'])} · أُرسل {r['sent']}/{r['total']} · فشل {r['failed']} · {esc(r['status'])}")
+        if r["status"] in ("PENDING", "RUNNING"):
+            rows_kb.append([kb.btn(f"⏹ إيقاف #{r['id']}", f"a:bcabort:{r['id']}")])
+    if not recent:
+        lines.append("  لا توجد حملات بعد.")
+    rows_kb += [[kb.btn(t, f"a:bcaud:{code}")] for code, t in BROADCAST_AUDIENCES[:2]]
+    rows_kb += [[kb.btn(t, f"a:bcaud:{code}")] for code, t in BROADCAST_AUDIENCES[2:]]
+    rows_kb.append([kb.btn("💎 جمهور باقة محددة", "a:bcplan")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_bc_audience(q, uid, context, bot, audience: str):
+    context.user_data["broadcast_audience"] = audience
+    context.user_data["broadcast_plan"] = ""
+    context.user_data["awaiting_broadcast_text"] = True
+    await render(q, "✍️ أرسل نص الإعلان الآن (HTML مسموح). سيُعرض للمعاينة مع عدد المستلمين قبل الإرسال.",
+                 kb.admin_nav(), bot)
+
+
+async def admin_bc_plan(q, uid, context, bot):
+    with db.conn() as c:
+        plans = c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+    rows_kb = [[kb.btn(f"💎 {esc(p['title'])}", f"a:bcpick:{p['code']}")] for p in plans]
+    await render(q, "💎 اختر الباقة المستهدفة للإعلان:", kb.admin_nav(rows_kb), bot)
+
+
+async def admin_bc_pick(q, uid, context, bot, code: str):
+    context.user_data["broadcast_audience"] = "plan"
+    context.user_data["broadcast_plan"] = code
+    context.user_data["awaiting_broadcast_text"] = True
+    await render(q, f"✍️ أرسل نص الإعلان لباقة <b>{esc(code)}</b>:", kb.admin_nav(), bot)
+
+
+async def admin_bc_go(q, uid, context, bot, bid: int):
+    b = broadcast_service.get(bid)
+    if not b:
+        await render(q, "الحملة غير موجودة.", kb.admin_nav(), bot)
+        return
+    if b["status"] not in ("PENDING",):
+        await render(q, f"⛔ الحملة بحالة {esc(b['status'])} — لا تكرار للإرسال.", kb.admin_nav(), bot)
+        return
+    targets = broadcast_service.audience_ids(b["audience"], b["plan_code"])
+    if not targets:
+        await render(q, "لا يوجد مستلمون مطابقون للجمهور المحدد.", kb.admin_nav(), bot)
+        return
+    audit_log.log(uid, f"broadcast_start:{bid}:{len(targets)}")
+    asyncio.create_task(_run_broadcast(bid, bot, targets))
+    await render(q, f"🚀 <b>بدأ الإرسال #{bid}</b>\nالمستلمون: <b>{len(targets)}</b>\nمعدل الإرسال: {db.get_setting_int('broadcast_rate_per_sec', 20)} رسالة/ثانية\nتابع العدّاد من قسم الإعلانات.",
+                 kb.admin_nav(), bot)
+
+
+async def _run_broadcast(bid: int, bot, targets: list[int]):
+    try:
+        await broadcast_service.run_broadcast(bid, bot, targets)
+    except Exception:
+        from fysb.config import log
+        log.exception("broadcast %s failed", bid)
+        broadcast_service.mark_status(bid, "FAILED")
+
+
+async def admin_bc_abort(q, uid, context, bot, bid: int):
+    broadcast_service.abort(bid)
+    audit_log.log(uid, f"broadcast_abort:{bid}")
+    await admin_broadcast(q, uid, context, bot)
+
+
+async def admin_bc_cancel(q, uid, context, bot, bid: int):
+    b = broadcast_service.get(bid)
+    if b and b["status"] == "PENDING":
+        broadcast_service.mark_status(bid, "ABORTED")
+    await admin_broadcast(q, uid, context, bot)
+
+
+# --- Support center ---------------------------------------------------------------------
+async def admin_support(q, uid, context, bot):
+    tickets = support_service.list_tickets("OPEN")
+    answered = support_service.list_tickets("ANSWERED")
+    cfg = support_service.config_row()
+    lines = ["🎧 <b>مركز الدعم الفني</b>",
+             f"🎫 مفتوحة: <b>{len(tickets)}</b> · بانتظار رد المستخدم: <b>{len(answered)}</b>", "",
+             "<b>التذاكر المفتوحة:</b>"]
+    rows_kb = []
+    for t in tickets[:8]:
+        lines.append(f"  #{t['id']} · user {t['user_id']} · {esc(t['subject'][:40])} · {human_dt(t['updated_at'] or t['created_at'])}")
+        rows_kb.append([kb.btn(f"🎫 #{t['id']} {esc(t['subject'][:24])}", f"a:ticketview:{t['id']}")])
+    if not tickets:
+        lines.append("  لا توجد تذاكر مفتوحة.")
+    rows_kb.append([kb.btn("✏️ إعداد وسائل التواصل", "a:supportconfig")])
+    body = "\n".join(lines)
+    if any(cfg.get(x) for x in ("username", "phone", "channel", "group_chat")):
+        body += f"\n\n📞 القنوات الحالية: @{esc(cfg['username'] or '—')} · {esc(cfg['phone'] or '—')}"
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_support_config(q, uid, context, bot):
+    cfg = support_service.config_row() or {}
+    fields = [("username", "✉️ معرّف الدعم", f"@{cfg.get('username') or '—'}"),
+              ("phone", "📞 رقم الهاتف/واتساب", cfg.get('phone') or '—'),
+              ("channel", "📢 قناة البوت", cfg.get('channel') or '—'),
+              ("group_chat", "👥 مجموعة المجتمع", cfg.get('group_chat') or '—')]
+    rows_kb = [[kb.btn(f"{title}: {val}", f"a:supfield:{name}")] for name, title, val in fields]
+    body = ["🎧 <b><u>إعداد وسائل التواصل — حقلاً حقلاً</u></b>",
+            "اضغط الحقل لإرسال قيمته الجديدة. أرسل <code>-</code> لمسح قيمة حقل."]
+    for _n, t, v in fields:
+        body.append(f"▎{t}: <b>{esc(v.lstrip('@') if v.startswith('@') else v)}</b>")
+    await render(q, "\n".join(body), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_support_field(q, uid, context, bot, field: str):
+    if field not in ("username", "phone", "channel", "group_chat"):
+        await render(q, "حقل غير معروف.", kb.admin_nav(), bot)
+        return
+    context.user_data["awaiting_support_field"] = field
+    await render(q, f"✏️ أرسل القيمة الجديدة للحقل <b>{esc(field)}</b> — أو <code>-</code> لمسحه:", kb.admin_nav(), bot)
+
+
+async def admin_ticket_view(q, uid, context, bot, tid: int):
+    t = support_service.get_ticket(tid)
+    if not t:
+        await render(q, "التذكرة غير موجودة.", kb.admin_nav(), bot)
+        return
+    msgs = support_service.ticket_messages(tid)
+    lines = [f"🎫 <b>تذكرة #{tid}</b> · {esc(t['subject'])} · <b>{esc(t['status'])}</b>",
+             f"👤 المستخدم: <code>{t['user_id']}</code>", ""]
+    for m in msgs[-8:]:
+        who = "🧑 المستخدم" if m["sender_role"] == "user" else "🎧 الدعم"
+        lines.append(f"{who} ({human_dt(m['created_at'])}):")
+        lines.append(f"{esc(m['body'][:300])}\n")
+    rows_kb = []
+    if t["status"] in ("OPEN", "ANSWERED"):
+        rows_kb.append([kb.btn("💬 رد على المستخدم", f"a:ticketreply:{tid}")])
+    if t["status"] == "OPEN":
+        rows_kb.append([kb.btn("✅ إغلاق التذكرة", f"a:ticketclose:{tid}")])
+    elif t["status"] == "CLOSED":
+        rows_kb.append([kb.btn("🔓 إعادة فتح", f"a:ticketreopen_admin:{tid}")])
+    rows_kb.append([kb.btn("👤 ملف المستخدم", f"a:userdetail:{t['user_id']}"), kb.btn("↩️ الدعم", "a:support")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_ticket_reply(q, uid, context, bot, tid: int):
+    context.user_data["awaiting_admin_reply"] = tid
+    await render(q, f"💬 أرسل ردك على التذكرة #{tid} — سيصل للمستخدم مباشرة:", kb.admin_nav(), bot)
+
+
+async def admin_ticket_close(q, uid, context, bot, tid: int):
+    t = support_service.get_ticket(tid)
+    support_service.set_status(tid, "CLOSED")
+    audit_log.log(uid, f"ticket_closed:{tid}")
+    if t:
+        try:
+            await bot.send_message(t["user_id"], f"✅ أُغلقت تذكرتك #{tid}. يمكنك إعادة فتحها من سجل الدعم.")
+        except Exception:
+            pass
+    await admin_support(q, uid, context, bot)
+
+
+async def admin_ticket_reopen(q, uid, context, bot, tid: int):
+    support_service.set_status(tid, "OPEN")
+    audit_log.log(uid, f"ticket_reopened:{tid}")
+    await admin_ticket_view(q, uid, context, bot, tid)
+
+
+# --- Security center ----------------------------------------------------------------------
+async def admin_security(q, uid, context, bot):
+    events = audit_log.security_events(10)
+    ok, integrity = db.healthy()
+    lines = ["🔐 <b>مركز الأمان</b>",
+             f"👑 Super Admin: <code>{masked_admin()}</code> (من ADMIN_ID في .env)",
+             f"🛡 التحقق من الصلاحيات: <b>على السيرفر</b> في كل callback",
+             f"🗄 سلامة قاعدة البيانات: <b>{'✅ ' + esc(integrity) if ok else '❌ ' + esc(integrity)}</b>",
+             f"🚫 تسريب الأسرار: التوكن والمفاتيح لا تُطبع في السجلات ولا تُعرض في الواجهة",
+             f"🔧 صيانة: <b>{'مفعلة' if db.maintenance_on() else 'معطلة'}</b>",
+             f"🆕 منع تسجيل مستخدمين جدد: <b>{'مفعل' if db.get_setting('block_new_users','0')=='1' else 'معطل'}</b>",
+             "", "<b>أحدث الأحداث الأمنية:</b>"]
+    for e in events:
+        lines.append(f"  {human_dt(e['created_at'])} · actor {e['actor']} · {esc(e['action'])[:60]}")
+    if not events:
+        lines.append("  لا أحداث أمنية مسجلة.")
+    rows_kb = [[kb.btn("🔧 وضع الصيانة", "a:togglemaintenance"),
+                kb.btn(f"🆕 منع الجدد: {'إيقاف' if db.get_setting('block_new_users','0')=='1' else 'تفعيل'}", "a:toggleblocknew")]]
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+def masked_admin() -> str:
+    return "*" * (len(str(config.ADMIN_ID)) - 3) + str(config.ADMIN_ID)[-3:] if config.ADMIN_ID else "غير مضبوط"
+
+
+async def admin_toggle_maintenance(q, uid, context, bot):
+    new = "0" if db.maintenance_on() else "1"
+    db.set_setting("maintenance", new)
+    audit_log.log(uid, f"maintenance:{new}")
+    await admin_security(q, uid, context, bot)
+
+
+async def admin_toggle_blocknew(q, uid, context, bot):
+    val = "0" if db.get_setting("block_new_users", "0") == "1" else "1"
+    db.set_setting("block_new_users", val)
+    audit_log.log(uid, f"block_new_users:{val}")
+    await admin_security(q, uid, context, bot)
+
+
+# --- Backup & restore -----------------------------------------------------------------------
+async def admin_backup(q, uid, context, bot):
+    backups = backup_service.list_backups()
+    ok, integrity = db.healthy()
+    lines = ["💾 <b>النسخ الاحتياطي والاستعادة</b>",
+             f"🗄 سلامة القاعدة الحالية: <b>{'✅' if ok else '❌ ' + esc(integrity)}</b>",
+             f"📁 النسخ المحفوظة: <b>{len(backups)}</b>", "", "<b>أحدث النسخ:</b>"]
+    rows_kb = []
+    for b in backups[:6]:
+        lines.append(f"  📄 {esc(b['name'])} · {b['size_kb']} KB · {b['modified']}")
+        if b["name"].endswith(".db"):
+            rows_kb.append([kb.btn(f"📤 إرسال {esc(b['name'][:28])}", f"a:bksend:{b['name']}")])
+    rows_kb.append([kb.btn("🆕 نسخة قاعدة بيانات الآن", "a:bknow"),
+                    kb.btn("📦 نسخة مشروع كاملة", "a:bkfull")])
+    rows_kb.append([kb.btn("⚙️ تصدير الإعدادات (JSON)", "a:bksettings")])
+    rows_kb.append([kb.btn("♻️ استعادة نسخة (أرسل ملف .db)", "a:bkrestore")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_backup_now(q, uid, context, bot):
+    try:
+        dest = backup_service.quick_db_snapshot("admin")
+        audit_log.log(uid, f"backup_created:{dest.name}")
+        with open(dest, "rb") as f:
+            await bot.send_document(uid, f, filename=dest.name, caption=f"💾 نسخة قاعدة بيانات ({dest.stat().st_size // 1024} KB)")
+        await admin_backup(q, uid, context, bot)
+    except Exception as e:
+        await render(q, "❌ فشل إنشاء النسخة: " + safe(e), kb.admin_nav(), bot)
+
+
+async def admin_backup_full(q, uid, context, bot):
+    await render(q, "📦 جارٍ تجهيز نسخة المشروع الكاملة (قد تستغرق لحظات)...", None)
+    try:
+        dest = await asyncio.to_thread(backup_service.full_project_archive)
+        ok, detail = backup_service.verify_archive(dest)
+        audit_log.log(uid, f"project_backup:{dest.name}:{ok}")
+        if ok:
+            with open(dest, "rb") as f:
+                await bot.send_document(uid, f, filename=dest.name,
+                                        caption=f"📦 نسخة المشروع الكاملة ({dest.stat().st_size // 1024} KB) — التحقق: ✅ {esc(detail)}\n"
+                                                f"🔒 تشمل: الكود + قاعدة البيانات + ملف .env — احفظها في مكان آمن.")
+            await admin_backup(q, uid, context, bot)
+        else:
+            await render(q, "❌ فشل التحقق من الأرشيف: " + safe(detail), kb.admin_nav(), bot)
+    except Exception as e:
+        await render(q, "❌ فشل إنشاء نسخة المشروع: " + safe(e), kb.admin_nav(), bot)
+
+
+async def admin_backup_settings(q, uid, context, bot):
+    dest = backup_service.settings_export()
+    with open(dest, "rb") as f:
+        await bot.send_document(uid, f, filename=dest.name, caption="⚙️ تصدير الإعدادات والفهارس (بدون أسرار)")
+    await admin_backup(q, uid, context, bot)
+
+
+async def admin_backup_send(q, uid, context, bot, name: str):
+    from pathlib import Path
+    path = config.BACKUP_DIR / name
+    if not path.is_file() or ".." in name or "/" in name:
+        await render(q, "الملف غير موجود.", kb.admin_nav(), bot)
+        return
+    with open(path, "rb") as f:
+        await bot.send_document(uid, f, filename=path.name, caption=f"💾 {path.name} ({path.stat().st_size // 1024} KB)")
+
+
+async def admin_backup_restore(q, uid, context, bot):
+    context.user_data["awaiting_restore"] = True
+    await render(q, "♻️ <b>الاستعادة</b>\nأرسل ملف <code>.db</code> هنا.\n\n"
+                    "⚠️ سأأخذ نسخة أمان تلقائية أولاً، أتحقق من سلامة الملف، ثم أستبدل قاعدة البيانات.\n"
+                    "لا تُحذف أي بيانات — النسخة الحالية تُحفظ دائماً قبل الاستبدال.",
+                 kb.admin_nav(), bot)
+
+
+async def admin_do_restore(q, uid, context, bot, file_path):
+    context.user_data["awaiting_restore"] = False
+    await render(q, "♻️ جارٍ التحقق من الملف والاستعادة...", None)
+    ok, detail = backup_service.restore_from(file_path)
+    audit_log.log(uid, f"restore:{ok}:{detail}")
+    if ok:
+        await render(q, f"✅ <b>تمت الاستعادة بنجاح</b>\nالتحقق: {esc(detail)}\nنسخة الأمان محفوظة في مجلد backups.",
+                     kb.admin_nav(), bot)
+    else:
+        await render(q, f"❌ فشلت الاستعادة: {esc(detail)}\nلم يُستبدل أي ملف.", kb.admin_nav(), bot)
+
+
+# --- Settings ------------------------------------------------------------------------------
+async def admin_settings(q, uid, context, bot):
+    pairs = [
+        ("maintenance", "🔧 وضع الصيانة"),
+        ("trading_mode", "⚙️ وضع التشغيل"),
+        ("engine_enabled", "🧠 المحرك"),
+        ("global_kill_switch", "⛔ Kill Switch"),
+        ("live_enabled", "🔒 LIVE"),
+        ("default_market", "🌐 السوق الافتراضي"),
+        ("free_daily_signals", "🆓 حد الإشارات المجاني/يوم"),
+        ("demo_start_balance", "🧪 رصيد التجريبي الابتدائي"),
+        ("broadcast_rate_per_sec", "📣 معدل الإعلانات/ثانية"),
+        ("signal_expiry_hours", "⏳ صلاحية الإشارة (ساعة)"),
+    ]
+    lines = ["⚙️ <b>الإعدادات العامة</b>", ""]
+    rows_kb = []
+    for key, title in pairs:
+        val = db.get_setting(key, "—")
+        lines.append(f"{title}: <b>{esc(val)}</b>")
+    rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance"),
+                    kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
+    rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
+                    kb.btn("⏳ تعديل صلاحية الإشارة", "a:expiryset")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_free_set(q, uid, context, bot):
+    context.user_data["awaiting_free_quota"] = True
+    await render(q, "🆓 أرسل الرقم الجديد للحد اليومي للباقة المجانية (1-10):", kb.admin_nav(), bot)
+
+
+async def admin_demo_bal_set(q, uid, context, bot):
+    context.user_data["awaiting_demo_balance"] = True
+    await render(q, "🧪 أرسل الرصيد الابتدائي الجديد للحسابات التجريبية (مثال: 10000):", kb.admin_nav(), bot)
+
+
+async def admin_expiry_set(q, uid, context, bot):
+    context.user_data["awaiting_expiry_hours"] = True
+    await render(q, "⏳ أرسل صلاحية الإشارة بالساعات (مثال: 72):", kb.admin_nav(), bot)
+
+
+# --- Audit log ------------------------------------------------------------------------------
+async def admin_audit(q, uid, context, bot, page: int = 0):
+    size = 12
+    rows = audit_log.recent(size, page * size)
+    with db.conn() as c:
+        total = c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]
+    lines = [f"🧾 <b>سجل الإدارة</b> · صفحة {page + 1} · الإجمالي {total}", ""]
+    for r in rows:
+        lines.append(f"  {r['created_at'][5:16]} · {r['actor']} · {esc(r['action'])[:70]}")
+    rows_kb = []
+    nav = []
+    if page > 0:
+        nav.append(kb.btn("◀️", f"a:auditpage:{page - 1}"))
+    if (page + 1) * size < total:
+        nav.append(kb.btn("▶️", f"a:auditpage:{page + 1}"))
+    if nav:
+        rows_kb.append(nav)
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+# --- System health ----------------------------------------------------------------------------
+async def admin_health(q, uid, context, bot):
+    import os
+    import platform
+    import resource
+    import time as _time
+    ok, integrity = db.healthy()
+    try:
+        mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        mem_mb = 0
+    db_size = 0
+    try:
+        db_size = config.DB_FILE.stat().st_size // 1024
+        wal = config.DB_FILE.with_suffix(".db-wal")
+        wal_size = (wal.stat().st_size // 1024) if wal.exists() else 0
+    except OSError:
+        wal_size = 0
+    provider = market_data.provider_status()
+    uptime = int(_time.time() - _BOOT_EPOCH)
+    lines = [
+        "🖥 <b>حالة النظام</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🐍 Python: {platform.python_version()} · {platform.system()}",
+        f"⏱ مدة التشغيل: {uptime // 3600}س {uptime % 3600 // 60}د",
+        f"🧮 ذاكرة العملية: <b>{mem_mb:.1f} MB</b>",
+        f"🗄 قاعدة البيانات: <b>{db_size} KB</b> (WAL: {wal_size} KB) · <b>{'✅ سليمة' if ok else '❌ ' + esc(integrity)}</b>",
+        f"🌐 مزود البيانات: <b>{esc(provider.get('state', '?'))}</b> · مفاتيح مضبوطة: {'نعم' if provider.get('configured') else 'لا'}",
+        f"🤖 البوت: <b>متصل</b> (polling نشط)",
+        f"🧠 المحرك: <b>{'يعمل' if db.get_setting('engine_enabled','0')=='1' else 'متوقف'}</b>",
+        f"🔒 LIVE: <b>{'مفعل ⚠️' if db.get_setting('live_enabled','0')=='1' else 'مغلق'}</b>",
+    ]
+    await render(q, "\n".join(lines), kb.admin_nav(), bot)
+
+
+_BOOT_EPOCH = __import__("time").time()

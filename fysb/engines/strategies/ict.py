@@ -1,0 +1,149 @@
+"""ICT strategy — Inner Circle Trader concepts, each mapped to a measurable check.
+
+Entry thesis: liquidity is swept on the bias side, displacement leaves an FVG or
+order block, price trades back into that imbalance in the direction of the
+higher-timeframe bias during (optionally) a kill zone.
+
+Score weights (documented, deterministic):
+  HTF bias alignment ............ +12
+  Liquidity sweep present ....... +14  (matching direction)
+  Displacement leg .............. +10
+  FVG present & retraced zone ... +12
+  Order block confluence ........ +8
+  Premium/Discount alignment .... +10
+  Structure shift (MSS/CHOCH) ... +8
+  Kill zone active .............. +6
+  ATR regime normal ............. +4
+  RR >= 2.0 ..................... +6
+Base 50. Cap 95.
+"""
+from fysb.engines.analysis import (
+    atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
+    premium_discount, structure_labels,
+)
+from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+
+
+def evaluate(ctx: Ctx) -> StrategyResult | None:
+    candles = ctx.candles
+    if len(candles) < 40:
+        return None
+    last = candles[-1]
+    close = last["close"]
+
+    # --- Higher timeframe bias -------------------------------------------
+    bias = structure_labels(ctx.bias_candles)
+    bias_up, bias_down = bias["trend"] == "up", bias["trend"] == "down"
+
+    # --- Liquidity sweep ---------------------------------------------------
+    sweep = liquidity_sweep(candles)
+    sweep_dir = "BUY" if sweep["buy_side"] else ("SELL" if sweep["sell_side"] else "")
+    sweep_scored = sweep_dir in ("BUY", "SELL")
+
+    # --- Displacement / FVG / OB ------------------------------------------
+    obs = order_blocks(candles, 2)
+    fvgs = fair_value_gaps(candles, 3)
+    displacement = any(abs(f["hi"] - f["lo"]) > atr(candles) for f in fvgs)
+
+    # --- Premium/Discount ---------------------------------------------------
+    pd = premium_discount(candles)
+
+    # --- Decide direction: bias first, then sweep confirmation --------------
+    mss = structure_labels(candles)
+    direction = ""
+    if bias_up and sweep_dir in ("", "SELL"):
+        direction = "BUY"          # HTF up + (no sweep or SSL taken) = bullish context
+    elif bias_down and sweep_dir in ("", "BUY"):
+        direction = "SELL"
+    elif sweep_dir == "SELL" and (mss["choch"] or mss["bos"]) and mss["trend"] != "down":
+        direction = "BUY"          # SSL sweep + structure shift up = reversal continuation
+    elif sweep_dir == "BUY" and (mss["choch"] or mss["bos"]) and mss["trend"] != "up":
+        direction = "SELL"
+    if not direction:
+        return None
+
+    # --- Entry: retrace into the nearest FVG/OB in trade direction ---------
+    entry_zone = None
+    for f in fvgs:
+        if f["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+            entry_zone = (f["lo"], f["hi"])
+            break
+    if entry_zone is None:
+        for ob in obs:
+            if ob["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+                entry_zone = (ob["lo"], ob["hi"])
+                break
+    entry = (entry_zone[0] + entry_zone[1]) / 2 if entry_zone else close
+
+    # --- Stop: beyond the swept liquidity level / recent extreme -----------
+    a = atr(candles)
+    if a <= 0:
+        return None
+    if direction == "BUY":
+        swing_low = min(c["low"] for c in candles[-8:])
+        stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.5 * a
+        if stop >= entry:
+            stop = entry - 1.5 * a
+    else:
+        swing_high = max(c["high"] for c in candles[-8:])
+        stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.5 * a
+        if stop <= entry:
+            stop = entry + 1.5 * a
+
+    risk = abs(entry - stop)
+    tps = (
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5,
+    )
+    rr = abs(tps[0] - entry) / risk if risk > 0 else 0.0
+
+    # --- Measurable score ----------------------------------------------------
+    score = 50.0
+    checks = {}
+    checks["htf_bias"] = (bias_up and direction == "BUY") or (bias_down and direction == "SELL")
+    score += 12 if checks["htf_bias"] else 0
+    checks["sweep"] = (sweep["sell_side"] and direction == "BUY") or (sweep["buy_side"] and direction == "SELL")
+    score += 14 if checks["sweep"] else 0
+    checks["displacement"] = displacement
+    score += 10 if displacement else 0
+    checks["fvg_zone"] = entry_zone is not None
+    score += 12 if entry_zone else 0
+    checks["ob_confluence"] = any(o["kind"] == ("bullish" if direction == "BUY" else "bearish") for o in obs)
+    score += 8 if checks["ob_confluence"] else 0
+    # Premium/Discount measured at the ENTRY level (not the post-move close):
+    # guards against chasing premium prices on BUYs / discount prices on SELLs.
+    if pd.get("high") and pd.get("low") and pd["high"] > pd["low"]:
+        entry_pos = (entry - pd["low"]) / (pd["high"] - pd["low"])
+        checks["pd_align"] = (direction == "BUY" and entry_pos <= 0.75) or (direction == "SELL" and entry_pos >= 0.25)
+    else:
+        checks["pd_align"] = pd["zone"] in ("discount", "equilibrium", "premium")
+    score += 10 if checks["pd_align"] else 0
+    checks["mss"] = bias["choch"] or bias["bos"]
+    score += 8 if checks["mss"] else 0
+    kz = ctx.kill_zone or (kill_zone(candles[-1]["datetime"]) or "")
+    checks["kill_zone"] = bool(kz)
+    score += 6 if checks["kill_zone"] else 0
+    vol = atr_pct(candles)
+    checks["vol_ok"] = 0.05 < vol < 6.0
+    score += 4 if checks["vol_ok"] else 0
+    checks["rr_ok"] = rr >= 2.0
+    score += 6 if checks["rr_ok"] else 0
+
+    if score < 55:
+        return None
+
+    reasons = [
+        f"HTF bias={bias['trend']}",
+        f"liquidity sweep {'BSL' if direction=='BUY' else 'SSL'} @ {sweep['level']:.5g}" if checks["sweep"] else "no matching sweep",
+        "displacement leg confirmed" if displacement else "no displacement",
+        f"entry retraces FVG/OB zone {entry_zone[0]:.5g}-{entry_zone[1]:.5g}" if entry_zone else "entry at market (no zone)",
+        f"premium/discount={pd['zone']} (pos={pd['pos']:.2f})",
+        f"kill zone: {kz}" if kz else "outside kill zones",
+        f"RR(TP1)=1:{rr:.2f}",
+    ]
+    return StrategyResult(
+        code="ICT", direction=direction, entry=entry, stop=stop,
+        tp1=tps[0], tp2=tps[1], tp3=tps[2], rr=round(rr, 2),
+        score=clamp_score(score), reasons=reasons, checks=checks,
+    )

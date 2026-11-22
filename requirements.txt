@@ -1,0 +1,4 @@
+# FOREXYEMENI — dependencies
+# Tested on Python 3.10–3.13 (Linux / Termux / bot hosting).
+python-telegram-bot==22.8
+python-dotenv==1.2.4

@@ -2,3 +2,5 @@
 # Tested on Python 3.10–3.13 (Linux / Termux / bot hosting).
 python-telegram-bot==22.8
 python-dotenv==1.2.4
+# Real PostgreSQL engine (Supabase-ready) — used only when DATABASE_URL is set
+psycopg[binary]==3.3.9

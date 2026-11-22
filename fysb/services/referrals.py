@@ -14,7 +14,6 @@ Integrity rules (enforced server-side, no self-reporting possible):
     transaction path used by payment approval and admin grants
 """
 import secrets
-import sqlite3
 
 from fysb import config, db
 
@@ -88,7 +87,7 @@ def capture(code: str, invitee_id: int) -> dict:
             c.execute("""INSERT INTO referrals(campaign_id,invitee_id,invited_at)
                          VALUES(?,?,?)""", (camp["id"], invitee_id, config.now()))
         return {"captured": True, "campaign": camp["title"]}
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         return {"captured": False, "reason": "already_linked"}
 
 

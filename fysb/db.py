@@ -1,11 +1,14 @@
-"""SQLite data layer — WAL mode, safe ADDITIVE migrations, indexes, transactions.
+"""Data layer — SQLite (WAL) or PostgreSQL (Supabase), same API, zero call-site changes.
 
-Guarantees:
+Engine selection is automatic from .env:
+  * DATABASE_URL set        -> real PostgreSQL via fysb.pglayer (Supabase-ready)
+  * DATABASE_URL absent     -> classic local SQLite (WAL mode)
+
+Guarantees (both engines):
   * Existing tables/rows are never dropped or rewritten destructively.
   * Migrations only ADD columns/tables/indexes, and a pre-migration snapshot
     is taken automatically when a structural change is applied.
-  * All multi-step writes use explicit transactions (BEGIN IMMEDIATE).
-  * Connections are per-operation with WAL + busy timeout (Termux-friendly).
+  * All multi-step writes use explicit transactions.
 """
 import sqlite3
 import threading
@@ -15,6 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fysb import config
+
+if config.USE_PG:
+    from fysb import pglayer
+
+# Unified integrity-error surface for both engines (caught by services)
+IntegrityError = pglayer.IntegrityError if config.USE_PG else sqlite3.IntegrityError
 
 _local = threading.local()
 _migration_lock = threading.Lock()
@@ -28,8 +37,10 @@ def day_start_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
 
 
-def conn() -> sqlite3.Connection:
-    """Fresh short-lived connection (safe with WAL; no cross-thread reuse)."""
+def conn():
+    """Engine-appropriate connection (PG: pooled session; SQLite: fresh)."""
+    if config.USE_PG:
+        return pglayer.conn()
     c = sqlite3.connect(str(config.DB_FILE), timeout=30)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
@@ -42,6 +53,10 @@ def conn() -> sqlite3.Connection:
 @contextmanager
 def tx(immediate: bool = False):
     """Explicit transaction context: commit on success, rollback on error."""
+    if config.USE_PG:
+        with pglayer.conn() as c:   # BEGIN is implicit in PostgreSQL
+            yield c
+        return
     with conn() as c:
         c.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         try:
@@ -53,6 +68,8 @@ def tx(immediate: bool = False):
 
 
 def healthy() -> tuple[bool, str]:
+    if config.USE_PG:
+        return pglayer.healthy()
     try:
         with conn() as c:
             row = c.execute("PRAGMA integrity_check(5)").fetchone()
@@ -63,6 +80,8 @@ def healthy() -> tuple[bool, str]:
 
 
 def wal_checkpoint() -> None:
+    if config.USE_PG:
+        return  # no WAL concept on PostgreSQL
     try:
         with conn() as c:
             c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -381,7 +400,7 @@ SEED_MODES = [
 ]
 
 
-def _rename_legacy_elite_plan(c: sqlite3.Connection) -> None:
+def _rename_legacy_elite_plan(c) -> None:
     """One-time brand cleanup: rename the legacy ELITE plan to VIP everywhere.
 
     Idempotent — touches plans, subscriptions, payments, broadcasts and the
@@ -391,25 +410,32 @@ def _rename_legacy_elite_plan(c: sqlite3.Connection) -> None:
                           ("broadcasts", "plan_code")):
         try:
             c.execute(f"UPDATE {table} SET {column}='VIP' WHERE {column}='ELITE'")
-        except sqlite3.Error:
+        except Exception:
             pass
     try:
         c.execute("UPDATE payment_methods SET linked_plans=REPLACE(linked_plans,'ELITE','VIP') "
                   "WHERE linked_plans LIKE '%ELITE%'")
-    except sqlite3.Error:
+    except Exception:
         pass
     if c.execute("SELECT 1 FROM plans WHERE code='ELITE'").fetchone():
         try:
             c.execute("UPDATE plans SET code='VIP', title='VIP' WHERE code='ELITE'")
-        except sqlite3.Error:
+        except Exception:
             pass
     c.execute("UPDATE plans SET title='VIP' WHERE code='VIP' AND title IN ('Elite','ELITE','elite')")
 
 
-def _apply_add_columns(c: sqlite3.Connection) -> bool:
+def _table_cols(c, table: str) -> set:
+    """Dialect-aware column introspection (PRAGMA vs information_schema)."""
+    if config.USE_PG:
+        return pglayer.table_columns(table)
+    return {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _apply_add_columns(c) -> bool:
     changed = False
     for table, columns in ADD_COLUMNS.items():
-        present = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+        present = _table_cols(c, table)
         for column, definition in columns.items():
             if column not in present:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -428,8 +454,11 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
     with _migration_lock:
         c = conn()
         try:
-            tables_now = {r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if config.USE_PG:
+                tables_now = pglayer.list_tables()
+            else:
+                tables_now = {r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             structural = bool(tables_now & set(ADD_COLUMNS.keys()))
             if structural:
                 applied = _apply_add_columns(c)
@@ -437,7 +466,14 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                     from fysb.services.backup import quick_db_snapshot
                     snap = quick_db_snapshot("pre-migration")
                     log_lines.append(f"pre-migration snapshot: {snap.name}")
-            c.executescript(SCHEMA)
+            if config.USE_PG:
+                pglayer.run_schema(c, SCHEMA)
+            else:
+                c.executescript(SCHEMA)
+            # Commit the schema immediately (SQLite's executescript auto-commits,
+            # and PostgreSQL information_schema introspection below must see it)
+            if config.USE_PG:
+                c.commit()
             _apply_add_columns(c)
             for idx in INDEXES:
                 c.execute(idx)
@@ -525,7 +561,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                           (m[0], m[1], m[2], m[3], m[4], m[5], config.now(), config.now()))
             c.execute("UPDATE mode_registry SET enabled=1,executable=1 WHERE code='A'")
             # Legacy OPEN status normalization + legacy targets parsing (kept from V5)
-            signal_cols = {row[1] for row in c.execute("PRAGMA table_info(signals)").fetchall()}
+            signal_cols = _table_cols(c, "signals")
             if "targets" in signal_cols:
                 old_rows = c.execute("SELECT id,targets,tp1,tp2,tp3 FROM signals").fetchall()
                 for old in old_rows:

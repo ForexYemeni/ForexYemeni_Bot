@@ -1,4 +1,4 @@
-"""Backup & restore service — SQLite-safe, WAL-aware, no secrets in reports.
+"""Backup & restore service — engine-aware (SQLite file snapshots / PostgreSQL JSON dumps).
 
 Full project archive is a real ZIP (code + docs + .env + fresh DB snapshot)
 sent to the admin on request — the admin owns the environment file.
@@ -17,11 +17,18 @@ from fysb.config import log
 
 
 def quick_db_snapshot(tag: str = "manual") -> Path:
-    """Consistent snapshot of the live DB using the sqlite3 backup API.
+    """Consistent snapshot of the live DB.
 
-    Works correctly with WAL: the backup connection copies committed pages.
+    SQLite: the sqlite3 backup API (WAL-safe page copy).
+    PostgreSQL: full JSON dump of every table (restore-ready).
     """
     ts = time.strftime("%Y%m%d_%H%M%S")
+    if config.USE_PG:
+        dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.json"
+        data = db.pglayer.dump_all()
+        dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _prune_old(keep=10)
+        return dest
     dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.db"
     src = db.conn()
     try:
@@ -36,7 +43,10 @@ def quick_db_snapshot(tag: str = "manual") -> Path:
 
 
 def _prune_old(keep: int = 10) -> None:
-    files = sorted(config.BACKUP_DIR.glob("fysb_db_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(
+        list(config.BACKUP_DIR.glob("fysb_db_*.db"))
+        + list(config.BACKUP_DIR.glob("fysb_db_*.json")),
+        key=lambda p: p.stat().st_mtime, reverse=True)
     for old in files[keep:]:
         try:
             old.unlink()
@@ -45,7 +55,7 @@ def _prune_old(keep: int = 10) -> None:
 
 
 def verify_archive(path: Path) -> tuple[bool, str]:
-    """Check an archive: DB -> integrity_check, zip/tar -> readable listing."""
+    """Check an archive: DB -> integrity_check, json -> parse, zip/tar -> listing."""
     try:
         if path.suffix == ".db":
             c = sqlite3.connect(str(path))
@@ -55,6 +65,9 @@ def verify_archive(path: Path) -> tuple[bool, str]:
                 return ok, str(row[0])
             finally:
                 c.close()
+        if path.suffix == ".json":
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return (len(data) > 0), f"{len(data)} tables"
         if path.suffix == ".zip":
             with zipfile.ZipFile(str(path), "r") as z:
                 names = z.namelist()
@@ -113,7 +126,7 @@ def full_project_archive() -> Path:
             except (OSError, PermissionError):
                 continue
         # Fresh consistent DB snapshot inside the archive
-        z.write(str(snap), arcname="database/forexyemeni_backup.db")
+        z.write(str(snap), arcname=f"database/forexyemeni_backup{snap.suffix}")
         # .env explicitly (never silently omitted) — skipped in the loop above
         env_file = base / ".env"
         if env_file.is_file():
@@ -138,12 +151,24 @@ def list_backups() -> list[dict]:
 def restore_from(db_file: Path) -> tuple[bool, str]:
     """Restore a DB snapshot. Takes a fresh safety snapshot first.
 
-    The swap happens after integrity verification; active connections are
-    short-lived per operation, so the next operation picks the restored file.
+    SQLite: verified .db file swap. PostgreSQL: JSON dump replay (wipe +
+    insert + sequence resync) inside one transaction.
     """
     ok, detail = verify_archive(db_file)
     if not ok:
         return False, f"archive failed verification: {detail}"
+    if config.USE_PG:
+        if db_file.suffix != ".json":
+            return False, "PostgreSQL engine restores JSON dumps only (.json)"
+        try:
+            quick_db_snapshot("pre-restore")
+            data = json.loads(db_file.read_text(encoding="utf-8"))
+            res = db.pglayer.restore_json(data)
+            ok2, res2 = db.healthy()
+            log.info("DB restored (PostgreSQL) | result=%s", res2)
+            return ok2, f"{res} | health: {res2}"
+        except Exception as e:
+            return False, type(e).__name__
     quick_db_snapshot("pre-restore")
     tmp_target = db.conn()
     tmp_target.close()

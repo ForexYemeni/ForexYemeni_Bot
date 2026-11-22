@@ -12,4 +12,4 @@ Modular platform:
 
 No broker order execution exists in this build. LIVE mode stays closed by default.
 """
-__version__ = "6.4.0"
+__version__ = "6.5.0"

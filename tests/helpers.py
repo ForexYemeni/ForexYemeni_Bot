@@ -1,7 +1,9 @@
 """Shared test helpers — synthetic candle builders + Telegram mocks.
 
 The test suite ALWAYS runs against a temporary database (never the production
-DB) and a fake admin id, set before importing fysb.
+DB) and fake credentials, using a dedicated temporary .env file pointed to via
+DOTENV_PATH — config.py loads THAT file with override=True, so no inherited
+shell value or ancestor .env can ever leak into tests (or vice versa).
 """
 import os
 import sys
@@ -9,12 +11,17 @@ import tempfile
 from pathlib import Path
 
 # Isolate the test environment BEFORE fysb is imported anywhere.
-_TEST_DIR = tempfile.mkdtemp(prefix="fysb_test_")
-os.environ["DB_PATH"] = str(Path(_TEST_DIR) / "test.db")
-os.environ["ADMIN_ID"] = "9001"
-os.environ["BOT_TOKEN"] = "TEST:TOKEN_NOT_REAL"
-os.environ["TWELVEDATA_API_KEY"] = ""
-os.environ.pop("LOG_LEVEL", None)
+_TEST_DIR = Path(tempfile.mkdtemp(prefix="fysb_test_"))
+_DOTENV = _TEST_DIR / ".env"
+_DOTENV.write_text(
+    "BOT_TOKEN=TEST:TOKEN_NOT_REAL\n"
+    "ADMIN_ID=9001\n"
+    f"DB_PATH={_TEST_DIR / 'test.db'}\n"
+    "TWELVEDATA_API_KEY=\n"
+    "DATABASE_URL=\n"
+    "LOG_LEVEL=INFO\n",
+    encoding="utf-8")
+os.environ["DOTENV_PATH"] = str(_DOTENV)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

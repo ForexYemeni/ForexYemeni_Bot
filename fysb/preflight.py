@@ -27,7 +27,8 @@ def run() -> int:
         strategies = c.execute("SELECT COUNT(*) n FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
         open_signals = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')").fetchone()["n"]
     print("✅ BOOT: environment validated (BOT_TOKEN present, ADMIN_ID present)")
-    print(f"✅ BOOT: database ok ({integrity}) — users={users}, plans={plans}")
+    engine = "PostgreSQL (Supabase)" if config.USE_PG else f"SQLite ({config.DB_FILE.name})"
+    print(f"✅ BOOT: database ok ({integrity}) | engine={engine} — users={users}, plans={plans}")
     print(f"✅ BOOT: ready markets (enabled+verified)={markets} | ready strategies={strategies}")
     print(f"✅ BOOT: open signals={open_signals} | engine={'ON' if db.get_setting('engine_enabled')=='1' else 'OFF'} | kill_switch={'ON' if db.kill_switch_on() else 'OFF'}")
     print(f"ℹ️  BOOT: market data key={'configured' if config.has_market_api() else 'MISSING (signals engine disabled)'}")

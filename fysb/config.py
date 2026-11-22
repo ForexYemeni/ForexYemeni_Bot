@@ -2,6 +2,12 @@
 
 Secrets are read here and never logged, never rendered to users, never embedded
 in reports. Only boolean/presence checks are exposed (e.g. has_market_api()).
+
+.env resolution (pinned, deterministic):
+  * DOTENV_PATH env var (used by the test suite for airtight isolation), else
+  * the project's own .env next to this package.
+The chosen file wins over inherited shell values (override=True) so a stale
+DATABASE_URL in the login environment can never silently hijack the engine.
 """
 import os
 import logging
@@ -16,12 +22,25 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-load_dotenv()
+# --- Paths (needed before .env loading) -------------------------------------
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+_DOTENV_FILE = Path(os.getenv("DOTENV_PATH", "")).expanduser() \
+    if os.getenv("DOTENV_PATH", "").strip() else (BASE_DIR / ".env")
+load_dotenv(_DOTENV_FILE, override=True)
 
 # --- Environment -----------------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
 DB_PATH = os.getenv("DB_PATH", "database/forexyemeni.db").strip()
+# PostgreSQL (Supabase) — when DATABASE_URL is set, the whole platform runs on
+# real PostgreSQL; without it the classic SQLite engine is used. The URL holds
+# credentials and is NEVER logged, never rendered, never included in reports.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL.lower().startswith("file:"):
+    # Not a PostgreSQL URL — inherited environment noise; ignore it entirely.
+    DATABASE_URL = ""
+USE_PG = bool(DATABASE_URL)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 _MARKET_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "").strip()
 
@@ -35,12 +54,10 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "6.4.0"
+VERSION = "6.5.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 
-# --- Paths -----------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent.parent
 BACKUP_DIR = BASE_DIR / "backups"
 LOG_DIR = BASE_DIR / "logs"
 DB_FILE = Path(DB_PATH) if Path(DB_PATH).is_absolute() else (BASE_DIR / DB_PATH)

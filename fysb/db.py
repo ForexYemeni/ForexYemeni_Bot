@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS users(
   user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', full_name TEXT DEFAULT '',
   joined_at TEXT NOT NULL, is_blocked INTEGER DEFAULT 0,
   notifications INTEGER DEFAULT 1, timeframe TEXT DEFAULT 'M15',
-  strategy TEXT DEFAULT 'ICT', market TEXT DEFAULT 'XAUUSD',
+  strategy TEXT DEFAULT '', market TEXT DEFAULT 'XAUUSD',
   min_score INTEGER DEFAULT 80, language TEXT DEFAULT 'ar'
 );
 CREATE TABLE IF NOT EXISTS plans(
@@ -334,7 +334,9 @@ DEFAULT_SETTINGS = {
     "trading_mode": "SIGNALS_ONLY",
     "engine_enabled": "1",
     "live_enabled": "0",
-    "global_kill_switch": "1",
+    # Kill switch ships OFF: the engine must be able to issue real signals from
+    # the first boot. The admin can still arm it any time (a:risk -> killswitch).
+    "global_kill_switch": "0",
     "default_market": "XAUUSD",
     "engine_interval_seconds": "300",
     "engine_min_score": "80",
@@ -441,6 +443,25 @@ def _apply_add_columns(c) -> bool:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 changed = True
     return changed
+
+
+STRATEGY_PREF_FLAG = "strategy_pref_normalized_v651"
+
+
+def _normalize_strategy_preference(c) -> bool:
+    """One-time reset of the (historically cosmetic) users.strategy default.
+
+    Returns True when rows were changed. Runs inside init_db behind a settings
+    flag so a user's ACTIVE ICT choice made AFTER this migration is never
+    touched again.
+    """
+    flag = get_setting(STRATEGY_PREF_FLAG, "")
+    if flag == "1":
+        return False
+    cur = c.execute("UPDATE users SET strategy='' WHERE strategy IS NOT NULL AND strategy<>''")
+    changed = cur.rowcount or 0
+    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (STRATEGY_PREF_FLAG, "1"))
+    return changed > 0
 
 
 def init_db(snapshot_before_structural: bool = True) -> list[str]:
@@ -560,6 +581,14 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 c.execute("INSERT OR IGNORE INTO mode_registry(code,title,description,enabled,executable,adapter_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                           (m[0], m[1], m[2], m[3], m[4], m[5], config.now(), config.now()))
             c.execute("UPDATE mode_registry SET enabled=1,executable=1 WHERE code='A'")
+            # Strategy preference normalization (v6.5.1, one-time): the profile's
+            # "الاستراتيجية المفضلة" is now a REAL delivery gate. Historically the
+            # column was a cosmetic label with schema default 'ICT' while delivery
+            # ignored it entirely — every existing row is therefore a default, not
+            # a choice. Reset to '' (= every methodology, exactly the behavior the
+            # user has always received) so the preference only exists once the user
+            # ACTIVELY picks it from the profile picker. Gated by a settings flag.
+            _normalize_strategy_preference(c)
             # Legacy OPEN status normalization + legacy targets parsing (kept from V5)
             signal_cols = _table_cols(c, "signals")
             if "targets" in signal_cols:
@@ -619,4 +648,4 @@ def maintenance_on() -> bool:
 
 
 def kill_switch_on() -> bool:
-    return get_setting("global_kill_switch", "1") == "1"
+    return get_setting("global_kill_switch", "0") == "1"

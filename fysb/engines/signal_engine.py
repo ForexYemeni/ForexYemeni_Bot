@@ -173,6 +173,36 @@ def _market_row(symbol: str):
     return dict(r) if r else None
 
 
+def passes_personal_filters(u, sig_symbol: str, sig_tf: str, sig_strategy: str, sig_score) -> bool:
+    """Personal server-side delivery filters for one user row.
+
+    Enforced gates (empty value = no personal restriction):
+      * market    : user's chosen market ("XAU/USD" style tolerated)
+      * timeframe : exact entry-TF match
+      * strategy  : the user's selected methodology — "ALL" or empty = every
+                    methodology. This makes the profile's "الاستراتيجية المفضلة"
+                    a REAL delivery gate, not a cosmetic label.
+      * min_score : quality floor
+    Plan/package entitlements are a separate hard gate in emit_to_users.
+    """
+    u_market = (u["market"] or "").strip().upper()
+    if u_market:
+        # slash-tolerant both ways: "XAU/USD" <-> "XAUUSD"
+        u_m_n = u_market.replace("/", "")
+        sig_n = sig_symbol.upper().replace("/", "")
+        if sig_n not in u_m_n and sig_n != u_m_n:
+            return False
+    u_tf = (u["timeframe"] or "").strip().upper()
+    if u_tf and u_tf != sig_tf.upper():
+        return False
+    u_strategy = (u["strategy"] or "").strip().upper()
+    if u_strategy and u_strategy != "ALL" and u_strategy != (sig_strategy or "").upper():
+        return False
+    if sig_score < (u["min_score"] or 0):
+        return False
+    return True
+
+
 async def emit_to_users(signal_row, bot_send) -> dict:
     """Step 16 — deliver a stored signal to eligible users (server-side gates).
 
@@ -197,7 +227,7 @@ async def emit_to_users(signal_row, bot_send) -> dict:
     sig_score = sig["score"]
     sig_strategy = (sig.get("strategy") or "").upper()
     with db.conn() as c:
-        users = c.execute("SELECT user_id,market,timeframe,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
+        users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
 
     for u in users:
         uid = u["user_id"]
@@ -223,15 +253,7 @@ async def emit_to_users(signal_row, bot_send) -> dict:
             continue
 
         # 2) personal preferences (empty = follow the plan entirely)
-        u_market = (u["market"] or "").strip().upper()
-        if u_market and sig_symbol.upper() not in u_market.replace("/", "") and sig_symbol.upper() != u_market:
-            stats["skipped_filters"] += 1
-            continue
-        u_tf = (u["timeframe"] or "").strip().upper()
-        if u_tf and u_tf != sig_tf.upper():
-            stats["skipped_filters"] += 1
-            continue
-        if sig_score < (u["min_score"] or 0):
+        if not passes_personal_filters(u, sig_symbol, sig_tf, sig_strategy, sig_score):
             stats["skipped_filters"] += 1
             continue
 

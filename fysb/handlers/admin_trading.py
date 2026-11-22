@@ -49,9 +49,49 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
     rows_kb = []
     if sig["status"] in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
         rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}")])
+    rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
     body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم."
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_delete_signal_confirm(q, uid, context, bot, sid: int):
+    """Luxury double-confirmation before PERMANENT signal deletion."""
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+        deliveries = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE signal_id=?", (sid,)).fetchone()["n"]
+    if not r:
+        await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
+        return
+    from fysb.theme import status_ar
+    sig = dict(r)
+    body = (f"🗑 <b>حذف نهائي للإشارة #{sid}</b>\n"
+            f"<blockquote>▎🌐 {esc(sig['symbol'])} · {esc(sig['direction'])} · {esc(sig['timeframe'])}\n"
+            f"▎📌 الحالة: <b>{status_ar(sig['status'])}</b> · الجودة {sig['score']}/100\n"
+            f"▎📬 مستلمون مسجلون: <b>{deliveries}</b>\n"
+            f"▎⚠️ سيُمحى السجل <b>بأكمله نهائياً</b> — الإشارة، التسليمات، كل شيء. لا أرشيف ولا رجوع.</blockquote>")
+    rows_kb = [
+        [kb.btn("⚠️ تأكيد الحذف النهائي", f"a:delsignalgo:{sid}")],
+        [kb.btn("↩️ تراجع", f"a:signalview:{sid}")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_delete_signal_go(q, uid, context, bot, sid: int):
+    """ERASE the signal row + its deliveries forever (audit-logged)."""
+    with db.tx() as c:
+        sig = c.execute("SELECT symbol, direction FROM signals WHERE id=?", (sid,)).fetchone()
+        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id=?", (sid,)).rowcount)
+        s = abs(c.execute("DELETE FROM signals WHERE id=?", (sid,)).rowcount)
+    if not s:
+        await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
+        return
+    audit_log.log(uid, f"signal_deleted_forever:{sid}")
+    body = (f"✅ <b>تم حذف الإشارة #{sid} نهائياً</b>"
+            + (f" ({esc(sig['symbol'])} {esc(sig['direction'])})" if sig else "")
+            + f"\n<blockquote>▎🗑 سجل الإشارة: مُمحى\n▎📬 سجلات التسليم المُمحاة: <b>{d}</b>\n"
+              f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>")
+    await render(q, body, kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
 async def admin_signal_recipients(q, uid, context, bot, sid: int):

@@ -114,6 +114,38 @@ def admin_edit_subscription(uid: int, plan_code: str, actor: int, days: int | No
     return res
 
 
+def delete_user_forever(uid: int, actor: int = 0) -> dict:
+    """PERMANENT deletion — the user and every trace of him, gone for good.
+
+    Single IMMEDIATE transaction wipes: profile, subscriptions, payments,
+    signal deliveries, demo account(s) + positions + trades, saved analyses,
+    notification events, support tickets (+ their messages), broker accounts,
+    and referral links. Irreversible BY DESIGN — this is not a ban; the user
+    can re-register as brand-new only through the normal /start flow.
+    The admin account can never be deleted. Audit-logged with per-table counts.
+    """
+    if uid == config.ADMIN_ID:
+        return {"ok": False, "error": "الإدارة لا تُحذف"}
+    with db.tx(immediate=True) as c:
+        if not c.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone():
+            return {"ok": False, "error": "المستخدم غير موجود"}
+        counts: dict[str, int] = {}
+        for t in c.execute("SELECT id FROM tickets WHERE user_id=?", (uid,)).fetchall():
+            counts["ticket_messages"] = counts.get("ticket_messages", 0) + abs(
+                c.execute("DELETE FROM ticket_messages WHERE ticket_id=?", (t["id"],)).rowcount)
+        for table in ("analyses", "demo_positions", "demo_trades", "demo_accounts",
+                      "notification_events", "payments", "signal_deliveries",
+                      "subscriptions", "user_accounts"):
+            counts[table] = abs(c.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,)).rowcount)
+        counts["tickets"] = abs(c.execute("DELETE FROM tickets WHERE user_id=?", (uid,)).rowcount)
+        counts["referrals"] = abs(c.execute("DELETE FROM referrals WHERE invitee_id=?", (uid,)).rowcount)
+        counts["users"] = abs(c.execute("DELETE FROM users WHERE user_id=?", (uid,)).rowcount)
+    audit_log.log(actor, f"user_deleted_forever:{uid}")
+    from fysb.config import log
+    log.info("USER DELETED FOREVER | user=%s actor=%s wiped=%s", uid, actor, counts)
+    return {"ok": True, "counts": counts}
+
+
 def counts() -> dict:
     """Platform user counts — the admin account is excluded everywhere."""
     with db.conn() as c:

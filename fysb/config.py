@@ -44,6 +44,16 @@ USE_PG = bool(DATABASE_URL)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 _MARKET_KEY_RAW = os.getenv("TWELVEDATA_API_KEY", "").strip()
 
+# --- Price provider controls (env-tunable, REAL failover preserved) --------
+# PRICE_PROVIDER: preferred provider tried FIRST when it serves the symbol
+# class (values: BINANCE | BYBIT | YAHOO | GOLD_API | TWELVEDATA | empty=auto).
+# The hidden failover chain always stays intact — preference reorders, it never
+# removes a safety net. Unknown values are ignored silently (auto mode).
+PRICE_PROVIDER = os.getenv("PRICE_PROVIDER", "").strip().upper()
+# Base-URL overrides (geo/network workarounds) — empty => official endpoints.
+BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://api.binance.com").strip().rstrip("/")
+BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").strip().rstrip("/")
+
 # Engine scopes (env-tunable, catalog-driven at runtime)
 MARKET_SYMBOLS_ENV = os.getenv("MARKET_SYMBOLS", "XAU/USD")
 MARKET_TIMEFRAME_ENV = os.getenv("MARKET_TIMEFRAME", "15min")
@@ -54,7 +64,7 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "6.5.0"
+VERSION = "6.6.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 

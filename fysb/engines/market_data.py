@@ -40,8 +40,9 @@ from fysb.config import log
 
 BASE_URL_TD = "https://api.twelvedata.com/time_series"
 QUOTE_URL_TD = "https://api.twelvedata.com/price"
-BASE_URL_BINANCE = "https://api.binance.com"
-BASE_URL_BYBIT = "https://api.bybit.com"
+# Venue endpoints are env-overridable (config.BINANCE_BASE_URL / BYBIT_BASE_URL)
+# so a geo-blocked or firewalled runtime can point the same chain at a mirror
+# without touching code. Call sites read config directly (always current).
 BASE_URL_GOLD_API = "https://api.gold-api.com/price"
 YAHOO_BASES = ("https://query1.finance.yahoo.com/v8/finance/chart/",
                "https://query2.finance.yahoo.com/v8/finance/chart/")
@@ -94,6 +95,59 @@ def _provider_key(internal: str) -> str | None:
     if internal.endswith("USDT") and len(internal) >= 6:
         return internal  # already a venue-style pair (admin-added crypto)
     return None
+
+
+# --- provider chains (env-tunable order) -----------------------------------
+# "goldapi" serves QUOTES only (no candles anywhere); it never enters a candle
+# chain. "twelvedata" enters a chain only when TWELVEDATA_API_KEY is set.
+_CANDLE_CHAINS = {
+    "gold":   ["venue-gold", "twelvedata"],
+    "metal":  ["twelvedata"],
+    "fx":     ["fx-ref", "twelvedata"],
+    "crypto": ["binance", "bybit", "twelvedata"],
+}
+_QUOTE_CHAINS = {
+    "gold":   ["spot-ref", "venue-gold", "twelvedata"],
+    "metal":  ["spot-ref", "twelvedata"],
+    "fx":     ["fx-ref", "twelvedata"],
+    "crypto": ["binance", "bybit", "twelvedata"],
+}
+_PREFERRED_ALIASES = {
+    "GOLD": "spot-ref", "GOLD_API": "spot-ref", "GOLDAPI": "spot-ref",
+    "YAHOO": "fx-ref", "YAHOO_FINANCE": "fx-ref", "FX": "fx-ref",
+    "PAXG": "venue-gold", "VENUE": "venue-gold", "BINANCE_PAXG": "venue-gold",
+    "TD": "twelvedata",
+}
+
+
+def _class_of(internal: str) -> str | None:
+    """Symbol class that selects the provider chain."""
+    if internal == "XAUUSD":                # must win over the BINANCE_MAP check
+        return "gold"
+    if internal in BYBIT_MAP or _provider_key(internal):
+        return "crypto"
+    if internal in GOLD_API_MAP:          # XAGUSD — real spot quote, no venue candles
+        return "metal"
+    if internal in YAHOO_FX_MAP:
+        return "fx"
+    return None
+
+
+def _ordered_chain(chain: list[str], preferred: str, has_key: bool) -> list[str]:
+    """Default chain minus unavailable entries, preferred provider moved first.
+
+    Preference REORDERS only — a provider the preferred value names but that
+    cannot serve this chain (e.g. GOLDAPI for candles) is ignored, and the
+    full failover net always stays. Unknown values change nothing (auto).
+    """
+    out = [p for p in chain if p != "twelvedata" or has_key]
+    pref = _PREFERRED_ALIASES.get((preferred or "").upper(), (preferred or "").upper())
+    if pref:
+        pref_l = pref.lower()               # chains are lowercase, env value is upper
+        if pref_l in out:
+            out.remove(pref_l)
+            out.insert(0, pref_l)
+    return out
 
 
 def _td_symbol(internal: str, raw_symbol: str) -> str:
@@ -328,7 +382,7 @@ def _binance_interval(interval: str) -> str:
 def _fetch_binance_candles(venue_symbol: str, interval: str, outputsize: int) -> list[dict]:
     q = urllib.parse.urlencode({"symbol": venue_symbol, "interval": _binance_interval(interval),
                                 "limit": max(40, min(outputsize, 1000))})
-    raw = _http_json(BASE_URL_BINANCE + "/api/v3/klines?" + q)
+    raw = _http_json(config.BINANCE_BASE_URL + "/api/v3/klines?" + q)
     out = []
     for row in raw:
         try:
@@ -343,7 +397,7 @@ def _fetch_binance_candles(venue_symbol: str, interval: str, outputsize: int) ->
 
 
 def _fetch_binance_price(venue_symbol: str) -> float:
-    raw = _http_json(BASE_URL_BINANCE + "/api/v3/ticker/price?" + urllib.parse.urlencode({"symbol": venue_symbol}), timeout=10)
+    raw = _http_json(config.BINANCE_BASE_URL + "/api/v3/ticker/price?" + urllib.parse.urlencode({"symbol": venue_symbol}), timeout=10)
     return float(raw["price"])
 
 
@@ -356,7 +410,7 @@ def _bybit_interval(interval: str) -> str:
 def _fetch_bybit_candles(venue_symbol: str, interval: str, outputsize: int) -> list[dict]:
     q = urllib.parse.urlencode({"category": "spot", "symbol": venue_symbol,
                                 "interval": _bybit_interval(interval), "limit": max(40, min(outputsize, 1000))})
-    raw = _http_json(BASE_URL_BYBIT + "/v5/market/kline?" + q)
+    raw = _http_json(config.BYBIT_BASE_URL + "/v5/market/kline?" + q)
     rows = ((raw.get("result") or {}).get("list") or [])
     out = []
     for row in reversed(rows):  # newest-first -> oldest-first
@@ -372,7 +426,7 @@ def _fetch_bybit_candles(venue_symbol: str, interval: str, outputsize: int) -> l
 
 
 def _fetch_bybit_price(venue_symbol: str) -> float:
-    raw = _http_json(BASE_URL_BYBIT + "/v5/market/tickers?" + urllib.parse.urlencode({"category": "spot", "symbol": venue_symbol}), timeout=10)
+    raw = _http_json(config.BYBIT_BASE_URL + "/v5/market/tickers?" + urllib.parse.urlencode({"category": "spot", "symbol": venue_symbol}), timeout=10)
     return float(raw["result"]["list"][0]["lastPrice"])
 
 
@@ -430,8 +484,10 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                   use_cache: bool = True) -> dict:
     """Fetch OHLC candles through the hidden failover chain.
 
-    Order per symbol class:
+    Chain per symbol class (config.PRICE_PROVIDER may reorder it — preference
+    first, everything else stays as the fallback net):
       * gold   : VENUE gold candles CALIBRATED to real spot -> KEYED -> error
+      * metal  : KEYED only (silver has no venue candles; quotes use SPOT-REF)
       * forex  : FX-REF real spot candles -> KEYED -> error
       * crypto : VENUE-1 -> VENUE-2 -> KEYED -> error
     Raises RuntimeError with SANITIZED Arabic messages when everything fails —
@@ -446,55 +502,38 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
             return hit["payload"]
 
     errors: list[str] = []
-
-    # --- gold: venue candles calibrated to the REAL spot reference ---------
-    if internal == "XAUUSD" and not in_cooldown("venue-gold", internal, interval):
-        venue = BINANCE_MAP[internal]
-        try:
-            values = _fetch_binance_candles(venue, interval, outputsize)
-            offset = _gold_offset_now(internal, venue)
-            if offset is None:
-                offset = _persisted_offset(internal) or 0.0
-            values = _apply_offset(values, offset)
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
-        except Exception as exc:
-            _mark_failure("venue-gold", internal, interval)
-            errors.append("gold-candles:" + type(exc).__name__)
-
-    # --- forex majors: real spot candles from the FX reference --------------
-    if internal in YAHOO_FX_MAP and not in_cooldown("fx-ref", internal, interval):
-        try:
-            values = _fetch_yahoo_candles(YAHOO_FX_MAP[internal], interval, outputsize)
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
-        except Exception as exc:
-            _mark_failure("fx-ref", internal, interval)
-            errors.append("fx-candles:" + type(exc).__name__)
-
-    # --- crypto: venue chain -------------------------------------------------
+    cls = _class_of(internal)
+    chain = _ordered_chain(_CANDLE_CHAINS.get(cls, []), config.PRICE_PROVIDER,
+                           config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
-    if venue and not in_cooldown("binance", internal, interval):
-        try:
-            values = _fetch_binance_candles(venue, interval, outputsize)
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
-        except Exception as exc:
-            _mark_failure("binance", internal, interval)
-            errors.append("binance:" + type(exc).__name__)
 
-    if internal in BYBIT_MAP and not in_cooldown("bybit", internal, interval):
+    for provider in chain:
+        if in_cooldown(provider, internal, interval):
+            errors.append(f"{provider}:cooldown")
+            continue
         try:
-            values = _fetch_bybit_candles(BYBIT_MAP[internal], interval, outputsize)
+            if provider == "venue-gold":
+                v = BINANCE_MAP[internal]
+                values = _fetch_binance_candles(v, interval, outputsize)
+                offset = _gold_offset_now(internal, v)
+                if offset is None:
+                    offset = _persisted_offset(internal) or 0.0
+                values = _apply_offset(values, offset)
+            elif provider == "fx-ref":
+                values = _fetch_yahoo_candles(YAHOO_FX_MAP[internal], interval, outputsize)
+            elif provider == "binance":
+                values = _fetch_binance_candles(venue, interval, outputsize)
+            elif provider == "bybit":
+                values = _fetch_bybit_candles(BYBIT_MAP[internal], interval, outputsize)
+            elif provider == "twelvedata":
+                values = _fetch_td_candles(_td_symbol(internal, symbol), interval,
+                                           config.market_api_key(), outputsize)
+            else:
+                continue
             return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
         except Exception as exc:
-            _mark_failure("bybit", internal, interval)
-            errors.append("bybit:" + type(exc).__name__)
-
-    if config.has_market_api() and not in_cooldown("twelvedata", internal, interval):
-        try:
-            values = _fetch_td_candles(_td_symbol(internal, symbol), interval, config.market_api_key(), outputsize)
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
-        except Exception as exc:
-            _mark_failure("twelvedata", internal, interval)
-            errors.append("provider:" + type(exc).__name__)
+            _mark_failure(provider, internal, interval)
+            errors.append(f"{provider}:" + type(exc).__name__)
 
     if internal in FOREX_ONLY and not config.has_market_api():
         raise RuntimeError("تعذر جلب شموع الفوركس من المرجع اللحظي — أعد المحاولة بعد قليل")
@@ -505,68 +544,51 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
 def fetch_price(symbol: str, api_key: str = "") -> dict:
     """Latest REAL quote — headline prices must match the actual market."""
     internal = _norm(symbol)
-
-    # 1) Real spot reference (gold/silver — keyless, 24/7, matches the trader's screen)
-    spot_ticker = GOLD_API_MAP.get(internal)
-    if spot_ticker and not in_cooldown("spot-ref", internal, "quote"):
-        try:
-            ref = _fetch_goldapi_price(spot_ticker)
-            _last_provider[internal] = "LIVE"
-            return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
-                    "source": "LIVE", "spot_ref": True}
-        except Exception:
-            _mark_failure("spot-ref", internal, "quote")
-
-    # 2) Real FX spot quote
-    if internal in YAHOO_FX_MAP and not in_cooldown("fx-ref", internal, "quote"):
-        try:
-            ref = _fetch_yahoo_quote(YAHOO_FX_MAP[internal])
-            _last_provider[internal] = "LIVE"
-            return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
-                    "source": "LIVE", "spot_ref": True}
-        except Exception:
-            _mark_failure("fx-ref", internal, "quote")
-
-    # 3) Gold venue token — only with the learned spot calibration applied
-    if internal == "XAUUSD" and not in_cooldown("venue-gold", internal, "quote"):
-        venue = BINANCE_MAP[internal]
-        try:
-            venue_price = _fetch_binance_price(venue)
-            offset = _gold_offset_now(internal, venue)
-            if offset is None:
-                offset = _persisted_offset(internal)
-            if offset:
-                venue_price = venue_price + offset
-            _last_provider[internal] = "LIVE"
-            return {"symbol": symbol, "price": venue_price, "fetched_at": config.now(),
-                    "source": "LIVE", "spot_ref": bool(offset)}
-        except Exception:
-            _mark_failure("venue-gold", internal, "quote")
-
-    # 4) Crypto venue chain
+    cls = _class_of(internal)
+    chain = _ordered_chain(_QUOTE_CHAINS.get(cls, []), config.PRICE_PROVIDER,
+                           config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
-    if venue:
+
+    for provider in chain:
+        if in_cooldown(provider, internal, "quote"):
+            continue
         try:
-            price = _fetch_binance_price(venue)
-            _last_provider[internal] = "LIVE"
-            return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
-        except Exception:
-            pass
-        if internal in BYBIT_MAP:
-            try:
+            if provider == "spot-ref":
+                ref = _fetch_goldapi_price(GOLD_API_MAP[internal])
+                _last_provider[internal] = "LIVE"
+                return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
+                        "source": "LIVE", "spot_ref": True}
+            if provider == "fx-ref":
+                ref = _fetch_yahoo_quote(YAHOO_FX_MAP[internal])
+                _last_provider[internal] = "LIVE"
+                return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
+                        "source": "LIVE", "spot_ref": True}
+            if provider == "venue-gold":
+                v = BINANCE_MAP[internal]
+                venue_price = _fetch_binance_price(v)
+                offset = _gold_offset_now(internal, v)
+                if offset is None:
+                    offset = _persisted_offset(internal)
+                if offset:
+                    venue_price = venue_price + offset
+                _last_provider[internal] = "LIVE"
+                return {"symbol": symbol, "price": venue_price, "fetched_at": config.now(),
+                        "source": "LIVE", "spot_ref": bool(offset)}
+            if provider == "binance":
+                price = _fetch_binance_price(venue)
+                _last_provider[internal] = "LIVE"
+                return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
+            if provider == "bybit":
                 price = _fetch_bybit_price(BYBIT_MAP[internal])
                 _last_provider[internal] = "LIVE"
                 return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
-            except Exception:
-                pass
-
-    if config.has_market_api():
-        try:
-            price = _fetch_td_price(_td_symbol(internal, symbol), config.market_api_key())
-            _last_provider[internal] = "LIVE"
-            return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
+            if provider == "twelvedata":
+                price = _fetch_td_price(_td_symbol(internal, symbol), config.market_api_key())
+                _last_provider[internal] = "LIVE"
+                return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
         except Exception:
-            pass
+            _mark_failure(provider, internal, "quote")
+            continue
 
     if internal in FOREX_ONLY and not config.has_market_api():
         raise RuntimeError("تعذر جلب سعر لحظي من مرجع الفوركس — أعد المحاولة بعد قليل")

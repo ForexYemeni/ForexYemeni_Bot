@@ -120,6 +120,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_core.admin_user_payments(q, uid, context, bot, int(arg))
     elif act == "userdeliveries":
         await admin_core.admin_user_deliveries(q, uid, context, bot, int(arg))
+    elif act == "userdelete":
+        await admin_core.admin_user_delete_confirm(q, uid, context, bot, int(arg))
+    elif act == "userdeletego":
+        await admin_core.admin_user_delete_go(q, uid, context, bot, int(arg))
     elif act == "subedit":
         await admin_core.admin_sub_edit(q, uid, context, bot, int(arg))
     elif act == "subset":
@@ -264,6 +268,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signal_recipients(q, uid, context, bot, int(arg))
     elif act == "cancelsignal":
         await admin_trading.admin_cancel_signal(q, uid, context, bot, int(arg))
+    elif act == "delsignal":
+        await admin_trading.admin_delete_signal_confirm(q, uid, context, bot, int(arg))
+    elif act == "delsignalgo":
+        await admin_trading.admin_delete_signal_go(q, uid, context, bot, int(arg))
     elif act == "newsignal":
         await admin_trading.admin_new_signal(q, uid, context, bot)
     elif act == "tracknow":

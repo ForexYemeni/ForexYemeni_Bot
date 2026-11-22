@@ -69,9 +69,61 @@ async def admin_user_detail(q, uid, context, bot, target: int):
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
         [kb.btn("💳 مدفوعاته", f"a:userpayments:{target}"), kb.btn("📡 ما استلمه", f"a:userdeliveries:{target}")],
         [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
+        [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}")],
         [kb.btn("↩️ دليل المستخدمين", "a:users")],
     ]
     await render(q, render_user_card(u, profile), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_user_delete_confirm(q, uid, context, bot, target: int):
+    """Luxury double-confirmation before PERMANENT user deletion."""
+    if target == config.ADMIN_ID:
+        await render(q, "⛔ حساب المدير لا يُحذف أبداً — محمي على مستوى الخدمة نفسها.", kb.admin_nav(), bot)
+        return
+    u = users_service.get_user(target)
+    if not u:
+        await render(q, "المستخدم غير موجود (ربما حُذف سابقاً).", kb.admin_nav(), bot)
+        return
+    with db.conn() as c:
+        n = lambda t: c.execute(f"SELECT COUNT(*) n FROM {t} WHERE user_id=?", (target,)).fetchone()["n"]
+        stats = {"subscriptions": n("subscriptions"), "payments": n("payments"),
+                 "deliveries": n("signal_deliveries"), "demo": n("demo_accounts"),
+                 "positions": n("demo_positions"), "trades": n("demo_trades"),
+                 "analyses": n("analyses"), "tickets": n("tickets"),
+                 "accounts": n("user_accounts")}
+    name = (u["full_name"] or u["username"] or str(target))
+    body = (f"🗑 <b>حذف نهائي للمستخدم</b>\n"
+            f"<blockquote>▎👤 <b>{esc(name)}</b> · <code>{target}</code>\n"
+            f"▎⚠️ هذا <b>حذف نهائي غير قابل للاسترجاع</b> — ليس حظراً مؤقتاً.\n"
+            f"▎🧹 سيُمحى معه: اشتراكات ({stats['subscriptions']}) · مدفوعات ({stats['payments']}) · "
+            f"إشارات مستلمة ({stats['deliveries']}) · حساب تجريبي ({stats['demo']}) · "
+            f"صفقات ({stats['positions']}/{stats['trades']}) · تحليلات ({stats['analyses']}) · "
+            f"تذاكر ({stats['tickets']}) · حسابات وسيط ({stats['accounts']})</blockquote>\n"
+            f"<i>التأكيد الثاني مطلوب — بعد التنفيذ لا يوجد أي رجوع أو أرشيف.</i>")
+    rows_kb = [
+        [kb.btn("⚠️ تأكيد الحذف النهائي", f"a:userdeletego:{target}")],
+        [kb.btn("↩️ تراجع", f"a:userdetail:{target}")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_user_delete_go(q, uid, context, bot, target: int):
+    res = users_service.delete_user_forever(target, uid)
+    if not res.get("ok"):
+        await render(q, f"⛔ {esc(res.get('error', 'فشل الحذف'))}", kb.admin_nav(), bot)
+        return
+    try:
+        await bot.send_message(target,
+            "🗑 تم حذف حسابك نهائياً من قبل الإدارة. شكراً لوقتك معنا — يمكنك البدء من جديد عبر /start إن أردت.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+    wiped = res.get("counts", {})
+    total = sum(wiped.values())
+    body = (f"✅ <b>تم حذف المستخدم نهائياً</b> · <code>{target}</code>\n"
+            f"<blockquote>▎🧹 مُحوِّلات: <b>{total}</b> سجل عبر {len(wiped)} جدول\n"
+            f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>")
+    await render(q, body, kb.admin_nav([[kb.btn("↩️ دليل المستخدمين", "a:users")]]), bot)
 
 
 async def admin_toggle_user(q, uid, context, bot, target: int):

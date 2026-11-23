@@ -169,6 +169,10 @@ class TestSelfUpdate(unittest.TestCase):
         pkg = pathlib.Path("/tmp/_upd_cycle.zip")
         build_package(pkg)
         dest = pathlib.Path("/tmp/_upd_cycle_dest")
+        # v6.10.0 — the fake remote must ALWAYS be newer than the running
+        # build (config.VERSION moves with every release; a hardcoded tag
+        # silently degraded to no_update and broke the CI contract).
+        fake_next = f"v{config.VERSION}.9"
 
         def fake_download(url, dpath, timeout=updater.TIMEOUT_ZIP):
             pathlib.Path(dpath).write_bytes(pkg.read_bytes())
@@ -176,11 +180,11 @@ class TestSelfUpdate(unittest.TestCase):
 
         try:
             with patch.object(updater, "latest_release",
-                              return_value={"tag": "v6.10.0", "url": "http://x"}), \
+                              return_value={"tag": fake_next, "url": "http://x"}), \
                  patch.object(updater, "_download", side_effect=fake_download):
                 res = updater.self_update(dest_root=dest)
             self.assertEqual(res["status"], "updated")
-            self.assertEqual(res["remote"], "v6.10.0")
+            self.assertEqual(res["remote"], fake_next)
             self.assertEqual(res["local"], config.VERSION)
             self.assertGreaterEqual(res["files"], 4)
             self.assertTrue((dest / "main.py").is_file())
@@ -209,6 +213,7 @@ class TestSelfUpdate(unittest.TestCase):
         pkg = pathlib.Path("/tmp/_upd_incomplete.zip")
         with zipfile.ZipFile(pkg, "w") as z:
             z.writestr("pkg/readme.txt", "broken release payload\n")
+        fake_next = f"v{config.VERSION}.9"   # always newer than the running build
 
         def fake_download(url, dpath, timeout=updater.TIMEOUT_ZIP):
             pathlib.Path(dpath).write_bytes(pkg.read_bytes())
@@ -216,7 +221,7 @@ class TestSelfUpdate(unittest.TestCase):
 
         try:
             with patch.object(updater, "latest_release",
-                              return_value={"tag": "v6.10.0", "url": "http://x"}), \
+                              return_value={"tag": fake_next, "url": "http://x"}), \
                  patch.object(updater, "_download", side_effect=fake_download):
                 res = updater.self_update(dest_root=pathlib.Path("/tmp/_upd_inc_dest"))
             self.assertEqual(res["status"], "error")

@@ -63,7 +63,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         state = subs.quota_state(uid)
         with db.conn() as c:
             total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-            active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')").fetchone()["n"]
+            active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
             wins = c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"]
             delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
             anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
@@ -256,7 +256,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         marks_s = ",".join("?" for _ in strategies)
         args = markets + timeframes + strategies + [min_score]
         with db.conn() as c:
-            rows = c.execute(f"""SELECT * FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')
+            rows = c.execute(f"""SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
                                  AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
                                  AND strategy IN ({marks_s}) AND score>=?
                                  ORDER BY id DESC LIMIT 12""", args).fetchall()
@@ -293,6 +293,20 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         row = _market_row(sig["symbol"])
         card_text = render_signal_card(dict(sig), user_view=True, row=row)
+        # Live market pulse for open trades — the card is alive, not a snapshot.
+        if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+            try:
+                from fysb.engines import market_data
+                quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
+                price = float(quote["price"])
+                entry = float(sig["entry"])
+                drift = instruments.pips(sig["symbol"], entry, price)
+                side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
+                card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
+                              f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"
+                              f" · {side} · <b>{drift:+.1f} pips</b> من الدخول</blockquote>")
+            except Exception:
+                pass
         from fysb.services import user_trade
         personal = user_trade.personal_block(dict(sig), uid)
         if personal:
@@ -629,7 +643,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "demopick":
         with db.conn() as c:
-            rows = c.execute("""SELECT * FROM signals WHERE status IN ('ACTIVE','TP1_HIT')
+            rows = c.execute("""SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
                                 ORDER BY id DESC LIMIT 6""").fetchall()
         rows_kb = [[kb.btn(f"#{r['id']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
         rows_kb.append([kb.btn("↩️ التجريبي", "u:demo")])

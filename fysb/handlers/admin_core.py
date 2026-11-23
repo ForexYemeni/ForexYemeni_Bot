@@ -374,7 +374,7 @@ async def admin_plan_cb(q, uid, context, bot, action: str, arg: str):
         audit_log.log(uid, f"plan_created:{d['code']}")
         code = d["code"]
         context.user_data.pop("plan_draft", None)
-        await render(q, f"✅ <b>حُفظت الباقة <b>{esc(code)}</b> بنجاح</b>", kb.admin_nav([[kb.btn("💠 عرض الباقات", "a:plans")]]), bot)
+        await render(q, f"✅ <b>حُفظت الباقة {esc(code)} بنجاح</b>", kb.admin_nav([[kb.btn("💠 عرض الباقات", "a:plans")]]), bot)
     elif action == "cancel":
         context.user_data.pop("plan_draft", None)
         await render(q, "🗑 أُلغي إنشاء الباقة.", kb.admin_nav([[kb.btn("💠 الباقات", "a:plans")]]), bot)

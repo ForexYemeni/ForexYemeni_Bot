@@ -44,6 +44,7 @@ ICON = {
 # Status colorization (Emerald = positive, Red = negative, Blue = info)
 STATUS_STYLE = {
     "ACTIVE": ("EMERALD", "ACTIVE"),
+    "RUNNING": ("EMERALD", "RUNNING"),
     "TP1_HIT": ("EMERALD", "TP1 HIT"),
     "TP2_HIT": ("EMERALD", "TP2 HIT"),
     "TP3_HIT": ("EMERALD", "TP3 HIT"),
@@ -91,7 +92,8 @@ TIMEFRAME_AR = {
 
 STATUS_AR = {
     "ACTIVE": "نشطة — بانتظار التنفيذ",
-    "TP1_HIT": "تحقق الهدف الأول",
+    "RUNNING": "نشطة — قيد التنفيذ في السوق",
+    "TP1_HIT": "تحقق الهدف الأول — مأمونة",
     "TP2_HIT": "تحقق الهدف الثاني",
     "TP3_HIT": "تحقق الهدف الثالث — مكتملة",
     "SL_HIT": "ضرب وقف الخسارة",

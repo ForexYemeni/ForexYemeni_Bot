@@ -32,7 +32,7 @@ def dashboard() -> dict:
         }
         signals = {
             "total": c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"],
-            "open": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')").fetchone()["n"],
+            "open": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"],
             "completed": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('TP3_HIT','SL_HIT','CLOSED_WIN')").fetchone()["n"],
             "cancelled": c.execute("SELECT COUNT(*) n FROM signals WHERE status='CANCELLED'").fetchone()["n"],
             "expired": c.execute("SELECT COUNT(*) n FROM signals WHERE status='EXPIRED'").fetchone()["n"],

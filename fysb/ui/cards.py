@@ -140,11 +140,16 @@ def render_analysis_card(an: dict, market_row=None) -> str:
 
 
 def render_signal_compact(sig) -> str:
+    """ONE-LINE PLAIN-TEXT summary — used as TELEGRAM BUTTON text.
+
+    Inline keyboard buttons render PLAIN TEXT ONLY: any <b>/<code> markup
+    shows up as literal «رموز برمجية» on screen. No HTML here, ever.
+    """
     d_emoji = DIRECTION_EMOJI.get(sig["direction"], "")
-    status_map = {"ACTIVE": "🟢", "TP1_HIT": "🟢", "TP2_HIT": "🟢", "TP3_HIT": "🟢",
+    status_map = {"ACTIVE": "🟢", "RUNNING": "🟢", "TP1_HIT": "🟢", "TP2_HIT": "🟢", "TP3_HIT": "🟢",
                   "SL_HIT": "🔴", "CANCELLED": "⚪", "EXPIRED": "⚪"}
-    return (f"{status_map.get(sig['status'], '🔵')} #{sig['id']} · <b>{esc(sig['symbol'])}</b> {d_emoji} "
-            f"{esc(tf_name(sig['timeframe']))} · {esc(strategy_name(sig['strategy']))} · <b>{sig['score']}</b>/100 · {status_ar(sig['status'])}")
+    return (f"{status_map.get(sig['status'], '🔵')} #{sig['id']} · {sig['symbol']} {d_emoji} "
+            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {status_ar(sig['status'])}")
 
 
 def render_payment_card(p, plan_title: str = "") -> str:

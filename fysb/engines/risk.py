@@ -32,7 +32,7 @@ def check_signal(symbol: str, rr: float, atr_pct_value: float) -> RiskDecision:
     metrics["rr"] = rr
     max_open = int(_s("max_open_signals", 3))
     with db.conn() as c:
-        open_count = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')").fetchone()["n"]
+        open_count = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
     metrics["open_signals"] = open_count
     if open_count >= max_open:
         return RiskDecision(False, f"open signals {open_count} reached cap {max_open}", metrics)

@@ -48,7 +48,7 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
         return
     sig = dict(r)
     live_note = ""
-    if sig["status"] in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
+    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
         try:
             quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
             price = float(quote["price"])
@@ -65,7 +65,7 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
         except Exception:
             live_note = "\n⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
     rows_kb = []
-    if sig["status"] in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
+    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
         rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
     rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
@@ -148,7 +148,7 @@ async def admin_signal_purge_go(q, uid, context, bot):
 
 async def admin_cancel_signal(q, uid, context, bot, sid: int):
     with db.tx() as c:
-        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','TP1_HIT','TP2_HIT')",
+        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
                         (config.now(), sid))
     audit_log.log(uid, f"cancel_signal:{sid}")
     if cur.rowcount:

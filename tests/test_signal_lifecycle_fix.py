@@ -261,5 +261,126 @@ class NoDisclaimerCards(unittest.TestCase):
         self.assertIn("إدارة المخاطر", text)
 
 
+class TestEntryFillActivation(unittest.TestCase):
+    """The exact user-reported bug: price traded through the entry (SELL 3581.60,
+    market at 3575) yet the card stayed «🟢 نشطة — بانتظار التنفيذ» forever.
+
+    Fix: candle-confirmed entry fill transitions ACTIVE -> RUNNING («نشطة — قيد
+    التنفيذ»); RUNNING signals keep tracking toward TP/SL like before."""
+
+    def setUp(self):
+        db.init_db()
+        with db.conn() as c:
+            c.execute("DELETE FROM signals")
+            c.execute("DELETE FROM signal_deliveries")
+            c.execute("DELETE FROM engine_runs")
+            cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,
+                         targets,rr,score,strategy,reason,status,source,created_by,created_at,
+                         data_source,data_time,strategy_scores,expires_at,entry_zone_lo,entry_zone_hi)
+                         VALUES('XAUUSD','SELL','M15',3581.60,3592.91,3558.97,3547.66,3530.69,
+                         '3558.97,3547.66,3530.69',2.0,95,'SMC','ctx','ACTIVE','AUTO',0,?,
+                         'LIVE','2026-11-22 20:00:00','{}',?,'',0.0)""",
+                      ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                       (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
+            self.sid = cur.lastrowid
+
+    def _payload(self, hi: float, lo: float):
+        start = datetime.now(timezone.utc) - timedelta(hours=1)
+        return {"symbol": "XAUUSD", "interval": "5min",
+                "values": _candles(start, 40, hi, lo),
+                "fetched_at": config.now(), "last_candle_iso":
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "age_seconds": 30.0, "source": "LIVE"}
+
+    def test_entry_crossed_becomes_running(self):
+        """SELL entry 3581.60, price trades down to 3575 (entry crossed, TP1 NOT
+        reached) -> status must become RUNNING, not stay «بانتظار التنفيذ»."""
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+            result = tracker.check_open_signals("")
+        self.assertEqual(result["stats"]["updated"], 1)
+        with db.conn() as c:
+            row = c.execute("SELECT status,pips_result FROM signals").fetchone()
+        self.assertEqual(row["status"], "RUNNING")
+        self.assertEqual(row["pips_result"], 0.0)        # not a result yet — trade is live
+        self.assertTrue(result["notifications"])         # receivers notified once
+
+    def test_running_not_reannounced_on_second_pass(self):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+            tracker.check_open_signals("")
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+            result = tracker.check_open_signals("")
+        self.assertEqual(result["stats"]["updated"], 0)  # no duplicate activation
+        with db.conn() as c:
+            self.assertEqual(c.execute("SELECT status FROM signals").fetchone()["status"], "RUNNING")
+
+    def test_entry_never_touched_stays_active(self):
+        """SELL whose entry was never traded (price below entry from the start,
+        above TP1) honestly stays ACTIVE — no fabricated execution."""
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3580.0, 3576.0)):
+            result = tracker.check_open_signals("")
+        self.assertEqual(result["stats"]["updated"], 0)
+        with db.conn() as c:
+            self.assertEqual(c.execute("SELECT status FROM signals").fetchone()["status"], "ACTIVE")
+
+    def test_running_then_tp1_hits(self):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+            tracker.check_open_signals("")
+        with db.conn() as c:
+            c.execute("UPDATE signals SET half_notified=1")
+        # later window reaches TP1 3558.97
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3560.0, 3550.0)):
+            result = tracker.check_open_signals("")
+        self.assertEqual(result["stats"]["updated"], 1)
+        with db.conn() as c:
+            row = c.execute("SELECT status,pips_result FROM signals").fetchone()
+        self.assertEqual(row["status"], "TP1_HIT")
+        self.assertTrue(row["pips_result"] > 0)
+
+    def test_running_notification_is_luxury_arabic(self):
+        with db.conn() as c:
+            c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)",
+                      (self.sid, 555001, config.now()))
+        payload = self._payload(3582.0, 3575.0)
+        with patch.object(tracker.market_data, "fetch_candles", return_value=payload):
+            result = tracker.check_open_signals("")
+        user_text = result["notifications"][0][1]     # deliveries first, admin note last
+        self.assertIn("قيد التنفيذ", user_text)
+        self.assertIn("السعر عند التفعيل", user_text)
+        self.assertIn("pips", user_text)
+
+    def test_running_row_tracked_by_expiry_sweep(self):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+            tracker.check_open_signals("")
+        old = (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
+        with db.conn() as c:
+            c.execute("UPDATE signals SET created_at=?, expires_at=''", (old,))
+        self.assertEqual(tracker.expire_stale_signals(), 1)  # RUNNING rows expire too
+
+
+class PlainTextSignalButtons(unittest.TestCase):
+    """Telegram inline buttons are PLAIN TEXT — HTML tags rendered literally as
+    «رموز برمجية» in the admin signals list (user screenshot bug)."""
+
+    def test_compact_button_has_no_html_tags(self):
+        sig = {"id": 4, "symbol": "ETHUSD", "direction": "BUY", "timeframe": "M15",
+               "entry": 3000.0, "stop": 3010.0, "tp1": 3020.0, "tp2": 3040.0, "tp3": 3060.0,
+               "rr": 2.0, "score": 92, "strategy": "CRT", "status": "ACTIVE"}
+        text = cards.render_signal_compact(sig)
+        for tag in ("<b>", "</b>", "<code>", "</code>", "<i>", "</i>", "<u>", "</u>"):
+            self.assertNotIn(tag, text)
+        self.assertIn("ETHUSD", text)
+        self.assertIn("#4", text)
+
+    def test_compact_button_all_statuses(self):
+        sig = {"id": 1, "symbol": "XAUUSD", "direction": "SELL", "timeframe": "M15",
+               "entry": 3581.6, "stop": 3592.9, "tp1": 3558.9, "tp2": 3547.6, "tp3": 3530.6,
+               "rr": 2.0, "score": 95, "strategy": "SMC", "status": "RUNNING"}
+        text = cards.render_signal_compact(sig)
+        self.assertNotIn("<b>", text)
+        self.assertNotIn("</b>", text)
+        self.assertIn("قيد التنفيذ", text)
+        self.assertIn("المال الذكي", text)
+
+
 if __name__ == "__main__":
     unittest.main()

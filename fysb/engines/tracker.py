@@ -1,7 +1,10 @@
 """Signal lifecycle tracker — status updates from REAL price data only.
 
 Rules:
-  * Statuses: ACTIVE -> TP1_HIT -> TP2_HIT -> TP3_HIT (or SL_HIT / CANCELLED / EXPIRED)
+  * Statuses: ACTIVE -> RUNNING -> TP1_HIT -> TP2_HIT -> TP3_HIT (or SL_HIT /
+    CANCELLED / EXPIRED). RUNNING = candle data confirms price actually traded
+    through the entry level — the signal is IN the market, no longer «بانتظار
+    التنفيذ». A signal whose entry was never touched stays ACTIVE honestly.
   * A TP/SL is only recorded when provider candles confirm the price actually
     traded through the level. On gaps where a candle spans both SL and TP, the
     conservative rule applies (SL first) — documented, never optimistic.
@@ -68,6 +71,15 @@ def _tracking_payload(provider_symbol: str, api_key: str) -> dict:
     raise last_err or RuntimeError("تعذر جلب شموع التتبع — كل المزودين فشلوا")
 
 
+def entry_filled(sig: dict, candles: list[dict]) -> bool:
+    """Candle-confirmed entry execution: a SELL fills when price trades at or
+    ABOVE the entry level; a BUY fills when price trades at or BELOW it."""
+    entry = float(sig["entry"])
+    if sig["direction"] == "BUY":
+        return any(c["low"] <= entry for c in candles)
+    return any(c["high"] >= entry for c in candles)
+
+
 def check_open_signals(api_key: str) -> dict:
     """Scan all open signals against recent candles; update states.
 
@@ -79,7 +91,7 @@ def check_open_signals(api_key: str) -> dict:
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM signals WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT') ORDER BY id").fetchall()]
+            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id").fetchall()]
     for sig in rows:
         stats["checked"] += 1
         symbol = sig["symbol"]
@@ -102,8 +114,17 @@ def check_open_signals(api_key: str) -> dict:
             notifications.extend(notes)
             admin_notice += f"\n📡 إشارة #{sig['id']} {sig['symbol']}: {transition} ({result_pips:+.1f} pips)"
             continue
+        # Entry-fill activation: the moment candles confirm price traded through
+        # the entry level, the signal is IN the market — «بانتظار التنفيذ» must
+        # never outlive an executed trade (the exact user-reported bug).
+        if sig["status"] == "ACTIVE" and entry_filled(sig, candles):
+            stats["updated"] += 1
+            notes, _ = _apply_transition(sig, "RUNNING", payload)
+            notifications.extend(notes)
+            admin_notice += f"\n🚀 إشارة #{sig['id']} {sig['symbol']}: عُبر سعر الدخول — قيد التنفيذ"
+            sig["status"] = "RUNNING"
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified)
-        if not sig.get("half_notified") and sig["status"] == "ACTIVE":
+        if not sig.get("half_notified") and sig["status"] in ("ACTIVE", "RUNNING"):
             try:
                 if halfway_reached(sig, candles):
                     with db.conn() as c:
@@ -245,6 +266,18 @@ def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[t
     from fysb.theme import dir_badge, esc, status_ar, tf_name
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
     detail = ""
+    result_line = f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>\n"
+    if status == "RUNNING":
+        detail = ("▎🚀 <b>عُبر سعر الدخول ببيانات سوق فعلية — الإشارة الآن قيد التنفيذ "
+                  "وتُتابع لحظياً حتى الأهداف أو الوقف.</b>\n")
+        vals = payload.get("values") or []
+        if vals and vals[-1].get("close"):
+            live_px = float(vals[-1]["close"])
+            drift = instruments.pips(sig["symbol"], sig["entry"], live_px)
+            side = "أعلى الدخول" if live_px > float(sig["entry"]) else (
+                "عند الدخول" if live_px == float(sig["entry"]) else "أدنى الدخول")
+            result_line = (f"▎📍 السعر عند التفعيل: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code>"
+                           f" · {side} · <b>{drift:+.1f} pips</b> من الدخول\n")
     if status.startswith("TP"):
         detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>\n")
         if hit_tp == 1:
@@ -259,7 +292,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[t
         f"<blockquote>"
         f"▎📌 الحالة الجديدة: <b>{status_ar(status)}</b>\n"
         f"▎⏱ الإطار: <b>{tf_name(sig['timeframe'])}</b>\n"
-        f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>\n"
+        f"{result_line}"
         f"{detail}"
         f"</blockquote>\n"
         f"<i>تحديث قائم على بيانات السعر الفعلية من السوق اللحظي.</i>"
@@ -285,7 +318,7 @@ def expire_stale_signals() -> int:
     legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with db.conn() as c:
         cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
-                           WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')
+                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
                            AND ((expires_at!='' AND expires_at<=?)
                                 OR (expires_at='' AND created_at<=?))""",
                         (config.now(), config.now(), legacy_cutoff))

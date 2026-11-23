@@ -16,6 +16,7 @@ from tests.helpers import (MockBot, MockContext, MockQuery, MockMessage,
 from fysb import db, config
 from fysb.handlers import dispatcher, common
 from fysb.services import users as users_service
+from fysb.services import payments as payments_service
 
 
 def run(coro):
@@ -250,6 +251,134 @@ class TestRoyalRestore(unittest.TestCase):
         for data in ("a:home", "a:signals", "a:accounts", "a:stats"):
             q, ctx = fire(data, ADMIN)
             self.assertTrue(page_for(q, ctx), f"{data} must deliver a page")
+
+
+class TestRoyalFixesV691(unittest.TestCase):
+    """v6.9.1 — three owner-reported defects, locked shut with real flows:
+      1. «الاستراتيجيات» tap died: the 36-methodology board reached 4678 chars
+         (> Telegram's 4096) ⇒ BadRequest ⇒ generic error card. Now paginated.
+      2. Broadcast text died: InlineKeyboardButton(“↩️ الإعلانات”, "a:broadcast")
+         bound the callback to the URL parameter ⇒ "wrong port number".
+      3. Documented USDT wallets invisible to users on the plan page.
+    """
+
+    def setUp(self):
+        db.init_db()
+        common._last_panel.clear()
+        # Defensive flag reset (same pattern as test_picker_selfheal): other
+        # suites legitimately toggle platform flags (maintenance, registration)
+        # and a shared-DB restore path may leave maintenance=1 behind — these
+        # USER-side flows must never be hijacked by leftover flags.
+        db.set_setting("maintenance", "0")
+        payments_service.set_chain_wallet("TRC20", "")
+        payments_service.set_chain_wallet("BEP20", "")
+
+    # --- fix 1: strategies pagination ------------------------------------------
+    def test_strategies_board_is_paginated_under_telegram_limit(self):
+        q, ctx = fire("a:strategies", ADMIN)
+        text = page_for(q, ctx)
+        self.assertTrue(text, "strategies board must render")
+        self.assertLessEqual(len(text), 4096, "page 1 must fit Telegram's limit")
+        self.assertIn("الصفحة <b>1</b>", text)
+        self.assertIn("صفحة", text)
+
+    def test_strategies_every_page_fits_and_navigation_works(self):
+        from fysb.handlers.admin_trading import STRATS_PER_PAGE
+        with db.conn() as c:
+            total = c.execute("SELECT COUNT(*) n FROM strategy_catalog").fetchone()["n"]
+        pages = max(1, (total + STRATS_PER_PAGE - 1) // STRATS_PER_PAGE)
+        self.assertGreater(pages, 1, "36 methodologies must produce multiple pages")
+        seen_ranks = set()
+        for p in range(pages):
+            q, ctx = fire(f"a:strategies:{p}", ADMIN)
+            text = page_for(q, ctx)
+            self.assertTrue(text, f"page {p + 1} must render")
+            self.assertLessEqual(len(text), 4096, f"page {p + 1} exceeds Telegram's 4096 limit")
+            first = p * STRATS_PER_PAGE + 1
+            last = min(total, (p + 1) * STRATS_PER_PAGE)
+            for rank in range(first, last + 1):
+                seen_ranks.add(rank)
+        self.assertEqual(seen_ranks, set(range(1, total + 1)),
+                         "global ranks must be continuous across pages, none skipped")
+
+    def test_strategies_toggle_keeps_the_current_page(self):
+        # The board's action buttons carry their page: toggling lands BACK on
+        # the same page (royal navigation, never yanked to page 1).
+        from fysb.handlers.admin_trading import STRATS_PER_PAGE
+        with db.conn() as c:
+            row = c.execute("SELECT code,verified FROM strategy_catalog ORDER BY code").fetchone()
+        code = row["code"]
+        if not row["verified"]:
+            with db.conn() as c:
+                c.execute("UPDATE strategy_catalog SET verified=1 WHERE code=?", (code,))
+        q, ctx = fire(f"a:strategy_toggle:{code}:2", ADMIN)
+        text = page_for(q, ctx)
+        self.assertIn("الصفحة <b>3</b>", text, "toggle must re-render the SAME page (2 → عرض 3)")
+
+    # --- fix 2: broadcast preview buttons are callbacks, never URLs -------------
+    def test_broadcast_buttons_use_callback_data_never_positional_url(self):
+        # The exact defect: InlineKeyboardButton(text, "a:broadcast") binds
+        # "a:broadcast" to the URL parameter — Telegram rejects it with
+        # "wrong port number specified in the url" and the announcement dies.
+        import inspect
+        from fysb.handlers import inputs
+        src = inspect.getsource(inputs)
+        self.assertNotIn('InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")', src,
+                         "positional arg = URL — the exact owner-reported defect")
+        self.assertEqual(src.count('InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")'), 2,
+                         "both broadcast flows (text preview + photo attach) must carry callback_data")
+
+    # --- fix 3: documented USDT wallets visible on the user's plan page ---------
+    def test_plan_page_shows_documented_usdt_wallets_as_fast_lane(self):
+        payments_service.set_chain_wallet("TRC20", "T" + "9" * 33)
+        payments_service.set_chain_wallet("BEP20", "0x" + "a" * 40)
+        q, ctx = fire("u:planview:PRO", USER)
+        text = page_for(q, ctx)
+        self.assertIn("المحافظ الموثقة", text, "documented wallets section must appear")
+        self.assertIn("TRC20", text)
+        self.assertIn("BEP20", text)
+        markup = page_markup_for(q, ctx)
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("u:usdtpay:PRO:TRC20", datas, "TRC20 fast-lane button must be on the plan page")
+        self.assertIn("u:usdtpay:PRO:BEP20", datas, "BEP20 fast-lane button must be on the plan page")
+
+    def test_plan_page_without_documented_wallets_has_no_fast_lane(self):
+        q, ctx = fire("u:planview:PRO", USER)
+        text = page_for(q, ctx)
+        self.assertNotIn("المحافظ الموثقة", text)
+
+    def test_usdtpay_creates_pending_request_and_renders_chain_page(self):
+        payments_service.set_chain_wallet("TRC20", "T" + "9" * 33)
+        with db.conn() as c:
+            before = c.execute("SELECT COUNT(*) n FROM payments").fetchone()["n"]
+        q, ctx = fire("u:usdtpay:PRO:TRC20", USER)
+        text = page_for(q, ctx)
+        self.assertIn("تعليمات الدفع", text)
+        self.assertIn("T" + "9" * 33, text, "the documented wallet address must be visible")
+        self.assertIn("أرسل TXID", page_markup_for(q, ctx).inline_keyboard[0][0].text)
+        with db.conn() as c:
+            after = c.execute("SELECT COUNT(*) n FROM payments").fetchone()["n"]
+            row = c.execute("SELECT * FROM payments ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(after, before + 1, "one PENDING request must be created")
+        self.assertEqual(row["status"], "PENDING")
+        self.assertEqual(row["plan_code"], "PRO")
+        self.assertEqual(row["method"], "USDT-TRC20")
+        self.assertEqual(row["user_id"], USER)
+
+    def test_usdtpay_rejects_undocumented_chain_without_creating_request(self):
+        with db.conn() as c:
+            before = c.execute("SELECT COUNT(*) n FROM payments").fetchone()["n"]
+        q, ctx = fire("u:usdtpay:PRO:ERC20", USER)
+        text = page_for(q, ctx)
+        self.assertIn("غير موثقة", text)
+        with db.conn() as c:
+            after = c.execute("SELECT COUNT(*) n FROM payments").fetchone()["n"]
+        self.assertEqual(after, before, "no request must be created for an undocumented chain")
+
+    def test_usdtpay_never_opens_the_free_plan(self):
+        payments_service.set_chain_wallet("TRC20", "T" + "9" * 33)
+        q, ctx = fire("u:usdtpay:FREE:TRC20", USER)
+        self.assertIn("غير متاحة", page_for(q, ctx))
 
 
 if __name__ == "__main__":

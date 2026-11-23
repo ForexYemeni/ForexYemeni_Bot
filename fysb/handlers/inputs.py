@@ -444,7 +444,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=f"a:bcgo:{bid}")],
                     [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")],
+                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
                 ]))
         except Exception as e:
             # The broadcast flow must NEVER die with the generic error card —
@@ -783,7 +783,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🚀 إرسال الآن", callback_data=f"a:bcgo:{bid}")],
                     [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")],
+                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
                 ]))
         else:
             await update.effective_message.reply_text("⚠️ لا يوجد مسودة إعلان — ابدأ من قسم الإعلانات.")

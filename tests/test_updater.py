@@ -153,11 +153,11 @@ class TestValidatePackage(unittest.TestCase):
 class TestSelfUpdate(unittest.TestCase):
     def test_no_update_when_equal(self):
         with patch.object(updater, "latest_release",
-                          return_value={"tag": "v6.9.0", "url": "http://x"}):
+                          return_value={"tag": f"v{config.VERSION}", "url": "http://x"}):
             res = updater.self_update(dest_root=pathlib.Path("/tmp/_never"))
         self.assertEqual(res["status"], "no_update")
-        self.assertEqual(res["remote"], "v6.9.0")
-        self.assertEqual(res["local"], "6.9.0")
+        self.assertEqual(res["remote"], f"v{config.VERSION}")
+        self.assertEqual(res["local"], config.VERSION)
 
     def test_no_update_when_older(self):
         with patch.object(updater, "latest_release",
@@ -181,7 +181,7 @@ class TestSelfUpdate(unittest.TestCase):
                 res = updater.self_update(dest_root=dest)
             self.assertEqual(res["status"], "updated")
             self.assertEqual(res["remote"], "v6.10.0")
-            self.assertEqual(res["local"], "6.9.0")
+            self.assertEqual(res["local"], config.VERSION)
             self.assertGreaterEqual(res["files"], 4)
             self.assertTrue((dest / "main.py").is_file())
             self.assertTrue((dest / "fysb/config.py").is_file())
@@ -203,7 +203,7 @@ class TestSelfUpdate(unittest.TestCase):
             res = updater.self_update(dest_root=pathlib.Path("/tmp/_never"))
         self.assertEqual(res["status"], "error")
         self.assertIn("RuntimeError", res["detail"])
-        self.assertEqual(res["local"], "6.9.0")
+        self.assertEqual(res["local"], config.VERSION)
 
     def test_incomplete_package_refused(self):
         pkg = pathlib.Path("/tmp/_upd_incomplete.zip")

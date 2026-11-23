@@ -38,6 +38,39 @@ async def _upsell(q, uid, bot, why: str) -> None:
     await render(q, body, kb.user_nav(rows_kb), bot)
 
 
+async def _render_chain_payment(q, bot, req, chain: str) -> None:
+    """v6.9.1 — the ROYAL chain payment page, shared by u:paychain (existing
+    request) and u:usdtpay (documented-wallet fast lane from the plan page).
+    One single source of truth: both entries render the identical contract."""
+    from fysb.services.chain_verify import EVM_CHAINS
+    chain = (chain or "").upper()
+    label = {"TRC20": "USDT TRC20 (شبكة Tron)",
+             **{k: v["label"] for k, v in EVM_CHAINS.items()}}.get(chain, chain)
+    wallet = payments_service.chain_wallet(chain)
+    pid = req["id"]
+    if not wallet:
+        await render(q, "⛓ هذه الشبكة غير مفعلة حالياً — اختر شبكة أخرى من صفحة الباقة أو تواصل مع الدعم.",
+                     kb.user_nav([[kb.btn("🧾 مدفوعاتي", "u:payments")]]), bot)
+        return
+    body = [
+        f"⛓ <b><u>تعليمات الدفع على {label}</u></b>",
+        "<blockquote>"
+        f"▎🧾 الطلب: <b>#{pid}</b> · المبلغ المطلوب: <b>{float(req['amount']):g} USDT</b>\n"
+        f"▎⛓ أرسل المبلغ إلى العنوان الملكي التالي:\n"
+        f"▎<code>{esc(wallet)}</code>\n"
+        "▎⚠️ تأكد أن شبكة التحويل في محفظتك هي نفسها المختارة — الإرسال على شبكة خاطئة يعني خسارة الأموال.\n"
+        "▎🔗 بعد نجاح التحويل انسخ <b>TXID</b> المعاملة (64 خانة) من محفظتك."
+        "</blockquote>",
+        "<i>بمجرد إرسال الـ TXID يُفحص البلوكيشن فعلياً: التأكيد + عقد USDT + عنوان الإدارة + المبلغ — "
+        "وعند التوافق تُفتح باقتك فوراً ويُحجب الـ TXID نهائياً.</i>",
+    ]
+    await render(q, "\n".join(body), kb.user_nav([
+        [kb.btn(f"⛓ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}")],
+        [kb.btn("↩️ وسائل الدفع الأخرى", f"u:planview:{req['plan_code']}")],
+        [kb.btn("🧾 مدفوعاتي", "u:payments")],
+    ]), bot)
+
+
 async def user_page(q, action: str, uid: int, context) -> None:
     bot = context.bot
     # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
@@ -609,15 +642,53 @@ async def user_page(q, action: str, uid: int, context) -> None:
             await render(q, "هذه الباقة غير متاحة حالياً.", kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
             return
         methods = payments_service.list_methods(enabled_only=True)
+        chains = payments_service.configured_chains()
         rows_kb = []
+        body = render_plan_card(dict(p))
         if code != "FREE":
+            # v6.9.1 ROYAL FAST LANE — the DOCUMENTED USDT wallets (the ✅ ones
+            # the owner configured in «محافظ USDT») now appear DIRECTLY in the
+            # user's plan page, above any manual method: one tap on the verified
+            # network → the royal chain page → TXID → on-chain instant opening.
+            # No longer hidden behind a manually-added “USDT” payment method.
+            if chains:
+                body += (
+                    "\n\n⛓ <b><u>التفعيل الفوري بالبلوكيشن — المحافظ الموثقة</u></b>\n"
+                    "<blockquote>"
+                    "▎ادفع USDT على شبكتك الموثقة ← أرسل TXID ← يُفحص البلوكيشن فعلياً\n"
+                    "▎(التأكيد + عقد USDT + العنوان الملكي + المبلغ)\n"
+                    "▎⚡ تُفتح باقتك فوراً 100% بلا انتظار مراجعة — والـ TXID يُحجب نهائياً بعد القبول\n"
+                    f"▎🔗 الشبكات الموثقة الآن: <b>{esc(', '.join(chains))}</b>"
+                    "</blockquote>"
+                )
+                for ch in chains:
+                    rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:usdtpay:{code}:{ch}")])
             if methods:
                 for m in methods:
                     rows_kb.append([kb.btn(f"🧾 اشتراك عبر {esc(m['title'])}", f"u:requestplan:{code}:{m['id']}")])
             else:
                 rows_kb.append([kb.btn("🧾 طلب اشتراك (دفع يدوي)", f"u:requestplan:{code}:0")])
         rows_kb.append([kb.btn("↩️ كل الباقات", "u:plans")])
-        await render(q, render_plan_card(dict(p)), kb.user_nav(rows_kb), bot)
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("usdtpay:"):
+        # v6.9.1 — direct entry into the blockchain fast lane from the plan
+        # page's DOCUMENTED wallets: creates the request and lands on the
+        # same royal chain page as u:paychain (identical contract, zero drift).
+        _, code, chain = action.split(":", 2)
+        chain = chain.upper()
+        with db.conn() as c:
+            p = c.execute("SELECT * FROM plans WHERE code=? AND enabled=1", (code,)).fetchone()
+        if not p or code == "FREE":
+            await render(q, "الباقة غير متاحة.", kb.user_nav([[kb.btn("↩️ كل الباقات", "u:plans")]]), bot)
+            return
+        if chain not in payments_service.configured_chains():
+            await render(q, "⛓ هذه الشبكة غير موثقة حالياً — اختر شبكة موثقة من صفحة الباقة أو تواصل مع الدعم.",
+                         kb.user_nav([[kb.btn("↩️ الباقة", f"u:planview:{code}")]]), bot)
+            return
+        pid = payments_service.create_request(uid, code, p["price"], f"USDT-{chain}")
+        req = payments_service.get_request(pid)
+        await _render_chain_payment(q, bot, req, chain)
 
     elif action.startswith("requestplan:"):
         try:
@@ -678,31 +749,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await render(q, "الطلب غير متاح (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
             return
-        from fysb.services.chain_verify import EVM_CHAINS
-        label = {"TRC20": "USDT TRC20 (شبكة Tron)",
-                 **{k: v["label"] for k, v in EVM_CHAINS.items()}}.get(chain, chain)
-        wallet = payments_service.chain_wallet(chain)
-        if not wallet:
-            await render(q, "⛓ هذه الشبكة غير مفعلة حالياً — اختر شبكة أخرى من صفحة الطلب أو تواصل مع الدعم.",
-                         kb.user_nav([[kb.btn("🧾 مدفوعاتي", "u:payments")]]), bot)
-            return
-        body = [
-            f"⛓ <b><u>تعليمات الدفع على {label}</u></b>",
-            "<blockquote>"
-            f"▎🧾 الطلب: <b>#{pid}</b> · المبلغ المطلوب: <b>{float(req['amount']):g} USDT</b>\n"
-            f"▎⛓ أرسل المبلغ إلى العنوان الملكي التالي:\n"
-            f"▎<code>{esc(wallet)}</code>\n"
-            "▎⚠️ تأكد أن شبكة التحويل في محفظتك هي نفسها المختارة — الإرسال على شبكة خاطئة يعني خسارة الأموال.\n"
-            "▎🔗 بعد نجاح التحويل انسخ <b>TXID</b> المعاملة (64 خانة) من محفظتك."
-            "</blockquote>",
-            "<i>بمجرد إرسال الـ TXID يُفحص البلوكيشن فعلياً: التأكيد + عقد USDT + عنوان الإدارة + المبلغ — "
-            "وعند التوافق تُفتح باقتك فوراً ويُحجب الـ TXID نهائياً.</i>",
-        ]
-        await render(q, "\n".join(body), kb.user_nav([
-            [kb.btn(f"⛓ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}")],
-            [kb.btn("↩️ وسائل الدفع الأخرى", f"u:planview:{req['plan_code']}")],
-            [kb.btn("🧾 مدفوعاتي", "u:payments")],
-        ]), bot)
+        await _render_chain_payment(q, bot, req, chain)
 
     elif action.startswith("usdttxt:"):
         # v6.8.0 — awaiting the user's on-chain TXID for instant verification

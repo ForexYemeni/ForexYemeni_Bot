@@ -275,7 +275,16 @@ async def admin_engine_clean(q, uid, context, bot):
 
 
 # --- Strategies ------------------------------------------------------------------
-async def admin_strategies(q, uid, context, bot):
+# v6.9.1 — the full world catalog (36 methodologies) exceeds Telegram's 4096
+# character message limit in one board (measured: 4678 chars ⇒ BadRequest
+# "Message is too long" ⇒ the generic error card the owner reported).
+# The royal fix: paginate — 10 strategies per page, global rank numbers
+# preserved across pages, prev/next navigation, and every action button
+# carries its page so toggling/verifying lands back on the same page.
+STRATS_PER_PAGE = 10
+
+
+async def admin_strategies(q, uid, context, bot, page: int = 0):
     from fysb.services import strategy_stats
     with db.conn() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
@@ -283,6 +292,8 @@ async def admin_strategies(q, uid, context, bot):
     # history, then the documented baseline), mirroring the user-facing order.
     # v6.8.1 — rank numbers make the guaranteed order VISIBLE on every line,
     # and buttons go 2-per-row so the full world catalog stays compact.
+    # v6.9.1 — the board is PAGINATED (see STRATS_PER_PAGE above): global
+    # ranks keep their meaning across pages, strongest-first order intact.
     codes = strategy_stats.ordered_codes([r["code"] for r in rows])
     by_code = {r["code"]: r for r in rows}
     ordered = [by_code[c] for c in codes if c in by_code] + [r for r in rows if r["code"] not in codes]
@@ -290,14 +301,18 @@ async def admin_strategies(q, uid, context, bot):
     total = len(ordered)
     verified_n = sum(1 for r in ordered if r["verified"])
     active_n = sum(1 for r in ordered if r["enabled"] and r["verified"])
-    lines = ["🧩 <b><u>حوكمة الاستراتيجيات — مرتبة من الأقوى</u></b>",
-             "<blockquote>"
+    pages = max(1, (total + STRATS_PER_PAGE - 1) // STRATS_PER_PAGE)
+    page = max(0, min(int(page or 0), pages - 1))
+    chunk = ordered[page * STRATS_PER_PAGE:(page + 1) * STRATS_PER_PAGE]
+    lines = [f"🧩 <b><u>حوكمة الاستراتيجيات — مرتبة من الأقوى</u></b>\n"
+             f"<blockquote>▎📄 الصفحة <b>{page + 1}</b> من <b>{pages}</b> — الترتيب عالمي متصل عبر الصفحات\n"
              f"▎🗂 إجمالي المنهجيات: <b>{total}</b> · موثقة ومختبرة آلياً: <b>{verified_n}</b>"
              f" · جاهزة للإشارات الآن: <b>{active_n}</b>\n"
              "▎الترتيب حقيقي 100%: التاريخ المغلق يقيس القوة أولاً، ثم الترتيب الأساسي الموثق"
              "</blockquote>\n"]
     rows_kb = []
-    for rank, r in enumerate(ordered, start=1):
+    for i, r in enumerate(chunk):
+        rank = page * STRATS_PER_PAGE + i + 1
         status = "🟢" if (r["enabled"] and r["verified"]) else "⚪"
         verified = "موثقة ومختبرة" if r["verified"] else "غير مختبرة — مغلق"
         d = board.get(r["code"])
@@ -305,10 +320,10 @@ async def admin_strategies(q, uid, context, bot):
                 if d else "")
         lines.append(f"{rank}. {status} <b>{esc(r['title'])}</b> · {verified}{perf}\n   {esc(r['description'])}")
         if r["code"] in VERIFIABLE and not r["verified"]:
-            rows_kb.append([kb.btn(f"✅ {r['code']}: تحقق وتفعيل", f"a:strategy_verify:{r['code']}")])
+            rows_kb.append([kb.btn(f"✅ {r['code']}: تحقق وتفعيل", f"a:strategy_verify:{r['code']}:{page}")])
         else:
             action = "إيقاف" if (r["enabled"] and r["verified"]) else "تفعيل"
-            pending = kb.btn(f"{r['code']}: {action}", f"a:strategy_toggle:{r['code']}")
+            pending = kb.btn(f"{r['code']}: {action}", f"a:strategy_toggle:{r['code']}:{page}")
             if rows_kb and len(rows_kb[-1]) == 1 and \
                     rows_kb[-1][0].callback_data.startswith("a:strategy_toggle:"):
                 rows_kb[-1].append(pending)          # 2-per-row compact grid
@@ -316,10 +331,18 @@ async def admin_strategies(q, uid, context, bot):
                 rows_kb.append([pending])
     lines.append("\n<i>التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً — الباقي يبقى مغلق. "
                  "أُضيفت كل مدارس العالم وترتقي تلقائياً مع كل نتيجة مغلقة.</i>")
+    # Royal pagination strip — always present so the owner sees position 1/N.
+    pager = []
+    if page > 0:
+        pager.append(kb.btn("◀️ الأقوى السابقة", f"a:strategies:{page - 1}"))
+    pager.append(kb.btn(f"📄 {page + 1}/{pages}", "a:plannoop"))
+    if page < pages - 1:
+        pager.append(kb.btn("الأدنى التالية ▶️", f"a:strategies:{page + 1}"))
+    rows_kb.append(pager)
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
-async def admin_strategy_toggle(q, uid, context, bot, code: str):
+async def admin_strategy_toggle(q, uid, context, bot, code: str, page: int = 0):
     with db.conn() as c:
         r = c.execute("SELECT enabled,verified FROM strategy_catalog WHERE code=?", (code,)).fetchone()
         if not r:
@@ -332,17 +355,17 @@ async def admin_strategy_toggle(q, uid, context, bot, code: str):
         c.execute("UPDATE strategy_catalog SET enabled=?,updated_at=? WHERE code=?",
                   (0 if r["enabled"] else 1, config.now(), code))
     audit_log.log(uid, f"strategy_toggle:{code}")
-    await admin_strategies(q, uid, context, bot)
+    await admin_strategies(q, uid, context, bot, page)
 
 
-async def admin_strategy_verify(q, uid, context, bot, code: str):
+async def admin_strategy_verify(q, uid, context, bot, code: str, page: int = 0):
     if code not in VERIFIABLE:
         await render(q, "⛔ هذه الاستراتيجية غير منفذة بعد؛ لا يمكن التحقق منها.", kb.admin_nav(), bot)
         return
     with db.conn() as c:
         c.execute("UPDATE strategy_catalog SET verified=1,enabled=1,updated_at=? WHERE code=?", (config.now(), code))
     audit_log.log(uid, f"strategy_verified:{code}")
-    await admin_strategies(q, uid, context, bot)
+    await admin_strategies(q, uid, context, bot, page)
 
 
 # --- Operating modes -------------------------------------------------------------

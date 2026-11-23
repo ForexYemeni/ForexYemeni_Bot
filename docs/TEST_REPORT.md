@@ -1,6 +1,6 @@
 # FOREXYEMENI — تقرير الاختبارات الفعلية
 
-تاريخ التنفيذ: 2026-11-23 13:00 UTC
+تاريخ التنفيذ: 2026-11-23 13:01 UTC
 النتيجة الإجمالية: **205/205 ناجح** — 0 فاشل
 
 | Suite | Tests | Failures | Errors | Seconds | الحالة |
@@ -8,13 +8,13 @@
 | test_instruments | 11 | 0 | 0 | 0.0 | PASS |
 | test_analysis | 12 | 0 | 0 | 0.0 | PASS |
 | test_strategies | 16 | 0 | 0 | 0.02 | PASS |
-| test_quota | 7 | 0 | 0 | 0.13 | PASS |
-| test_payments | 12 | 0 | 0 | 0.33 | PASS |
+| test_quota | 7 | 0 | 0 | 0.1 | PASS |
+| test_payments | 12 | 0 | 0 | 0.31 | PASS |
 | test_signal_pipeline | 6 | 0 | 0 | 0.05 | PASS |
-| test_ui_callbacks | 13 | 0 | 0 | 1.03 | PASS |
+| test_ui_callbacks | 13 | 0 | 0 | 1.02 | PASS |
 | test_services | 12 | 0 | 0 | 0.5 | PASS |
 | test_royal_upgrade | 21 | 0 | 0 | 0.2 | PASS |
-| test_royal_elite_v7 | 49 | 0 | 0 | 0.71 | PASS |
+| test_royal_elite_v7 | 49 | 0 | 0 | 0.85 | PASS |
 | test_truth_layer | 19 | 0 | 0 | 0.02 | PASS |
 | test_picker_selfheal | 6 | 0 | 0 | 0.05 | PASS |
 | test_referrals | 7 | 0 | 0 | 0.03 | PASS |

@@ -267,18 +267,28 @@ async def user_page(q, action: str, uid: int, context) -> None:
             from fysb.db import IMPLEMENTED_STRATEGIES
             usable = [s for s in p_strats if s != "ALL" and s in IMPLEMENTED_STRATEGIES] \
                 or [s for s in p_strats if s != "ALL"]
+        # v6.8.1 — owner rule (same as markets): the FULL implemented universe
+        # is visible to everyone in guaranteed strength order; methodologies
+        # outside the plan wear 🔒 and tapping one opens the upsell card.
+        from fysb.services import strategy_stats as _ss
+        universe = _ss.ordered_codes(sorted(enabled))
         if is_admin:
-            # v6.8.0 — real strength order for the admin lens picker too
-            from fysb.services import strategy_stats
-            usable = strategy_stats.ordered_codes(sorted(enabled))
+            usable = universe
+        elif not universe:
+            pass  # dead catalog — the plan fallback above keeps the page alive
+        else:
+            usable = universe
+        locked = set() if is_admin else {s for s in usable if s not in p_strats}
         if not usable:
             await _upsell(q, uid, bot, "باقتك الحالية لا تتضمن منهجيات — رقّ باقتك للمتابعة")
             return
         tf_txt = "تحليل متعدد الأطباق" if draft["tf"] == "ALL" else tf
         body = (f"⏱ <b>الإطار:</b> <b>{esc(tf_txt)}</b>\n"
                 f"🧠 <b>اختر المنهجية</b> — "
-                + ("كل الاستراتيجيات المنفذة متاحة لتحليل الإدارة:" if is_admin else f"الاستراتيجيات المسموحة لباقتك ({esc(plan['title'])}):"))
-        rows = [[kb.btn(strategy_name(s), f"u:anlstrat:{s}") for s in usable[i:i + 2]]
+                + ("كل الاستراتيجيات المنفذة متاحة لتحليل الإدارة:" if is_admin
+                   else "كل المنهجيات ظاهرة — 🔒 تفتح مع باقة أعلى:"))
+        rows = [[kb.btn(("🔒 " if s in locked else "") + strategy_name(s), f"u:anlstrat:{s}")
+                 for s in usable[i:i + 2]]
                 for i in range(0, len(usable), 2)]
         if len(usable) > 1:
             rows.insert(0, [kb.btn("👑 جميع المنهجيات (الأفضل تُختار لك)", "u:anlstrat:ALL")])

@@ -154,6 +154,28 @@ def close_pool() -> None:
                 pass
 
 
+def warm(n: int = 2) -> None:
+    """Pre-open n pooled connections so the first button press never pays the
+    WAN connect cost (up to connect_timeout=15s on a cold pool).
+
+    Runs at post_init (in a worker thread): by the time the owner taps their
+    first button, the pool already holds live keepalive sessions to Supabase.
+    Failures are silent — the pool self-heals on demand as before."""
+    for _ in range(max(0, int(n))):
+        try:
+            c = _connect()
+        except Exception:
+            return
+        with _pool_lock:
+            if len(_pool) < _POOL_MAX:
+                _pool.append(c)
+                continue
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # SQL translation — SQLite dialect -> PostgreSQL
 # ---------------------------------------------------------------------------

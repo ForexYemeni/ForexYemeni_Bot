@@ -5,6 +5,7 @@ DB) and fake credentials, using a dedicated temporary .env file pointed to via
 DOTENV_PATH — config.py loads THAT file with override=True, so no inherited
 shell value or ancestor .env can ever leak into tests (or vice versa).
 """
+import itertools
 import os
 import sys
 import tempfile
@@ -136,7 +137,18 @@ def smc_bos_setup(base: float = 1.0800) -> list[dict]:
     return make_candles(vals)
 
 
+_MSG_SEQ = itertools.count(555000)
+
+
+class MockChat:
+    def __init__(self, chat_id=777):
+        self.id = chat_id
+
+
 class MockBot:
+    """Faithful enough: send_message returns a message object with message_id
+    (the living-panel registry consumes it), records every call."""
+
     def __init__(self):
         self.sent = []
         self.photos = []
@@ -146,7 +158,10 @@ class MockBot:
     async def send_message(self, chat_id, text, **kwargs):
         if chat_id in self.fail_for:
             raise RuntimeError("blocked by user")
-        self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
+        mid = next(_MSG_SEQ)
+        self.sent.append({"chat_id": chat_id, "text": text,
+                          "message_id": mid, **kwargs})
+        return type("SentMsg", (), {"message_id": mid, "chat": MockChat(chat_id)})()
 
     async def send_photo(self, chat_id, photo, caption="", **kwargs):
         self.photos.append({"chat_id": chat_id, "caption": caption})
@@ -158,13 +173,39 @@ class MockBot:
 
 
 class MockMessage:
-    def __init__(self, chat_id=777):
+    """Production-realistic message: has chat/message_id/edit_text/delete —
+    exactly the surface the living-panel render() contract relies on.
+    (The v6.8.1 incident hid here: reply-only mocks never exercised the
+    edit-in-place path the bot actually runs in production.)"""
+
+    def __init__(self, chat_id=777, message_id=None):
         self.chat_id = chat_id
-        self.replies = []
+        self.chat = MockChat(chat_id)
+        self.message_id = message_id if message_id is not None else next(_MSG_SEQ)
+        self.replies = []   # reply_text records (backward compat)
+        self.edits = []     # edit_text records (living panel)
+        self.deleted = False
 
     async def reply_text(self, text, reply_markup=None, parse_mode=None, **kw):
         self.replies.append({"text": text, "markup": reply_markup})
+        return self
+
+    async def edit_text(self, text, reply_markup=None, parse_mode=None, **kw):
+        self.edits.append({"text": text, "markup": reply_markup})
+        return self
+
+    async def delete(self):
+        self.deleted = True
         return True
+
+
+class InaccessibleMock:
+    """PTB v22 reality for panels older than 48h: chat + message_id ONLY —
+    no edit_text, no reply_text, no delete. (v6.8.1 died on these.)"""
+
+    def __init__(self, chat_id=777, message_id=None):
+        self.chat = MockChat(chat_id)
+        self.message_id = message_id if message_id is not None else next(_MSG_SEQ)
 
 
 class MockQuery:
@@ -177,6 +218,52 @@ class MockQuery:
     async def answer(self, *a, **kw):
         self._answered = True
         return True
+
+
+def page_for(q, ctx) -> str:
+    """The page the user actually SEES after the callback (living-panel
+    contract): the last fresh page delivered to the tapped chat, or an
+    in-place edit, or a legacy reply — never a silent no-op."""
+    try:
+        cid = q.message.chat.id
+    except Exception:
+        cid = None
+    sent = getattr(getattr(ctx, "bot", None), "sent", None) or []
+    for m in reversed(sent):
+        if m.get("chat_id") == cid:
+            return str(m.get("text", ""))
+    if getattr(q.message, "edits", None):
+        return str(q.message.edits[-1]["text"])
+    if getattr(q.message, "replies", None):
+        return str(q.message.replies[-1]["text"])
+    return ""
+
+
+def page_markup_for(q, ctx):
+    """The inline keyboard of the page the user sees (living-panel contract)."""
+    try:
+        cid = q.message.chat.id
+    except Exception:
+        cid = None
+    sent = getattr(getattr(ctx, "bot", None), "sent", None) or []
+    for m in reversed(sent):
+        if m.get("chat_id") == cid:
+            return m.get("reply_markup")
+    if getattr(q.message, "edits", None):
+        return q.message.edits[-1]["markup"]
+    if getattr(q.message, "replies", None):
+        return q.message.replies[-1]["markup"]
+    return None
+
+
+def page_of(q) -> str:
+    """page_for() for fire()-style tests: fire() attaches the context on q."""
+    return page_for(q, getattr(q, "_ctx", None))
+
+
+def page_markup_of(q):
+    """page_markup_for() for fire()-style tests: context attached on q."""
+    return page_markup_for(q, getattr(q, "_ctx", None))
 
 
 class FakeUser:

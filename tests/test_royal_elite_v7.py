@@ -450,6 +450,9 @@ class TestAdminTextFSM(unittest.TestCase):
         asyncio.run(inputs_mod.on_text(upd, ctx))
         return ctx, upd.effective_message.replies
 
+    def setUp(self):
+        db.init_db()   # v6.8.2: per-suite subprocess isolation — the FSM tests need the schema
+
     def test_demo_balance_setting_works(self):
         ctx, replies = self._run("25000", {"awaiting_demo_balance": True})
         self.assertNotIn("awaiting_demo_balance", ctx.user_data)

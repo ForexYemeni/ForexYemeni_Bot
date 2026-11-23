@@ -1,15 +1,20 @@
 """UI callback routing tests — every button family answers, renders, guards.
 
 These smoke tests replay real callback payloads through the dispatcher with
-mocked Telegram objects, asserting the button-fix behaviors:
-  q.answer() first, fresh-message render, admin guard, no dead callbacks.
+REALISTIC mocked Telegram objects (messages carry chat/message_id and support
+edit_text/delete — the exact surface production runs on), asserting:
+  q.answer() first, living-panel render (fresh page at the chat bottom for
+  stale panels, in-place edit for the current one), admin guard, no dead
+  callbacks, and the v6.8.1 regression («زر يُضغط ولا يظهر أي شيء») can
+  never return.
 """
 import unittest
 import asyncio
 
-from tests.helpers import MockBot, MockContext, MockQuery, FakeUser
+from tests.helpers import (MockBot, MockContext, MockQuery, MockMessage,
+                           FakeUser, InaccessibleMock, page_for, page_markup_for)
 from fysb import db, config
-from fysb.handlers import dispatcher
+from fysb.handlers import dispatcher, common
 from fysb.services import users as users_service
 
 
@@ -18,11 +23,17 @@ def run(coro):
         else asyncio.new_event_loop().run_until_complete(coro)
 
 
-def fire(data: str, uid: int, bot: MockBot | None = None) -> tuple[MockQuery, MockContext]:
+def fire_raw(message, data: str, uid: int, bot: MockBot | None = None):
+    """Fire a callback attached to an EXPLICIT message object (any kind)."""
     q = MockQuery(data, uid)
+    q.message = message
     ctx = MockContext(bot)
     asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
     return q, ctx
+
+
+def fire(data: str, uid: int, bot: MockBot | None = None) -> tuple[MockQuery, MockContext]:
+    return fire_raw(MockMessage(), data, uid, bot)
 
 
 def _mk_update(q):
@@ -38,6 +49,7 @@ ADMIN = 9001
 class TestUserCallbacks(unittest.TestCase):
     def setUp(self):
         db.init_db()
+        common._last_panel.clear()
         try:
             users_service.ensure_user(FakeUser(USER))
         except Exception:
@@ -46,7 +58,7 @@ class TestUserCallbacks(unittest.TestCase):
     def test_answered_and_rendered(self):
         q, ctx = fire("u:home", USER)
         self.assertTrue(q._answered, "callback must be answered immediately")
-        self.assertEqual(len(q.message.replies), 1)
+        self.assertTrue(page_for(q, ctx), "a page must actually appear")
 
     def test_all_user_buttons_render_something(self):
         actions = ["home", "profile", "dashboard", "signals", "preferences",
@@ -56,7 +68,7 @@ class TestUserCallbacks(unittest.TestCase):
         for a in actions:
             q, ctx = fire(f"u:{a}", USER)
             self.assertTrue(q._answered, f"u:{a} not answered")
-            self.assertTrue(q.message.replies, f"u:{a} rendered nothing")
+            self.assertTrue(page_for(q, ctx), f"u:{a} rendered nothing")
 
     def test_menu_buttons_route_correctly(self):
         """REGRESSION (double-prefix bug): every callback_data the menus actually
@@ -68,7 +80,7 @@ class TestUserCallbacks(unittest.TestCase):
         self.assertTrue(datas, "user menu must expose buttons")
         for data in datas:
             q, ctx = fire(data, USER)
-            text = q.message.replies[0]["text"] if q.message.replies else ""
+            text = page_for(q, ctx)
             for bad in bad_fallbacks:
                 self.assertNotIn(bad, text, f"menu button {data} hit the fallback — routing broken")
 
@@ -79,19 +91,19 @@ class TestUserCallbacks(unittest.TestCase):
         datas = [b.callback_data for row in markup.inline_keyboard for b in row]
         for data in datas:
             q, ctx = fire(data, ADMIN)
-            text = q.message.replies[0]["text"] if q.message.replies else ""
+            text = page_for(q, ctx)
             self.assertNotIn("غير معروف", text, f"admin menu button {data} is dead")
             self.assertNotIn("غير متاح", text, f"admin menu button {data} unreachable")
 
     def test_blocked_user_cannot_browse(self):
         users_service.set_blocked(USER, True, 9001)
         q, ctx = fire("u:home", USER)
-        self.assertIn("موقوف", q.message.replies[0]["text"])
+        self.assertIn("موقوف", page_for(q, ctx))
         users_service.set_blocked(USER, False, 9001)
 
     def test_user_cannot_reach_admin_pages(self):
         q, ctx = fire("a:stats", USER)
-        self.assertIn("غير مصرح", q.message.replies[0]["text"])
+        self.assertIn("غير مصرح", page_for(q, ctx))
         with db.conn() as c:
             r = c.execute("SELECT action FROM audit WHERE actor=? ORDER BY id DESC LIMIT 1", (USER,)).fetchone()
         self.assertTrue(r["action"].startswith("admin_probe"), "admin probes must be audited")
@@ -100,6 +112,7 @@ class TestUserCallbacks(unittest.TestCase):
 class TestAdminCallbacks(unittest.TestCase):
     def setUp(self):
         db.init_db()
+        common._last_panel.clear()
 
     def test_all_admin_sections_render(self):
         # Every one of the 27 admin sections must render a page (no dead sections)
@@ -111,11 +124,11 @@ class TestAdminCallbacks(unittest.TestCase):
         for a in actions:
             q, ctx = fire(f"a:{a}", ADMIN)
             self.assertTrue(q._answered, f"a:{a} not answered")
-            self.assertTrue(q.message.replies, f"a:{a} rendered nothing (dead section)")
+            self.assertTrue(page_for(q, ctx), f"a:{a} rendered nothing (dead section)")
 
     def test_admin_guard_rejects_stranger(self):
         q, ctx = fire("a:stats", USER)
-        self.assertIn("غير مصرح", q.message.replies[0]["text"])
+        self.assertIn("غير مصرح", page_for(q, ctx))
 
     def test_admin_detail_pages(self):
         pairs = [
@@ -152,9 +165,9 @@ class TestAdminCallbacks(unittest.TestCase):
         for data, expect in pairs:
             q, ctx = fire(data, ADMIN)
             self.assertTrue(q._answered, f"{data} not answered")
-            self.assertTrue(q.message.replies, f"{data} dead button")
+            self.assertTrue(page_for(q, ctx), f"{data} dead button")
             if expect:
-                self.assertIn(expect, q.message.replies[0]["text"], f"{data} unexpected text")
+                self.assertIn(expect, page_for(q, ctx), f"{data} unexpected text")
 
     def test_settings_toggles_persist(self):
         before = db.get_setting("maintenance")
@@ -166,19 +179,76 @@ class TestAdminCallbacks(unittest.TestCase):
 
     def test_live_stays_locked(self):
         q, ctx = fire("a:live", ADMIN)
-        self.assertIn("مغلق", q.message.replies[0]["text"])
+        self.assertIn("مغلق", page_for(q, ctx))
         self.assertEqual(db.get_setting("live_enabled", "0"), "0")
 
     def test_mode_c_not_switchable(self):
         q, ctx = fire("a:mode_set:C", ADMIN)
-        text = q.message.replies[0]["text"]
+        text = page_for(q, ctx)
         self.assertTrue("غير قابل للتنفيذ" in text or "LIVE" in text)
         self.assertNotEqual(db.get_setting("trading_mode"), "C")
 
     def test_unknown_callback_handled(self):
         q, ctx = fire("x:weird", USER)
         self.assertTrue(q._answered)
-        self.assertTrue(q.message.replies, "unknown callbacks must reply, never die silently")
+        self.assertTrue(page_for(q, ctx), "unknown callbacks must reply, never die silently")
+
+
+class TestLivingPanel(unittest.TestCase):
+    """THE 2026-11-23 INCIDENT (owner: «زر يُضغط ولا يظهر أي شيء») —
+    v6.8.1 edited the tapped message in place unconditionally; Telegram edits
+    do NOT move a message, so taps on old panels silently mutated history far
+    above where the owner was looking, and >48h panels raised RuntimeError
+    through the dead q.message_chat fallback. These tests pin the fix."""
+
+    def setUp(self):
+        db.init_db()
+        common._last_panel.clear()
+
+    def test_tap_on_current_panel_edits_in_place(self):
+        # The luxury single surface: tapping the LIVING panel mutates it —
+        # no new message, no spam.
+        q = MockQuery("a:signals", ADMIN)
+        common.register_panel(777, q.message.message_id)
+        ctx = MockContext()
+        asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
+        self.assertTrue(q._answered)
+        self.assertTrue(q.message.edits, "the current panel must be edited in place")
+        self.assertEqual(ctx.bot.sent, [], "editing the living panel must NOT send a new message")
+        self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
+
+    def test_tap_on_stale_panel_delivers_fresh_at_the_bottom(self):
+        # THE EXACT INCIDENT: a button on an OLD panel must produce a FRESH
+        # page in the chat (visible at the bottom) — never a silent edit.
+        q, ctx = fire("a:home", ADMIN)
+        self.assertTrue(ctx.bot.sent, "stale panel tap must deliver a fresh page")
+        self.assertIn("SUPER ADMIN", page_for(q, ctx))
+        self.assertTrue(q.message.deleted, "the stale tapped panel is removed")
+        # and the fresh page becomes the new living panel
+        self.assertEqual(common._last_panel.get(777),
+                         ctx.bot.sent[-1]["message_id"])
+
+    def test_inaccessible_panel_still_renders(self):
+        # >48h-old panel: PTB v22 gives InaccessibleMessage (chat + message_id
+        # only). v6.8.1 raised RuntimeError here — the dead fallback.
+        msg = InaccessibleMock(chat_id=777, message_id=42)
+        q, ctx = fire_raw(msg, "a:home", ADMIN)
+        self.assertTrue(q._answered)
+        self.assertTrue(ctx.bot.sent, "even an inaccessible panel must render a fresh page")
+        self.assertIn("SUPER ADMIN", page_for(q, ctx))
+
+    def test_first_tap_after_restart_always_delivers(self):
+        # Registry empty (fresh boot): every tap takes the fresh path — the
+        # safest possible default; a page ALWAYS appears.
+        q, ctx = fire("a:accounts", ADMIN)
+        self.assertTrue(ctx.bot.sent, "post-restart first tap must deliver a page")
+
+    def test_registry_reset_between_taps_is_safe(self):
+        # Rapid navigation: every stale tap replaces its own panel — no
+        # accumulation, no dead ends.
+        for data in ("a:home", "a:signals", "a:accounts", "a:stats"):
+            q, ctx = fire(data, ADMIN)
+            self.assertTrue(ctx.bot.sent, f"{data} must deliver a page")
 
 
 if __name__ == "__main__":

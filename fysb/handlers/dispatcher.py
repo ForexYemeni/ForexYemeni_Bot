@@ -2,7 +2,7 @@
 
 Preserved behaviors (from the working V5 build, non-negotiable):
   1. await q.answer() IMMEDIATELY on every callback (visible response)
-  2. pages render as fresh messages (never edit_message_text)
+  2. pages render through the living-panel contract (see common.render)
   3. every action logged, every failure caught with a visible reply
   4. admin guard checked SERVER-SIDE in both the dispatcher and each page module
 
@@ -10,7 +10,13 @@ Added hardening:
   * unknown callbacks get an explicit "unknown button" reply (no dead buttons)
   * non-admin tapping admin callbacks is logged as a security probe
   * callback data length validated (Telegram 64-byte limit protection)
+  * v6.8.2: user identity = ONE pooled round trip (touch_and_get) — WAN
+    PostgreSQL used to cost 3-4 sequential queries per button press
+  * v6.8.2: every button logs its total handling time (BUTTON DONE) so the
+    owner can prove latency from the log alone
 """
+import time
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -32,6 +38,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_REF = context.bot
     uid = q.from_user.id
     data = q.data or ""
+    t0 = time.monotonic()
     log.info("BUTTON RECEIVED | user_id=%s | data=%s", uid, data[:64])
     try:
         await q.answer()  # immediate visual acknowledgement — always first
@@ -53,18 +60,25 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("⚠️ حدث خطأ أثناء تنفيذ الزر. أعد المحاولة أو راجع سجل الإدارة.")
         except Exception:
             pass
+    finally:
+        log.info("BUTTON DONE | %.0fms | data=%s",
+                 (time.monotonic() - t0) * 1000, data[:32])
 
 
 # ---------------------------------------------------------------- user routing
 async def _route_user(q, context, uid: int, action: str):
-    if users_service.get_user(uid) is None:
+    # ONE pooled round trip: throttled last_seen write + profile read.
+    # (was: get_user + touch + is_blocked = 3 sequential WAN queries)
+    u = users_service.touch_and_get(uid)
+    if u is None:
         try:
             users_service.ensure_user(q.from_user)
+            u = users_service.touch_and_get(uid)
         except PermissionError:
             from fysb.handlers.common import render
             await render(q, "⛔ التسجيل مغلق مؤقتاً.", None, context.bot)
             return
-    if users_service.is_blocked(uid):
+    if u and u["is_blocked"]:
         from fysb.handlers.common import render
         await render(q, "⛔ حسابك موقوف. تواصل مع الدعم الفني.", None, context.bot)
         return

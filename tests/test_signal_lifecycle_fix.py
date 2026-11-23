@@ -19,7 +19,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from tests.helpers import MockBot, MockQuery, MockContext
+from tests.helpers import MockBot, MockQuery, MockContext, page_of
 from fysb import db, config
 from fysb.engines import tracker
 from fysb.handlers import dispatcher
@@ -32,6 +32,7 @@ ADMIN = 9001
 def fire(data: str, uid: int):
     q = MockQuery(data, uid)
     ctx = MockContext()
+    q._ctx = ctx
     upd = type("Update", (), {})()
     upd.callback_query = q
     asyncio.run(dispatcher.buttons(upd, ctx))
@@ -225,11 +226,11 @@ class TestBulkPurgeThroughDispatcher(unittest.TestCase):
 
     def test_purge_confirm_then_delete(self):
         q, _ = fire("a:signalpurge", ADMIN)
-        body = str(q.message.replies)
+        body = page_of(q)
         self.assertIn("تنظيف", body)
         self.assertIn("2", body)
         q2, _ = fire("a:signalpurgego", ADMIN)
-        self.assertIn("تم التنظيف", str(q2.message.replies))
+        self.assertIn("تم التنظيف", page_of(q2))
         with db.conn() as c:
             rows = c.execute("SELECT id,status FROM signals ORDER BY id").fetchall()
             self.assertEqual(len(rows), 1)
@@ -240,7 +241,7 @@ class TestBulkPurgeThroughDispatcher(unittest.TestCase):
         with db.conn() as c:
             c.execute("DELETE FROM signals WHERE status IN ('CANCELLED','EXPIRED')")
         q, _ = fire("a:signalpurge", ADMIN)
-        self.assertIn("نظيف", str(q.message.replies))
+        self.assertIn("نظيف", page_of(q))
 
 
 class NoDisclaimerCards(unittest.TestCase):

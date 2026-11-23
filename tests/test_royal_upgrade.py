@@ -15,7 +15,7 @@ from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
-from tests.helpers import MockBot, MockContext, MockQuery, FakeUser
+from tests.helpers import MockBot, MockContext, MockQuery, FakeUser, page_of
 from fysb import db, config
 from fysb.handlers import dispatcher
 from fysb.services import users as users_service
@@ -31,6 +31,7 @@ def run(coro):
 def fire(data: str, uid: int) -> tuple[MockQuery, MockContext]:
     q = MockQuery(data, uid)
     ctx = MockContext()
+    q._ctx = ctx
     upd = type("Update", (), {})()
     upd.callback_query = q
     asyncio.run(dispatcher.buttons(upd, ctx))
@@ -78,7 +79,7 @@ class TestKeyboardRouting(unittest.TestCase):
         for row in markup.inline_keyboard:
             for b in row:
                 q, _ = fire(b.callback_data, USER)
-                text = q.message.replies[0]["text"] if q.message.replies else ""
+                text = page_of(q)
                 self.assertNotIn("هذا القسم غير متاح", text, b.callback_data)
                 self.assertNotIn("غير معروف", text, b.callback_data)
 
@@ -88,7 +89,7 @@ class TestKeyboardRouting(unittest.TestCase):
         for row in markup.inline_keyboard:
             for b in row:
                 q, _ = fire(b.callback_data, ADMIN)
-                text = q.message.replies[0]["text"] if q.message.replies else ""
+                text = page_of(q)
                 self.assertNotIn("غير معروف", text, b.callback_data)
 
 

@@ -11,7 +11,7 @@ Covers:
 import unittest
 from unittest.mock import patch
 
-import helpers  # noqa: F401  (isolated test env)
+import tests.helpers  # noqa: F401  (isolated test env FIRST — subprocess-safe import)
 from fysb import db
 from fysb.engines import market_data as md
 from fysb.theme import rich

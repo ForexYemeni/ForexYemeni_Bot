@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.db
+*.log
+logs/*
+backups/*
+!backups/.gitkeep
+database/*.db
+database/spot_calibration.json

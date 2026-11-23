@@ -13,7 +13,7 @@ Covers:
 import asyncio
 import unittest
 
-from tests.helpers import MockBot, MockQuery, MockContext
+from tests.helpers import MockBot, MockQuery, MockContext, page_of, page_markup_of
 from fysb import db, config
 from fysb.handlers import dispatcher
 from fysb.services import users as users_service
@@ -27,6 +27,7 @@ def run(coro):
 def fire(data: str, uid: int):
     q = MockQuery(data, uid)
     ctx = MockContext()
+    q._ctx = ctx
     upd = type("Update", (), {})()
     upd.callback_query = q
     asyncio.run(dispatcher.buttons(upd, ctx))
@@ -119,18 +120,18 @@ class TestDeleteUserForever(unittest.TestCase):
         fire(f"a:userdetail:{USER}", ADMIN)
         # the confirm page lists wipe scope and warns irreversibility
         q2, _ = fire(f"a:userdelete:{USER}", ADMIN)
-        t2 = str(q2.message.replies)
+        t2 = page_of(q2)
         self.assertIn("حذف نهائي", t2)
         self.assertIn("غير قابل للاسترجاع", t2)
         # execute — user gone for good
         q3, _ = fire(f"a:userdeletego:{USER}", ADMIN)
-        t3 = str(q3.message.replies)
+        t3 = page_of(q3)
         self.assertIn("تم حذف المستخدم نهائياً", t3)
         self.assertIsNone(users_service.get_user(USER))
 
     def test_admin_guard_via_dispatcher(self):
         q, _ = fire(f"a:userdelete:{config.ADMIN_ID}", ADMIN)
-        t = str(q.message.replies)
+        t = page_of(q)
         self.assertIn("لا يُحذف", t)
 
 
@@ -148,16 +149,18 @@ class TestDeleteSignalForever(unittest.TestCase):
 
     def test_button_present_for_terminal_signal(self):
         q, _ = fire(f"a:signalview:{self.sid}", ADMIN)
-        t = str(q.message.replies)
+        # v6.8.x: the delete-forever control is an inline BUTTON on the card —
+        # assert it in the full user-visible surface (text + keyboard).
+        t = page_of(q) + str(page_markup_of(q))
         self.assertIn("حذف نهائي للإشارة", t)
 
     def test_confirm_then_real_erase(self):
         q, _ = fire(f"a:delsignal:{self.sid}", ADMIN)
-        t = str(q.message.replies)
+        t = page_of(q)
         self.assertIn("حذف نهائي", t)
         self.assertIn("لا أرشيف", t)
         q2, _ = fire(f"a:delsignalgo:{self.sid}", ADMIN)
-        t2 = str(q2.message.replies)
+        t2 = page_of(q2)
         self.assertIn("تم حذف الإشارة", t2)
         with db.conn() as c:
             self.assertIsNone(c.execute("SELECT id FROM signals WHERE id=?", (self.sid,)).fetchone())
@@ -166,7 +169,7 @@ class TestDeleteSignalForever(unittest.TestCase):
 
     def test_missing_signal_graceful(self):
         q, _ = fire("a:delsignalgo:99999999", ADMIN)
-        self.assertIn("غير موجودة", str(q.message.replies))
+        self.assertIn("غير موجودة", page_of(q))
 
 
 class TestKillSwitchShipsOff(unittest.TestCase):

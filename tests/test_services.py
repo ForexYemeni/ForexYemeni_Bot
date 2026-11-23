@@ -89,6 +89,9 @@ class TestSupport(unittest.TestCase):
 
 
 class TestBackup(unittest.TestCase):
+    def setUp(self):
+        db.init_db()   # v6.8.2: per-suite subprocess isolation — init here, not in a sibling suite
+
     def test_snapshot_and_verify(self):
         db.init_db()
         snap = backup_service.quick_db_snapshot("test")

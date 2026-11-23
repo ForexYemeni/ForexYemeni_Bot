@@ -359,6 +359,14 @@ async def channels_loop(app):
 
 async def post_init(app):
     global _TASKS
+    # v6.8.2: pre-warm the PostgreSQL pool in a worker thread so the FIRST
+    # button press after a boot never pays the cold WAN connect cost
+    # (connect_timeout=15s worst case on Supabase). SQLite: no-op.
+    if config.USE_PG:
+        try:
+            await asyncio.to_thread(_warm_pg)
+        except Exception:
+            log.warning("pg pool warm-up skipped (will self-heal on demand)")
     _TASKS = [
         asyncio.create_task(market_engine_loop(app), name="fysb-market-engine"),
         asyncio.create_task(tracker_loop(app), name="fysb-tracker"),
@@ -368,6 +376,20 @@ async def post_init(app):
     ]
     post_init._tasks_ref = _TASKS
     log.info("background loops started (5)")
+
+
+def _warm_pg() -> None:
+    """Warm the PG pool + prove connectivity with one cheap statement."""
+    from fysb import pglayer
+    pglayer.warm(2)
+    c = pglayer._acquire()
+    try:
+        cur = c.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchall()
+        cur.close()
+    finally:
+        pglayer._release(c)
 
 
 async def post_shutdown(app):

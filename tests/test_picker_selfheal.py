@@ -14,7 +14,8 @@ This suite pins three layers:
 import unittest
 import asyncio
 
-from tests.helpers import MockContext, MockQuery, FakeUser
+from tests.helpers import (MockContext, MockQuery, FakeUser,
+                           page_of, page_markup_of)
 from fysb import db, config
 from fysb.handlers import dispatcher
 from fysb.services import users as users_service
@@ -30,9 +31,11 @@ def _mk_update(q):
 
 def fire(data: str, uid: int, ctx=None):
     q = MockQuery(data, uid)
+    ctx = ctx or MockContext(None)
+    q._ctx = ctx
     upd = type("Update", (), {})()
     upd.callback_query = q
-    asyncio.run(dispatcher.buttons(upd, ctx or MockContext(None)))
+    asyncio.run(dispatcher.buttons(upd, ctx))
     return q
 
 
@@ -93,9 +96,9 @@ class TestPickerSelfHeal(unittest.TestCase):
         _kill_catalogs()          # dead catalog, NO boot heal in between
         q = fire("u:anlsym:XAUUSD", USER)
         self.assertTrue(q._answered)
-        self.assertTrue(q.message.replies, "anlsym must render something")
-        text = q.message.replies[0]["text"]
-        kb_rows = q.message.replies[0].get("markup")
+        self.assertTrue(page_of(q), "anlsym must render something")
+        text = page_of(q)
+        kb_rows = page_markup_of(q)
         self.assertIn("اختر الإطار الزمني", text)
         self.assertIn("anltf:", str(kb_rows), "timeframe buttons MUST exist even with a dead catalog")
 
@@ -103,7 +106,7 @@ class TestPickerSelfHeal(unittest.TestCase):
         _kill_catalogs()
         q = fire("u:analytics", USER)
         self.assertTrue(q._answered)
-        kb_rows = str(q.message.replies[0].get("markup"))
+        kb_rows = str(page_markup_of(q))
         self.assertIn("anlsym:", kb_rows, "market buttons must exist even with a dead catalog")
 
     def test_full_flow_reaches_analysis_generation(self):
@@ -112,14 +115,14 @@ class TestPickerSelfHeal(unittest.TestCase):
         fire("u:anlsym:XAUUSD", USER, ctx)
         q = fire("u:anltf:M15", USER, ctx)
         self.assertTrue(q._answered)
-        kb_rows = str(q.message.replies[0].get("markup"))
+        kb_rows = str(page_markup_of(q))
         self.assertIn("anlstrat:", kb_rows, "strategy buttons must exist even with a dead catalog")
 
     def test_timeframe_buttons_use_arabic_names(self):
         db.init_db()          # healthy catalog
         q = fire("u:anlsym:XAUUSD", USER)
-        text = q.message.replies[0]["text"]
-        markup = str(q.message.replies[0].get("markup"))
+        text = page_of(q)
+        markup = str(page_markup_of(q))
         self.assertIn("anltf:M15", markup)
         self.assertIn("15 دقيقة", markup, "timeframe labels must be luxury Arabic names")
 

@@ -258,7 +258,7 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "pmdel":
         await admin_core.admin_pm_delete(q, uid, context, bot, int(arg))
     elif act == "usdtwallet":
-        await admin_core.admin_usdt_wallet(q, uid, context, bot)
+        await admin_core.admin_usdt_wallet(q, uid, context, bot, arg or "TRC20")
     # --- trading ---
     elif act == "signals":
         await admin_trading.admin_signals(q, uid, context, bot)

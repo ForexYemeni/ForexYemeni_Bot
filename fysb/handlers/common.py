@@ -1,8 +1,12 @@
 """Common handlers — render(), start, /admin, error handler, /backup.
 
-CRITICAL (button-fix preserved from the working V5 build):
+CRITICAL (button experience, v6.8.1 — the owner's «استجابة أسرع من لمح البصر» +
+«التعديل على مكان واحد وليس كل شوية يرسل»):
   * every callback is answered IMMEDIATELY (await q.answer()) in the dispatcher
-  * pages render as FRESH messages (reply_text) — never edit_message_text
+  * pages render IN PLACE: the tapped message is EDITED into the new page —
+    one message mutates, nothing spams, zero scroll-storm
+  * robust fallback to a fresh message whenever editing is impossible
+    (photo captions, 48h-old messages, inaccessible message objects)
   * every action is logged and wrapped; failures reply with a visible message
 """
 import html
@@ -29,23 +33,42 @@ def safe(s) -> str:
 
 
 async def render(q, text: str, markup=None, bot=None) -> None:
-    """Send callback pages as fresh Telegram messages (the proven fix)."""
-    if q.message is not None:
-        await q.message.reply_text(
-            text=text,
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-        log.info("PAGE RENDERED | user=%s | method=new_message", q.from_user.id)
-        return
+    """Callback pages render IN PLACE — the luxury single-surface experience.
+
+    The tapped message becomes the new page (edit_message_text). Telegram
+    forbids editing in a handful of cases (media captions, 48h-old messages,
+    inaccessible message objects, >4096 chars): all of them fall back to the
+    proven fresh-message path, so a page NEVER fails to appear. An edit whose
+    content is identical («Message is not modified») is a silent no-op."""
+    msg = q.message
+    editable = msg is not None and hasattr(msg, "edit_text") and len(text) <= 4096
+    if editable:
+        try:
+            await msg.edit_text(text=text, reply_markup=markup,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True)
+            return
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return  # same content re-tapped — nothing to update, no spam
+            # any other edit failure (caption/age/entity) -> fresh message
+    if msg is not None:
+        try:
+            await msg.reply_text(
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            return
+        except Exception:
+            pass  # original message deleted mid-flight -> chat fallback below
     # Fallback: original message deleted/too old — deliver to the chat directly.
     chat = getattr(q, "message_chat", None)
     if chat is None or bot is None:
         raise RuntimeError("callback message is no longer available")
     await bot.send_message(chat.id, text, reply_markup=markup,
                            parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    log.info("PAGE RENDERED | user=%s | method=chat_fallback", q.from_user.id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

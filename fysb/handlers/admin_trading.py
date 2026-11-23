@@ -159,12 +159,13 @@ async def admin_cancel_signal(q, uid, context, bot, sid: int):
                         (config.now(), sid))
     audit_log.log(uid, f"cancel_signal:{sid}")
     if cur.rowcount:
-        from fysb.engines.tracker import TERMINAL
-        from fysb.theme import dir_badge, esc
+        from fysb.engines.tracker import TERMINAL, seq_of
+        from fysb.theme import dir_badge, esc, status_ar
         with db.conn() as c:
             sig = dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
-        text = (f"<b>{esc(sig['symbol'])} {dir_badge(sig['direction'])}</b> — تحديث الإشارة #{sig['id']}\n"
-                f"الحالة الجديدة: <b>CANCELLED</b> (قرار إداري)")
+        text = (f"⛔ <b><u>تحديث الإشارة الملكية #{seq_of(sid)}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
+                f"<blockquote>▎📌 الحالة الجديدة: <b>{status_ar('CANCELLED')}</b>\n"
+                f"▎📌 السبب: قرار إداري موثق من الإدارة الملكية</blockquote>")
         with db.conn() as c:
             uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sid,))]
         for note_uid in uids + [config.ADMIN_ID]:
@@ -280,25 +281,41 @@ async def admin_strategies(q, uid, context, bot):
         rows = [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
     # v6.8.0 — the governance board is ordered STRONGEST-FIRST too (measured
     # history, then the documented baseline), mirroring the user-facing order.
+    # v6.8.1 — rank numbers make the guaranteed order VISIBLE on every line,
+    # and buttons go 2-per-row so the full world catalog stays compact.
     codes = strategy_stats.ordered_codes([r["code"] for r in rows])
     by_code = {r["code"]: r for r in rows}
     ordered = [by_code[c] for c in codes if c in by_code] + [r for r in rows if r["code"] not in codes]
     board = {d["code"]: d for d in strategy_stats.leaderboard()}
-    lines = ["🧩 <b>حوكمة الاستراتيجيات — مرتبة من الأقوى</b>\n"]
+    total = len(ordered)
+    verified_n = sum(1 for r in ordered if r["verified"])
+    active_n = sum(1 for r in ordered if r["enabled"] and r["verified"])
+    lines = ["🧩 <b><u>حوكمة الاستراتيجيات — مرتبة من الأقوى</u></b>",
+             "<blockquote>"
+             f"▎🗂 إجمالي المنهجيات: <b>{total}</b> · موثقة ومختبرة آلياً: <b>{verified_n}</b>"
+             f" · جاهزة للإشارات الآن: <b>{active_n}</b>\n"
+             "▎الترتيب حقيقي 100%: التاريخ المغلق يقيس القوة أولاً، ثم الترتيب الأساسي الموثق"
+             "</blockquote>\n"]
     rows_kb = []
-    for r in ordered:
+    for rank, r in enumerate(ordered, start=1):
         status = "🟢" if (r["enabled"] and r["verified"]) else "⚪"
-        verified = "موثقة ومختبرة" if r["verified"] else "غير مختبرة"
+        verified = "موثقة ومختبرة" if r["verified"] else "غير مختبرة — مغلق"
         d = board.get(r["code"])
         perf = (f" · قوة {d['strength']:.1f} · {d['win_rate']:.0f}% رابحة ({d['n']} مغلقة)"
                 if d else "")
-        lines.append(f"{status} <b>{esc(r['title'])}</b> · {verified}{perf}\n  {esc(r['description'])}")
-        row = [kb.btn(f"{esc(r['code'])}: {'إيقاف' if (r['enabled'] and r['verified']) else 'تفعيل'}", f"a:strategy_toggle:{r['code']}")]
+        lines.append(f"{rank}. {status} <b>{esc(r['title'])}</b> · {verified}{perf}\n   {esc(r['description'])}")
         if r["code"] in VERIFIABLE and not r["verified"]:
-            row.append(kb.btn("✅ تحقق", f"a:strategy_verify:{r['code']}"))
-        rows_kb.append(row)
-    lines.append("\n<i>الترتيب حقيقي 100%: التاريخ المغلق يقيس القوة أولاً، ثم الترتيب الأساسي الموثق. "
-                 "التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً — الباقي يبقى مغلق.</i>")
+            rows_kb.append([kb.btn(f"✅ {r['code']}: تحقق وتفعيل", f"a:strategy_verify:{r['code']}")])
+        else:
+            action = "إيقاف" if (r["enabled"] and r["verified"]) else "تفعيل"
+            pending = kb.btn(f"{r['code']}: {action}", f"a:strategy_toggle:{r['code']}")
+            if rows_kb and len(rows_kb[-1]) == 1 and \
+                    rows_kb[-1][0].callback_data.startswith("a:strategy_toggle:"):
+                rows_kb[-1].append(pending)          # 2-per-row compact grid
+            else:
+                rows_kb.append([pending])
+    lines.append("\n<i>التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً — الباقي يبقى مغلق. "
+                 "أُضيفت كل مدارس العالم وترتقي تلقائياً مع كل نتيجة مغلقة.</i>")
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
@@ -413,19 +430,61 @@ async def admin_vol_filter(q, uid, context, bot):
 
 
 # --- Markets ---------------------------------------------------------------------
+CATEGORY_ORDER = ["metal", "forex", "crypto", "index", "stock", "commodity"]
+
+
 async def admin_markets(q, uid, context, bot):
+    """v6.8.1 — LUXURY CATALOG BOARD: every market inside its royal category
+    section (المعادن · الفوركس · الرقمية · المؤشرات · الأسهم · السلع), with
+    real counts, live-state markers and a 2-per-row button grid — the old
+    flat alphabetical wall is gone."""
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON
     with db.conn() as c:
-        rows = c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()
-    lines = ["🌐 <b>إدارة الأسواق</b>\nالسوق الجديد يبقى مغلقاً حتى يثبت المزود بياناته فعلياً (زر تحقق).", ""]
-    rows_kb = []
+        rows = [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
+    if not rows:
+        await render(q, "🌐 لا توجد أسواق في الفهرس بعد.", kb.admin_nav([[kb.btn("➕ إضافة سوق", "a:market_add")]]), bot)
+        return
+    total = len(rows)
+    verified = sum(1 for r in rows if r["verified"])
+    enabled = sum(1 for r in rows if r["enabled"])
+    live = sum(1 for r in rows if r["enabled"] and r["verified"])
+    lines = ["🌐 <b><u>إدارة الأسواق — الفهرس الملكي بأقسامه</u></b>",
+             "<blockquote>"
+             f"▎🗂 إجمالي الأدوات: <b>{total}</b> · موثقة: <b>{verified}</b> · مفعلة: <b>{enabled}</b> · جاهزة للتداول: <b>{live}</b>\n"
+             "▎السوق الجديد يبقى مغلقاً حتى يثبت المزود بياناته فعلياً (زر تحقق)</blockquote>"]
+    sections: dict[str, list] = {}
     for r in rows:
-        state = "🟢" if (r["enabled"] and r["verified"]) else ("🔵 موثق" if r["verified"] else "⚪ مغلق")
-        lines.append(f"{state} <b>{esc(r['symbol'])}</b> · {esc(r['provider_symbol'])} · pip={r['pip_size']} · digits={r['digits']}")
-        row = [kb.btn(f"{esc(r['symbol'])}: {'إيقاف' if r['enabled'] else 'تفعيل'}", f"a:market_toggle:{r['symbol']}")]
-        if not r["verified"]:
-            row.append(kb.btn("✅ تحقق من المزود", f"a:market_verify:{r['symbol']}"))
-        rows_kb.append(row)
-    rows_kb.append([kb.btn("➕ إضافة سوق", "a:market_add")])
+        sections.setdefault((r.get("category") or "forex"), []).append(r)
+    ordered = [c for c in CATEGORY_ORDER if c in sections] + \
+              [c for c in sections if c not in CATEGORY_ORDER]
+    rows_kb = []
+    for cat in ordered:
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        grp = sections[cat]
+        sec_ver = sum(1 for r in grp if r["verified"])
+        sec_en = sum(1 for r in grp if r["enabled"])
+        lines.append(f"\n{icon} <b><u>{title}</u></b> — {len(grp)} أدوات · موثقة {sec_ver} · مفعلة {sec_en}")
+        for r in grp:
+            state = "🟢" if (r["enabled"] and r["verified"]) else ("🔵" if r["verified"] else "⚪")
+            lines.append(f"▎{state} <b>{esc(r['symbol'])}</b> — {esc(r['title'])} · <code>{esc(r['provider_symbol'])}</code>"
+                         f" · pip={r['pip_size']} · digits={r['digits']}")
+        # 2-per-row toggle grid per section (compact luxury board)
+        grid = []
+        for r in grp:
+            mark = "🟢" if (r["enabled"] and r["verified"]) else ("🔵" if r["verified"] else "⚪")
+            grid.append(kb.btn(f"{mark} {r['symbol']}: {'إيقاف' if r['enabled'] else 'تفعيل'}",
+                               f"a:market_toggle:{r['symbol']}"))
+            if len(grid) == 2:
+                rows_kb.append(grid)
+                grid = []
+        if grid:
+            rows_kb.append(grid)
+        unverified = [r for r in grp if not r["verified"]]
+        while unverified:
+            pair, unverified = unverified[:2], unverified[2:]
+            rows_kb.append([kb.btn(f"✅ تحقق {r['symbol']} من المزود", f"a:market_verify:{r['symbol']}") for r in pair])
+    rows_kb.append([kb.btn("➕ إضافة سوق جديد", "a:market_add")])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 

@@ -163,6 +163,13 @@ def render_payment_card(p, plan_title: str = "") -> str:
         f"💎 الباقة: <b>{esc(plan_title or p['plan_code'])}</b>",
         f"💰 المبلغ: <b>{p['amount']:.2f} {esc(p.get('currency', 'USD'))}</b>",
         f"💳 وسيلة الدفع: <b>{esc(p.get('method') or '—')}</b>",
+    ]
+    if p.get("chain"):
+        body.append(f"🌐 شبكة التحقق: <b>{esc(p['chain'])}</b>")
+    if p.get("txid"):
+        tx = str(p["txid"])
+        body.append(f"🔗 TXID موثق: <code>{esc(tx[:14])}…{esc(tx[-8:])}</code>")
+    body += [
         f"🧾 الإيصال: {'مرفق ✅' if p.get('receipt_file_id') else 'غير مرفق ⚠️'}",
         f"📌 الحالة: {status}",
     ]

@@ -419,7 +419,10 @@ async def admin_plan_edit(q, uid, context, bot, code: str):
 
 
 async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
-    """Toggle grid for one plan feature kind (markets / timeframes / strategies)."""
+    """Toggle grid for one plan feature kind (markets / timeframes / strategies).
+    v6.8.1 — strategies show the FULL world catalog (not only verified), in the
+    guaranteed baseline order; markets group by royal category. The render()
+    edit-in-place keeps every toggle on ONE page surface."""
     with db.conn() as c:
         r = c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
     if not r:
@@ -430,23 +433,38 @@ async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
                                     p.get("timeframes") if kind == "timeframes" else
                                     p.get("strategies") or "").split(",") if x.strip()]
     if kind == "markets":
+        from fysb.handlers.admin_trading import CATEGORY_ORDER
         with db.conn() as c:
-            items = [row["symbol"] for row in c.execute("SELECT symbol FROM market_catalog ORDER BY symbol").fetchall()]
+            recs = [dict(row) for row in c.execute("SELECT symbol, category FROM market_catalog").fetchall()]
+        by_cat: dict[str, list] = {}
+        for rec in recs:
+            by_cat.setdefault(rec.get("category") or "forex", []).append(rec["symbol"])
+        items = [s for cat in [c for c in CATEGORY_ORDER if c in by_cat] + [c for c in by_cat if c not in CATEGORY_ORDER]
+                 for s in sorted(by_cat[cat])]
         title, icon = "الأسواق", "🌐"
     elif kind == "timeframes":
         items = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]
         title, icon = "الأطر الزمنية", "⏱"
     else:
         with db.conn() as c:
-            items = [row["code"] for row in c.execute("SELECT code FROM strategy_catalog WHERE verified=1 ORDER BY code").fetchall()]
-        title, icon = "الاستراتيجيات", "🧠"
-    from fysb.theme import strategy_name
-    rows = [[kb.btn(("✅ " if it in current else "▫️ ") +
-                    (strategy_name(it) if kind == "strategies" else it),
-                    f"a:planfeat:{code}:{kind}:{it}") for it in items[i:i + 3]]
-            for i in range(0, len(items), 3)]
+            recs = [dict(row) for row in c.execute("SELECT code, verified FROM strategy_catalog").fetchall()]
+        from fysb.services import strategy_stats
+        items = strategy_stats.ordered_codes([x["code"] for x in recs])
+        verified = {x["code"] for x in recs if x["verified"]}
+        prefix = {c: ("✳️ " if c in verified else "🔒 ") for c in items}
+        title, icon = "الاستراتيجيات (الموثقة ✳️ والمغلقة 🔒)", "🧠"
+    if kind == "strategies":
+        # compact code buttons — the governance board carries the full names;
+        # callback_data always carries the RAW code (never the status prefix)
+        rows = [[kb.btn(("✅ " if it in current else "▫️ ") + prefix.get(it, "") + it,
+                        f"a:planfeat:{code}:{kind}:{it}") for it in items[i:i + 2]]
+                for i in range(0, len(items), 2)]
+    else:
+        rows = [[kb.btn(("✅ " if it in current else "▫️ ") + it,
+                        f"a:planfeat:{code}:{kind}:{it}") for it in items[i:i + 3]]
+                for i in range(0, len(items), 3)]
     rows.append([kb.btn("↩️ محرر الباقة", f"a:planedit:{code}")])
-    note = f"{'🌐' if kind == 'markets' else '⏱' if kind == 'timeframes' else '🧠'} <b>تعديل {title} للباقة {esc(p['title'])}</b>\nاضغط للتبديل — التغيير فوري ومحفوظ:"
+    note = f"{icon} <b>تعديل {title} للباقة {esc(p['title'])}</b>\nاضغط للتبديل — التغيير فوري ومحفوظ، والصفحة تُحدَّث في مكانها:"
     await render(q, note, kb.admin_nav(rows), bot)
 
 
@@ -589,26 +607,49 @@ async def admin_paymethods(q, uid, context, bot):
     methods = payments_service.list_methods()
     rows_kb = [[kb.btn(f"{'🟢' if m['enabled'] else '⚪'} {esc(m['title'])}{' · ' + esc(m['country']) if m['country'] else ''}",
                        f"a:pmview:{m['id']}")] for m in methods]
-    wallet = db.get_setting("usdt_wallet_trc20", "")
+    wallet_row = " · ".join(
+        f"{ch}: {'✅' if payments_service.chain_wallet(ch) else '⚪'}"
+        for ch in ("TRC20", "BEP20", "ERC20", "POLYGON"))
     body = (f"{ICON['bank']} <b><u>وسائل الدفع</u></b>\n"
             "▎أضف وسيلة دفع بتدفق موجّه: محافظ يمنية، عملات رقمية، حوالات — مع بيانات الحساب والتعليمات وربط الباقات.\n"
-            f"▎⛓ محفظة USDT (TRC20) للتحقق البلوكيشن الفوري: <code>{esc(wallet) if wallet else 'غير مضبوطة — اضغط الزر بالأسفل'}</code>")
+            f"▎⛓ محافظ USDT للتحقق البلوكيشن الفوري — {wallet_row}\n"
+            "▎الشبكات الجاهزة: <b>" + (", ".join(payments_service.configured_chains()) or "—") + "</b>")
     await render(q, body, kb.admin_nav(rows_kb + [[kb.btn("➕ إضافة وسيلة دفع", "a:pmadd")],
-                                                 [kb.btn("⛓ عنوان محفظة USDT (TRC20)", "a:usdtwallet")]]), bot)
+                                                 [kb.btn("⛓ محافظ USDT — كل الشبكات", "a:usdtwallet")]]), bot)
 
 
-async def admin_usdt_wallet(q, uid, context, bot):
-    """v6.8.0 — set THE USDT TRC20 wallet for on-chain instant activation.
+async def admin_usdt_wallet(q, uid, context, bot, chain: str = "TRC20"):
+    """v6.8.1 — MULTI-NETWORK USDT wallets for on-chain instant activation
+    (TRC20 + BEP20 + ERC20 + Polygon — the owner asked for more networks).
     Stored in DB settings (no environment variables, per the owner's rule)."""
-    wallet = db.get_setting("usdt_wallet_trc20", "")
-    context.user_data["awaiting_usdt_wallet"] = True
-    await render(q, "⛓ <b><u>محفظة USDT للتحقق البلوكيشن الفوري</u></b>\n"
-                    "أرسل <b>عنوان المحفظة</b> (يبدأ بـ T وعدد خاناته 34) — ستُستخدم لكل عمليات USDT TRC20:\n"
-                    "المستخدم يدفع → يرسل TXID → يُفحص البلوكيشن (التأكيد + العنوان + المبلغ) → تُفتح الباقة فوراً "
-                    "ويُحجب الـ TXID نهائياً من إعادة الاستخدام.\n\n"
-                    f"العنوان الحالي: <code>{esc(wallet) if wallet else 'غير مضبوط'}</code>\n"
-                    "أرسل <code>-</code> لمسح العنوان.",
-                 kb.admin_nav([[kb.btn("↩️ وسائل الدفع", "a:paymethods")]]), bot)
+    from fysb.services.chain_verify import ALL_CHAINS, EVM_CHAINS
+    chain = (chain or "TRC20").upper()
+    if chain not in ALL_CHAINS:
+        chain = "TRC20"
+    labels = {"TRC20": "USDT TRC20 (Tron)",
+              **{k: v["label"] for k, v in EVM_CHAINS.items()}}
+    wallet = payments_service.chain_wallet(chain)
+    context.user_data["awaiting_usdt_wallet"] = {"chain": chain}
+    rows = []
+    for ch in ALL_CHAINS:
+        w = payments_service.chain_wallet(ch)
+        mark = "🟢" if w else "⚪"
+        rows.append([kb.btn(f"{mark} ضبط {labels[ch]}",
+                            f"a:usdtwallet:{ch}" if ch != chain else "a:plannoop")])
+    await render(q, "⛓ <b><u>محافظ USDT للتحقق البلوكيشن الفوري — كل الشبكات</u></b>\n"
+                    "<blockquote>"
+                    "▎المستخدم يدفع USDT على الشبكة التي يختارها ← يرسل TXID ← يُفحص البلوكيشن فعلياً\n"
+                    "▎(التأكيد + العقد + العنوان الملكي + المبلغ) ← تُفتح الباقة فوراً\n"
+                    "▎🔒 ويُحجب الـ TXID نهائياً من أي استخدام آخر\n"
+                    f"▎الشبكات الجاهزة للمستخدمين الآن: <b>{', '.join(payments_service.configured_chains()) or '—'}</b>"
+                    "</blockquote>\n\n"
+                    f"⛓ <b>الشبكة الحالية: {labels[chain]}</b>\n"
+                    + ("أرسل <b>عنوان المحفظة</b> الآن:\n"
+                       + ("<i>عنوان Tron يبدأ بحرف T وطوله 34 خانة.</i>" if chain == "TRC20"
+                          else "<i>عنوان EVM يبدأ بـ 0x وطوله 42 خانة.</i>") + "\n"
+                       f"العنوان الحالي: <code>{esc(wallet) if wallet else 'غير مضبوط'}</code>\n"
+                       "أرسل <code>-</code> لمسح العنوان."),
+                 kb.admin_nav(rows + [[kb.btn("↩️ وسائل الدفع", "a:paymethods")]]), bot)
 
 
 async def admin_pm_add(q, uid, context, bot):

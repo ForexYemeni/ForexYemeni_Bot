@@ -36,6 +36,21 @@ def touch(uid: int) -> None:
         pass
 
 
+def touch_and_get(uid: int):
+    """v6.8.1 hot-path helper: ONE pooled connection for the two calls every
+    button press makes (throttled last_seen + profile read). Halves the
+    round trips on the user navigation path — WAN PostgreSQL makes each one
+    cost real latency."""
+    try:
+        with db.conn() as c:
+            c.execute("UPDATE users SET last_seen=? WHERE user_id=? AND (last_seen IS NULL OR last_seen<=?)",
+                      (config.now(), uid, config.now()))
+            r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+        return dict(r) if r else None
+    except Exception:
+        return get_user(uid)
+
+
 def is_blocked(uid: int) -> bool:
     u = get_user(uid)
     return bool(u and u["is_blocked"])

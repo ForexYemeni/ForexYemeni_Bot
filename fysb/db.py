@@ -594,6 +594,58 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("TREND", "Trend Following", "ترتيب المتوسطات 9/21/50 + ارتداد إلى قيمة EMA21 واستئناف الاتجاه (منفذة واختبارة آلياً)."),
                 ("ICHIMOKU", "Ichimoku Kinko Hyo", "نظام السحابة الياباني: كسر الكومو + تقاطع تينكان/كيجون + سحابة مستقبلية مؤكدة (منفذة واختبارة آلياً)."),
                 ("WYCKOFF", "Wyckoff", "منهج وايكوف؛ غير معتمد آلياً بعد — مغلق."),
+                # --- v6.8.1: مجموعات الاستراتيجيات العالمية الكاملة (كل مدرسة، كلها) ---
+                # كل صف يُولد مغلقاً وغير مختبر (حوكمة صادقة) حتى يُنفذ ويُختبر آلياً.
+                ("ELLIOTT_WAVE", "Elliott Waves",
+                 "عد موجات إليوت: دافعية 1-2-3-4-5 وتصحيحية A-B-C مع مناطق التماثل وقيادة الموجة الثالثة."),
+                ("HARMONIC", "Harmonic Patterns",
+                 "أنماط توافقية بنِسب فيبوناتشي المضبوطة: جارتفلي · بات · كاب · بترفلاي ومنطقة PRZ."),
+                ("VOLUME_PROFILE", "Volume Profile",
+                 "توزيع الحجم بالسعر: POC وحدود منطقة القيمة VAH/VAL ومناطق القيمة العادلة لكل جلسة."),
+                ("VWAP", "VWAP",
+                 "السعر المتوسط المرجح بالحجم: انحرافات ±1/±2 للانضباط المؤسسي وانعكاسات الانحراف."),
+                ("BREAKOUT_RETEST", "Breakout & Retest",
+                 "كسر مستوى هيكلي بإغلاق مؤكد ثم إعادة اختبار ناجحة ودخول مع الاستمرار — الكلاسيك الصلب."),
+                ("SUPPORT_RESISTANCE", "Support & Resistance",
+                 "مناطق دعم/مقاومة محورية مبنية على القمم والقيعان الملموسة وتقاطع الأطر الكبرى."),
+                ("RSI_DIVERGENCE", "RSI Divergence",
+                 "دايفرجنس RSI بين السعر والزخم مع مناطق تشبع 70/30 وفلتر اتجاه الإطار الأعلى."),
+                ("MACD_STRAT", "MACD Momentum",
+                 "تقاطعات MACD ودايفرجنس الهيستوجرام مع فلتر الترند الأعلى ومراكز الصفر."),
+                ("BOLLINGER", "Bollinger Bands",
+                 "انضغاط بولينجر (Squeeze) قبل الانفجار وارتدادات من الحدود مع وسط 20 كمرجع."),
+                ("DONCHIAN", "Donchian Breakout",
+                 "كسر قناة دونشيان 20/55 — قواعد السلاحف الأصلية مع وقف ATR وجني متدرج."),
+                ("MA_CROSS", "MA Crossover",
+                 "تقاطع المتوسطات السريع/البطيء (الذهبي/المميت) مع فلتر اتجاه الأطر الأعلى."),
+                ("SUPERTREND", "Supertrend",
+                 "خط السوبر تريند ATR: تبديل الاتجاه عند كسر الخط والدخول معه بوقف ديناميكي."),
+                ("KELTNER", "Keltner Channels",
+                 "قنوات كلتنر EMA+ATR: اختراقات الامتداد وأهداف القناة المقابلة."),
+                ("ORB", "Opening Range Breakout",
+                 "كسر مدى الافتتاح (أول 15/30 دقيقة من الجلسة) بأهداف ممددة من حجم المدى."),
+                ("ASIA_RANGE", "Asia Range",
+                 "مدى جلسة آسيا: كسر سيولة آسيا في افتتاح لندن — نمط الجلسات الملكية."),
+                ("LONDON_BREAK", "London Breakout",
+                 "كسر قمة/قاع أول ساعتين من لندن مع فلتر اتجاه اليوم وإدارة بنسبة ثابتة."),
+                ("PIVOT_POINTS", "Pivot Points",
+                 "نقاط المحور اليومية الكلاسيكية PP/R1-R3/S1-S3 للانعكاس والاستمرار المؤسسي."),
+                ("CPR", "Central Pivot Range",
+                 "مدى المحور المركزي TC/PIVOT/BC وتصنيف اليوم الضيق/العريض قبل الافتتاح."),
+                ("MARKET_PROFILE", "Market Profile (TPO)",
+                 "ملف السوق TPO: أشكال اليوم البسيطة/المزدوجة ومناطق قبول ورفض السعر."),
+                ("ORDER_FLOW", "Order Flow & Delta",
+                 "تدفق الأوامر والدلتا التراكمية وامتصاص السيولة عند المستويات الكبرى."),
+                ("MEAN_REVERSION", "Mean Reversion",
+                 "الارتداد للمتوسط: Z-Score على النطاقات الملتزمة والأزواج المرتبطة إحصائياً."),
+                ("GAP_TRADE", "Gap Trading",
+                 "فجوات الافتتاح: ملء الفجوة أو الاستمرار بحسب نوعها وحجمها وموقعها من الاتجاه."),
+                ("HEIKIN_ASHI", "Heikin Ashi",
+                 "شموع هيكين آشي الملساء: تلوين الاتجاه وغياب الهيبات العكسية لتصفية الضجيج."),
+                ("MOMENTUM", "Momentum Breakout",
+                 "اندفاعات الزخم: شموع توسع بحجم استثنائي وامتداد مؤكد فوق مستوى المقاومة."),
+                ("ATR_BREAKOUT", "ATR Volatility Break",
+                 "كسر نطاق N×ATR مع وقف ديناميكي وأهداف ممتدة حسب التقلب اللحظي."),
             ]:
                 c.execute("INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,0,0,?,?,60)",
                           (code, title, desc, config.now(), config.now()))
@@ -679,10 +731,29 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
     return log_lines
 
 
+# --- Settings fast-path cache (v6.8.1 button-latency fix) --------------------
+# get_setting() runs on EVERY button press (maintenance gate, kill-switch,
+# quotas, push flag...). Over WAN PostgreSQL each call is a network round trip;
+# a tiny process-local cache with a short TTL removes most of them. Correctness:
+# the only writer is this process, and set_setting()/set_settings_bulk() update
+# the cache write-through, so a toggle is visible on the very next read.
+_SETTINGS_TTL = 5.0
+_settings_cache: dict[str, tuple[str, float]] = {}
+_settings_lock = threading.Lock()
+
+
 def get_setting(key: str, default: str = "") -> str:
+    ent = _settings_cache.get(key)
+    if ent is not None and (time.time() - ent[1]) < _SETTINGS_TTL:
+        return ent[0]
     with conn() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return r["value"] if r else default
+    if r is None:
+        return default  # misses are never cached — a later INSERT stays visible
+    val = r["value"]
+    with _settings_lock:
+        _settings_cache[key] = (val, time.time())
+    return val
 
 
 def get_setting_int(key: str, default: int) -> int:
@@ -703,6 +774,8 @@ def set_setting(key: str, value) -> None:
     with conn() as c:
         c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (key, str(value)))
+    with _settings_lock:   # write-through — the next read never sees a stale value
+        _settings_cache[key] = (str(value), time.time())
 
 
 def set_settings_bulk(pairs: dict) -> None:
@@ -710,6 +783,10 @@ def set_settings_bulk(pairs: dict) -> None:
         for k, v in pairs.items():
             c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                       (k, str(v)))
+    with _settings_lock:
+        now_ts = time.time()
+        for k, v in pairs.items():
+            _settings_cache[k] = (str(v), now_ts)
 
 
 def maintenance_on() -> bool:

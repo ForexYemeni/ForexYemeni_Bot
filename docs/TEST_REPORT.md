@@ -1,24 +1,24 @@
 # FOREXYEMENI — تقرير الاختبارات الفعلية
 
-تاريخ التنفيذ: 2026-11-22 03:40 UTC
-النتيجة الإجمالية: **189/189 ناجح** — 0 فاشل
+تاريخ التنفيذ: 2026-11-23 13:00 UTC
+النتيجة الإجمالية: **205/205 ناجح** — 0 فاشل
 
 | Suite | Tests | Failures | Errors | Seconds | الحالة |
 |---|---|---|---|---|---|
 | test_instruments | 11 | 0 | 0 | 0.0 | PASS |
 | test_analysis | 12 | 0 | 0 | 0.0 | PASS |
-| test_strategies | 9 | 0 | 0 | 0.01 | PASS |
-| test_quota | 7 | 0 | 0 | 0.09 | PASS |
-| test_payments | 4 | 0 | 0 | 0.02 | PASS |
-| test_signal_pipeline | 6 | 0 | 0 | 0.04 | PASS |
-| test_ui_callbacks | 13 | 0 | 0 | 1.0 | PASS |
-| test_services | 12 | 0 | 0 | 0.44 | PASS |
-| test_royal_upgrade | 21 | 0 | 0 | 0.19 | PASS |
-| test_royal_elite_v7 | 49 | 0 | 0 | 0.76 | PASS |
+| test_strategies | 16 | 0 | 0 | 0.02 | PASS |
+| test_quota | 7 | 0 | 0 | 0.13 | PASS |
+| test_payments | 12 | 0 | 0 | 0.33 | PASS |
+| test_signal_pipeline | 6 | 0 | 0 | 0.05 | PASS |
+| test_ui_callbacks | 13 | 0 | 0 | 1.03 | PASS |
+| test_services | 12 | 0 | 0 | 0.5 | PASS |
+| test_royal_upgrade | 21 | 0 | 0 | 0.2 | PASS |
+| test_royal_elite_v7 | 49 | 0 | 0 | 0.71 | PASS |
 | test_truth_layer | 19 | 0 | 0 | 0.02 | PASS |
-| test_picker_selfheal | 5 | 0 | 0 | 0.04 | PASS |
+| test_picker_selfheal | 6 | 0 | 0 | 0.05 | PASS |
 | test_referrals | 7 | 0 | 0 | 0.03 | PASS |
-| test_channel_publish | 14 | 0 | 0 | 0.01 | PASS |
+| test_channel_publish | 14 | 0 | 0 | 0.02 | PASS |
 
 ## تفاصيل الفشل (إن وجد)
 

@@ -368,6 +368,22 @@ def _payload_close(payload: dict) -> float:
     return 0.0
 
 
+def seq_of(signal_id: int) -> int:
+    """REAL sequential number — the SAME number the signals center displays.
+
+    The center numbers signals chronologically via ROW_NUMBER (deleting any
+    signal makes the following ones take the freed number). The rank of id X
+    among all signals ordered by id equals COUNT(id <= X), so every alert can
+    show the exact number the admin sees — never a stale internal id like the
+    live «إشارة #12» complaint after deletions (v6.8.1 numbering integrity)."""
+    try:
+        with db.conn() as c:
+            r = c.execute("SELECT COUNT(*) n FROM signals WHERE id<=?", (signal_id,)).fetchone()
+        return int(r["n"]) if r else signal_id
+    except Exception:
+        return signal_id
+
+
 def drift_pips(symbol: str, direction: str, entry: float, px: float) -> float:
     """Signed pips from entry — positive means IN the trade's favour.
 
@@ -524,7 +540,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     live-card edits). The caller sends/edits inside the bot's event loop.
     RUNNING transitions anchor `filled_at` (the fill candle's datetime) so all
     later target evaluation starts from the true fill moment."""
-    from fysb.theme import dir_badge, esc, status_ar, tf_name
+    from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
     status = new_status
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3,
               "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
@@ -577,7 +593,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
                            + (f" · 💵 <b>{instruments.usd_move(sig['symbol'], side_pips, 0.01, px=live_px):+,.2f} $</b> بـ 0.01 لوت" if side_pips else "")
                            + "\n")
     elif status == "CANCELLED":
-        detail = ("▎⛔ لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
+        detail = ("▎⛔ <b>فات الدخول:</b> لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
                   "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
         result_line = ""
     if status.startswith("TP"):
@@ -593,37 +609,28 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         detail = (f"▎🛡 الخسارة محدودة بمقدار وقف الخسارة المخطط"
                   + (f" · 💵 <b>{usd_sl:+,.2f} $</b> لكل 0.01 لوت" if usd_sl else "")
                   + " — التزم بإدارة المخاطر في الفكرة القادمة.\n")
+    # v6.8.1 — numbering integrity: every alert shows the SAME sequential
+    # number the signals center displays (after deletions the following
+    # signals take the freed numbers), never the raw internal id.
+    seq = seq_of(sig["id"])
     text = (
-        f"📡 <b>تحديث الإشارة #{sig['id']}</b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
+        f"📡 <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
         f"▎📌 الحالة الجديدة: <b>{status_ar(status)}</b>\n"
-        f"▎⏱ الإطار: <b>{tf_name(sig['timeframe'])}</b>\n"
         f"{result_line}"
         f"{detail}"
+        f"▎🧠 المنهجية: <b>{strategy_name(sig['strategy'])}</b> · ⭐ الجودة: <code>{int(sig['score'] or 0)}/100</code>\n"
         f"</blockquote>\n"
-        f"<i>تحديث قائم على بيانات السعر الفعلية من السوق اللحظي.</i>"
+        f"<i>تحديث قائم على بيانات السعر الفعلية من السوق اللحظي — تتابع لحظي حتى الإغلاق.</i>"
     )
     with db.conn() as c:
         uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
+    # v6.8.1 — the ADMIN receives the SAME royal card the users receive
+    # (identical truth, identical luxury layout — the old one-line telegram
+    # «📡 إشارة #N … (+pips · $)» that read badly is retired for good).
     notes = [(uid, text) for uid in uids]
     if config.ADMIN_ID:
-        # Admin sees the SAME truth the users see — Arabic status + real numbers,
-        # never a raw machine token like «RUNNING (+0.0 pips)».
-        if status == "RUNNING" and live_px:
-            side_pips = drift_pips(sig["symbol"], sig["direction"], float(sig["entry"]), live_px)
-            admin = (f"🚀 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} — "
-                     f"السعر <code>{instruments.fmt_price(sig['symbol'], live_px)}</code> "
-                     f"({side_pips:+.1f} pips من الدخول)")
-        elif status == "CANCELLED":
-            admin = f"⛔ إشارة #{sig['id']} {sig['symbol']}: أُلغيت — بلغ الهدف الأول دون لمس منطقة الدخول (فات الدخول)"
-        elif pips_result:
-            usd_001 = instruments.usd_move(sig["symbol"], pips_result, 0.01)
-            usd_txt = f" · {usd_001:+,.2f} $ لكل 0.01 لوت" if usd_001 else ""
-            admin = (f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} "
-                     f"({pips_result:+.1f} pips{usd_txt})")
-        else:
-            admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)}"
-        notes.append((config.ADMIN_ID, admin))
+        notes.append((config.ADMIN_ID, text))
     return notes, pips_result, edits
 
 

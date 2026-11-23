@@ -40,8 +40,8 @@ async def _upsell(q, uid, bot, why: str) -> None:
 
 async def user_page(q, action: str, uid: int, context) -> None:
     bot = context.bot
-    users_service.touch(uid)
-    u = users_service.get_user(uid)
+    # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
+    u = users_service.touch_and_get(uid)
     if not u:
         await render(q, "لم يتم العثور على حسابك. أرسل /start أولاً.", kb.user_menu(), bot)
         return
@@ -101,12 +101,11 @@ async def user_page(q, action: str, uid: int, context) -> None:
         is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         with db.conn() as c:
-            if is_admin:
-                # v6.8.0 ADMIN ROYAL ANALYSIS: ANY market — every catalog row,
-                # open or closed, quota-free. The admin decides, not the plan.
-                rows = c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()
-            else:
-                rows = c.execute("SELECT * FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()
+            # v6.8.1 — EVERYONE sees the FULL catalog (owner rule): markets
+            # outside the plan render as 🔒 and open the upsell card; markets
+            # inside the plan but not yet armed by the admin render as ⚪.
+            # Rows are converted to dicts immediately (sqlite3.Row has no .get).
+            rows = [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
         if not rows:
             # LEGACY-DEAD CATALOG FALLBACK (picker-empty bug 2026-11-22): the
             # picker must never dead-end — offer the plan's own markets (the
@@ -127,10 +126,18 @@ async def user_page(q, action: str, uid: int, context) -> None:
         # v6.8.0 — LUXURY CATEGORY SECTIONS (المعادن · الفوركس · العملات الرقمية
         # · المؤشرات · الأسهم): every market belongs to its royal section, with
         # a real state marker (🟢 open trading / 🔵 verified analysis / ⚪ closed).
+        # v6.8.1 — OWNER RULE: «يجب أن تظهر له الكل ولكن الباقيات مغلقة ليشترك»
+        # — the FULL catalog is rendered for everyone; markets outside the plan
+        # appear with a 🔒 lock badge and tapping one opens the luxury upsell
+        # card (subscribe path) instead of being hidden.
         from fysb.theme import CATEGORY_AR, CATEGORY_ICON
+
+        allowed_syms = {r["symbol"].upper() for r in allowed_rows}
 
         def _state_icon(r) -> str:
             en, ver = int(r.get("enabled") or 0), int(r.get("verified") or 0)
+            if r["symbol"].upper() not in allowed_syms and not is_admin:
+                return "🔒"
             if en and ver:
                 return "🟢"
             return "🔵" if ver else "⚪"
@@ -145,22 +152,25 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return out
 
         sections: dict[str, list] = {}
-        for r in allowed_rows:
+        for r in (list(rows) if not is_admin else allowed_rows):
             sections.setdefault((r.get("category") or instruments.spec(r["symbol"]).category),
                                 []).append(r)
-        ordered_sections = sorted(sections, key=lambda cat: -len(sections[cat]))
+        from fysb.handlers.admin_trading import CATEGORY_ORDER
+        ordered_sections = [c for c in CATEGORY_ORDER if c in sections] + \
+                           [c for c in sections if c not in CATEGORY_ORDER]
 
         mkt_block = ""
         for cat in ordered_sections:
             icon = CATEGORY_ICON.get(cat, "🌐")
             title = CATEGORY_AR.get(cat, cat)
-            mkt_block += f"\n{icon} <b><u>{title}</u></b>\n"
-            for r in sections[cat]:
+            grp = sections[cat]
+            open_n = sum(1 for r in grp if r["symbol"].upper() in allowed_syms or is_admin)
+            mkt_block += (f"\n{icon} <b><u>{title}</u></b> — "
+                          f"{('كلها مفتوحة لك' if open_n == len(grp) else f'مفتوح لك {open_n} من {len(grp)}')}\n")
+            for r in grp:
                 mkt_block += f"▎{_state_icon(r)} <b>{esc(r['symbol'])}</b> — {esc(r['title'])}\n"
         if not is_admin and locked_rows:
-            lock_lines = "\n".join(f"▎🔒 {esc(r['symbol'])} — {esc(r['title'])}" for r in locked_rows[:6])
-            mkt_block += (f"\n{ICON['lock']} <b>أسواق تنتظرك في الباقات الأعلى:</b>\n"
-                          f"<blockquote>{lock_lines}</blockquote>")
+            mkt_block += (f"\n{ICON['lock']} <b>الأسواق المقفولة 🔒 تفتح فوراً مع باقة أعلى — اضغط عليها لعرض الباقات.</b>")
 
         body = (f"🔬 <b><u>التحليلات الاحترافية المؤسسية</u></b>\n"
                 f"<blockquote>"
@@ -170,8 +180,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
                    f"▎💎 باقتك: <b>{esc(plan['title'])}</b>\n")
                 + "</blockquote>\n"
                 + ("<blockquote>▎🟢 مفتوح للتداول والإشارات · 🔵 موثق للتحليل · ⚪ مغلق بانتظار الإدارة</blockquote>"
-                   if is_admin else "")
-                + f"{ICON['globe']} <b>{'كل أسواق العالم — بأقسامها الملكية:' if is_admin else 'أسواق باقتك — بأقسامها الملكية:'}</b>"
+                   if is_admin else
+                   "<blockquote>▎🟢 مفتوح لك الآن · 🔵 موثق داخل باقتك · 🔒 مقفول — يفتح مع باقة أعلى</blockquote>")
+                + f"{ICON['globe']} <b>{'كل أسواق العالم — بأقسامها الملكية:' if is_admin else 'كل أسواق العالم — مفتوح لك 🔎 والمقفول 🔒 ينتظر ترقيتك:'}</b>"
                 + mkt_block)
 
         mkt_rows: list[list] = []
@@ -202,6 +213,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         if not is_admin and symbol.upper() not in p_markets:
             await _upsell(q, uid, bot, "هذا السوق غير مشمول في باقتك")
             return
+        # v6.8.1 NOTE: the picker NEVER dead-ends (regression-pinned live bug) —
+        # even a ⚪ closed market keeps flowing; the analysis stage itself is
+        # honest when provider data is unavailable.
         draft = {"symbol": symbol}
         context.user_data["anl_draft"] = draft
         p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
@@ -319,7 +333,11 @@ async def user_page(q, action: str, uid: int, context) -> None:
         marks_s = ",".join("?" for _ in strategies)
         args = markets + timeframes + strategies + [min_score]
         with db.conn() as c:
-            rows = c.execute(f"""SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+            # v6.8.1 — seq = the REAL chronological number (same as the admin
+            # center): after any deletion the following signals take the freed
+            # numbers, so the user sees the same # the admin sees.
+            rows = c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                                 FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
                                  AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
                                  AND strategy IN ({marks_s}) AND score>=?
                                  ORDER BY id DESC LIMIT 12""", args).fetchall()
@@ -328,7 +346,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         lines = [f"💎 <b>الباقة:</b> {esc(plan['title'])}",
                  f"📊 الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
                  "اختر إشارة لعرض بطاقة الدخول الكاملة:"]
-        rows_kb = [[kb.btn(f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['id']} {esc(r['symbol'])} {r['direction']} · {r['score']}/100",
+        rows_kb = [[kb.btn(f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['seq']} {esc(r['symbol'])} {r['direction']} · {r['score']}/100",
                            f"u:signalview:{r['id']}")] for r in fresh[:8]]
         if not rows_kb:
             rows_kb = [[kb.btn("🔄 تحديث الإشارات", "u:signals")]]
@@ -518,16 +536,28 @@ async def user_page(q, action: str, uid: int, context) -> None:
         from urllib.parse import quote as _urlquote
         from fysb.services import referrals as ref
         st = ref.user_stats(uid)
+        # v6.8.1 — LUXURY SHARE TEXT: the message a friend receives when the
+        # user taps «شارك رابط الدعوة». No bot-handle duplication, no raw
+        # tech-talk — a clean royal invitation, then the clickable link.
+        share_text = (
+            "👑 دعوة خاصة إليك من FOREXYEMENI\n\n"
+            "✨ تحليلات وإشارات تداول ملكية لحظية\n"
+            "🥇 الذهب مفعّل الآن — متابعة لحظية حتى الأهداف\n"
+            "🧪 تنفيذ تجريبي آلي + إدارة صفقات ملكية\n"
+            "💎 باقات لكل مستوى ودعم فاخر\n\n"
+            "⬇️ اضغط الرابط وابدأ الآن"
+        )
         share_link = ("https://t.me/share/url?url=" + _urlquote(st["link"])
-                      + "&text=" + _urlquote("👑 انضم إلى FOREXYEMENI — تحليلات وإشارات تداول ملكية لحظية عبر @ForexYemeni1_BOT"))
+                      + "&text=" + _urlquote(share_text))
         body = [
             "🤝 <b><u>دعوة الأصدقاء — بطاقة إحالات ملكية</u></b>",
             "",
             "<blockquote>"
-            "▎🔗 رابط الدعوة الخاص بك — رابط حقيقي قابل للنقر (أزرق)، والمحال يدخل عبره تلقائياً فيُحسب لك:\n"
-            f"▎<a href=\"{esc(st['link'])}\"><b>{esc(st['link'])}</b></a>\n"
-            f"▎🤖 معرف البوت: <code>{esc(ref.bot_username())}</code>\n"
-            "▎<i>اضغط الرابط ليفتح مباشرة — أو استخدم زر المشاركة بالأسفل.</i>\n"
+            "▎🔗 رابط الدعوة الخاص بك — رابط أزرق حقيقي قابل للنقر، والمحال يدخل عبره تلقائياً فيُحسب لك:\n"
+            f"▎<a href=\"{esc(st['link'])}\"><b>اضغط هنا لفتح رابط الدعوة</b></a>\n"
+            f"▎🧾 الرابط الكامل للنسخ اليدوي:\n"
+            f"▎<code>{esc(st['link'])}</code>\n"
+            "▎<i>اضغط الرابط الأزرق ليفتح مباشرة — أو استخدم زر المشاركة الفاخر بالأسفل.</i>\n"
             "</blockquote>",
             "",
             "📊 <b>تقدمك نحو الأهداف الملكية:</b>",
@@ -544,7 +574,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
             "<i>العدّ آلي وموثوق 100% (لا يحتسب إلا الاشتراك الفعلي)، وتُمنح المكافآت يدوياً من الإدارة عند تحقيق كل مستوى.</i>",
         ]
         rows_kb = [
-            [InlineKeyboardButton("🟢 📤 شارك رابط الدعوة", url=share_link)],
+            [InlineKeyboardButton("🟢 📤 شارك رابط الدعوة (نص فاخر جاهز)", url=share_link)],
             [InlineKeyboardButton("🔗 فتح رابط الدعوة", url=st["link"])],
             [kb.btn("🟡 💎 الباقات", "u:plans")],
         ]
@@ -597,8 +627,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
         body = [f"🧾 <b>طلب اشتراك #{pay_req}</b>",
                 f"💎 الباقة: <b>{esc(p['title'])}</b>",
                 f"💰 المبلغ: <b>{p['price']:g} {esc(p['currency'])}</b>"]
-        wallet = db.get_setting("usdt_wallet_trc20", "") or (method["account_ref"] if method else "")
-        is_usdt = bool(method and "USDT" in (method["title"] or "").upper() and wallet.strip())
+        is_usdt = bool(method and "USDT" in (method["title"] or "").upper())
+        chains = payments_service.configured_chains() if is_usdt else []
         if method:
             body.append("\n💳 <b>وسيلة الدفع:</b> " + esc(method["title"]))
             if method["country"]:
@@ -607,35 +637,80 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 body.append("🔢 بيانات الحساب: <code>" + esc(method["account_ref"]) + "</code>")
             if method["instructions"]:
                 body.append("📝 التعليمات: " + esc(method["instructions"]))
-        if is_usdt:
-            # v6.8.0 — BLOCKCHAIN FAST LANE: pay USDT, submit the TXID, the
-            # platform verifies on-chain and opens the plan immediately; the
-            # verified TXID is then blocked from any second use.
+        if is_usdt and chains:
+            # v6.8.1 — BLOCKCHAIN FAST LANE, EVERY NETWORK: the user picks the
+            # USDT network he actually pays on (TRC20 / BEP20 / ERC20 / Polygon) —
+            # the chosen network is verified ON-CHAIN and the plan opens
+            # immediately; the verified TXID is then blocked from any second use.
             body += [
-                "\n⛓ <b><u>التحقق البلوكيشن الفوري (USDT TRC20)</u></b>",
-                f"▎⛓ ارسل <b>{p['price']:g} USDT</b> على شبكة TRC20 إلى العنوان الملكي:",
-                f"▎<code>{esc(wallet.strip())}</code>",
-                "▎🔗 ثم انسخ <b>TXID</b> المعاملة من محفظتك واضغط الزر بالأسفل ولصقه —",
+                "\n⛓ <b><u>التفعيل الفوري بالتحقق البلوكيشن — اختر شبكتك</u></b>",
+                f"▎💵 ارسل <b>{p['price']:g} USDT</b> إلى عنوان الإدارة على الشبكة التي تناسبك،",
+                "▎🔗 ثم اضغط الشبكة بالأسفل وأرسل <b>TXID</b> المعاملة من محفظتك —",
                 "▎⚡ يُتحقق من المعاملة على البلوكيشن مباشرة وتُفتح الباقة فوراً 100%،",
                 "▎🔒 ويُحجب الـ TXID نهائياً بعد قبوله فلا يصلح لتفعيل آخر.",
             ]
-            rows_kb = [[kb.btn("⛓ إرسال TXID — تفعيل فوري بالتحقق البلوكيشن", f"u:usdttx:{pay_req}")],
-                       [kb.btn("🧾 مدفوعاتي", "u:payments")]]
+            rows_kb = [[kb.btn(f"⛓ الدفع عبر {ch}", f"u:paychain:{pay_req}:{ch}")] for ch in chains]
+            rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments")])
+        elif is_usdt:
+            body += ["\n⛓ تفعيل البلوكيشن الفوري يتطلب ضبط محافظ الشبكات من الإدارة — أرسل صورة الإيصال الآن للمراجعة اليدوية."]
+            rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
         else:
             body.append("\n📸 <b>أرسل صورة الإيصال هنا</b> — يبقى الاشتراك معلقاً حتى مراجعة الإدارة.")
             rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
+    elif action.startswith("paychain:"):
+        # v6.8.1 — network-specific payment instructions (one page per chain)
+        _, pid_s, chain = action.split(":", 2)
+        pid = _safe_int(pid_s)
+        chain = chain.upper()
+        req = payments_service.get_request(pid) if pid else None
+        if not req or req["user_id"] != uid or req["status"] != "PENDING":
+            await render(q, "الطلب غير متاح (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
+            return
+        from fysb.services.chain_verify import EVM_CHAINS
+        label = {"TRC20": "USDT TRC20 (شبكة Tron)",
+                 **{k: v["label"] for k, v in EVM_CHAINS.items()}}.get(chain, chain)
+        wallet = payments_service.chain_wallet(chain)
+        if not wallet:
+            await render(q, "⛓ هذه الشبكة غير مفعلة حالياً — اختر شبكة أخرى من صفحة الطلب أو تواصل مع الدعم.",
+                         kb.user_nav([[kb.btn("🧾 مدفوعاتي", "u:payments")]]), bot)
+            return
+        body = [
+            f"⛓ <b><u>تعليمات الدفع على {label}</u></b>",
+            "<blockquote>"
+            f"▎🧾 الطلب: <b>#{pid}</b> · المبلغ المطلوب: <b>{float(req['amount']):g} USDT</b>\n"
+            f"▎⛓ أرسل المبلغ إلى العنوان الملكي التالي:\n"
+            f"▎<code>{esc(wallet)}</code>\n"
+            "▎⚠️ تأكد أن شبكة التحويل في محفظتك هي نفسها المختارة — الإرسال على شبكة خاطئة يعني خسارة الأموال.\n"
+            "▎🔗 بعد نجاح التحويل انسخ <b>TXID</b> المعاملة (64 خانة) من محفظتك."
+            "</blockquote>",
+            "<i>بمجرد إرسال الـ TXID يُفحص البلوكيشن فعلياً: التأكيد + عقد USDT + عنوان الإدارة + المبلغ — "
+            "وعند التوافق تُفتح باقتك فوراً ويُحجب الـ TXID نهائياً.</i>",
+        ]
+        await render(q, "\n".join(body), kb.user_nav([
+            [kb.btn(f"⛓ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}")],
+            [kb.btn("↩️ وسائل الدفع الأخرى", f"u:planview:{req['plan_code']}")],
+            [kb.btn("🧾 مدفوعاتي", "u:payments")],
+        ]), bot)
+
     elif action.startswith("usdttxt:"):
         # v6.8.0 — awaiting the user's on-chain TXID for instant verification
-        pid = _safe_int(action.split(":", 1)[1])
+        # v6.8.1 — the chain rides in the callback (u:usdttxt:{pid}:{CHAIN})
+        parts = action.split(":", 2)
+        pid = _safe_int(parts[1])
+        chain = (parts[2].upper() if len(parts) > 2 else "TRC20")
         req = payments_service.get_request(pid) if pid else None
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await render(q, "الطلب غير متاح للتحقق (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
             return
+        if not payments_service.chain_wallet(chain):
+            await render(q, "⛓ هذه الشبكة غير مضبوطة حالياً — اختر شبكة أخرى.", kb.user_nav(), bot)
+            return
         context.user_data["awaiting_usdt_txid"] = pid
-        await render(q, "⛓ <b>أرسل الآن TXID المعاملة</b> (64 خانة سداسية عشرية)\n"
-                        "انسخها من محفظتك بعد إرسال <b>USDT TRC20</b> — سيُفحص البلوكيشن فوراً:\n"
+        context.user_data["usdt_chain"] = chain
+        await render(q, f"⛓ <b>أرسل الآن TXID المعاملة</b> (64 خانة سداسية عشرية)\n"
+                        f"انسخها من محفظتك بعد إرسال <b>USDT على شبكة {chain}</b> — سيُفحص البلوكيشن فوراً:\n"
                         "التأكيد + العنوان الملكي + المبلغ، ثم تُفتح باقتك مباشرة.",
                      kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
 
@@ -755,9 +830,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "demopick":
         with db.conn() as c:
-            rows = c.execute("""SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
+            rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                                FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
                                 ORDER BY id DESC LIMIT 6""").fetchall()
-        rows_kb = [[kb.btn(f"#{r['id']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
+        rows_kb = [[kb.btn(f"#{r['seq']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
         rows_kb.append([kb.btn("↩️ التجريبي", "u:demo")])
         await render(q, "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):",
                      kb.user_nav(rows_kb), bot)

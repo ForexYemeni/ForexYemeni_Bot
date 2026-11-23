@@ -1,6 +1,35 @@
 """Payments service — methods, requests, approval gate. No double-approval."""
 from fysb import config, db
 
+# v6.8.1 — per-network USDT wallets for instant on-chain activation.
+# The owner demanded BEP20 + more networks next to TRC20; each chain keeps its
+# own wallet setting and its own verifier (public blockchain APIs, no keys).
+CHAIN_WALLET_KEYS = {
+    "TRC20": "usdt_wallet_trc20",
+    "BEP20": "usdt_wallet_bep20",
+    "ERC20": "usdt_wallet_erc20",
+    "POLYGON": "usdt_wallet_polygon",
+}
+
+
+def chain_wallet(chain: str) -> str:
+    key = CHAIN_WALLET_KEYS.get((chain or "").upper())
+    return db.get_setting(key, "") if key else ""
+
+
+def set_chain_wallet(chain: str, wallet: str) -> bool:
+    key = CHAIN_WALLET_KEYS.get((chain or "").upper())
+    if not key:
+        return False
+    db.set_setting(key, (wallet or "").strip())
+    return True
+
+
+def configured_chains() -> list[str]:
+    """Networks whose wallets are actually configured — the user may pick
+    ONLY among these (a chain without a destination wallet cannot verify)."""
+    return [ch for ch in CHAIN_WALLET_KEYS if chain_wallet(ch)]
+
 
 def list_methods(enabled_only: bool = False) -> list:
     with db.conn() as c:

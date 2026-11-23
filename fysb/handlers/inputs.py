@@ -18,6 +18,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from fysb import config, db, instruments
+from fysb.services import chain_verify
 from fysb.handlers.common import safe
 from fysb.services import payments as payments_service
 from fysb.services import support as support_service
@@ -106,40 +107,45 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(f"❌ {safe(e)} — أرسل رقماً فقط (مثال: 5000).")
         return
 
-    # ---------- User: USDT on-chain TXID — instant blockchain activation (v6.8.0) ----------
+    # ---------- User: USDT on-chain TXID — instant blockchain activation ----------
+    # v6.8.1: the chain follows the network the user PICKED (TRC20/BEP20/ERC20/
+    # Polygon) — stored alongside the pending request, never guessed.
     tx_pid = ud.pop("awaiting_usdt_txid", None)
     if tx_pid:
         from fysb.services import chain_verify
-        req = payments_service.get_request(int(tx_pid))
+        pid = int(tx_pid)
+        req = payments_service.get_request(pid)
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await update.effective_message.reply_text("⚠️ الطلب غير متاح للتحقق (مُراجع مسبقاً أو غير موجود).")
             return
+        chain = (ud.pop("usdt_chain", "") or (req.get("chain") if isinstance(req, dict) else "") or "TRC20").upper()
         used = payments_service.txid_used(text.strip())
         if used:
             await update.effective_message.reply_text(
                 f"🔒 هذا TXID مُستخدم مسبقاً في الطلب #{used} — المعاملة محجوبة نهائياً ولا تُقبل مرتين.")
             return
-        wallet = db.get_setting("usdt_wallet_trc20", "")
+        wallet = payments_service.chain_wallet(chain)
         if not wallet:
             await update.effective_message.reply_text(
-                "⛓ لم يُضبَط عنوان محفظة USDT بعد — أرسل صورة الإيصال للمراجعة اليدوية أو تواصل مع الدعم.")
+                f"⛓ لم يُضبَط عنوان محفظة USDT على شبكة {chain} بعد — أرسل صورة الإيصال للمراجعة اليدوية أو تواصل مع الدعم.")
             return
-        await update.effective_message.reply_text("⛓ جارٍ فحص المعاملة على البلوكيشن (التأكيد + العنوان + المبلغ)…")
-        res = await asyncio.to_thread(chain_verify.verify_trc20_usdt,
-                                      text.strip(), wallet, float(req["amount"] or 0))
+        await update.effective_message.reply_text(f"⛓ جارٍ فحص المعاملة على شبكة {chain} (التأكيد + العنوان + المبلغ)…")
+        res = await asyncio.to_thread(chain_verify.verify_usdt,
+                                      text.strip(), wallet, float(req["amount"] or 0), chain)
         if not res.get("ok"):
-            ud["awaiting_usdt_txid"] = int(tx_pid)
+            ud["awaiting_usdt_txid"] = pid
+            ud["usdt_chain"] = chain
             await update.effective_message.reply_text(
                 f"❌ <b>فشل التحقق البلوكيشن</b>\n{res.get('reason', '')}\n\n"
                 "أعد إرسال TXID صحيحاً، أو أرسل صورة الإيصال للمراجعة اليدوية.",
                 parse_mode="HTML")
             return
-        bound = payments_service.attach_txid(int(tx_pid), uid, text.strip(), "TRC20")
+        bound = payments_service.attach_txid(pid, uid, text.strip(), chain)
         if not bound.get("ok"):
             ud.pop("awaiting_usdt_txid", None)
             await update.effective_message.reply_text("🔒 " + bound.get("error", ""))
             return
-        appr = payments_service.approve_request(int(tx_pid), actor=0)
+        appr = payments_service.approve_request(pid, actor=0)
         ud.pop("awaiting_usdt_txid", None)
         if not appr.get("ok"):
             await update.effective_message.reply_text("⚠️ المعاملة موثقة ومسجلة، لكن التفعيل أعاد: "
@@ -153,7 +159,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "👑 <b><u>تم التحقق من دفعتك على البلوكيشن — باقتك مفتوحة الآن</u></b>\n"
             "<blockquote>"
-            f"▎✅ المعاملة: <code>{tx_short}</code> · <b>{res.get('amount', 0):,.2f} USDT</b> موثقة على الشبكة\n"
+            f"▎✅ المعاملة: <code>{tx_short}</code> · <b>{res.get('amount', 0):,.2f} USDT</b> موثقة على شبكة <b>{chain}</b>\n"
             f"▎💎 الباقة المفتوحة: <b>{title}</b>"
             + (f" · المدة: <b>{days} يوم</b>" if days else "")
             + "\n▎🔒 الـ TXID مُسجل في سجلك ومحجوب نهائياً من أي استخدام آخر\n"
@@ -166,6 +172,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     config.ADMIN_ID,
                     f"⛓ <b>دفعة USDT موثقة على البلوكيشن — تفعيل فوري</b>\n"
                     f"▎👤 المستخدم: <code>{uid}</code>\n"
+                    f"▎🌐 الشبكة: <b>{chain}</b>\n"
                     f"▎🧾 الطلب: #{req['id']} · الباقة: {title} · {res.get('amount', 0):,.2f} USDT\n"
                     f"▎🔗 TXID: <code>{tx_short}</code>\n"
                     f"▎🔒 المعاملة محجوبة من إعادة الاستخدام",
@@ -375,22 +382,24 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             await update.effective_message.reply_text("نتائج البحث:\n" + lines, parse_mode="HTML")
         return True
 
-    # ---------- USDT TRC20 wallet (admin — blockchain verification) ----------
-    if ud.pop("awaiting_usdt_wallet", False):
+    # ---------- USDT per-network wallets (admin — blockchain verification) ----------
+    wallet_flow = ud.pop("awaiting_usdt_wallet", None)
+    if wallet_flow:
+        chain = (wallet_flow.get("chain") if isinstance(wallet_flow, dict) else "TRC20") or "TRC20"
         val = "" if text in ("-", "—", "لا") else text.strip()
-        if val and (not val.startswith("T") or len(val) < 30 or len(val) > 60
-                    or not re.fullmatch(r"[A-Za-z0-9]+", val)):
-            ud["awaiting_usdt_wallet"] = True
-            await update.effective_message.reply_text(
-                "❌ عنوان TRC20 صحيح يبدأ بحرف T وطوله 34 خانة (أرقام وحروف لاتينية) — "
-                "أعد الإرسال أو أرسل - للمسح.")
+        if val and not chain_verify.valid_wallet(val, chain):
+            ud["awaiting_usdt_wallet"] = {"chain": chain}
+            hint = ("عنوان TRC20 صحيح يبدأ بحرف T وطوله 34 خانة (أرقام وحروف لاتينية)"
+                    if chain == "TRC20"
+                    else "عنوان EVM صحيح يبدأ بـ 0x يليه 40 خانة سداسية عشرية")
+            await update.effective_message.reply_text(f"❌ {hint} — أعد الإرسال أو أرسل - للمسح.")
             return True
-        db.set_setting("usdt_wallet_trc20", val)
-        audit_log.log(uid, "usdt_wallet_set" if val else "usdt_wallet_cleared")
+        payments_service.set_chain_wallet(chain, val)
+        audit_log.log(uid, f"usdt_wallet_set:{chain}" if val else f"usdt_wallet_cleared:{chain}")
         await update.effective_message.reply_text(
-            f"✅ تم ضبط محفظة USDT TRC20 للتحقق البلوكيشن الفوري:\n<code>{esc(val)}</code>\n"
-            "كل دفعة تُفعّل بالتحقق على الشبكة، والـ TXID يُحجب بعد القبول."
-            if val else "✅ تم مسح عنوان المحفظة — البلوكيشن معطل حتى ضبطه.",
+            (f"✅ تم ضبط محفظة USDT على شبكة <b>{chain}</b> للتحقق البلوكيشن الفوري:\n<code>{esc(val)}</code>\n"
+             "كل دفعة تُتحقق على الشبكة (التأكيد + العقد + العنوان + المبلغ)، والـ TXID يُحجب بعد القبول."
+             if val else f"✅ تم مسح عنوان محفظة {chain} — الشبكة تبقى مغلقة للمستخدمين حتى ضبطها."),
             parse_mode="HTML")
         return True
 
@@ -415,24 +424,34 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
     if ud.pop("awaiting_broadcast_text", False):
         audience = ud.get("broadcast_audience", "all")
         plan = ud.get("broadcast_plan", "")
-        from fysb.services import broadcast as broadcast_service
-        bid = broadcast_service.create(uid, audience, plan, text)
-        ud["broadcast_draft"] = bid
-        ud["awaiting_broadcast_photo"] = True   # v6.8.0: a photo may now follow
-        targets = broadcast_service.audience_ids(audience, plan)
-        from fysb.theme import esc as _esc
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        await update.effective_message.reply_text(
-            f"📋 <b>معاينة الإعلان #{bid}</b>\n\n{_esc(text)[:1500]}\n\n"
-            f"🎯 الجمهور: {_esc(audience)}{' · ' + _esc(plan) if plan else ''}\n"
-            f"👥 عدد المستلمين: <b>{len(targets)}</b>\n\n"
-            "🖼 أرسل صورة الآن لإرفاقها بالإعلان (اختيارية)، أو أكد الإرسال.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=f"a:bcgo:{bid}")],
-                [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                [InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")],
-            ]))
+        try:
+            from fysb.services import broadcast as broadcast_service
+            bid = broadcast_service.create(uid, audience, plan, text)
+            ud["broadcast_draft"] = bid
+            ud["awaiting_broadcast_photo"] = True   # a photo may now follow
+            targets = broadcast_service.audience_ids(audience, plan)
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            # v6.8.1 — the preview IS the final look: the plain text is wrapped
+            # in the royal announcement frame (never parsed as the admin's own
+            # HTML), so what the admin confirms is exactly what users receive.
+            await update.effective_message.reply_text(
+                f"📋 <b>معاينة الإعلان #{bid}</b> (هذا شكله النهائي لدى المستخدمين)\n\n"
+                + broadcast_service.announcement_text(text, limit=2600) + "\n\n"
+                f"🎯 الجمهور: {esc(audience)}{' · ' + esc(plan) if plan else ''}\n"
+                f"👥 عدد المستلمين: <b>{len(targets)}</b>\n\n"
+                "🖼 أرسل صورة الآن لإرفاقها بالإعلان (اختيارية)، أو أكد الإرسال.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=f"a:bcgo:{bid}")],
+                    [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
+                    [InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")],
+                ]))
+        except Exception as e:
+            # The broadcast flow must NEVER die with the generic error card —
+            # the admin always gets the exact reason and the flow stays open.
+            ud["awaiting_broadcast_text"] = True
+            await update.effective_message.reply_text(
+                f"❌ تعذر تجهيز الإعلان: {safe(e)}\nأعد إرسال النص (نص عادي — لا حاجة لأي وسوم).")
         return True
 
     # ---------- Free daily signals quota ----------

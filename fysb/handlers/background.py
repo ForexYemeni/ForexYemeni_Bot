@@ -166,8 +166,10 @@ async def market_engine_loop(app):
                                 try:
                                     # v6.8.0: the admin receives the REAL full card —
                                     # the same royal board the users received, plus
-                                    # delivery counters. The teaser line «📡 إشارة
-                                    # آلية جديدة #N (SYM) — جودة X/100» is retired.
+                                    # delivery counters. v6.8.1: the number shown is
+                                    # the REAL sequential number (same as the
+                                    # signals center), never the internal id.
+                                    from fysb.engines.tracker import seq_of
                                     from fysb.ui.cards import render_signal_card
                                     with db.conn() as c:
                                         mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?",
@@ -175,7 +177,7 @@ async def market_engine_loop(app):
                                     card = render_signal_card(
                                         dict(sig), user_view=False,
                                         row=dict(mrow) if mrow else None)
-                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{result['signal_id']}"
+                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq_of(result['signal_id'])}"
                                              f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
                                              f"▎📤 التسليم: {stats['sent']} مستلم"
                                              f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"

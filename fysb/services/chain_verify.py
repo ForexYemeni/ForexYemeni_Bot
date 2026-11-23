@@ -10,10 +10,16 @@ The luxury payment protocol the owner demanded:
   4. on success the plan is activated IMMEDIATELY and the TXID is permanently
      bound to that payment — a used TXID can never unlock a second activation.
 
-Primary source: TronGrid public events API.
-Fallback source: Tronscan public transaction API.
-The parser is schema-tolerant: it walks the returned JSON tree for any
-token-transfer record addressed to our wallet, so minor upstream schema
+Primary source (TRC20): TronGrid public events API.
+Fallback source (TRC20): Tronscan public transaction API.
+v6.8.1 — MULTI-NETWORK (owner request: «لا يمكنني اضافة USDT BEP20 او شبكة اخرى»):
+BEP20 (BSC) / ERC20 (Ethereum) / Polygon USDT are verified through PUBLIC
+JSON-RPC endpoints (no API key, no paid service): eth_getTransactionReceipt
+decodes the canonical ERC-20 Transfer event against the per-chain USDT
+contract. The parser is strict about: receipt success, contract identity,
+destination wallet (topic2) and amount (value / 1e6).
+The parser is schema-tolerant everywhere: it walks the returned structures
+for the exact transfer record addressed to our wallet, so minor upstream
 changes can never silently pass — and never falsely fail — a payment.
 """
 import json
@@ -31,6 +37,38 @@ import httpx
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 USDT_DECIMALS = 6
 TXID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# --- v6.8.1 multi-network registry (EVM chains, all public RPC, no keys) -----
+# Contracts are the CANONICAL USDT addresses (identical across explorers).
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df3231f"
+
+EVM_CHAINS = {
+    "BEP20": {
+        "label": "USDT BEP20 (BSC)",
+        "contract": "0x55d398326f99059fF775485246999027B3197955",
+        "decimals": 6,
+        "rpc": ["https://bsc-dataseed.binance.org",
+                "https://bsc-dataseed1.defibit.io",
+                "https://bsc.publicnode.com"],
+    },
+    "ERC20": {
+        "label": "USDT ERC20 (Ethereum)",
+        "contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "decimals": 6,
+        "rpc": ["https://ethereum-rpc.publicnode.com",
+                "https://eth.llamarpc.com",
+                "https://cloudflare-eth.com"],
+    },
+    "POLYGON": {
+        "label": "USDT Polygon (POS)",
+        "contract": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "decimals": 6,
+        "rpc": ["https://polygon-bor-rpc.publicnode.com",
+                "https://polygon-rpc.com"],
+    },
+}
+
+ALL_CHAINS = ["TRC20"] + list(EVM_CHAINS.keys())
 
 
 def valid_txid(txid: str) -> bool:
@@ -151,3 +189,109 @@ def verify_trc20_usdt(txid: str, wallet: str, min_amount: float, timeout: float 
         errors.append(f"{source}: no transfer to the configured wallet")
     return {"ok": False,
             "reason": "تعذر التحقق من المعاملة الآن (" + "؛ ".join(errors[:2]) + ") — تأكد من TXID أو حاول بعد قليل"}
+
+
+# ---------------------------------------------------------------------------
+# v6.8.1 — EVM chains (BEP20 / ERC20 / Polygon) via PUBLIC JSON-RPC, no keys.
+# ---------------------------------------------------------------------------
+def _rpc_call(rpc: str, method: str, params: list, timeout: float):
+    r = httpx.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                   timeout=timeout)
+    r.raise_for_status()
+    js = r.json()
+    if js.get("error"):
+        raise RuntimeError(js["error"].get("message", "rpc error"))
+    return js.get("result")
+
+
+def _wallet_topic(wallet: str) -> str:
+    """Encode a 0x address as the 32-byte padded topic2 of an ERC-20 Transfer."""
+    w = (wallet or "").strip().lower()
+    if w.startswith("0x"):
+        w = w[2:]
+    if not re.fullmatch(r"[0-9a-f]{40}", w):
+        return ""
+    return "0x" + "0" * 24 + w
+
+
+def _evm_amount(log: dict, decimals: int) -> float:
+    for key in ("data",):
+        v = log.get(key) or "0x0"
+        try:
+            return int(v, 16) / (10 ** decimals)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def verify_evm_usdt(txid: str, wallet: str, min_amount: float, chain: str,
+                    timeout: float = 20.0) -> dict:
+    """Verify one on-chain USDT transfer on BEP20/ERC20/Polygon — REAL proof.
+
+    Flow: eth_getTransactionReceipt on public RPC endpoints (tried in order) →
+    the receipt must carry status=0x1 → find the Transfer log from the chain's
+    canonical USDT contract → destination topic2 must equal OUR wallet →
+    decoded value must cover the plan price. Every failure mode has its own
+    honest Arabic reason; nothing is assumed, nothing invented."""
+    txid = (txid or "").strip()
+    wallet = (wallet or "").strip()
+    cfg = EVM_CHAINS.get((chain or "").upper())
+    if not cfg:
+        return {"ok": False, "reason": "شبكة غير مدعومة"}
+    if not valid_txid(txid):
+        return {"ok": False, "reason": "صيغة TXID غير صحيحة — يجب أن تكون 64 خانة سداسية عشرية (انسخها من المحفظة)"}
+    topic = _wallet_topic(wallet)
+    if not topic:
+        return {"ok": False, "reason": "عنوان محفظة الشبكة غير مضبوط أو غير صالح — تواصل مع الإدارة"}
+    errors: list[str] = []
+    receipt = None
+    for rpc in cfg["rpc"]:
+        try:
+            receipt = _rpc_call(rpc, "eth_getTransactionReceipt", [txid], timeout)
+            if receipt:
+                break
+        except Exception as e:
+            errors.append(f"{rpc.split('//')[1][:18]}: {type(e).__name__}")
+    if receipt is None:
+        return {"ok": False,
+                "reason": "تعذر الوصول إلى المعاملة على شبكة " + cfg["label"] +
+                          " الآن (" + "؛ ".join(errors[:2]) + ") — تأكد من TXID أو حاول بعد قليل"}
+    if receipt.get("status") not in ("0x1", "0x01", 1):
+        return {"ok": False, "reason": "المعاملة فشلت على الشبكة (status=0x0) — انظر المحفظة"}
+    for log in receipt.get("logs") or []:
+        if (log.get("address") or "").lower() != cfg["contract"].lower():
+            continue
+        topics = log.get("topics") or []
+        if not topics or topics[0].lower() != TRANSFER_TOPIC:
+            continue
+        if len(topics) < 3 or topics[2].lower() != topic:
+            continue
+        val = _evm_amount(log, cfg["decimals"])
+        if val <= 0:
+            continue
+        if val + 1e-9 >= min_amount:
+            return {"ok": True, "amount": val, "confirmed": True, "source": chain.lower() + "-rpc"}
+        return {"ok": False,
+                "reason": f"مبلغ المعاملة {val:,.2f} USDT أقل من المطلوب {min_amount:,.2f} USDT"}
+    return {"ok": False,
+            "reason": "المعاملة موجودة لكنها ليست تحويلاً لعملة USDT إلى عنواننا على شبكة " + cfg["label"]}
+
+
+def verify_usdt(txid: str, wallet: str, min_amount: float, chain: str = "TRC20",
+                timeout: float = 20.0) -> dict:
+    """Multi-network dispatcher: TRC20 → TronGrid/Tronscan; BEP20/ERC20/Polygon
+    → public EVM RPC. `chain` comes from the payment flow (never guessed)."""
+    chain = (chain or "TRC20").upper()
+    if chain == "TRC20":
+        return verify_trc20_usdt(txid, wallet, min_amount, timeout)
+    return verify_evm_usdt(txid, wallet, min_amount, chain, timeout)
+
+
+def valid_wallet(wallet: str, chain: str = "TRC20") -> bool:
+    """Address-shape validation per chain (admin input gate)."""
+    w = (wallet or "").strip()
+    if (chain or "").upper() == "TRC20":
+        return w.startswith("T") and 30 <= len(w) <= 60 and bool(re.fullmatch(r"[A-Za-z0-9]+", w))
+    if w.lower().startswith("0x"):
+        w = w[2:]
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", w))

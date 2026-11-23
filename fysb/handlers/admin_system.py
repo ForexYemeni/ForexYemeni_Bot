@@ -168,7 +168,8 @@ async def admin_bc_audience(q, uid, context, bot, audience: str):
     context.user_data["broadcast_audience"] = audience
     context.user_data["broadcast_plan"] = ""
     context.user_data["awaiting_broadcast_text"] = True
-    await render(q, "✍️ أرسل نص الإعلان الآن (HTML مسموح). سيُعرض للمعاينة مع عدد المستلمين قبل الإرسال.",
+    await render(q, "✍️ <b>أرسل نص الإعلان الآن</b> — نص عادي فاخر (بدون وسوم HTML — سيُغلف تلقائياً بالإطار الملكي).\n"
+                    "سيُعرض للمعاينة بشكله النهائي مع عدد المستلمين قبل الإرسال.",
                  kb.admin_nav(), bot)
 
 
@@ -183,7 +184,7 @@ async def admin_bc_pick(q, uid, context, bot, code: str):
     context.user_data["broadcast_audience"] = "plan"
     context.user_data["broadcast_plan"] = code
     context.user_data["awaiting_broadcast_text"] = True
-    await render(q, f"✍️ أرسل نص الإعلان لباقة <b>{esc(code)}</b>:", kb.admin_nav(), bot)
+    await render(q, f"✍️ أرسل نص الإعلان لباقة <b>{esc(code)}</b> — نص عادي (يُغلف بالإطار الملكي تلقائياً):", kb.admin_nav(), bot)
 
 
 async def admin_bc_go(q, uid, context, bot, bid: int):

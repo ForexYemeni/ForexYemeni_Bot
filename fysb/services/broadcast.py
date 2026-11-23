@@ -8,6 +8,7 @@ import asyncio
 
 from fysb import config, db
 from fysb.config import log
+from fysb.theme import esc
 
 
 def audience_ids(audience: str, plan_code: str = "") -> list[int]:
@@ -94,23 +95,47 @@ def _is_parse_error(e: Exception) -> bool:
             or "entity" in str(e).lower())
 
 
+# v6.8.1 — LUXURY PLAIN-TEXT announcements (owner directive: «الإعلانات يجب أن
+# تكون عادية وفاخرة جداً وليس HTML»). The admin writes ANY plain text; it is
+# ALWAYS escaped and wrapped in the royal frame. Two guarantees fall out of
+# this design: (1) the announcement can never fail Telegram's HTML parser —
+# the «⚠️ حدث خطأ غير متوقع» that hit a pasted-HTML broadcast is structurally
+# impossible now (the old preview sliced ESCAPED text mid-entity, breaking the
+# parser); (2) every announcement looks identical, branded and luxurious.
+BRAND_FOOTER = "FOREXYEMENI — تحليلات وإشارات تداول ملكية لحظية 👑"
+
+
+def announcement_text(raw: str, limit: int = 3500) -> str:
+    """Wrap the admin's plain text in the royal announcement frame. Escaping
+    happens AFTER truncation on the raw string — an entity can never be cut."""
+    body = (raw or "").strip() or "—"
+    if len(body) > limit:
+        body = body[:limit].rstrip() + "…"
+    return (f"👑 <b><u>إعلان رسمي من الإدارة</u></b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<blockquote>{esc(body)}</blockquote>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>{BRAND_FOOTER}</i>")
+
+
 async def _send_one(bot, uid: int, text: str, file_id: str) -> bool:
-    """HTML when valid; ESCAPED plain text when the admin typed something that
-    Telegram cannot parse. The live bug this replaces: one raw «<» in the
-    announcement made every single send fail («أُرسل 0 · فشل N») — now the
-    royal message always lands, beautifully or honestly-plain."""
-    from fysb.theme import esc
+    """The royal announcement, always parseable: the admin text is escaped and
+    wrapped by announcement_text() — plain input, luxury output, zero HTML
+    surprises. A photo, when attached, carries the same wrapped frame as its
+    caption (Telegram caption limit 1024)."""
     if file_id:
+        caption = announcement_text(text, limit=700)   # caption hard limit 1024
         try:
-            await bot.send_photo(uid, file_id, caption=text[:1024], parse_mode="HTML")
+            await bot.send_photo(uid, file_id, caption=caption, parse_mode="HTML")
             return True
         except Exception as e:
             if _is_parse_error(e):
                 await bot.send_photo(uid, file_id, caption=esc(text)[:1024])
                 return True
             raise
+    payload = announcement_text(text)
     try:
-        await bot.send_message(uid, text, parse_mode="HTML")
+        await bot.send_message(uid, payload, parse_mode="HTML")
         return True
     except Exception as e:
         if _is_parse_error(e):

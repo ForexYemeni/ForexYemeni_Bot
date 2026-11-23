@@ -103,22 +103,26 @@ async def market_engine_loop(app):
 
 
 async def tracker_loop(app):
-    """Signal lifecycle updates from real prices + expiry sweep + half-TP1 alerts."""
+    """Signal lifecycle updates from real prices + expiry sweep + half-TP1 alerts.
+
+    Tracking runs UNCONDITIONALLY: open signals are obligations the platform
+    already issued — the engine toggle governs generating NEW signals only.
+    A paused engine must never leave issued signals unattended.
+    """
     from fysb.engines import tracker
     while True:
         try:
-            if db.get_setting("engine_enabled", "0") == "1":
-                result = await asyncio.to_thread(tracker.check_open_signals, config.market_api_key())
-                if result["stats"]["updated"]:
-                    log.info("tracker updated %s signals", result["stats"]["updated"])
-                for uid, text in result["notifications"]:
-                    try:
-                        await app.bot.send_message(uid, text, parse_mode="HTML")
-                    except Exception:
-                        pass
-                expired = tracker.expire_stale_signals()
-                if expired:
-                    log.info("expired %s stale signals", expired)
+            result = await asyncio.to_thread(tracker.check_open_signals, config.market_api_key())
+            if result["stats"]["updated"]:
+                log.info("tracker updated %s signals", result["stats"]["updated"])
+            for uid, text in result["notifications"]:
+                try:
+                    await app.bot.send_message(uid, text, parse_mode="HTML")
+                except Exception:
+                    pass
+            expired = tracker.expire_stale_signals()
+            if expired:
+                log.info("expired %s stale signals", expired)
         except asyncio.CancelledError:
             raise
         except Exception:

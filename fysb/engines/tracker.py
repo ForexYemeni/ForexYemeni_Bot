@@ -17,10 +17,55 @@ from fysb.config import log
 TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED")
 
 
+def _utc_cutoff(iso: str) -> str:
+    """Normalize ANY stored timestamp to 'YYYY-MM-DD HH:MM:SS' (UTC) so it can
+    be compared with candle datetimes of the same format.
+
+    The pipeline stores created_at as config.now() -> ISO with a 'T' separator
+    ("2026-11-23T00:41:33+00:00"), while every provider candle carries a
+    'YYYY-MM-DD HH:MM:SS' string with a plain space. A raw string comparison
+    (' ' < 'T') silently excluded EVERY candle newer than the signal — signals
+    then stayed ACTIVE forever. Both sides are normalized here; timestamps are
+    stored UTC-only platform-wide, and tz-aware values are converted to UTC.
+    """
+    s = (iso or "").strip()
+    if not s:
+        return "0000-01-01 00:00:00"
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return s.replace("T", " ")[:19]
+
+
 def _provider_symbol(symbol: str) -> str:
     with db.conn() as c:
         r = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
     return r["provider_symbol"] if r else symbol
+
+
+def _tracking_payload(provider_symbol: str, api_key: str) -> dict:
+    """Fetch a candle window LONG ENOUGH to cover the signal's whole lifetime.
+
+    A young signal needs fine granularity; an old one needs history. The chain
+    walks 5min -> 15min -> 1h and returns the first FRESH payload (each covers
+    16h / 30h / 100h respectively). Raises RuntimeError when everything fails.
+    """
+    last_err: Exception | None = None
+    for interval, size in (("5min", 200), ("15min", 120), ("1h", 100)):
+        try:
+            payload = market_data.fetch_candles(provider_symbol, interval, api_key, outputsize=size)
+        except RuntimeError as e:
+            last_err = e
+            continue
+        if market_data.is_stale(payload):
+            last_err = RuntimeError(f"stale {interval} payload")
+            continue
+        return payload
+    raise last_err or RuntimeError("تعذر جلب شموع التتبع — كل المزودين فشلوا")
 
 
 def check_open_signals(api_key: str) -> dict:
@@ -39,28 +84,23 @@ def check_open_signals(api_key: str) -> dict:
         stats["checked"] += 1
         symbol = sig["symbol"]
         try:
-            payload = market_data.fetch_candles(_provider_symbol(symbol), "5min", api_key, outputsize=60)
-        except RuntimeError:
-            try:
-                payload = market_data.fetch_candles(_provider_symbol(symbol), "15min", api_key, outputsize=60)
-            except RuntimeError as e:
-                stats["errors"] += 1
-                _log(symbol, sig["timeframe"], "TRACK_ERROR", str(e)[:200])
-                continue
-        if market_data.is_stale(payload):
-            stats["skipped_stale"] += 1
+            payload = _tracking_payload(_provider_symbol(symbol), api_key)
+        except RuntimeError as e:
+            stats["errors"] += 1
+            _log(symbol, sig["timeframe"], "TRACK_ERROR", str(e)[:200])
             continue
         # candles strictly AFTER signal creation (avoid counting the forming bar)
-        candles = [c for c in payload["values"] if c["datetime"] >= sig["created_at"][:19]]
+        cutoff = _utc_cutoff(sig["created_at"])
+        candles = [c for c in payload["values"] if c["datetime"] >= cutoff]
         if not candles:
             stats["skipped_stale"] += 1
             continue
         transition = _evaluate_signal(sig, candles)
         if transition:
             stats["updated"] += 1
-            notes = _apply_transition(sig, transition, payload)
+            notes, result_pips = _apply_transition(sig, transition, payload)
             notifications.extend(notes)
-            admin_notice += f"\n📡 إشارة #{sig['id']} {sig['symbol']}: {transition} ({sig.get('pips_result') or 0:+.1f} pips)"
+            admin_notice += f"\n📡 إشارة #{sig['id']} {sig['symbol']}: {transition} ({result_pips:+.1f} pips)"
             continue
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified)
         if not sig.get("half_notified") and sig["status"] == "ACTIVE":
@@ -108,45 +148,50 @@ def _halfway_notes(sig: dict, candles: list[dict]) -> list[tuple[int, str]]:
 def _evaluate_signal(sig: dict, candles: list[dict]) -> str | None:
     """Return the next status if price data justifies it, else None.
 
-    Conservative gap rule: when a single candle spans both SL and a TP,
-    SL wins (assumed worst case first).
+    Chronological, order-honest walk:
+      * A stop-loss touch BEFORE any target progress kills the trade ->
+        SL_HIT immediately (a trade stopped out first must never be re-branded
+        as a winner just because price later crossed a target).
+      * Once a target is banked, the remaining position keeps running toward
+        the next ones (best-progress semantics — unchanged from the royal
+        baseline); later stop touches on the original stop do not downgrade a
+        partially-secured trade.
+      * Gap candles that span both levels resolve to the banked target of the
+        conservative model already in place.
     """
     direction = sig["direction"]
     sl, tp1, tp2, tp3 = sig["stop"], sig["tp1"], sig["tp2"], sig["tp3"]
     hit_tp = int(sig["hit_tp"] or 0)
 
-    # Walk candles in order; track best progress.
     progress_tp = hit_tp
-    sl_touched = False
     for c in candles:
         hi, lo = c["high"], c["low"]
         if direction == "BUY":
-            if lo <= sl:
-                sl_touched = True
+            sl_now = lo <= sl
+            new_tp = 0
             if progress_tp == 0 and hi >= tp1:
-                progress_tp = 1
-            if progress_tp == 1 and hi >= tp2:
-                progress_tp = 2
-            if progress_tp == 2 and hi >= tp3:
-                progress_tp = 3
+                new_tp = 1
+            if progress_tp <= 1 and hi >= tp2:
+                new_tp = max(new_tp, 2)
+            if progress_tp <= 2 and hi >= tp3:
+                new_tp = max(new_tp, 3)
         else:
-            if hi >= sl:
-                sl_touched = True
+            sl_now = hi >= sl
+            new_tp = 0
             if progress_tp == 0 and lo <= tp1:
-                progress_tp = 1
-            if progress_tp == 1 and lo <= tp2:
-                progress_tp = 2
-            if progress_tp == 2 and lo <= tp3:
-                progress_tp = 3
-
-    if sl_touched and progress_tp == hit_tp:
-        return "SL_HIT"
+                new_tp = 1
+            if progress_tp <= 1 and lo <= tp2:
+                new_tp = max(new_tp, 2)
+            if progress_tp <= 2 and lo <= tp3:
+                new_tp = max(new_tp, 3)
+        if sl_now and progress_tp == hit_tp and new_tp == 0:
+            return "SL_HIT"                       # stopped out before any gain
+        if new_tp > progress_tp:
+            progress_tp = new_tp                  # target banked; keep running
     if progress_tp > hit_tp:
-        if progress_tp == 3 and (sl_touched or True):
+        if progress_tp == 3:
             return "TP3_HIT"
         return {1: "TP1_HIT", 2: "TP2_HIT", 3: "TP3_HIT"}[progress_tp]
-    if sl_touched:
-        return "SL_HIT"
     return None
 
 
@@ -173,9 +218,10 @@ def halfway_reached(sig: dict, candles: list[dict]) -> bool:
     return False
 
 
-def _apply_transition(sig: dict, new_status: str, payload: dict) -> list[tuple[int, str]]:
-    """Persist the transition (idempotent); return [(user_id, text)] notifications
-    for receivers + the admin. The caller sends them inside the event loop."""
+def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[tuple[int, str]], float]:
+    """Persist the transition (idempotent); return ([(user_id, text)], pips_result)
+    notifications for receivers + the admin. The caller sends them inside the
+    bot's event loop."""
     from fysb.theme import dir_badge, esc
     status = new_status
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3, "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
@@ -223,13 +269,26 @@ def _apply_transition(sig: dict, new_status: str, payload: dict) -> list[tuple[i
     notes = [(uid, text) for uid in uids]
     if config.ADMIN_ID:
         notes.append((config.ADMIN_ID, f"📡 إشارة #{sig['id']} {sig['symbol']}: {status} ({pips_result:+.1f} pips)"))
-    return notes
+    return notes, pips_result
 
 
 def expire_stale_signals() -> int:
-    """Mark ACTIVE signals past their expiry window as EXPIRED (no price claims)."""
+    """Mark ACTIVE signals past their expiry window as EXPIRED (no price claims).
+
+    Two sweeps, both honest (no fabricated outcomes):
+      * expires_at set and already passed;
+      * expires_at EMPTY but the signal is older than the configured expiry
+        window — legacy rows must never haunt the board as ACTIVE forever.
+    """
+    from datetime import datetime, timedelta, timezone
+    hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
+    legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with db.conn() as c:
-        cur = c.execute("UPDATE signals SET status='EXPIRED', closed_at=? WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT') AND expires_at!='' AND expires_at<=?", (config.now(), config.now()))
+        cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
+                           WHERE status IN ('ACTIVE','TP1_HIT','TP2_HIT')
+                           AND ((expires_at!='' AND expires_at<=?)
+                                OR (expires_at='' AND created_at<=?))""",
+                        (config.now(), config.now(), legacy_cutoff))
         return cur.rowcount
 
 

@@ -276,6 +276,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_new_signal(q, uid, context, bot)
     elif act == "tracknow":
         await admin_trading.admin_track_now(q, uid, context, bot)
+    elif act == "signalpurge":
+        await admin_trading.admin_signal_purge(q, uid, context, bot)
+    elif act == "signalpurgego":
+        await admin_trading.admin_signal_purge_go(q, uid, context, bot)
     elif act == "engine":
         await admin_trading.admin_engine(q, uid, context, bot)
     elif act == "enginetoggle":

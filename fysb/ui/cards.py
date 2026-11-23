@@ -81,7 +81,6 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
             data_lines.append(f"{emoji} <b>النتيجة المسجلة:</b> {sig['pips_result']:+.1f} pips")
         out.append(card("\n".join(data_lines)))
         out.append(footer(""))
-        out.append("<i>⚠️ محتوى تحليلي لأغراض المعلومات فقط — ليس نصيحة استثمارية ولا ضماناً للربح.</i>")
     return "\n".join(out)
 
 
@@ -137,7 +136,6 @@ def render_analysis_card(an: dict, market_row=None) -> str:
     if an.get("risk_note"):
         out.append(f"🛡 <b>إدارة المخاطر:</b> <i>{esc(an['risk_note'])}</i>")
     out.append(footer(""))
-    out.append("<i>⚠️ هذا تحليل تعليمي مبني على بيانات السوق الحقيقية — ليس أمر تنفيذ ولا نصيحة استثمارية.</i>")
     return "\n".join(out)
 
 

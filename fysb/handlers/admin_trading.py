@@ -34,6 +34,7 @@ async def admin_signals(q, uid, context, bot, page: int = 0):
     if nav_row:
         rows_kb.append(nav_row)
     rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
+    rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
     await render(q, f"📡 <b>مركز إدارة الإشارات</b>\nالإجمالي: <b>{total}</b> · صفحة {page + 1}",
                  kb.admin_nav(rows_kb), bot)
 
@@ -46,12 +47,29 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
     sig = dict(r)
+    live_note = ""
+    if sig["status"] in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
+        try:
+            quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
+            price = float(quote["price"])
+            from fysb import instruments
+            entry = float(sig["entry"])
+            drift = instruments.pips(sig["symbol"], entry, price)
+            side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
+            live_note = (f"\n💰 <b>سعر السوق الآن:</b> <code>{instruments.fmt_price(sig['symbol'], price)}</code>"
+                         f" · {side} · <b>{drift:+.1f} pips</b>")
+            sl = float(sig["stop"])
+            beyond = price >= sl if sig["direction"] == "SELL" else price <= sl
+            if beyond:
+                live_note += "\n⚠️ السعر تجاوز وقف الخسارة — اضغط «فحص مفتوحة الآن» لتحصيل الحالة فوراً."
+        except Exception:
+            live_note = "\n⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
     rows_kb = []
     if sig["status"] in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
-        rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}")])
+        rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
     rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
-    body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم."
+    body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم.{live_note}"
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
@@ -101,6 +119,31 @@ async def admin_signal_recipients(q, uid, context, bot, sid: int):
     lines = [f"📬 <b>مستلمو الإشارة #{sid}</b>"]
     lines += [f"  <code>{r['user_id']}</code> · {human_dt(r['delivered_at'])}" for r in rows] or ["  لا يوجد مستلمون."]
     await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+
+
+async def admin_signal_purge(q, uid, context, bot):
+    """Bulk permanent deletion of CANCELLED/EXPIRED signals (double confirm)."""
+    with db.conn() as c:
+        n = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('CANCELLED','EXPIRED')").fetchone()["n"]
+    if not n:
+        await render(q, "✅ لا توجد إشارات ملغاة أو منتهية — السجل نظيف بالكامل.",
+                     kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals")]]), bot)
+        return
+    await render(q, f"🧹 <b>تنظيف الإشارات الميتة</b>\n<blockquote>▎إشارات ملغاة/منتهية: <b>{n}</b>\n"
+                    f"▎⚠️ حذف نهائي بلا أرشيف — يشمل سجلات التسليم المرتبطة.</blockquote>",
+                 kb.admin_nav([[kb.btn(f"⚠️ حذف {n} إشارة نهائياً", "a:signalpurgego")],
+                               [kb.btn("↩️ تراجع", "a:signals")]]), bot)
+
+
+async def admin_signal_purge_go(q, uid, context, bot):
+    with db.tx() as c:
+        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id IN "
+                          "(SELECT id FROM signals WHERE status IN ('CANCELLED','EXPIRED'))").rowcount)
+        s = abs(c.execute("DELETE FROM signals WHERE status IN ('CANCELLED','EXPIRED')").rowcount)
+    audit_log.log(uid, f"signals_purged:{s}")
+    await render(q, f"✅ <b>تم التنظيف النهائي</b>\n<blockquote>▎🗑 إشارات مُمحاة: <b>{s}</b>\n▎📬 تسليمات مُمحاة: <b>{d}</b>\n"
+                    f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>",
+                 kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
 async def admin_cancel_signal(q, uid, context, bot, sid: int):

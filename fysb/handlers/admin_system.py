@@ -376,6 +376,10 @@ async def admin_backup(q, uid, context, bot):
 async def admin_backup_now(q, uid, context, bot):
     try:
         dest = backup_service.quick_db_snapshot("admin")
+        if dest is None:
+            await render(q, "⏳ تعذر أخذ نسخة الآن — قاعدة البيانات مشغولة (حاول بعد قليل).",
+                         kb.admin_nav(), bot)
+            return
         audit_log.log(uid, f"backup_created:{dest.name}")
         with open(dest, "rb") as f:
             await bot.send_document(uid, f, filename=dest.name, caption=f"💾 نسخة قاعدة بيانات ({dest.stat().st_size // 1024} KB)")

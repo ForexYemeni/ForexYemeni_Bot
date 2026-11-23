@@ -488,12 +488,25 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 tables_now = {r[0] for r in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             structural = bool(tables_now & set(ADD_COLUMNS.keys()))
-            if structural:
-                applied = _apply_add_columns(c)
-                if applied and snapshot_before_structural:
-                    from fysb.services.backup import quick_db_snapshot
+            if structural and snapshot_before_structural:
+                # v6.7.2: the snapshot runs BEFORE any ALTER takes its lock and
+                # is BEST-EFFORT. The live Supabase crash (2026-11-23): the
+                # boot-time dump hit the server's statement_timeout, the
+                # exception aborted init_db, the with-conn() rollback undid the
+                # just-applied migrations, and every restart re-applied them
+                # and crashed again — an infinite boot loop. Migrations are
+                # additive-only, so a missing snapshot is always safe to skip.
+                from fysb.services.backup import quick_db_snapshot
+                try:
                     snap = quick_db_snapshot("pre-migration")
-                    log_lines.append(f"pre-migration snapshot: {snap.name}")
+                    log_lines.append(f"pre-migration snapshot: {snap.name}" if snap else
+                                     "pre-migration snapshot unavailable (DB busy) — "
+                                     "continuing: migrations are additive-only")
+                except Exception as e:  # pragma: no cover — snapshot() no longer raises
+                    log_lines.append(f"pre-migration snapshot skipped ({type(e).__name__}) — "
+                                     "continuing: migrations are additive-only")
+            if structural:
+                _apply_add_columns(c)
             if config.USE_PG:
                 pglayer.run_schema(c, SCHEMA)
             else:

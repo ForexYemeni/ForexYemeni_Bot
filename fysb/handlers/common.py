@@ -111,6 +111,10 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from fysb.services import backup as backup_service
     try:
         dest = backup_service.quick_db_snapshot("admin")
+        if dest is None:
+            await update.effective_message.reply_text(
+                "⏳ قاعدة البيانات مشغولة حالياً — تعذر أخذ نسخة لحظية الآن. حاول بعد قليل.")
+            return
         with open(dest, "rb") as f:
             await update.effective_message.reply_document(f, filename=dest.name)
         audit_log.log(uid, f"database_backup:{dest.name}")

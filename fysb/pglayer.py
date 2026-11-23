@@ -28,6 +28,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from fysb import config
+from fysb.config import log
 
 # Unified exception surface (referrals.py and friends catch db.IntegrityError)
 IntegrityError = psycopg.errors.IntegrityError
@@ -78,12 +79,46 @@ _POOL_MAX = 8
 
 
 def _connect():
-    return psycopg.connect(
-        config.DATABASE_URL,
+    """Pooled-connection factory tuned for hosted runtimes (v6.7.2).
+
+    Live crash this replaces (bot-hosting + Supabase, 2026-11-23): the host's
+    server-side statement_timeout canceled a boot-time full-table dump with
+    «canceling statement due to statement timeout» and the platform could
+    never start. Hardening applied here:
+      * TCP keepalives — an idle pooled session survives NAT/gateway reaping
+        (the classic «first query after silence dies» failure).
+      * Session-level statement_timeout (120 s) overrides the aggressive
+        default some Supabase roles/poolers impose; statement_timeout is a
+        USERSET parameter, a client may always raise it for its own session.
+      * If the endpoint rejects the startup `options`, we silently fall back
+        to a plain connection and try session SETs (best effort).
+    """
+    base = dict(
+        conninfo=config.DATABASE_URL,
         connect_timeout=15,
         application_name="FOREXYEMENI",
         row_factory=dict_row,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
     )
+    try:
+        c = psycopg.connect(
+            options="-c statement_timeout=120000 -c idle_in_transaction_session_timeout=300000",
+            **base)
+    except (psycopg.OperationalError, psycopg.InterfaceError, TypeError):
+        c = psycopg.connect(**base)
+    try:
+        with c.cursor() as cur:
+            cur.execute("SET statement_timeout TO '120s'")
+            cur.execute("SET idle_in_transaction_session_timeout TO '300s'")
+        c.commit()
+    except Exception:
+        try:
+            c.rollback()
+        except Exception:
+            pass
+    return c
 
 
 def _acquire():
@@ -278,6 +313,11 @@ class Conn:
     def execute(self, sql, params=()):
         try:
             return self._exec(sql, params)
+        except psycopg.errors.QueryCanceled:
+            # statement timeout: the session itself is healthy — re-running the
+            # same oversized statement would only double the stall. Let the
+            # caller (dump_all skips the table, handlers surface the error).
+            raise
         except (psycopg.OperationalError, psycopg.InterfaceError) as e:
             # dead/broken session: discard, reconnect, retry exactly once
             try:
@@ -369,14 +409,52 @@ def list_tables() -> set[str]:
     return {r[0] for r in rows}
 
 
+# Per-table statement budget for dumps: a snapshot must stay quick and a
+# single huge/slow table may never hold the boot hostage (v6.7.2).
+_DUMP_BUDGET = "45s"
+
+
 def dump_all() -> dict:
-    """Full consistent dump: {table: [ {col: val, ...}, ... ]} for backups."""
+    """Full consistent dump: {table: [ {col: val, ...}, ... ]} for backups.
+
+    BEST-EFFORT by contract (v6.7.2): one slow or huge table that trips the
+    server's statement_timeout can never abort the whole dump — the table is
+    retried once on a fresh session, then skipped and reported under
+    "_meta.skipped_tables". Callers (boot-time pre-migration snapshot, admin
+    backups) treat the dump as advisory: degrading is acceptable, crashing —
+    especially before Telegram is even reachable — is not. restore_json
+    ignores "_meta" because only list values are replayed.
+    """
     data: dict = {}
-    with conn() as c:
-        tables = sorted(list_tables())
-        for t in tables:
-            rows = c.execute(f"SELECT * FROM {t}").fetchall()
+    skipped: list[str] = []
+    errors: list[str] = []
+    for t in sorted(list_tables()):
+        rows = None
+        for attempt in (1, 2):
+            try:
+                with conn() as c:
+                    try:
+                        c.execute(f"SET statement_timeout TO '{_DUMP_BUDGET}'")
+                    except Exception:
+                        pass  # budget is a courtesy, not a requirement
+                    rows = c.execute(f"SELECT * FROM {t}").fetchall()
+                break
+            except Exception as e:
+                if attempt == 2:
+                    skipped.append(t)
+                    errors.append(f"{t}: {type(e).__name__}")
+                    log.warning("dump_all: table %s skipped (%s) — snapshot is best-effort",
+                                t, type(e).__name__)
+                # attempt 1 failure: the aborted transaction is rolled back by
+                # the context manager; retry once on a fresh pooled session
+        if rows is not None:
             data[t] = [dict(r) for r in rows]
+    if skipped:
+        data["_meta"] = {
+            "skipped_tables": skipped,
+            "errors": errors,
+            "note": "best-effort dump — skipped tables are reported, never fatal",
+        }
     return data
 
 

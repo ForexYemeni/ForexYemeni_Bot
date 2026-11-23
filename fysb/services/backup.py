@@ -16,28 +16,42 @@ from fysb import config, db
 from fysb.config import log
 
 
-def quick_db_snapshot(tag: str = "manual") -> Path:
-    """Consistent snapshot of the live DB.
+def quick_db_snapshot(tag: str = "manual") -> Path | None:
+    """Consistent snapshot of the live DB — BEST-EFFORT (v6.7.2).
 
     SQLite: the sqlite3 backup API (WAL-safe page copy).
     PostgreSQL: full JSON dump of every table (restore-ready).
+
+    Returns None when the snapshot cannot be taken (hosted DB slow/busy,
+    statement budget exceeded). A failed backup is a logged warning — it
+    never raises into the caller and above all never blocks the boot: the
+    live Supabase crash of 2026-11-23 (statement_timeout on the boot-time
+    pre-migration dump aborting init_db, rolling back its migrations and
+    re-crashing on every restart) is exactly what this contract makes
+    impossible.
     """
     ts = time.strftime("%Y%m%d_%H%M%S")
-    if config.USE_PG:
-        dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.json"
-        data = db.pglayer.dump_all()
-        dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        _prune_old(keep=10)
-        return dest
-    dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.db"
-    src = db.conn()
     try:
-        target = sqlite3.connect(str(dest))
-        with target:
-            src.backup(target)
-        target.close()
-    finally:
-        src.close()
+        if config.USE_PG:
+            dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.json"
+            data = db.pglayer.dump_all()
+            if not any(isinstance(v, list) for v in data.values()):
+                raise RuntimeError("dump returned no tables")
+            dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        else:
+            dest = config.BACKUP_DIR / f"fysb_db_{tag}_{ts}.db"
+            src = db.conn()
+            try:
+                target = sqlite3.connect(str(dest))
+                with target:
+                    src.backup(target)
+                target.close()
+            finally:
+                src.close()
+    except Exception as e:
+        log.warning("DB snapshot '%s' skipped (%s) — backup is best-effort, never boot-blocking",
+                    tag, type(e).__name__)
+        return None
     _prune_old(keep=10)
     return dest
 
@@ -103,7 +117,7 @@ def full_project_archive() -> Path:
     their own token, delivered to their own chat) so the archive can restore a
     working copy anywhere. Excludes generated junk (venv/__pycache__/logs/backups).
     """
-    snap = quick_db_snapshot("archived")
+    snap = quick_db_snapshot("archived")  # may be None — archive still builds
     ts = time.strftime("%Y%m%d_%H%M%S")
     dest = config.BACKUP_DIR / f"FYSB_PROJECT_BACKUP_{ts}.zip"
     skip_dirs = {"venv", ".venv", "__pycache__", "node_modules", ".git", "logs", "backups"}
@@ -115,7 +129,7 @@ def full_project_archive() -> Path:
                 continue
             if path.is_file() and path.name.endswith((".pyc", ".pyo", ".db-shm", ".db-wal")):
                 continue
-            if path == snap:
+            if snap is not None and path == snap:
                 continue
             if path.name == "fysb.lock":
                 continue
@@ -125,13 +139,21 @@ def full_project_archive() -> Path:
                 z.write(str(path), arcname=str(rel))
             except (OSError, PermissionError):
                 continue
-        # Fresh consistent DB snapshot inside the archive
-        z.write(str(snap), arcname=f"database/forexyemeni_backup{snap.suffix}")
+        # Fresh consistent DB snapshot inside the archive (when available)
+        if snap is not None:
+            z.write(str(snap), arcname=f"database/forexyemeni_backup{snap.suffix}")
+        else:
+            z.writestr(
+                "database/SNAPSHOT_UNAVAILABLE.txt",
+                "النسخة اللحظية لقاعدة البيانات لم تكن متاحة لحظة إنشاء الأرشيف "
+                "(قاعدة البيانات مشغولة / تجاوز ميزانية الزمن). الأرشيف يحتوي كامل "
+                "الكود؛ خُذ نسخة قاعدة بيانات منفصلة عبر /backup أو زر «نسخة قاعدة بيانات الآن».")
         # .env explicitly (never silently omitted) — skipped in the loop above
         env_file = base / ".env"
         if env_file.is_file():
             z.write(str(env_file), arcname=".env")
-    snap.unlink(missing_ok=True)
+    if snap is not None:
+        snap.unlink(missing_ok=True)
     return dest
 
 
@@ -161,6 +183,9 @@ def restore_from(db_file: Path) -> tuple[bool, str]:
         if db_file.suffix != ".json":
             return False, "PostgreSQL engine restores JSON dumps only (.json)"
         try:
+            # Safety snapshot is best-effort: if it fails we still proceed —
+            # restore_json is one atomic transaction (wipe + insert commit
+            # together or not at all), so data survives a failed restore.
             quick_db_snapshot("pre-restore")
             data = json.loads(db_file.read_text(encoding="utf-8"))
             res = db.pglayer.restore_json(data)

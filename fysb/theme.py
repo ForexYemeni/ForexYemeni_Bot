@@ -79,8 +79,9 @@ STRATEGY_AR = {
     "TURTLE_SOUP": "اصطياد السيولة",
     "SILVER_BULLET": "الرصاصة الفضية",
     "WYCKOFF": "وايكوف",
-    "FIBONACCI": "فيبوناتشي",
+    "FIBONACCI": "فيبوناتشي (الجيب الذهبي)",
     "TREND": "اتباع الاتجاه",
+    "ICHIMOKU": "إيشيموكو (السحابة اليابانية)",
     "MANUAL": "إشارة يدوية من الإدارة",
     "ALL": "جميع الاستراتيجيات",
 }
@@ -88,6 +89,21 @@ STRATEGY_AR = {
 TIMEFRAME_AR = {
     "M1": "1 دقيقة", "M5": "5 دقائق", "M15": "15 دقيقة", "M30": "30 دقيقة",
     "H1": "ساعة", "H4": "4 ساعات", "D1": "يومي", "W1": "أسبوعي",
+}
+
+# v6.8.0 — luxury market sections (owner instruction: المعادن/الفوركس/العملات/
+# الأسهم as separated royal sections). Any unknown category falls back to its code.
+CATEGORY_AR = {
+    "metal": "المعادن",
+    "forex": "الفوركس والعملات",
+    "crypto": "العملات الرقمية",
+    "index": "المؤشرات العالمية",
+    "stock": "الأسهم الأمريكية",
+    "commodity": "السلع",
+}
+
+CATEGORY_ICON = {
+    "metal": "🥇", "forex": "💱", "crypto": "🪙", "index": "📊", "stock": "🏛", "commodity": "🛢",
 }
 
 STATUS_AR = {

@@ -144,11 +144,15 @@ def render_signal_compact(sig) -> str:
 
     Inline keyboard buttons render PLAIN TEXT ONLY: any <b>/<code> markup
     shows up as literal «رموز برمجية» on screen. No HTML here, ever.
+    `seq` (when present) is the REAL sequential position in the signals
+    center — after a deletion the following signals take the freed number
+    (v6.8.0 «الترقيم الحقيقي»), while `id` stays the stable internal key.
     """
     d_emoji = DIRECTION_EMOJI.get(sig["direction"], "")
     status_map = {"ACTIVE": "🟢", "RUNNING": "🟢", "TP1_HIT": "🟢", "TP2_HIT": "🟢", "TP3_HIT": "🟢",
                   "SL_HIT": "🔴", "CANCELLED": "⚪", "EXPIRED": "⚪"}
-    return (f"{status_map.get(sig['status'], '🔵')} #{sig['id']} · {sig['symbol']} {d_emoji} "
+    shown_no = sig.get("seq") or sig["id"]
+    return (f"{status_map.get(sig['status'], '🔵')} #{shown_no} · {sig['symbol']} {d_emoji} "
             f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {status_ar(sig['status'])}")
 
 

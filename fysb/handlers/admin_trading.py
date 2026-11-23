@@ -23,7 +23,12 @@ async def admin_signals(q, uid, context, bot, page: int = 0):
     size = 8
     with db.conn() as c:
         total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-        rows = c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ? OFFSET ?",
+        # v6.8.0 — REAL sequential numbering: `seq` is the chronological position
+        # (oldest = #1), computed live via ROW_NUMBER so deleting any signal
+        # makes the following ones take the freed number instantly. The internal
+        # id stays the stable reference for deliveries/positions.
+        rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                            FROM signals ORDER BY id DESC LIMIT ? OFFSET ?""",
                          (size, page * size)).fetchall()
     rows_kb = [[kb.btn(render_signal_compact(dict(r)), f"a:signalview:{r['id']}")] for r in rows]
     nav_row = []
@@ -35,7 +40,8 @@ async def admin_signals(q, uid, context, bot, page: int = 0):
         rows_kb.append(nav_row)
     rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
     rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
-    await render(q, f"📡 <b>مركز إدارة الإشارات</b>\nالإجمالي: <b>{total}</b> · صفحة {page + 1}",
+    await render(q, f"📡 <b>مركز إدارة الإشارات</b>\nالإجمالي: <b>{total}</b> · صفحة {page + 1}\n"
+                    "<i>الترقيم تسلسلي حقيقي — عند حذف أي إشارة تتوالى الأرقام تلقائياً.</i>",
                  kb.admin_nav(rows_kb), bot)
 
 
@@ -269,19 +275,30 @@ async def admin_engine_clean(q, uid, context, bot):
 
 # --- Strategies ------------------------------------------------------------------
 async def admin_strategies(q, uid, context, bot):
+    from fysb.services import strategy_stats
     with db.conn() as c:
-        rows = c.execute("SELECT * FROM strategy_catalog ORDER BY code").fetchall()
-    lines = ["🧩 <b>حوكمة الاستراتيجيات</b>\n"]
+        rows = [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
+    # v6.8.0 — the governance board is ordered STRONGEST-FIRST too (measured
+    # history, then the documented baseline), mirroring the user-facing order.
+    codes = strategy_stats.ordered_codes([r["code"] for r in rows])
+    by_code = {r["code"]: r for r in rows}
+    ordered = [by_code[c] for c in codes if c in by_code] + [r for r in rows if r["code"] not in codes]
+    board = {d["code"]: d for d in strategy_stats.leaderboard()}
+    lines = ["🧩 <b>حوكمة الاستراتيجيات — مرتبة من الأقوى</b>\n"]
     rows_kb = []
-    for r in rows:
+    for r in ordered:
         status = "🟢" if (r["enabled"] and r["verified"]) else "⚪"
         verified = "موثقة ومختبرة" if r["verified"] else "غير مختبرة"
-        lines.append(f"{status} <b>{esc(r['title'])}</b> · {verified}\n  {esc(r['description'])}")
+        d = board.get(r["code"])
+        perf = (f" · قوة {d['strength']:.1f} · {d['win_rate']:.0f}% رابحة ({d['n']} مغلقة)"
+                if d else "")
+        lines.append(f"{status} <b>{esc(r['title'])}</b> · {verified}{perf}\n  {esc(r['description'])}")
         row = [kb.btn(f"{esc(r['code'])}: {'إيقاف' if (r['enabled'] and r['verified']) else 'تفعيل'}", f"a:strategy_toggle:{r['code']}")]
         if r["code"] in VERIFIABLE and not r["verified"]:
             row.append(kb.btn("✅ تحقق", f"a:strategy_verify:{r['code']}"))
         rows_kb.append(row)
-    lines.append("\n<i>التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً (ICT/SMC/PRICE_ACTION). الباقي يبقى مغلق.</i>")
+    lines.append("\n<i>الترتيب حقيقي 100%: التاريخ المغلق يقيس القوة أولاً، ثم الترتيب الأساسي الموثق. "
+                 "التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً — الباقي يبقى مغلق.</i>")
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 

@@ -589,9 +589,26 @@ async def admin_paymethods(q, uid, context, bot):
     methods = payments_service.list_methods()
     rows_kb = [[kb.btn(f"{'🟢' if m['enabled'] else '⚪'} {esc(m['title'])}{' · ' + esc(m['country']) if m['country'] else ''}",
                        f"a:pmview:{m['id']}")] for m in methods]
+    wallet = db.get_setting("usdt_wallet_trc20", "")
     body = (f"{ICON['bank']} <b><u>وسائل الدفع</u></b>\n"
-            "▎أضف وسيلة دفع بتدفق موجّه: محافظ يمنية، عملات رقمية، حوالات — مع بيانات الحساب والتعليمات وربط الباقات.")
-    await render(q, body, kb.admin_nav(rows_kb + [[kb.btn("➕ إضافة وسيلة دفع", "a:pmadd")]]), bot)
+            "▎أضف وسيلة دفع بتدفق موجّه: محافظ يمنية، عملات رقمية، حوالات — مع بيانات الحساب والتعليمات وربط الباقات.\n"
+            f"▎⛓ محفظة USDT (TRC20) للتحقق البلوكيشن الفوري: <code>{esc(wallet) if wallet else 'غير مضبوطة — اضغط الزر بالأسفل'}</code>")
+    await render(q, body, kb.admin_nav(rows_kb + [[kb.btn("➕ إضافة وسيلة دفع", "a:pmadd")],
+                                                 [kb.btn("⛓ عنوان محفظة USDT (TRC20)", "a:usdtwallet")]]), bot)
+
+
+async def admin_usdt_wallet(q, uid, context, bot):
+    """v6.8.0 — set THE USDT TRC20 wallet for on-chain instant activation.
+    Stored in DB settings (no environment variables, per the owner's rule)."""
+    wallet = db.get_setting("usdt_wallet_trc20", "")
+    context.user_data["awaiting_usdt_wallet"] = True
+    await render(q, "⛓ <b><u>محفظة USDT للتحقق البلوكيشن الفوري</u></b>\n"
+                    "أرسل <b>عنوان المحفظة</b> (يبدأ بـ T وعدد خاناته 34) — ستُستخدم لكل عمليات USDT TRC20:\n"
+                    "المستخدم يدفع → يرسل TXID → يُفحص البلوكيشن (التأكيد + العنوان + المبلغ) → تُفتح الباقة فوراً "
+                    "ويُحجب الـ TXID نهائياً من إعادة الاستخدام.\n\n"
+                    f"العنوان الحالي: <code>{esc(wallet) if wallet else 'غير مضبوط'}</code>\n"
+                    "أرسل <code>-</code> لمسح العنوان.",
+                 kb.admin_nav([[kb.btn("↩️ وسائل الدفع", "a:paymethods")]]), bot)
 
 
 async def admin_pm_add(q, uid, context, bot):

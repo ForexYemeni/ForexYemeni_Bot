@@ -51,6 +51,31 @@ def attach_receipt(payment_id: int, user_id: int, file_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def txid_used(txid: str) -> int:
+    """The internal id of the payment already bound to this TXID (0 = free).
+    One on-chain transaction can activate ONE plan — ever."""
+    with db.conn() as c:
+        r = c.execute("SELECT id FROM payments WHERE txid=?", ((txid or "").strip(),)).fetchone()
+    return r["id"] if r else 0
+
+
+def attach_txid(payment_id: int, user_id: int, txid: str, chain: str) -> dict:
+    """Bind a VERIFIED on-chain TXID to a PENDING payment and block its reuse
+    forever (v6.8.0 blockchain protocol). Transactional: the uniqueness check
+    and the write happen atomically, so two simultaneous submissions race to
+    exactly one winner."""
+    with db.tx(immediate=True) as c:
+        other = c.execute("SELECT id FROM payments WHERE txid=?", (txid,)).fetchone()
+        if other:
+            return {"ok": False, "error": f"هذا TXID مُستخدم مسبقاً في الطلب #{other['id']} — المعاملة محجوبة"}
+        cur = c.execute("""UPDATE payments SET txid=?, chain=?, confirmed_at=?
+                           WHERE id=? AND user_id=? AND status='PENDING'""",
+                        (txid, chain, config.now(), payment_id, user_id))
+        if cur.rowcount == 0:
+            return {"ok": False, "error": "الطلب غير موجود أو تمت مراجعته مسبقاً"}
+    return {"ok": True}
+
+
 def get_request(pid: int):
     with db.conn() as c:
         r = c.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()

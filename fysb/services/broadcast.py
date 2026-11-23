@@ -85,6 +85,40 @@ def abort(bid: int) -> bool:
     return True
 
 
+def _is_parse_error(e: Exception) -> bool:
+    """Telegram rejects announcements whose HTML entities are malformed
+    (raw <, unbalanced tags). Those are CONTENT problems, never delivery
+    problems — the announcement must still reach every user as plain text."""
+    return (type(e).__name__ == "BadRequest"
+            or "parse" in str(e).lower()
+            or "entity" in str(e).lower())
+
+
+async def _send_one(bot, uid: int, text: str, file_id: str) -> bool:
+    """HTML when valid; ESCAPED plain text when the admin typed something that
+    Telegram cannot parse. The live bug this replaces: one raw «<» in the
+    announcement made every single send fail («أُرسل 0 · فشل N») — now the
+    royal message always lands, beautifully or honestly-plain."""
+    from fysb.theme import esc
+    if file_id:
+        try:
+            await bot.send_photo(uid, file_id, caption=text[:1024], parse_mode="HTML")
+            return True
+        except Exception as e:
+            if _is_parse_error(e):
+                await bot.send_photo(uid, file_id, caption=esc(text)[:1024])
+                return True
+            raise
+    try:
+        await bot.send_message(uid, text, parse_mode="HTML")
+        return True
+    except Exception as e:
+        if _is_parse_error(e):
+            await bot.send_message(uid, esc(text))
+            return True
+        raise
+
+
 async def run_broadcast(bid: int, bot, targets: list[int]) -> dict:
     """Throttled sender with persisted progress. Never exceeds rate limit."""
     b = get(bid)
@@ -100,11 +134,8 @@ async def run_broadcast(bid: int, bot, targets: list[int]) -> dict:
         if flag.aborted:
             break
         try:
-            if b["file_id"]:
-                await bot.send_photo(uid, b["file_id"], caption=b["text"][:1024], parse_mode="HTML")
-            else:
-                await bot.send_message(uid, b["text"], parse_mode="HTML")
-            sent += 1
+            if await _send_one(bot, uid, b["text"], b["file_id"]):
+                sent += 1
         except Exception as e:
             failed += 1
             log.debug("broadcast fail uid=%s err=%s", uid, type(e).__name__)

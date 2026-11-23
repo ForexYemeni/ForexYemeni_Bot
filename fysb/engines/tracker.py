@@ -25,6 +25,15 @@ from fysb.config import log
 
 TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED")
 
+# v6.8.0 — CONSERVATIVE target confirmation: a target is banked only when the
+# provider candle PENETRATES the level by this margin, not merely grazes it.
+# Asymmetric by design, like every other rule here: SL stays EXACT (never
+# optimistic on the loss side), TP requires real penetration (never optimistic
+# on the win side). This kills single-tick feed-noise wicks from banked profits
+# — the live complaint: «TP1 verified (+582.0 pips)» while the chart showed the
+# high at 3637 vs TP1 3644 — a feed-noise touch must never read as a goal.
+TP_CONFIRM_PIPS = 2.0
+
 
 def _utc_cutoff(iso: str) -> str:
     """Normalize ANY stored timestamp to 'YYYY-MM-DD HH:MM:SS' (UTC) so it can
@@ -102,11 +111,13 @@ def entry_filled(sig: dict, candles: list[dict]) -> bool:
 def missed_target(sig: dict, candles: list[dict]) -> bool:
     """The entry was NEVER touched but price already reached TP1 — the idea is
     dead (the market ran away without giving the plan its fill). No result is
-    credited: an unentered trade cannot win."""
+    credited: an unentered trade cannot win.
+    Uses the same conservative TP confirmation buffer as _evaluate_signal."""
     tp1 = float(sig["tp1"])
+    buf = TP_CONFIRM_PIPS * max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
     if sig["direction"] == "BUY":
-        return any(float(c["high"]) >= tp1 for c in candles)
-    return any(float(c["low"]) <= tp1 for c in candles)
+        return any(float(c["high"]) >= tp1 + buf for c in candles)
+    return any(float(c["low"]) <= tp1 - buf for c in candles)
 
 
 def _legacy_active(sig: dict) -> bool:
@@ -275,33 +286,73 @@ def check_open_signals(api_key: str) -> dict:
             "admin_notice": admin_notice, "edits": edits}
 
 
+def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:
+    """(extreme_price, signed_pips) — the furthest documented price travel in
+    the trade's favour within the tracked window AFTER the fill anchor.
+    This is the number the notification can PROVE from provider candles; the
+    card shows it next to any achieved target so every claim carries its own
+    documented witness (v6.8.0 honesty)."""
+    try:
+        entry = float(sig["entry"])
+        cut = _utc_cutoff(sig.get("filled_at") or sig.get("created_at") or "")
+        post = [c for c in (payload.get("values") or []) if c.get("datetime", "") >= cut]
+        if not post:
+            return 0.0, 0.0
+        if sig["direction"] == "BUY":
+            ext = max(float(c["high"]) for c in post)
+        else:
+            ext = min(float(c["low"]) for c in post)
+        return ext, drift_pips(sig["symbol"], sig["direction"], entry, ext)
+    except Exception:
+        return 0.0, 0.0
+
+
 def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tuple[list[tuple[int, str]], list]:
-    """Luxury half-way secure-profit advisory for every receiver + admin
+    """LUXURY half-way secure-profit advisory (v6.8.0) — for every receiver AND
+    the admin (the old one-liner «💧 إشارة #N … نصف الطريق» is gone; admin sees
+    the same royal card with REAL numbers: documented travel, progress toward
+    TP1, USD at 0.01 lot for any pair, and the money-management protocol).
     (+ live-card edits so the original message shows the current state)."""
     from fysb import instruments
-    from fysb.theme import dir_badge, esc, tf_name
+    from fysb.theme import bar, dir_badge, esc, tf_name
     from fysb import config as cfg
     symbol = sig["symbol"]
     entry = float(sig["entry"])
     tp1 = float(sig["tp1"])
     dist = abs(tp1 - entry)
-    secured_half_price = entry + (dist / 2.0) if sig["direction"] == "BUY" else entry - (dist / 2.0)
+    px = float(live_px or 0.0)
+    drift = drift_pips(symbol, sig["direction"], entry, px) if px else 0.0
+    progress = min(100.0, max(0.0, (drift / instruments.pips(symbol, entry, tp1) * 100.0)
+                              if instruments.pips(symbol, entry, tp1) > 0 else 0.0))
+    remaining = instruments.pips(symbol, entry, tp1) - max(0.0, drift)
+    usd_now = instruments.usd_move(symbol, drift, 0.01, px=px) if px else 0.0
+    usd_tp1 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp1), 0.01)
+    usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp2"] or tp1)), 0.01)
+    usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp3"] or tp1)), 0.01)
     text = (
-        f"💧 <b>تحديث إدارة الصفقة</b> — {esc(symbol)} {dir_badge(sig['direction'])}\n"
+        f"💧 <b>إدارة الصفقة الملكية</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
-        f"▎✨ وصل السعر <b>نصف الطريق</b> نحو الهدف الأول (TP1).\n"
-        f"▎🎯 الهدف الأول: <code>{instruments.fmt_price(symbol, tp1)}</code>\n"
-        f"▎🛡 <b>توصية الحماية:</b> انقل وقف الخسارة إلى نقطة الدخول "
-        f"<code>{instruments.fmt_price(symbol, entry)}</code> وأمّن جزءاً من الربح (إغلاق 50%).\n"
-        f"▎⏱ الإطار: <b>{tf_name(sig['timeframe'])}</b> · الحالة: <b>نشطة — تحرك لصالحك</b>\n"
-        f"</blockquote>\n"
-        f"<i>تحديث مُتحقق من بيانات السعر الفعلية — وليس تنفيذاً تلقائياً لحسابك الحقيقي.</i>"
+        f"▎✨ وصل السعر <b>نصف الطريق</b> نحو الهدف الأول — الصفقة في صالحك.\n"
+        f"▎📍 السعر الآن: <code>{instruments.fmt_price(symbol, px)}</code>"
+        f" · <b>{drift:+.1f} pips</b> من الدخول"
+        + (f" · تقدم {progress:.0f}% نحو TP1 {bar(progress, 100)}\n" if px else "\n")
+        + (f"▎🏁 المتبقي نحو TP1: <b>{max(0.0, remaining):.1f} pips</b> (الهدف <code>{instruments.fmt_price(symbol, tp1)}</code>)\n"
+           if px else f"▎🎯 الهدف الأول: <code>{instruments.fmt_price(symbol, tp1)}</code>\n")
+        + f"▎💵 <b>الربح الحقيقي الآن بـ 0.01 لوت:</b> <b>{usd_now:+,.2f} $</b>"
+          f" · وعند TP1: <b>{usd_tp1:+,.2f} $</b>\n"
+        + f"▎📈 مسار الربح الكامل بـ 0.01 لوت: TP1 <b>{usd_tp1:+,.2f} $</b> · TP2 <b>{usd_tp2:+,.2f} $</b> · TP3 <b>{usd_tp3:+,.2f} $</b>\n"
+        + f"▎🛡 <b>بروتوكول التأمين (نصيحة مالية):</b> انقل وقف الخسارة الآن إلى نقطة الدخول "
+          f"<code>{instruments.fmt_price(symbol, entry)}</code> وأغلق <b>50%</b> من الحجم — "
+          f"تصبح الصفقة المتبقية خالية من المخاطرة تماماً.\n"
+        + f"▎⏱ الحالة: <b>نشطة — متابعة لحظية حتى الأهداف أو الوقف</b>\n"
+        + f"</blockquote>\n"
+        + f"<i>أرقام موثقة من أسعار السوق الفعلية — إدارة صفقتك بيدك، والتنبيه لا ينفذ في حسابك تلقائياً إلا إذا فعّلت التنفيذ الآلي في حسابك التجريبي.</i>"
     )
     with db.conn() as c:
         uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
     notes = [(uid, text) for uid in uids]
     if cfg.ADMIN_ID:
-        notes.append((cfg.ADMIN_ID, f"💧 إشارة #{sig['id']} {symbol}: نصف الطريق نحو TP1"))
+        notes.append((cfg.ADMIN_ID, text))
     edits = _card_refresh_edits(sig, live_px, _delivery_refs(sig["id"]))
     return notes, edits
 
@@ -410,26 +461,28 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
     walked = [c for c in candles if c["datetime"] >= cut]
     if not walked:
         return None
+    pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
+    buf = TP_CONFIRM_PIPS * pip
     progress_tp = hit_tp
     for c in walked:
         hi, lo = c["high"], c["low"]
         if direction == "BUY":
             sl_now = lo <= sl
             new_tp = 0
-            if progress_tp == 0 and hi >= tp1:
+            if progress_tp == 0 and hi >= tp1 + buf:
                 new_tp = 1
-            if progress_tp <= 1 and hi >= tp2:
+            if progress_tp <= 1 and hi >= tp2 + buf:
                 new_tp = max(new_tp, 2)
-            if progress_tp <= 2 and hi >= tp3:
+            if progress_tp <= 2 and hi >= tp3 + buf:
                 new_tp = max(new_tp, 3)
         else:
             sl_now = hi >= sl
             new_tp = 0
-            if progress_tp == 0 and lo <= tp1:
+            if progress_tp == 0 and lo <= tp1 - buf:
                 new_tp = 1
-            if progress_tp <= 1 and lo <= tp2:
+            if progress_tp <= 1 and lo <= tp2 - buf:
                 new_tp = max(new_tp, 2)
-            if progress_tp <= 2 and lo <= tp3:
+            if progress_tp <= 2 and lo <= tp3 - buf:
                 new_tp = max(new_tp, 3)
         if sl_now and progress_tp == hit_tp and new_tp == 0:
             return "SL_HIT"                       # stopped out before any gain
@@ -506,7 +559,12 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
 
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
     detail = ""
-    result_line = f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>\n"
+    result_line = f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>"
+    ext_px, ext_pips = _documented_extreme(sig, payload)
+    if ext_px:
+        result_line += (f" · أعلى تلامس موثق: <code>{instruments.fmt_price(sig['symbol'], ext_px)}</code> "
+                        f"({ext_pips:+.1f} pips)")
+    result_line += "\n"
     if status == "RUNNING":
         detail = ("▎🚀 <b>عُبر سعر الدخول ببيانات سوق فعلية — الإشارة الآن قيد التنفيذ "
                   "وتُتابع لحظياً حتى الأهداف أو الوقف.</b>\n")
@@ -515,20 +573,26 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
             side = "أعلى الدخول" if live_px > float(sig["entry"]) else (
                 "عند الدخول" if live_px == float(sig["entry"]) else "أدنى الدخول")
             result_line = (f"▎📍 السعر عند التفعيل: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code>"
-                           f" · {side} · <b>{side_pips:+.1f} pips</b> من الدخول\n")
+                           f" · {side} · <b>{side_pips:+.1f} pips</b> من الدخول"
+                           + (f" · 💵 <b>{instruments.usd_move(sig['symbol'], side_pips, 0.01, px=live_px):+,.2f} $</b> بـ 0.01 لوت" if side_pips else "")
+                           + "\n")
     elif status == "CANCELLED":
         detail = ("▎⛔ لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
                   "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
         result_line = ""
     if status.startswith("TP"):
-        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>\n")
+        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>"
+                  f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01):+,.2f} $</b> لكل 0.01 لوت\n")
         if hit_tp == 1:
             detail += ("▎🛡 <b>إدارة الصفقة:</b> انقل وقف الخسارة إلى نقطة الدخول (حماية كاملة) "
                        "واُترك الجزء المتبقي يعمل نحو الهدفين التاليين.\n")
         if status == "TP3_HIT":
             detail += "▎👑 <b>صفقة مكتملة بكل الأهداف — أداء ممتاز.</b>\n"
     if status == "SL_HIT":
-        detail = "▎🛡 الخسارة محدودة بمقدار وقف الخسارة المخطط — التزم بإدارة المخاطر في الفكرة القادمة.\n"
+        usd_sl = instruments.usd_move(sig["symbol"], pips_result, 0.01)
+        detail = (f"▎🛡 الخسارة محدودة بمقدار وقف الخسارة المخطط"
+                  + (f" · 💵 <b>{usd_sl:+,.2f} $</b> لكل 0.01 لوت" if usd_sl else "")
+                  + " — التزم بإدارة المخاطر في الفكرة القادمة.\n")
     text = (
         f"📡 <b>تحديث الإشارة #{sig['id']}</b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
         f"<blockquote>"
@@ -553,7 +617,10 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         elif status == "CANCELLED":
             admin = f"⛔ إشارة #{sig['id']} {sig['symbol']}: أُلغيت — بلغ الهدف الأول دون لمس منطقة الدخول (فات الدخول)"
         elif pips_result:
-            admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} ({pips_result:+.1f} pips)"
+            usd_001 = instruments.usd_move(sig["symbol"], pips_result, 0.01)
+            usd_txt = f" · {usd_001:+,.2f} $ لكل 0.01 لوت" if usd_001 else ""
+            admin = (f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} "
+                     f"({pips_result:+.1f} pips{usd_txt})")
         else:
             admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)}"
         notes.append((config.ADMIN_ID, admin))

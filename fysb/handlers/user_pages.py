@@ -98,9 +98,15 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         state = anl.quota_state(uid)
         plan = subs.plan_for(uid)
+        is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         with db.conn() as c:
-            rows = c.execute("SELECT * FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()
+            if is_admin:
+                # v6.8.0 ADMIN ROYAL ANALYSIS: ANY market — every catalog row,
+                # open or closed, quota-free. The admin decides, not the plan.
+                rows = c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()
+            else:
+                rows = c.execute("SELECT * FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()
         if not rows:
             # LEGACY-DEAD CATALOG FALLBACK (picker-empty bug 2026-11-22): the
             # picker must never dead-end — offer the plan's own markets (the
@@ -109,27 +115,68 @@ async def user_page(q, action: str, uid: int, context) -> None:
             titles = {m: t for m, t, *_rest in SEED_MARKETS}
             rows = [{"symbol": m, "title": titles.get(m, m), "enabled": 1, "verified": 1}
                     for m in p_markets]
-        allowed_rows = [r for r in rows if r["symbol"].upper() in p_markets]
-        locked_rows = [r for r in rows if r["symbol"].upper() not in p_markets]
+        if is_admin:
+            allowed_rows, locked_rows = list(rows), []
+        else:
+            allowed_rows = [r for r in rows if r["symbol"].upper() in p_markets]
+            locked_rows = [r for r in rows if r["symbol"].upper() not in p_markets]
         if not allowed_rows and not locked_rows:
             await render(q, "لا توجد أسواق مفعلة بعد — تواصل مع الإدارة.", kb.user_nav(), bot)
             return
-        # markets available for the user's plan (luxury toggle list)
-        mkt_lines = "\n".join(f"▎✅ <b>{esc(r['symbol'])}</b> — {esc(r['title'])}" for r in allowed_rows) or "▎لا أسواق في باقتك الحالية"
-        lock_lines = "\n".join(f"▎🔒 {esc(r['symbol'])} — {esc(r['title'])}" for r in locked_rows[:4])
+
+        # v6.8.0 — LUXURY CATEGORY SECTIONS (المعادن · الفوركس · العملات الرقمية
+        # · المؤشرات · الأسهم): every market belongs to its royal section, with
+        # a real state marker (🟢 open trading / 🔵 verified analysis / ⚪ closed).
+        from fysb.theme import CATEGORY_AR, CATEGORY_ICON
+
+        def _state_icon(r) -> str:
+            en, ver = int(r.get("enabled") or 0), int(r.get("verified") or 0)
+            if en and ver:
+                return "🟢"
+            return "🔵" if ver else "⚪"
+
+        def _section_rows(section_rows: list[dict]) -> list[list]:
+            out: list[list] = []
+            for i in range(0, len(section_rows), 3):
+                chunk = section_rows[i:i + 3]
+                out.append([kb.btn(f"{_state_icon(r)} {esc(r['symbol'])}",
+                                   f"u:anlsym:{r['symbol']}")
+                            for r in chunk])
+            return out
+
+        sections: dict[str, list] = {}
+        for r in allowed_rows:
+            sections.setdefault((r.get("category") or instruments.spec(r["symbol"]).category),
+                                []).append(r)
+        ordered_sections = sorted(sections, key=lambda cat: -len(sections[cat]))
+
+        mkt_block = ""
+        for cat in ordered_sections:
+            icon = CATEGORY_ICON.get(cat, "🌐")
+            title = CATEGORY_AR.get(cat, cat)
+            mkt_block += f"\n{icon} <b><u>{title}</u></b>\n"
+            for r in sections[cat]:
+                mkt_block += f"▎{_state_icon(r)} <b>{esc(r['symbol'])}</b> — {esc(r['title'])}\n"
+        if not is_admin and locked_rows:
+            lock_lines = "\n".join(f"▎🔒 {esc(r['symbol'])} — {esc(r['title'])}" for r in locked_rows[:6])
+            mkt_block += (f"\n{ICON['lock']} <b>أسواق تنتظرك في الباقات الأعلى:</b>\n"
+                          f"<blockquote>{lock_lines}</blockquote>")
+
         body = (f"🔬 <b><u>التحليلات الاحترافية المؤسسية</u></b>\n"
                 f"<blockquote>"
-                f"▎حصة اليوم: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
-                f"▎💎 باقتك: <b>{esc(plan['title'])}</b>\n"
-                f"</blockquote>\n"
-                f"{ICON['globe']} <b>أسواق باقتك — اختر السوق للتحليل:</b>\n"
-                f"<blockquote>{mkt_lines}</blockquote>")
-        if lock_lines:
-            body += (f"\n{ICON['lock']} <b>أسواق تنتظرك في الباقات الأعلى:</b>\n"
-                     f"<blockquote>{lock_lines}</blockquote>")
-        mkt_rows = [[kb.btn(("🔬 " if r["symbol"].upper() in p_markets else "🔒 ") + esc(r["symbol"]),
-                            f"u:anlsym:{r['symbol']}" if r["symbol"].upper() in p_markets else "u:upgrade")
-                     for r in rows[i:i + 3]] for i in range(0, len(rows), 3)]
+                + (f"▎👑 لوحة الإدارة: <b>تحليل حر — أي سوق × أي منهجية × أي إطار، بلا حدود</b>\n"
+                   if is_admin else
+                   f"▎حصة اليوم: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+                   f"▎💎 باقتك: <b>{esc(plan['title'])}</b>\n")
+                + "</blockquote>\n"
+                + ("<blockquote>▎🟢 مفتوح للتداول والإشارات · 🔵 موثق للتحليل · ⚪ مغلق بانتظار الإدارة</blockquote>"
+                   if is_admin else "")
+                + f"{ICON['globe']} <b>{'كل أسواق العالم — بأقسامها الملكية:' if is_admin else 'أسواق باقتك — بأقسامها الملكية:'}</b>"
+                + mkt_block)
+
+        mkt_rows: list[list] = []
+        for cat in ordered_sections:
+            mkt_rows.extend(_section_rows(sections[cat]))
         await render(q, body, kb.user_nav(mkt_rows), bot)
 
     elif action == "upgrade":
@@ -150,8 +197,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         from fysb.services import analytics as anl
         symbol = action.split(":", 1)[1]
         plan = subs.plan_for(uid)
+        is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
-        if symbol.upper() not in p_markets:
+        if not is_admin and symbol.upper() not in p_markets:
             await _upsell(q, uid, bot, "هذا السوق غير مشمول في باقتك")
             return
         draft = {"symbol": symbol}
@@ -162,17 +210,22 @@ async def user_page(q, action: str, uid: int, context) -> None:
         # PICKER CAN NEVER BE EMPTY (user bug report 2026-11-22): plan codes are
         # the access authority — if the legacy catalog filter empties them, we
         # fall back to the plan's own timeframes. Boot self-heal fixes the root.
+        # v6.8.0: the ADMIN analyzes ANY market × ANY timeframe × ANY strategy —
+        # the plan gates apply to customers only.
         usable = [t for t in p_tfs if t in enabled] or p_tfs
+        if is_admin:
+            usable = sorted(enabled)
         if not usable:
             await _upsell(q, uid, bot, "باقتك الحالية لا تتضمن أطراً زمنية — رقّ باقتك للمتابعة")
             return
         body = (f"🌐 <b>السوق:</b> <b>{esc(symbol)}</b>\n"
-                f"⏱ <b>اختر الإطار الزمني</b> — الأطر المسموحة لباقتك ({esc(plan['title'])}):")
+                f"⏱ <b>اختر الإطار الزمني</b> — "
+                + ("كل الأطر متاحة لتحليل الإدارة:" if is_admin else f"الأطر المسموحة لباقتك ({esc(plan['title'])}):"))
         rows = [[kb.btn(f"⏱ {tf_name(t)}", f"u:anltf:{t}") for t in usable[i:i + 4]] for i in range(0, len(usable), 4)]
         if len(usable) > 1:
             rows.insert(0, [kb.btn("👑 تحليل متعدد الأطباق (الكل)", "u:anltf:ALL")])
         else:
-            body += "\n▎إطار واحد متاح لباقتك حالياً — اختره للمتابعة."
+            body += "\n▎إطار واحد متاح حالياً — اختره للمتابعة."
         await render(q, body, kb.user_nav(rows), bot)
 
     elif action.startswith("anltf:"):
@@ -183,8 +236,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         tf = action.split(":", 1)[1]
         plan = subs.plan_for(uid)
+        is_admin = uid == config.ADMIN_ID
         p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
-        if tf.upper() != "ALL" and tf.upper() not in p_tfs:
+        if not is_admin and tf.upper() != "ALL" and tf.upper() not in p_tfs:
             await _upsell(q, uid, bot, "هذا الإطار الزمني غير مشمول في باقتك")
             return
         draft["tf"] = tf.upper()
@@ -199,12 +253,17 @@ async def user_page(q, action: str, uid: int, context) -> None:
             from fysb.db import IMPLEMENTED_STRATEGIES
             usable = [s for s in p_strats if s != "ALL" and s in IMPLEMENTED_STRATEGIES] \
                 or [s for s in p_strats if s != "ALL"]
+        if is_admin:
+            # v6.8.0 — real strength order for the admin lens picker too
+            from fysb.services import strategy_stats
+            usable = strategy_stats.ordered_codes(sorted(enabled))
         if not usable:
             await _upsell(q, uid, bot, "باقتك الحالية لا تتضمن منهجيات — رقّ باقتك للمتابعة")
             return
         tf_txt = "تحليل متعدد الأطباق" if draft["tf"] == "ALL" else tf
         body = (f"⏱ <b>الإطار:</b> <b>{esc(tf_txt)}</b>\n"
-                f"🧠 <b>اختر المنهجية</b> — الاستراتيجيات المسموحة لباقتك ({esc(plan['title'])}):")
+                f"🧠 <b>اختر المنهجية</b> — "
+                + ("كل الاستراتيجيات المنفذة متاحة لتحليل الإدارة:" if is_admin else f"الاستراتيجيات المسموحة لباقتك ({esc(plan['title'])}):"))
         rows = [[kb.btn(strategy_name(s), f"u:anlstrat:{s}") for s in usable[i:i + 2]]
                 for i in range(0, len(usable), 2)]
         if len(usable) > 1:
@@ -219,16 +278,20 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         strategy = action.split(":", 1)[1]
         plan = subs.plan_for(uid)
+        is_admin = uid == config.ADMIN_ID
         p_strats = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
-        if strategy.upper() != "ALL" and strategy.upper() not in p_strats:
+        if not is_admin and strategy.upper() != "ALL" and strategy.upper() not in p_strats:
             await _upsell(q, uid, bot, "هذه المنهجية غير مشمولة في باقتك")
             return
         draft["strategy"] = strategy.upper()
         state = anl.quota_state(uid)
         tf_txt = "تحليل متعدد الأطباق (الأدنى ← الأعلى)" if draft["tf"] == "ALL" else tf_name(draft["tf"])
-        await render(q, f"🔬 <b>جارٍ توليد التحليل المؤسسي المركب</b>\n▎السوق: <b>{esc(draft['symbol'])}</b> · الإطار: <b>{esc(tf_txt)}</b>\n▎حصتك قبل التوليد: <b>{state['used']}/{state['quota']}</b>", None)
+        quota_line = ("👑 تحليل إدارة ملكي — بلا حدود" if is_admin
+                      else f"▎حصتك قبل التوليد: <b>{state['used']}/{state['quota']}</b>")
+        await render(q, f"🔬 <b>جارٍ توليد التحليل المؤسسي المركب</b>\n▎السوق: <b>{esc(draft['symbol'])}</b> · الإطار: <b>{esc(tf_txt)}</b>\n{quota_line}", None)
         res = await asyncio.to_thread(anl.run_analysis, uid, draft["symbol"], draft["tf"],
-                                      "", "", draft["strategy"])
+                                      "", "", draft["strategy"],
+                                      enforce_plan=not is_admin)
         context.user_data.pop("anl_draft", None)
         if not res.get("ok"):
             await render(q, f"⛔ {esc(res.get('error', 'تعذر التوليد'))}",
@@ -395,11 +458,22 @@ async def user_page(q, action: str, uid: int, context) -> None:
         with db.conn() as c:
             enabled = {r["code"] for r in c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1")}
         usable = [s for s in allowed if s in enabled and s != "ALL"] or [s for s in allowed if s != "ALL"]
+        # v6.8.0 — REAL GUARANTEED ORDERING: measured strength first (closed
+        # signals), then the documented baseline — never a cosmetic shuffle.
+        from fysb.services import strategy_stats
+        usable = strategy_stats.ordered_codes(usable)
+        board = {d["code"]: d["rank"] for d in strategy_stats.leaderboard()}
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        body = ("🧠 <b>اختر الاستراتيجية المفضلة — مرتبة من الأقوى للأفضل دائماً</b>\n\n" + strategy_stats.leaderboard_text())
         rows_kb = [[kb.btn("👑 الكل (حسب باقتك)", "u:setstrategy:ALL")]]
-        rows_kb += [[kb.btn(("✅ " if s == (u["strategy"] or "").upper() else "") + strategy_name(s), f"u:setstrategy:{s}") for s in usable[i:i + 2]]
+        def _label(s: str) -> str:
+            rank = board.get(s)
+            prefix = medals.get(rank, f"{rank}.") if rank else "" 
+            return ("✅ " if s == (u["strategy"] or "").upper() else "") + (prefix + " " if prefix else "") + strategy_name(s)
+        rows_kb += [[kb.btn(_label(s), f"u:setstrategy:{s}") for s in usable[i:i + 2]]
                     for i in range(0, len(usable), 2)]
         rows_kb.append([kb.btn("↩️ التفضيلات", "u:preferences")])
-        await render(q, "🧠 <b>اختر الاستراتيجية المفضلة</b>", kb.user_nav(rows_kb), bot)
+        await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("setstrategy:"):
         st = action.split(":", 1)[1]
@@ -450,8 +524,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
             "🤝 <b><u>دعوة الأصدقاء — بطاقة إحالات ملكية</u></b>",
             "",
             "<blockquote>"
-            "▎🔗 رابط الدعوة الخاص بك — انسخه وشاركه مع أصدقائك:\n"
-            f"▎<code>{esc(st['link'])}</code>"
+            "▎🔗 رابط الدعوة الخاص بك — رابط حقيقي قابل للنقر (أزرق)، والمحال يدخل عبره تلقائياً فيُحسب لك:\n"
+            f"▎<a href=\"{esc(st['link'])}\"><b>{esc(st['link'])}</b></a>\n"
+            f"▎🤖 معرف البوت: <code>{esc(ref.bot_username())}</code>\n"
+            "▎<i>اضغط الرابط ليفتح مباشرة — أو استخدم زر المشاركة بالأسفل.</i>\n"
             "</blockquote>",
             "",
             "📊 <b>تقدمك نحو الأهداف الملكية:</b>",
@@ -469,6 +545,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         ]
         rows_kb = [
             [InlineKeyboardButton("🟢 📤 شارك رابط الدعوة", url=share_link)],
+            [InlineKeyboardButton("🔗 فتح رابط الدعوة", url=st["link"])],
             [kb.btn("🟡 💎 الباقات", "u:plans")],
         ]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
@@ -520,6 +597,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
         body = [f"🧾 <b>طلب اشتراك #{pay_req}</b>",
                 f"💎 الباقة: <b>{esc(p['title'])}</b>",
                 f"💰 المبلغ: <b>{p['price']:g} {esc(p['currency'])}</b>"]
+        wallet = db.get_setting("usdt_wallet_trc20", "") or (method["account_ref"] if method else "")
+        is_usdt = bool(method and "USDT" in (method["title"] or "").upper() and wallet.strip())
         if method:
             body.append("\n💳 <b>وسيلة الدفع:</b> " + esc(method["title"]))
             if method["country"]:
@@ -528,8 +607,37 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 body.append("🔢 بيانات الحساب: <code>" + esc(method["account_ref"]) + "</code>")
             if method["instructions"]:
                 body.append("📝 التعليمات: " + esc(method["instructions"]))
-        body.append("\n📸 <b>أرسل صورة الإيصال هنا</b> — يبقى الاشتراك معلقاً حتى مراجعة الإدارة.")
-        await render(q, "\n".join(body), kb.user_nav([[kb.btn("🧾 مدفوعاتي", "u:payments")]]), bot)
+        if is_usdt:
+            # v6.8.0 — BLOCKCHAIN FAST LANE: pay USDT, submit the TXID, the
+            # platform verifies on-chain and opens the plan immediately; the
+            # verified TXID is then blocked from any second use.
+            body += [
+                "\n⛓ <b><u>التحقق البلوكيشن الفوري (USDT TRC20)</u></b>",
+                f"▎⛓ ارسل <b>{p['price']:g} USDT</b> على شبكة TRC20 إلى العنوان الملكي:",
+                f"▎<code>{esc(wallet.strip())}</code>",
+                "▎🔗 ثم انسخ <b>TXID</b> المعاملة من محفظتك واضغط الزر بالأسفل ولصقه —",
+                "▎⚡ يُتحقق من المعاملة على البلوكيشن مباشرة وتُفتح الباقة فوراً 100%،",
+                "▎🔒 ويُحجب الـ TXID نهائياً بعد قبوله فلا يصلح لتفعيل آخر.",
+            ]
+            rows_kb = [[kb.btn("⛓ إرسال TXID — تفعيل فوري بالتحقق البلوكيشن", f"u:usdttx:{pay_req}")],
+                       [kb.btn("🧾 مدفوعاتي", "u:payments")]]
+        else:
+            body.append("\n📸 <b>أرسل صورة الإيصال هنا</b> — يبقى الاشتراك معلقاً حتى مراجعة الإدارة.")
+            rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
+        await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("usdttxt:"):
+        # v6.8.0 — awaiting the user's on-chain TXID for instant verification
+        pid = _safe_int(action.split(":", 1)[1])
+        req = payments_service.get_request(pid) if pid else None
+        if not req or req["user_id"] != uid or req["status"] != "PENDING":
+            await render(q, "الطلب غير متاح للتحقق (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
+            return
+        context.user_data["awaiting_usdt_txid"] = pid
+        await render(q, "⛓ <b>أرسل الآن TXID المعاملة</b> (64 خانة سداسية عشرية)\n"
+                        "انسخها من محفظتك بعد إرسال <b>USDT TRC20</b> — سيُفحص البلوكيشن فوراً:\n"
+                        "التأكيد + العنوان الملكي + المبلغ، ثم تُفتح باقتك مباشرة.",
+                     kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
 
     elif action == "payments":
         with db.conn() as c:
@@ -617,7 +725,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
         from fysb.engines import demo as demo_engine
         v = float(action.split(":", 1)[1])
         demo_engine.set_risk_pct(uid, v)
-        await render(q, f"✅ أصبحت مخاطرتك لكل صفقة: <b>{v:g}%</b> — سيُحسب حجم اللوت تلقائياً منه (في وضع اللوت التلقائي).",
+        await render(q, f"✅ أصبحت مخاطرتك لكل صفقة: <b>{v:g}%</b> من رأس مالك — سيُحسب حجم اللوت تلقائياً "
+                        f"من رصيدك وهذه النسبة ومسافة الوقف (بدون إدخال لوت).\n"
+                        f"🤖 <b>التنفيذ التلقائي مُسلّح:</b> كل إشارة مؤهلة تُفتح في حسابك فوراً بهذا الحساب — "
+                        f"يمكنك تعطيله من زر التنفيذ التلقائي.",
                      kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
 
     elif action == "demolot":

@@ -43,20 +43,31 @@ def demo_settings(user_id: int) -> dict:
 
 
 def set_balance(user_id: int, amount: float) -> dict:
-    """User/admin sets the demo starting balance (resets open positions)."""
+    """User/admin sets the demo starting balance (resets open positions).
+
+    v6.8.0 — 100% auto-execution protocol: linking a demo account with a real
+    balance is an explicit intent to TRADE it. The account is therefore armed
+    for automatic execution immediately (auto_trade=1), and the lot stays in
+    risk-based auto mode unless the user explicitly chose a fixed one. No
+    third configuration step is required — balance in, robot on.
+    """
     acc = get_or_create_account(user_id)
     with db.tx() as c:
         c.execute("DELETE FROM demo_positions WHERE account_id=?", (acc["id"],))
         c.execute("UPDATE demo_accounts SET balance=?, peak_equity=? WHERE id=?",
                   (amount, amount, acc["id"]))
+        # arm the robot (never downgrade an explicit earlier opt-in)
+        c.execute("UPDATE demo_accounts SET auto_trade=1 WHERE id=? AND auto_trade=0", (acc["id"],))
     return {"balance": amount}
 
 
 def set_risk_pct(user_id: int, pct: float) -> None:
+    """Set risk % — and arm auto-execution (same 100%-auto protocol)."""
     acc = get_or_create_account(user_id)
     pct = max(0.1, min(5.0, pct))
     with db.conn() as c:
         c.execute("UPDATE demo_accounts SET risk_pct=? WHERE id=?", (pct, acc["id"]))
+        c.execute("UPDATE demo_accounts SET auto_trade=1 WHERE id=? AND auto_trade=0", (acc["id"],))
 
 
 def set_lot_mode(user_id: int, mode: str, fixed_lot: float | None = None) -> None:

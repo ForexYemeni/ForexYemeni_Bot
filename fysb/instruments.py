@@ -108,3 +108,23 @@ def rr_ratio(entry: float, sl: float, tp: float, direction: str) -> float:
     if direction.upper() == "SELL" and tp >= entry:
         return 0.0
     return reward / risk
+
+
+def usd_move(symbol: str, signed_pips: float, lots: float, row=None, px: float = 0.0) -> float:
+    """USD value of a SIGNED pips move at `lots` — quote-currency aware (v6.8.0).
+
+    XXXUSD instruments (metals, forex majors, crypto): the quote IS USD, so
+    value = move * contract * lots exactly.
+    USDXXX pairs (e.g. USDJPY): the quote is XXX — the conversion needs the
+    current price; without it the function returns 0.0 HONESTLY rather than
+    fabricating a dollar number. Never prints a made-up profit.
+    """
+    s = spec(symbol, row)
+    if s.pip_size <= 0 or s.contract_size <= 0:
+        return 0.0
+    sym = (s.symbol or "").upper()
+    if sym.startswith("USD") and len(sym) == 6 and sym.endswith(("JPY", "CHF", "CAD", "NOK", "SEK")):
+        if px <= 0:
+            return 0.0            # no quote available — honest zero, no invention
+        return (signed_pips * s.pip_size * s.contract_size * lots) / px
+    return signed_pips * s.pip_size * s.contract_size * lots

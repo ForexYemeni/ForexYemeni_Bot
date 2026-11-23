@@ -257,6 +257,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_core.admin_pm_toggle(q, uid, context, bot, int(arg))
     elif act == "pmdel":
         await admin_core.admin_pm_delete(q, uid, context, bot, int(arg))
+    elif act == "usdtwallet":
+        await admin_core.admin_usdt_wallet(q, uid, context, bot)
     # --- trading ---
     elif act == "signals":
         await admin_trading.admin_signals(q, uid, context, bot)

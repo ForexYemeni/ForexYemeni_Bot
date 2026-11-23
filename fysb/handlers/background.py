@@ -164,9 +164,23 @@ async def market_engine_loop(app):
                                 stats = await emit_to_users(dict(sig), bot_send)
                                 log.info("auto signal #%s emitted: %s", result["signal_id"], stats)
                                 try:
-                                    await app.bot.send_message(
-                                        config.ADMIN_ID,
-                                        f"📡 إشارة آلية جديدة #{result['signal_id']} ({m['symbol']}) — جودة {result.get('score')}/100")
+                                    # v6.8.0: the admin receives the REAL full card —
+                                    # the same royal board the users received, plus
+                                    # delivery counters. The teaser line «📡 إشارة
+                                    # آلية جديدة #N (SYM) — جودة X/100» is retired.
+                                    from fysb.ui.cards import render_signal_card
+                                    with db.conn() as c:
+                                        mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?",
+                                                         (m["symbol"],)).fetchone()
+                                    card = render_signal_card(
+                                        dict(sig), user_view=False,
+                                        row=dict(mrow) if mrow else None)
+                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{result['signal_id']}"
+                                             f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
+                                             f"▎📤 التسليم: {stats['sent']} مستلم"
+                                             f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
+                                             f" · فشل: {stats.get('failed', 0)}</blockquote>")
+                                    await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
                                 except Exception:
                                     pass
                     except Exception as e:

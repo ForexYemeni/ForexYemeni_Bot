@@ -61,13 +61,31 @@ class TestPickerSelfHeal(unittest.TestCase):
     def test_init_db_heals_dead_catalogs(self):
         _kill_catalogs()
         db.init_db()
+        # v6.8.0 GOLD-FIRST POLICY (owner instruction): the heal arms GOLD only;
+        # every other instrument ships CLOSED and stays in the catalog, verified
+        # per provider coverage, awaiting the admin's per-market enablement.
         with db.conn() as c:
             mkts = c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
+            total = c.execute("SELECT COUNT(*) n FROM market_catalog").fetchone()["n"]
+            gold = c.execute("SELECT enabled,verified FROM market_catalog WHERE symbol='XAUUSD'").fetchone()
+            others_open = c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1 AND symbol!='XAUUSD'").fetchone()["n"]
             tfs = c.execute("SELECT COUNT(*) n FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
             strats = c.execute("SELECT COUNT(*) n FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
-        self.assertGreaterEqual(mkts, 6, "seeded markets must be live after boot heal")
+        self.assertEqual(mkts, 1, "gold-first: exactly ONE market ships open")
+        self.assertGreaterEqual(total, len(db.SEED_MARKETS), "all seeded markets must exist in the catalog")
+        self.assertEqual(tuple(gold), (1, 1), "the open market must be XAUUSD itself")
+        self.assertEqual(others_open, 0, "no other market may open before the admin arms it")
         self.assertGreaterEqual(tfs, 8, "seeded timeframes must be live after boot heal")
-        self.assertGreaterEqual(strats, 7, "implemented strategies must be live after boot heal")
+        self.assertGreaterEqual(strats, len(db.IMPLEMENTED_STRATEGIES),
+                                "implemented strategies must be live after boot heal")
+
+    # ---- layer 1b: gold-first shipping policy (v6.8.0) -----------------------
+    def test_gold_first_policy(self):
+        with db.conn() as c:
+            sections = c.execute("SELECT category, COUNT(*) n FROM market_catalog GROUP BY category").fetchall()
+            cats = {r["category"]: r["n"] for r in sections}
+        for cat in ("metal", "forex", "crypto", "index", "stock"):
+            self.assertGreaterEqual(cats.get(cat, 0), 1, f"catalog must carry a {cat} section")
 
     # ---- layer 2: the exact user flow ---------------------------------------
     def test_anlsym_page_has_timeframe_buttons_on_dead_catalog(self):

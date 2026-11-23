@@ -63,6 +63,25 @@ def downtrend_candles(n: int = 80, base: float = 200.0, step: float = 0.35) -> l
     return make_candles(vals)
 
 
+def trend_pullback_setup(base: float = 2500.0, step: float = 2.0) -> list[dict]:
+    """TREND fixture: EMA stack up -> pullback to the EMA21 value zone -> strong resumption."""
+    vals = []
+    px = base
+    for i in range(50):                       # establish the uptrend stack
+        o, c = px, px + step
+        vals.append((o, c + step * 0.4, o - step * 0.25, c))
+        px = c
+    # pullback: 5 candles drifting down INTO the value zone (no structure break)
+    for i in range(5):
+        o = px
+        c = px - step * 1.1
+        vals.append((o, o + step * 0.2, c - step * 0.3, c))
+        px = c
+    # resumption: a strong bullish candle reclaiming the trend
+    vals.append((px, px + step * 2.4, px - step * 0.2, px + step * 2.2))
+    return make_candles(vals)
+
+
 def ict_bullish_sweep_setup(base: float = 3500.0) -> list[dict]:
     """Range with a sell-side sweep then displacement up leaving a bullish FVG."""
     vals = []

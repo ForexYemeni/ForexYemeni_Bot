@@ -290,6 +290,11 @@ ADD_COLUMNS = {
         "remind_1d": "INTEGER DEFAULT 0",
     },
     "payment_methods": {"country": "TEXT DEFAULT ''", "linked_plans": "TEXT DEFAULT ''"},
+    "payments": {
+        "txid": "TEXT DEFAULT ''",
+        "chain": "TEXT DEFAULT ''",
+        "confirmed_at": "TEXT DEFAULT ''",
+    },
     "tickets": {"type": "TEXT DEFAULT 'general'", "updated_at": "TEXT DEFAULT ''"},
     "market_catalog": {
         "pip_size": "REAL DEFAULT 0", "digits": "INTEGER DEFAULT 5",
@@ -377,13 +382,46 @@ DEFAULT_SETTINGS = {
 
 SEED_MARKETS = [
     # symbol, title, provider, category, pip_size, digits, contract, spread_pips
+    # --- المعادن (Metals) ---
     ("XAUUSD", "Gold / US Dollar", "XAU/USD", "metal", 0.1, 2, 100, 2.5),
+    ("XAGUSD", "Silver / US Dollar", "XAG/USD", "metal", 0.01, 3, 5000, 3.0),
+    ("XPTUSD", "Platinum / US Dollar", "XPT/USD", "metal", 0.1, 2, 50, 5.0),
+    # --- الفوركس (Forex majors) ---
     ("EURUSD", "Euro / US Dollar", "EUR/USD", "forex", 0.0001, 5, 100000, 1.0),
     ("GBPUSD", "Pound / US Dollar", "GBP/USD", "forex", 0.0001, 5, 100000, 1.5),
     ("USDJPY", "US Dollar / Yen", "USD/JPY", "forex", 0.01, 3, 100000, 1.2),
+    ("USDCHF", "US Dollar / Franc", "USD/CHF", "forex", 0.0001, 5, 100000, 1.4),
+    ("AUDUSD", "Aussie / US Dollar", "AUD/USD", "forex", 0.0001, 5, 100000, 1.3),
+    ("USDCAD", "US Dollar / Loonie", "USD/CAD", "forex", 0.0001, 5, 100000, 1.6),
+    ("NZDUSD", "Kiwi / US Dollar", "NZD/USD", "forex", 0.0001, 5, 100000, 1.8),
+    # --- التقاطعات (Forex crosses) ---
+    ("EURJPY", "Euro / Yen", "EUR/JPY", "forex", 0.01, 3, 100000, 1.8),
+    ("GBPJPY", "Pound / Yen", "GBP/JPY", "forex", 0.01, 3, 100000, 2.5),
+    ("EURGBP", "Euro / Pound", "EUR/GBP", "forex", 0.0001, 5, 100000, 1.5),
+    # --- العملات الرقمية (Crypto) ---
     ("BTCUSD", "Bitcoin / US Dollar", "BTC/USD", "crypto", 1.0, 2, 1, 15),
     ("ETHUSD", "Ether / US Dollar", "ETH/USD", "crypto", 0.1, 2, 1, 1.5),
+    ("SOLUSD", "Solana / US Dollar", "SOL/USD", "crypto", 0.01, 3, 1, 0.5),
+    ("XRPUSD", "Ripple / US Dollar", "XRP/USD", "crypto", 0.0001, 4, 1, 0.02),
+    # --- المؤشرات (Indices) ---
+    ("US30", "Dow Jones 30", "DJI", "index", 1.0, 2, 1, 3.0),
+    ("NAS100", "Nasdaq 100", "NDX", "index", 1.0, 2, 1, 2.0),
+    ("SPX500", "S&P 500", "SPX", "index", 1.0, 2, 1, 1.5),
+    ("GER40", "DAX 40", "DAX", "index", 1.0, 2, 1, 2.5),
+    ("UK100", "FTSE 100", "FTSE", "index", 1.0, 2, 1, 2.5),
+    # --- الأسهم (Stocks) ---
+    ("AAPL", "Apple Inc.", "AAPL", "stock", 0.01, 2, 1, 1.0),
+    ("TSLA", "Tesla Inc.", "TSLA", "stock", 0.01, 2, 1, 2.0),
+    ("NVDA", "NVIDIA Corp.", "NVDA", "stock", 0.01, 2, 1, 1.5),
+    ("MSFT", "Microsoft Corp.", "MSFT", "stock", 0.01, 2, 1, 1.0),
+    ("AMZN", "Amazon Inc.", "AMZN", "stock", 0.01, 2, 1, 1.2),
 ]
+
+# v6.8.0 — GOLD-FIRST shipping policy: verified provider coverage exists for
+# metals/forex/crypto (the FX-grade provider chain); indices/stocks need the
+# admin's explicit Verify action per symbol (data contracts differ).
+SEED_VERIFIED_CATEGORIES = {"metal", "forex", "crypto"}
+GOLD_DEFAULT_SYMBOL = "XAUUSD"
 SEED_TIMEFRAMES = [("M1", "1min"), ("M5", "5min"), ("M15", "15min"), ("M30", "30min"),
                    ("H1", "1h"), ("H4", "4h"), ("D1", "1day"), ("W1", "1week")]
 
@@ -400,7 +438,8 @@ SEED_PLANS = [
 DEFAULT_ANALYSES_QUOTA = {"FREE": 3, "PRO": 10, "VIP": 30}
 
 # Strategy codes implemented + covered by the automated test-suite.
-IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP", "SILVER_BULLET"]
+IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
+                          "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU"]
 
 SEED_MODES = [
     ("A", "SIGNALS ONLY", "تحليل/نشر التوصيات دون تنفيذ صفقات.", 1, 1, "signals"),
@@ -551,9 +590,10 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("AMD", "Power of Three", "تراكم · تلاعب · توزيع على نطاق الافتتاح (Judas Swing)."),
                 ("TURTLE_SOUP", "Turtle Soup", "فشل كسر قمة/قمة 20 شمعة وانعكاس مضاد (اصطياد السيولة)."),
                 ("SILVER_BULLET", "Silver Bullet", "نوافذ ICT الزمنية (لندن/نيويورك) + استمرار FVG."),
+                ("FIBONACCI", "Fibonacci Golden Pocket", "مستوى ارتداد 61.8–78.6% من الموجة الدافعية مع بنية سليمة (منفذة واختبارة آلياً)."),
+                ("TREND", "Trend Following", "ترتيب المتوسطات 9/21/50 + ارتداد إلى قيمة EMA21 واستئناف الاتجاه (منفذة واختبارة آلياً)."),
+                ("ICHIMOKU", "Ichimoku Kinko Hyo", "نظام السحابة الياباني: كسر الكومو + تقاطع تينكان/كيجون + سحابة مستقبلية مؤكدة (منفذة واختبارة آلياً)."),
                 ("WYCKOFF", "Wyckoff", "منهج وايكوف؛ غير معتمد آلياً بعد — مغلق."),
-                ("FIBONACCI", "Fibonacci", "أداة مستويات مساعدة؛ غير معتمد آلياً بعد — مغلق."),
-                ("TREND", "Trend Following", "اتباع الاتجاه؛ غير معتمد آلياً بعد — مغلق."),
             ]:
                 c.execute("INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,0,0,?,?,60)",
                           (code, title, desc, config.now(), config.now()))
@@ -565,15 +605,17 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             # INFRASTRUCTURE SELF-HEAL (picker-empty bug, seen live 2026-11-22):
             # markets & timeframes were seeded disabled and nothing ever enabled
             # them, so the user analytics flow rendered the header with ZERO
-            # timeframe buttons. Every seeded market/timeframe maps to a real,
-            # working provider — they are infrastructure, not strategy claims,
-            # and have no admin toggle UI. User access stays scoped by the PLAN
-            # (per-package markets/timeframes), so healing on every boot can
-            # never leak extra content to a user. Runs AFTER every seed INSERT
-            # so it heals both fresh databases and legacy disabled rows.
-            for sym, _t, _p, _cat, _pip, _dig, _con, _sp in SEED_MARKETS:
-                c.execute("UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
-                          (config.now(), sym))
+            # timeframe buttons. v6.8.0 GOLD-FIRST POLICY (owner's explicit
+            # instruction): GOLD ships OPEN and every other instrument ships
+            # CLOSED — the heal arms gold only; admins open the rest per-market
+            # from the markets center after verifying each provider. Verified
+            # flags reflect real provider coverage (metal/forex/crypto = the
+            # proven FX-grade chain; indices/stocks require per-symbol verify).
+            for sym, _t, _p, cat, _pip, _dig, _con, _sp in SEED_MARKETS:
+                verified = 1 if cat in SEED_VERIFIED_CATEGORIES else 0
+                enabled = 1 if sym == GOLD_DEFAULT_SYMBOL else 0
+                c.execute("UPDATE market_catalog SET enabled=?, verified=?, updated_at=? WHERE symbol=?",
+                          (enabled, verified, config.now(), sym))
             for code, _interval in SEED_TIMEFRAMES:
                 c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
                           (config.now(), code))

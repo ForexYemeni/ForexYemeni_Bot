@@ -12,6 +12,12 @@ from fysb.handlers.background import (SingleInstanceLock, post_init, post_shutdo
 
 TASKS_REF = []
 
+# First line of every boot log — proves EXACTLY which build the container runs.
+# (2026-11-23 bot-hosting incident: the panel kept crash-looping on v6.7.1 for
+# hours while v6.7.2 sat on GitHub because the container never pulled it; a
+# version banner before ANY database work ends all doubt in one glance.)
+log.info("BOOT: %s v%s — this exact build is running", config.BRAND, config.VERSION)
+
 
 def preflight() -> bool:
     """Validate environment + database before touching Telegram."""

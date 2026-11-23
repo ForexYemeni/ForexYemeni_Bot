@@ -4,6 +4,8 @@ Single-instance protected (lock file), graceful shutdown, per-loop error
 isolation: one failing loop never kills the bot.
 """
 import asyncio
+import os
+from pathlib import Path
 
 from fysb import config, db
 from fysb.config import log
@@ -11,23 +13,83 @@ from fysb.config import log
 LOCK_FILE = config.BASE_DIR / "fysb.lock"
 
 
+def _proc_start_tick(pid: int) -> str:
+    """Linux: field 22 of /proc/<pid>/stat — jiffies at process start.
+
+    Identifies a *specific process incarnation*, immune to PID reuse. In
+    short-lived containers (bot-hosting.net, Pterodactyl) a restarted process
+    frequently gets the SAME low PID as the dead one — a bare PID check then
+    locks the bot out of its own stale lock. The start tick disambiguates.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
+        tail = raw[raw.rfind(")") + 2:].split()
+        return tail[19] if len(tail) > 19 else ""
+    except Exception:
+        return ""
+
+
+def _is_genuine_second_instance(pid: int) -> bool:
+    """True only when `pid` is a live python run of main.py FROM this folder.
+
+    Used for legacy locks (plain PID, no start tick): a reused PID belonging
+    to any other program (pip, daemon shell, container init) must NOT block.
+    """
+    if Path("/proc").is_dir():
+        try:
+            cwd = Path(f"/proc/{pid}/cwd").resolve()
+            if cwd != Path(config.BASE_DIR).resolve():
+                return False
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
+            return "main.py" in cmd
+        except Exception:
+            return False  # unreadable → cannot prove a genuine twin → take over
+    return True  # non-Linux (no /proc): keep the conservative legacy behaviour
+
+
+def _lock_identity_alive(pid: int, boot_tick: str) -> bool:
+    """Is the lock held by a genuinely running process incarnation?
+
+    Within one boot, /proc start ticks grow monotonically — so a matching tick
+    proves the SAME incarnation is alive; any mismatch proves the lock belongs
+    to a dead predecessor whose PID slot got reused (the bot-hosting bug).
+    """
+    my_tick = _proc_start_tick(os.getpid())
+    if boot_tick:
+        if pid == os.getpid():
+            return bool(my_tick) and boot_tick == my_tick
+        return _pid_alive(pid) and _proc_start_tick(pid) == boot_tick
+    # Legacy plain-PID lock (pre-6.6.3): the new format always carries a tick,
+    # so a tick-less lock naming OUR pid can only be a dead predecessor.
+    if pid == os.getpid():
+        return False
+    if not _pid_alive(pid):
+        return False
+    return _is_genuine_second_instance(pid)
+
+
 class SingleInstanceLock:
-    """Cross-platform single-instance guard (Termux-safe, no flock dependency)."""
+    """Cross-platform single-instance guard, restart-proof.
+
+    Lock content: `<pid>:<start-tick>` (tick empty where /proc is absent).
+    On acquire, ANY of these means "stale — take over silently":
+      PID equals ours · PID dead · start-tick mismatch (PID reused) ·
+      legacy lock whose PID is not a main.py run from this folder.
+    Only a genuine live second instance from the SAME folder blocks.
+    """
 
     def __init__(self):
         self.acquired = False
 
     def acquire(self) -> bool:
-        import os
         try:
             if LOCK_FILE.exists():
-                pid_text = LOCK_FILE.read_text().strip()
-                if pid_text.isdigit() and _pid_alive(int(pid_text)):
+                if not self._holder_is_live():
+                    LOCK_FILE.unlink(missing_ok=True)
+                else:
                     return False
-                # stale lock from a crashed run — take over
-                LOCK_FILE.unlink()
             fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
+            os.write(fd, f"{os.getpid()}:{_proc_start_tick(os.getpid())}".encode())
             os.close(fd)
             self.acquired = True
             return True
@@ -38,17 +100,30 @@ class SingleInstanceLock:
         except Exception:
             return True
 
+    def _holder_is_live(self) -> bool:
+        try:
+            text = LOCK_FILE.read_text().strip()
+        except OSError:
+            return False  # unreadable lock — treat as stale
+        parts = text.split(":")
+        pid_text = parts[0] if parts else ""
+        if not pid_text.isdigit():
+            return False  # garbage lock — stale
+        boot_tick = parts[1] if len(parts) > 1 else ""
+        return _lock_identity_alive(int(pid_text), boot_tick)
+
     def release(self):
         try:
             if self.acquired:
                 LOCK_FILE.unlink(missing_ok=True)
         except OSError:
             pass
+        finally:
+            self.acquired = False
 
 
 def _pid_alive(pid: int) -> bool:
     try:
-        import os
         os.kill(pid, 0)
         return True
     except (ProcessLookupError, ValueError):

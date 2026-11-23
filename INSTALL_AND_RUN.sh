@@ -230,12 +230,25 @@ python -m fysb.preflight || fail "Preflight لم يجتز — صحّح المل�
 step "9/9 · منع التشغيل المزدوج ثم التشغيل"
 # =============================================================================
 if [ -f fysb.lock ]; then
-  LOCKPID="$(tr -dc '0-9' < fysb.lock 2>/dev/null)"
+  LOCKPID="$(cut -d: -f1 fysb.lock 2>/dev/null | tr -dc '0-9')"
+  GENUINE=0
   if [ -n "$LOCKPID" ] && kill -0 "$LOCKPID" 2>/dev/null; then
+    # PID may have been reused by an unrelated process after a restart —
+    # block only if it is really a main.py run from THIS folder.
+    if [ -r "/proc/$LOCKPID/cmdline" ]; then
+      if grep -q "main.py" "/proc/$LOCKPID/cmdline" 2>/dev/null \
+         && [ "$(readlink -f "/proc/$LOCKPID/cwd" 2>/dev/null)" = "$(pwd)" ]; then
+        GENUINE=1
+      fi
+    else
+      GENUINE=1
+    fi
+  fi
+  if [ "$GENUINE" = "1" ]; then
     fail "يوجد نسخة أخرى تعمل الآن من هذا المجلد (PID $LOCKPID). أوقفها أولاً: kill $LOCKPID ثم أعد التشغيل."
   else
     rm -f fysb.lock
-    warn "قفل قديم من عملية ميتة — أُزيل بأمان"
+    warn "قفل قديم من عملية ميتة أو معاد استخدام رقم PID الخاص بها — أُزيل بأمان"
   fi
 fi
 warn "ملاحظة: إن كان البوت يعمل على جهاز/سيرفر آخر بنفس BOT_TOKEN فسيكتشفه البوت عند الإقلاع ويخبرك بدقة."

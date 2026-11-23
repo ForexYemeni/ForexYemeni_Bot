@@ -241,6 +241,20 @@ CREATE TABLE IF NOT EXISTS broadcast_channels(
   strategies TEXT DEFAULT 'ALL', interval_minutes INTEGER DEFAULT 60,
   last_sent TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS signal_watchers(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL, timeframe TEXT NOT NULL, strategy TEXT NOT NULL,
+  style TEXT DEFAULT '', interval_minutes INTEGER DEFAULT 30,
+  status TEXT DEFAULT 'ACTIVE', next_run TEXT NOT NULL,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_note TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS signal_watchers(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL, timeframe TEXT NOT NULL, strategy TEXT NOT NULL,
+  style TEXT DEFAULT '', interval_minutes INTEGER DEFAULT 30,
+  status TEXT DEFAULT 'ACTIVE', next_run TEXT NOT NULL,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_note TEXT DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS ref_campaigns(
   id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL,
   title TEXT NOT NULL, owner_id INTEGER NOT NULL DEFAULT 0,
@@ -339,6 +353,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_open ON signals(status, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_ref_campaign ON referrals(campaign_id, converted)",
     "CREATE INDEX IF NOT EXISTS idx_ref_invitee ON referrals(invitee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_watchers_due ON signal_watchers(status, next_run)",
 ]
 
 DEFAULT_SETTINGS = {
@@ -439,7 +454,29 @@ DEFAULT_ANALYSES_QUOTA = {"FREE": 3, "PRO": 10, "VIP": 30}
 
 # Strategy codes implemented + covered by the automated test-suite.
 IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
-                          "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU"]
+                          "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU",
+                          "CLASSIC", "SK"]
+
+# v6.10.0 — LUXURY PLAN DEFAULTS (owner demand: «اضبط انت اعدادات الباقات بشكل
+# فاخر جداً»). A one-time migration stamps FREE/PRO/VIP with these exact
+# values, and the old boot-time force-merge of implemented strategies into
+# every plan is retired — the tiering stays EXACTLY as designed.
+LUXURY_PLANS_V6100 = {
+    "FREE": {"title": "Free", "price": 0.0, "duration_days": 0, "min_score": 80,
+             "max_signals_per_day": 2, "max_analyses_per_day": 3,
+             "markets": "XAUUSD", "timeframes": "M15",
+             "strategies": "ICT,PRICE_ACTION", "enabled": 1},
+    "PRO": {"title": "Pro", "price": 19.0, "duration_days": 30, "min_score": 70,
+            "max_signals_per_day": 5, "max_analyses_per_day": 10,
+            "markets": "XAUUSD,EURUSD,GBPUSD", "timeframes": "M15,M30,H1,H4",
+            "strategies": "ICT,SMC,PRICE_ACTION,CRT,AMD", "enabled": 1},
+    "VIP": {"title": "VIP", "price": 49.0, "duration_days": 30, "min_score": 60,
+            "max_signals_per_day": 12, "max_analyses_per_day": 30,
+            "markets": "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,BTCUSD,ETHUSD",
+            "timeframes": "M5,M15,M30,H1,H4,D1",
+            "strategies": ",".join(IMPLEMENTED_STRATEGIES), "enabled": 1},
+}
+PLANS_LUXURY_FLAG = "plans_luxury_v6100_applied"
 
 SEED_MODES = [
     ("A", "SIGNALS ONLY", "تحليل/نشر التوصيات دون تنفيذ صفقات.", 1, 1, "signals"),
@@ -593,6 +630,8 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("FIBONACCI", "Fibonacci Golden Pocket", "مستوى ارتداد 61.8–78.6% من الموجة الدافعية مع بنية سليمة (منفذة واختبارة آلياً)."),
                 ("TREND", "Trend Following", "ترتيب المتوسطات 9/21/50 + ارتداد إلى قيمة EMA21 واستئناف الاتجاه (منفذة واختبارة آلياً)."),
                 ("ICHIMOKU", "Ichimoku Kinko Hyo", "نظام السحابة الياباني: كسر الكومو + تقاطع تينكان/كيجون + سحابة مستقبلية مؤكدة (منفذة واختبارة آلياً)."),
+                ("CLASSIC", "CLASSIC", "التحليل الكلاسيكي: اتجاه EMA50 + مستوى أفقي حقيقي من القمم والقيعان + تأكيد شمعة ابتلاع/دبوس (منفذة واختبارة آلياً)."),
+                ("SK", "SK", "محرك سكالبينج سريع: مستوى مفتاحي 12 شمعة يُكسر بإغلاق مؤكد + زخم RSI + اتجاه EMA9/21 (منفذة واختبارة آلياً)."),
                 ("WYCKOFF", "Wyckoff", "منهج وايكوف؛ غير معتمد آلياً بعد — مغلق."),
                 # --- v6.8.1: مجموعات الاستراتيجيات العالمية الكاملة (كل مدرسة، كلها) ---
                 # كل صف يُولد مغلقاً وغير مختبر (حوكمة صادقة) حتى يُنفذ ويُختبر آلياً.
@@ -671,15 +710,14 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             for code, _interval in SEED_TIMEFRAMES:
                 c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
                           (config.now(), code))
-            # Additive refresh: every plan keeps its codes and GAINS the newly
-            # implemented ones (never removes anything).
+            # v6.10.0 — RETIRED: the old force-merge of ALL implemented strategies
+            # into every plan destroyed the luxury tiering (FREE ended up with 12
+            # methodologies). Now: only plans whose strategies are EMPTY get the
+            # implemented baseline filled in — admin-set lists are never touched.
             for row in c.execute("SELECT code, strategies FROM plans").fetchall():
-                have = {x.strip().upper() for x in str(row["strategies"] or "").split(",") if x.strip()}
-                merged = have | set(IMPLEMENTED_STRATEGIES)
-                tail = ",".join(sorted(x for x in merged if x not in IMPLEMENTED_STRATEGIES))
-                merged_str = ",".join(IMPLEMENTED_STRATEGIES) + (("," + tail) if tail else "")
-                if merged_str != str(row["strategies"] or ""):
-                    c.execute("UPDATE plans SET strategies=? WHERE code=?", (merged_str, row["code"]))
+                if not (row["strategies"] or "").strip():
+                    c.execute("UPDATE plans SET strategies=? WHERE code=?",
+                              (",".join(IMPLEMENTED_STRATEGIES), row["code"]))
             c.execute("INSERT OR IGNORE INTO support_config(id,updated_at) VALUES(1,?)", (config.now(),))
             # Referral engine: the default royal campaign matches the launch
             # target (invite 50 → at least 5 real subscribers). INSERT OR
@@ -694,6 +732,17 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
                       "ON CONFLICT(code) DO NOTHING", SEED_PLANS[2])
             c.execute("UPDATE plans SET max_signals_per_day=2 WHERE code='FREE' AND max_signals_per_day IS NOT 2 AND max_signals_per_day>2")
+            # v6.10.0 — one-time LUXURY plan stamping (owner-set tiering). Runs
+            # AFTER the seed inserts (a fresh DB has no plan rows before them)
+            # and exactly ONCE — afterwards the admin's own edits are never
+            # overwritten by boots.
+            if get_setting(PLANS_LUXURY_FLAG, "") != "1":
+                for code, fields in LUXURY_PLANS_V6100.items():
+                    sets = ", ".join(f"{k}=?" for k in fields)
+                    c.execute(f"UPDATE plans SET {sets} WHERE code=?",
+                              (*fields.values(), code))
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')",
+                          (PLANS_LUXURY_FLAG,))
             # Analyses quota defaults (additive — only fills unset/zero values)
             for code, quota in DEFAULT_ANALYSES_QUOTA.items():
                 c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=? AND (max_analyses_per_day IS NULL OR max_analyses_per_day=0)",

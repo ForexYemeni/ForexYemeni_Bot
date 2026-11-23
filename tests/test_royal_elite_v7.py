@@ -220,8 +220,8 @@ class TestPlanGating(unittest.TestCase):
         uid, text = sent[0]
         self.assertEqual(uid, self.uid)
         self.assertIn("خطتك الشخصية", text)   # personal risk/profit block
-        self.assertIn("حركة السعر", text)      # Arabic strategy name
-        self.assertNotIn("PRICE_ACTION", text) # no machine codes
+        # v6.10.0 owner rule: strategy names are the SHORT ROYAL CODES everywhere
+        self.assertIn("PRICE_ACTION", text)
 
     def test_preference_all_follows_plan(self):
         users_service.set_preference(self.uid, "market", "", {"market"})
@@ -495,9 +495,13 @@ class TestAdminTextFSM(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestArabicNames(unittest.TestCase):
     def test_strategy_names(self):
-        self.assertEqual(strategy_name("PRICE_ACTION"), "حركة السعر")
-        self.assertEqual(strategy_name("ICT"), "آي سي تي المؤسسية")
-        self.assertEqual(strategy_name("SILVER_BULLET"), "الرصاصة الفضية")
+        # v6.10.0 owner rule: SHORT CODES everywhere (ICT, SMC, CRT...) —
+        # never long Arabic writings.
+        self.assertEqual(strategy_name("PRICE_ACTION"), "PRICE_ACTION")
+        self.assertEqual(strategy_name("SMC"), "SMC")
+        self.assertEqual(strategy_name("sk"), "SK")
+        self.assertEqual(strategy_name("ICT"), "ICT")
+        self.assertEqual(strategy_name("SILVER_BULLET"), "SILVER_BULLET")
 
     def test_status_names(self):
         self.assertIn("نشطة", status_ar("ACTIVE"))
@@ -508,12 +512,13 @@ class TestArabicNames(unittest.TestCase):
         self.assertEqual(tf_name("M15"), "15 دقيقة")
         self.assertEqual(tf_name("H4"), "4 ساعات")
 
-    def test_signal_card_fully_arabic(self):
+    def test_signal_card_codes_contract(self):
         from fysb.ui import cards
         text = cards.render_signal_card(_sig_row(), user_view=True)
-        for banned in ("PRICE_ACTION", "TWELVEDATA", " SELL ", "CANCELLED", "EXPIRED"):
+        for banned in ("TWELVEDATA", " SELL ", "CANCELLED", "EXPIRED"):
             self.assertNotIn(banned, text)
-        self.assertIn("حركة السعر", text)
+        # v6.10.0 owner rule: the SHORT ROYAL CODE is the strategy name.
+        self.assertIn("PRICE_ACTION", text)
         self.assertIn("15 دقيقة", text)
         self.assertIn("بيع", text)
 

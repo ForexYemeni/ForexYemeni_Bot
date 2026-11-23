@@ -177,6 +177,9 @@ class TestAnalytics(unittest.TestCase):
         db.set_setting("analytics_enabled", "1")
         with db.conn() as c:
             c.execute("UPDATE plans SET max_analyses_per_day=2 WHERE code='FREE'")
+            # v6.10.0 luxury tiering: FREE carries ICT,PRICE_ACTION — the test
+            # also uses SMC, so grant it explicitly (the plan is the gate).
+            c.execute("UPDATE plans SET strategies='ICT,SMC,CRT' WHERE code='FREE'")
         state = anl.quota_state(USER)
         self.assertGreaterEqual(state["quota"], 1)
         # consume both slots with mocked provider

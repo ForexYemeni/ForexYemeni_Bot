@@ -57,10 +57,15 @@ def _allowed_strategies(symbol: str, timeframe: str) -> list[str]:
     return codes or ["PRICE_ACTION"]
 
 
-def generate_signal(symbol: str, timeframe: str = "", force: bool = False) -> dict:
+def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
+                    only_strategies: list[str] | None = None) -> dict:
     """Run the full pipeline for one instrument. Returns a result dict:
     {"status": "SIGNAL_CREATED"|"NO_SETUP"|"REJECTED"|"ERROR"|"DUPLICATE",
-     "signal_id": int|None, "reason": str, "score": int|None}"""
+     "signal_id": int|None, "reason": str, "score": int|None}
+
+    v6.10.0 — only_strategies (from «إشارة الآن»): restrict the run to the
+    CHOSEN methodology (still intersected with enabled+verified+implemented —
+    a closed engine can never be summoned by request)."""
     entry_tf = timeframe or _resolve_tfs()[0]
     bias_tf = _resolve_tfs()[1]
     api_key = config.market_api_key()
@@ -110,8 +115,16 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False) -> di
     ctx = Ctx(symbol=symbol, timeframe=entry_tf, candles=candles,
               bias_candles=bias_candles, market_row=_market_row(symbol))
 
-    # 8: strategies
-    results = evaluate_all(ctx, _allowed_strategies(symbol, entry_tf))
+    # 8: strategies (v6.10.0: «إشارة الآن» pins the chosen methodology)
+    allowed = _allowed_strategies(symbol, entry_tf)
+    if only_strategies:
+        wanted = {s.strip().upper() for s in only_strategies if s.strip()}
+        allowed = [c for c in allowed if c in wanted]
+        if not allowed:
+            _log_run(symbol, entry_tf, "STRATEGY_NOT_LIVE", f"requested {sorted(wanted)} is not enabled+verified+implemented")
+            return {"status": "REJECTED", "signal_id": None,
+                    "reason": "المنهجية المطلوبة غير مفعلة/موثقة حالياً", "score": None}
+    results = evaluate_all(ctx, allowed)
     if not results:
         _log_run(symbol, entry_tf, "NO_SETUP", "no strategy conditions met; no signal manufactured")
         return {"status": "NO_SETUP", "signal_id": None, "reason": "no qualifying setup", "score": None}
@@ -188,6 +201,87 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False) -> di
     _log_run(symbol, entry_tf, "SIGNAL_CREATED",
              f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}")
     return {"status": "SIGNAL_CREATED", "signal_id": sid, "reason": best.summary(), "score": best.score}
+
+
+def opposite_close_advisory_targets(symbol: str, direction: str, exclude_sid: int) -> list[dict]:
+    """Open signals on the SAME symbol in the OPPOSITE direction (the trades a
+    new signal would fight against). Pure DB — unit-testable."""
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT * FROM signals
+               WHERE symbol=? AND direction!=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+               AND id!=? ORDER BY id DESC""",
+            (symbol, direction, exclude_sid)).fetchall()]
+    return rows
+
+
+async def opposite_close_advisory(sig: dict, bot_send) -> int:
+    """v6.10.0 owner report 6 — the direction-flip protection.
+
+    When a NEW signal is about to publish and an OPEN signal on the same
+    symbol runs in the OPPOSITE direction, every holder of the old trade gets
+    the royal close advisory FIRST: the documented profit so far (real price,
+    signed pips, USD at 0.01 lot), the verdict «the trade is WINNING so far»,
+    and the instruction to close/secure before the new signal arrives.
+    Returns the number of advisory messages sent."""
+    import asyncio as _asyncio
+    from fysb import instruments as _inst
+    from fysb.engines import market_data as _md
+    from fysb.engines.tracker import drift_pips, seq_of
+    from fysb.theme import dir_badge, esc, status_ar, tf_name
+    olds = opposite_close_advisory_targets(sig["symbol"], sig["direction"], int(sig.get("id") or 0))
+    if not olds:
+        return 0
+    live_px = 0.0
+    try:
+        quote = await _asyncio.to_thread(_md.fetch_price, sig["symbol"])
+        live_px = float((quote or {}).get("price") or 0.0)
+    except Exception:
+        live_px = 0.0
+    sent = 0
+    for old in olds:
+        try:
+            entry = float(old["entry"])
+            drift = drift_pips(old["symbol"], old["direction"], entry, live_px) if live_px else float(old.get("live_px") or 0.0)
+            usd = _inst.usd_move(old["symbol"], drift, 0.01, px=live_px or 0.0) if drift else 0.0
+            hit = int(old.get("hit_tp") or 0)
+            hit_txt = (" · تحقق الهدف الأول ✅" if hit >= 1 else
+                       " · تحقق هدفان ✅✅" if hit >= 2 else
+                       " · الصفقة في صالحك حتى الآن ✅")
+            with db.conn() as c:
+                uids = [r["user_id"] for r in c.execute(
+                    "SELECT user_id FROM signal_deliveries WHERE signal_id=? AND user_id>0", (old["id"],))]
+            if not uids:
+                continue  # nobody actually holds this old trade — nothing to advise
+            text = (
+                f"🔄 <b><u>تنبيه إغلاق صفقة متعاكسة — الإشارة #{seq_of(old['id'])}</u></b> — {esc(old['symbol'])} {dir_badge(old['direction'])} ⏱ {tf_name(old['timeframe'])}\n"
+                "<blockquote>"
+                f"▎📌 الحالة الحالية: <b>{status_ar(old['status'])}</b>{hit_txt}\n"
+                + (f"▎📍 السعر الآن: <code>{_inst.fmt_price(old['symbol'], live_px)}</code> · "
+                   f"<b>{drift:+.1f} نقطة ({drift:+.0f} pips)</b> من الدخول\n" if live_px else "")
+                + f"▎💵 <b>الربح الموثق الآن بـ 0.01 لوت: {usd:+,.2f} $</b>\n"
+                "▎✅ <b>الصفقة تعتبر رابحة حتى هذه اللحظة وفق بيانات السوق الفعلية.</b>\n"
+                "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> أغلقها على الربح الحالي، أو أمنحه "
+                "(انقل الوقف لنقطة الدخول وأغلق 50% على الأقل) — لا تتركها تتعارض مع الاتجاه الجديد.\n"
+                "▎📡 إشارة جديدة عكسية قادمة مباشرة بعد هذا التنبيه."
+                "</blockquote>\n"
+                "<i>أرقام موثقة من أسعار السوق — القرار النهائي لك، والتنبيه لا يغلق شيئاً تلقائياً في حسابك.</i>"
+            )
+            for uid in uids:
+                try:
+                    await bot_send(uid, text)
+                    sent += 1
+                except Exception:
+                    pass
+            if config.ADMIN_ID:
+                try:
+                    await bot_send(config.ADMIN_ID, text)
+                    sent += 1
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return sent
 
 
 def config_now():
@@ -271,6 +365,11 @@ async def emit_to_users(signal_row, bot_send) -> dict:
       4. daily quota (atomic ledger)
     Each delivered message carries the user's PERSONAL risk/profit block, and
     when auto-trade is on, the trade is opened on his demo account instantly.
+
+    v6.10.0 (owner report 6): BEFORE delivering, every holder of an OPEN signal
+    on the SAME symbol in the OPPOSITE direction receives the royal close
+    advisory — documented profit so far, «close or secure it» — then the new
+    signal flows. No silent direction flip ever again.
     """
     from fysb.services.subscriptions import try_consume_signal, release_signal, plan_for
     from fysb.services import user_trade
@@ -282,6 +381,7 @@ async def emit_to_users(signal_row, bot_send) -> dict:
     sig_tf = sig["timeframe"]
     sig_score = sig["score"]
     sig_strategy = (sig.get("strategy") or "").upper()
+    await opposite_close_advisory(sig, bot_send)
     with db.conn() as c:
         users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
 

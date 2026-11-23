@@ -90,10 +90,13 @@ class TestRegistry(unittest.TestCase):
             self.assertIn(code, VERIFIABLE)
 
     def test_ten_strategies_shipped(self):
-        """The owner contract: 10 real, tested strategies live (v6.8.0)."""
+        """The owner contract: 12 real, tested strategies live (v6.10.0 added
+        CLASSIC + SK to the v6.8.0 ten)."""
         from fysb.db import IMPLEMENTED_STRATEGIES
         from fysb.engines.strategies import VERIFIABLE
-        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 10)
+        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 12)
+        self.assertIn("CLASSIC", IMPLEMENTED_STRATEGIES)
+        self.assertIn("SK", IMPLEMENTED_STRATEGIES)
         self.assertTrue(set(IMPLEMENTED_STRATEGIES) <= VERIFIABLE)
 
     def test_evaluate_all_sorted_by_score(self):

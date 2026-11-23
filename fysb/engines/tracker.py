@@ -332,8 +332,10 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
     text = (
         f"💧 <b>إدارة الصفقة الملكية</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
-        f"▎✨ وصل السعر <b>نصف الطريق</b> نحو الهدف الأول — الصفقة في صالحك.\n"
-        f"▎📍 السعر الآن: <code>{instruments.fmt_price(symbol, px)}</code>"
+        f"▎✨ وصل السعر <b>نصف الطريق</b> نحو الهدف الأول.\n"
+        f"▎✅ <b>الصفقة تعتبر رابحة حتى الآن</b> — حققت <b>{drift:+.1f} نقطة</b> من الدخول"
+        + (f" و<b>{usd_now:+,.2f} $</b> بـ 0.01 لوت.\n" if px else "\n")
+        + f"▎📍 السعر الآن: <code>{instruments.fmt_price(symbol, px)}</code>"
         f" · <b>{drift:+.1f} pips</b> من الدخول"
         + (f" · تقدم {progress:.0f}% نحو TP1 {bar(progress, 100)}\n" if px else "\n")
         + (f"▎🏁 المتبقي نحو TP1: <b>{max(0.0, remaining):.1f} pips</b> (الهدف <code>{instruments.fmt_price(symbol, tp1)}</code>)\n"
@@ -349,8 +351,10 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
         + f"<i>أرقام موثقة من أسعار السوق الفعلية — إدارة صفقتك بيدك، والتنبيه لا ينفذ في حسابك تلقائياً إلا إذا فعّلت التنفيذ الآلي في حسابك التجريبي.</i>"
     )
     with db.conn() as c:
-        uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
-    notes = [(uid, text) for uid in uids]
+        refs = [dict(r) for r in c.execute(
+            "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
+    notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
+             for r in refs]
     if cfg.ADMIN_ID:
         notes.append((cfg.ADMIN_ID, text))
     edits = _card_refresh_edits(sig, live_px, _delivery_refs(sig["id"]))
@@ -624,11 +628,14 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         f"<i>تحديث قائم على بيانات السعر الفعلية من السوق اللحظي — تتابع لحظي حتى الإغلاق.</i>"
     )
     with db.conn() as c:
-        uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
-    # v6.8.1 — the ADMIN receives the SAME royal card the users receive
-    # (identical truth, identical luxury layout — the old one-line telegram
-    # «📡 إشارة #N … (+pips · $)» that read badly is retired for good).
-    notes = [(uid, text) for uid in uids]
+        refs = [dict(r) for r in c.execute(
+            "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
+    # v6.8.1 — the ADMIN receives the SAME royal card the users receive.
+    # v6.10.0 — CHANNELS too: a channel delivery row (user_id=0, chat_id=-100…)
+    # routes to its chat — the owner demanded FULL channel alerting from birth
+    # to the final close, not just the first card.
+    notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
+             for r in refs]
     if config.ADMIN_ID:
         notes.append((config.ADMIN_ID, text))
     return notes, pips_result, edits

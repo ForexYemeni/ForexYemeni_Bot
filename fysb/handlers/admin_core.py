@@ -21,15 +21,39 @@ async def admin_stats(q, uid, context, bot):
     await render(q, body, kb.admin_nav([[kb.btn("📈 إحصائيات مفصلة", "a:statistics"), kb.btn("🖥 حالة النظام", "a:health")]]), bot)
 
 
-async def admin_statistics(q, uid, context, bot):
-    body = "\n".join([
-        reports_service.users_report(), "",
-        reports_service.signals_report(), "",
-        reports_service.payments_report(), "",
-        reports_service.subscriptions_report(), "",
-        reports_service.analyses_report(),
-    ])
-    await render(q, body, kb.admin_nav(), bot)
+STAT_SECTIONS = ["users", "signals", "payments", "subscriptions", "analyses"]
+STAT_TITLES = {"users": "👥 تقرير المستخدمين", "signals": "📡 تقرير الإشارات",
+               "payments": "💳 تقرير المدفوعات", "subscriptions": "💎 تقرير الاشتراكات",
+               "analyses": "🔬 تقرير التحليلات"}
+
+
+def _stat_section_body(key: str) -> str:
+    return {"users": reports_service.users_report,
+            "signals": reports_service.signals_report,
+            "payments": reports_service.payments_report,
+            "subscriptions": reports_service.subscriptions_report,
+            "analyses": reports_service.analyses_report}[key]()
+
+
+async def admin_statistics(q, uid, context, bot, page: int = 0):
+    """v6.10.0 (owner report 1) — the old single message joined FIVE reports
+    and with real data grew past Telegram's 4096-char limit ⇒ BadRequest ⇒
+    the generic «حدث خطأ أثناء تنفيذ الزر» card. The royal fix: one LUXURY
+    page per report with a navigation strip — every page fits forever, and
+    the render safety net truncates nothing silently."""
+    page = max(0, min(int(page or 0), len(STAT_SECTIONS) - 1))
+    key = STAT_SECTIONS[page]
+    body = (f"📈 <b><u>الإحصائيات الملكية — {STAT_TITLES[key]}</u></b>\n"
+            f"<blockquote>▎📄 القسم <b>{page + 1}</b> من <b>{len(STAT_SECTIONS)}</b>"
+            f" · حدّث لحظياً من قاعدة البيانات الحقيقية</blockquote>\n"
+            + _stat_section_body(key))
+    pager = []
+    if page > 0:
+        pager.append(kb.btn("◀️ السابق", f"a:statistics:{page - 1}"))
+    pager.append(kb.btn(f"📄 {page + 1}/{len(STAT_SECTIONS)}", "a:plannoop"))
+    if page < len(STAT_SECTIONS) - 1:
+        pager.append(kb.btn("التالي ▶️", f"a:statistics:{page + 1}"))
+    await render(q, body, kb.admin_nav([pager]), bot)
 
 
 # --- Users ---------------------------------------------------------------------
@@ -158,15 +182,30 @@ async def admin_user_payments(q, uid, context, bot, target: int):
 
 
 async def admin_user_deliveries(q, uid, context, bot, target: int):
+    """v6.10.0 (owner report 2) — the received-signals card shows the SAME
+    sequential number as the signals center (ROW_NUMBER seq, not the raw
+    internal id after deletions), wrapped in a luxury status card with real
+    results (hit targets, banked pips, USD at 0.01 lot)."""
+    from fysb.engines.tracker import seq_of
+    from fysb import instruments
+    from fysb.theme import dir_badge, status_ar
     with db.conn() as c:
-        rows = c.execute("""SELECT d.delivered_at, s.id sid, s.symbol, s.direction, s.status, s.score
-                            FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
-                            WHERE d.user_id=? ORDER BY d.delivered_at DESC LIMIT 10""", (target,)).fetchall()
-    lines = [f"📡 <b>الإشارات التي استلمها المستخدم {target}</b>"]
+        rows = [dict(r) for r in c.execute(
+            """SELECT d.delivered_at, s.* FROM signal_deliveries d
+               JOIN signals s ON s.id=d.signal_id
+               WHERE d.user_id=? ORDER BY d.delivered_at DESC LIMIT 10""", (target,)).fetchall()]
+    lines = [f"📡 <b><u>الإشارات التي استلمها المستخدم {target}</u></b>", ""]
     for r in rows:
-        lines.append(f"  #{r['sid']} {esc(r['symbol'])} {r['direction']} · {esc(r['status'])} · {human_dt(r['delivered_at'])}")
+        seq = seq_of(r["id"])
+        d_emoji = "🟢" if r["direction"] == "BUY" else "🔴"
+        res = ""
+        if r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+            usd = instruments.usd_move(r["symbol"], float(r["pips_result"] or 0), 0.01)
+            res = f"\n   ▎📈 النتيجة المسجلة: <b>{float(r['pips_result'] or 0):+.1f} pips</b> · <b>{usd:+,.2f} $</b> بـ 0.01 لوت"
+        lines.append(
+            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {status_ar(r['status'])}" + res)
     if not rows:
-        lines.append("  لا شيء بعد.")
+        lines.append("▎لا شيء بعد.")
     await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("↩️ الملف", f"a:userdetail:{target}")]]), bot)
 
 
@@ -281,33 +320,53 @@ async def admin_plans(q, uid, context, bot):
 async def admin_plan_new(q, uid, context, bot):
     clear_flows(context.user_data)
     context.user_data["plan_draft"] = {"step": "code", "markets": [], "timeframes": [], "strategies": [], "linked": []}
-    await render(q, "👑 <b><u>إنشاء باقة جديدة — التدفق الموجّه</u></b>\n\n"
-                    "الخطوة 1/3: أرسل <b>رمز الباقة</b> CODE (أحرف لاتينية كبيرة، مثال: <code>VIP</code>):",
+    await render(q,
+                 "👑 <b><u>إنشاء باقة جديدة — التدفق الملكي الموجّه</u></b>\n"
+                 "<blockquote>"
+                 "▎🧭 <b>10 مراحل بالأزرار الفاخرة:</b> الرمز ← العنوان ← السعر ← العملة ← المدة ← الجودة ← "
+                 "حد الإشارات ← حد التحليلات ← الأسواق ← الأطر ← المنهجيات ← الحفظ.\n"
+                 "▎✏️ كل مرحلة تقبل قيمة جاهزة بضغطة <b>أو قيمة مخصصة</b> ترسلها رقماً فقط.\n"
+                 "▎🌐 الأسواق تعرض المفعلة والموثقة فقط، والمنهجيات تعرض المنفذة والمختبرة فقط — حقيقة 100%."
+                 "</blockquote>\n"
+                 "✍️ <b>المرحلة 1/10 — أرسل رمز الباقة CODE:</b> أحرف لاتينية كبيرة (مثال: <code>VIP</code>) — "
+                 "وقبل الأسماء العربية مثل الذهبية، الماسة، المتقدمة، الاحترافية لمرحلة العنوان.",
                  kb.admin_nav([[kb.btn("🗑 إلغاء", "a:plancancel")]]), bot)
 
 
 async def _plan_reply_current(q, uid, context, bot, d: dict, note: str):
-    """Render the remaining guided steps as luxury buttons."""
+    """Render the remaining guided steps as luxury buttons (v6.10.0: every
+    stage carries a ✏️ CUSTOM-VALUE button — the owner demanded being able to
+    enter ANY duration/quota instantly, not only the preset chips)."""
     stage = d.get("stage", "days")
     rows = []
     if stage == "days":
         rows = [[kb.btn(f"📅 {n} يوم", f"a:plandays:{n}") for n in (7, 14, 30)],
                 [kb.btn(f"📅 {n} يوم", f"a:plandays:{n}") for n in (90, 180, 365)],
-                [kb.btn("♾ دائم (0 يوم)", "a:plandays:0")]]
+                [kb.btn("♾ دائم (0 يوم)", "a:plandays:0")],
+                [kb.btn("✏️ مدة مخصصة (أرسل رقماً)", "a:plancustom:days")]]
     elif stage == "score":
         rows = [[kb.btn(f"⭐ {n}", f"a:planscore:{n}") for n in (50, 60, 70)],
-                [kb.btn(f"⭐ {n}", f"a:planscore:{n}") for n in (80, 90, 95)]]
+                [kb.btn(f"⭐ {n}", f"a:planscore:{n}") for n in (80, 90, 95)],
+                [kb.btn("✏️ جودة مخصصة (أرسل رقماً)", "a:plancustom:score")]]
     elif stage == "quota":
         rows = [[kb.btn(f"📡 {n}/يوم", f"a:planquota:{n}") for n in (2, 5, 10)],
-                [kb.btn(f"📡 {n}/يوم", f"a:planquota:{n}") for n in (20, 50, 100)]]
+                [kb.btn(f"📡 {n}/يوم", f"a:planquota:{n}") for n in (20, 50, 100)],
+                [kb.btn("✏️ حد مخصص (أرسل رقماً)", "a:plancustom:quota")]]
     elif stage == "analyses":
         rows = [[kb.btn(f"🔬 {n}/يوم", f"a:plananal:{n}") for n in (0, 3, 5)],
-                [kb.btn(f"🔬 {n}/يوم", f"a:plananal:{n}") for n in (10, 30, 100)]]
+                [kb.btn(f"🔬 {n}/يوم", f"a:plananal:{n}") for n in (10, 30, 100)],
+                [kb.btn("✏️ حد مخصص (أرسل رقماً)", "a:plancustom:analyses")]]
     elif stage == "markets":
+        # v6.10.0 (owner report 4): ONLY the markets the admin actually armed
+        # (enabled+verified) in the markets center — never the whole catalog.
         with db.conn() as c:
-            mkts = [r["symbol"] for r in c.execute("SELECT symbol FROM market_catalog ORDER BY symbol").fetchall()]
-        rows = [[kb.btn(("✅ " if s in d["markets"] else "") + s, f"a:planmkt:{s}") for s in mkts[i:i + 3]]
-                for i in range(0, len(mkts), 3)]
+            mkts = [r["symbol"] for r in c.execute(
+                "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+        if not mkts:
+            rows = [[kb.btn("⛔ لا توجد أسواق مفعلة — فعّل سوقاً من قسم الأسواق أولاً", "a:plannoop")]]
+        else:
+            rows = [[kb.btn(("✅ " if s in d["markets"] else "") + s, f"a:planmkt:{s}") for s in mkts[i:i + 3]]
+                    for i in range(0, len(mkts), 3)]
         rows.append([kb.btn("➡️ التالي: الأطر", "a:planstage:timeframes")])
     elif stage == "timeframes":
         tfs = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]
@@ -315,10 +374,20 @@ async def _plan_reply_current(q, uid, context, bot, d: dict, note: str):
                 for i in range(0, len(tfs), 4)]
         rows.append([kb.btn("➡️ التالي: الاستراتيجيات", "a:planstage:strategies")])
     elif stage == "strategies":
+        # v6.10.0 (owner report 4): ONLY REAL, enabled+verified+IMPLEMENTED
+        # engines — in the guaranteed strength order.
+        from fysb.engines.strategies import REGISTRY
         with db.conn() as c:
-            strat_rows = c.execute("SELECT code, enabled FROM strategy_catalog WHERE verified=1 ORDER BY code").fetchall()
-        rows = [[kb.btn(("✅ " if r["code"] in d["strategies"] else "") + r["code"], f"a:planstrat:{r['code']}")
-                 for r in strat_rows[i:i + 3]] for i in range(0, len(strat_rows), 3)]
+            strat_rows = c.execute(
+                "SELECT code FROM strategy_catalog WHERE verified=1 AND enabled=1").fetchall()
+        from fysb.services import strategy_stats
+        codes = strategy_stats.ordered_codes(
+            [r["code"] for r in strat_rows if REGISTRY.get(r["code"]) is not None])
+        if not codes:
+            rows = [[kb.btn("⛔ لا توجد منهجيات مفعلة — فعّلها من قسم الاستراتيجيات أولاً", "a:plannoop")]]
+        else:
+            rows = [[kb.btn(("✅ " if s in d["strategies"] else "") + s, f"a:planstrat:{s}")
+                     for s in codes[i:i + 3]] for i in range(0, len(codes), 3)]
         rows.append([kb.btn("💾 حفظ الباقة", "a:planconfirm")])
     rows.append([kb.btn("🗑 إلغاء الإنشاء", "a:plancancel")])
     await render(q, note, kb.admin_nav(rows), bot)
@@ -378,6 +447,13 @@ async def admin_plan_cb(q, uid, context, bot, action: str, arg: str):
     elif action == "cancel":
         context.user_data.pop("plan_draft", None)
         await render(q, "🗑 أُلغي إنشاء الباقة.", kb.admin_nav([[kb.btn("💠 الباقات", "a:plans")]]), bot)
+    elif action == "custom":
+        # v6.10.0 — the ✏️ custom-value buttons (days/score/quota/analyses)
+        context.user_data["awaiting_plan_custom"] = arg
+        labels = {"days": "المدة بالأيام (0 = دائم)", "score": "الجودة الدنيا (40-100)",
+                  "quota": "حد الإشارات اليومي", "analyses": "حد التحليلات اليومي"}
+        await render(q, f"✏️ أرسل <b>{labels.get(arg, 'القيمة')}</b> رقماً فقط:",
+                     kb.admin_nav([[kb.btn("🗑 إلغاء", f"a:plancancel")]]), bot)
 
 
 async def admin_plan_edit(q, uid, context, bot, code: str):
@@ -397,25 +473,89 @@ async def admin_plan_edit(q, uid, context, bot, code: str):
     mkt_row = " ".join(("✅" + m) if m in markets else ("▫️" + m) for m in all_mkts)
     tf_row = " ".join(("✅" + t) if t in tfs else ("▫️" + t) for t in all_tfs)
     st_row = " ".join(("✅" + s) if s in strats else ("▫️" + s) for s in all_strats)
+    # v6.10.0 (owner report 4) — DIRECT-ENTRY editor: the old +/- stepper rows
+    # are retired («أراه سيء للغاية وليس فاخر»). One tap opens a single-number
+    # prompt; any value lands instantly. Blocks stay as fast chip rows.
     rows_kb = [
-        [kb.btn("➖ السعر", f"a:planadj:{code}:price:-1"), kb.btn(f"💰 {p['price']:g} {p['currency']}", "a:plannoop"), kb.btn("➕ السعر", f"a:planadj:{code}:price:1")],
-        [kb.btn("➖ الأيام", f"a:planadj:{code}:days:-5"), kb.btn(f"📅 {p['duration_days']} يوم", "a:plannoop"), kb.btn("➕ الأيام", f"a:planadj:{code}:days:5")],
-        [kb.btn("➖ الإشارات", f"a:planadj:{code}:quota:-1"), kb.btn(f"📡 {p['max_signals_per_day']}/يوم", "a:plannoop"), kb.btn("➕ الإشارات", f"a:planadj:{code}:quota:1")],
-        [kb.btn("➖ التحليلات", f"a:planadj:{code}:anal:-1"), kb.btn(f"🔬 {p['max_analyses_per_day'] or 0}/يوم", "a:plannoop"), kb.btn("➕ التحليلات", f"a:planadj:{code}:anal:1")],
-        [kb.btn("➖ الجودة", f"a:planadj:{code}:score:-5"), kb.btn(f"⭐ {p['min_score']}/100", "a:plannoop"), kb.btn("➕ الجودة", f"a:planadj:{code}:score:5")],
+        [kb.btn(f"💰 السعر: {p['price']:g} {p['currency']}", f"a:planfield:{code}:price"),
+         kb.btn(f"📅 المدة: {'دائم' if not p['duration_days'] else str(p['duration_days']) + ' يوم'}", f"a:planfield:{code}:days")],
+        [kb.btn(f"📡 الإشارات: {p['max_signals_per_day']}/يوم", f"a:planfield:{code}:quota"),
+         kb.btn(f"🔬 التحليلات: {p['max_analyses_per_day'] or 0}/يوم", f"a:planfield:{code}:anal")],
+        [kb.btn(f"⭐ الجودة: {p['min_score']}/100", f"a:planfield:{code}:score")],
     ]
     # Feature toggles — what THIS plan may use (markets / timeframes / strategies)
     body = (render_plan_card(p) +
             f"\n\n🌐 <b>الأسواق المسموحة:</b>\n<blockquote>{esc(mkt_row)}</blockquote>" +
             f"⏱ <b>الأطر الزمنية المسموحة:</b>\n<blockquote>{esc(tf_row)}</blockquote>" +
             f"🧠 <b>الاستراتيجيات المسموحة:</b>\n<blockquote>{esc(st_row)}</blockquote>" +
-            "\n<i>اضغط أي عنصر بالأسفل لتفعيله/إيقافه لهذه الباقة — التغيير يطبق فوراً على كل مستخدميها.</i>")
-    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets")])
-    rows_kb.append([kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes")])
+            "\n<i>اضغط أي قيمة بالأسفل لكتابة القيمة الجديدة مباشرة (سعر/مدة/حدود/جودة)، "
+            "واضغط صفوف الأسواق والأطر والاستراتيجيات للتبديل الفوري — كل شيء سهل جداً وبضغطة واحدة.</i>")
+    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets"),
+                    kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes")])
     rows_kb.append([kb.btn("🧠 الاستراتيجيات ⬇️", f"a:planfeatpage:{code}:strategies")])
     rows_kb.append([kb.btn(f"{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'} · تفعيل/تعطيل", f"a:toggleplan:{code}")])
     rows_kb.append([kb.btn("🗑 حذف الباقة", f"a:plandel:{code}") if code not in ("FREE",) else kb.btn("🔒 الباقة المجانية محمية", "a:plannoop")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+PLAN_FIELD_LABELS = {"price": "السعر (رقم، مثال 19 أو 19.5)",
+                     "days": "المدة بالأيام (0 = دائم)",
+                     "quota": "حد الإشارات اليومي (عدد)",
+                     "anal": "حد التحليلات اليومي (عدد، 0 = بدون)",
+                     "score": "الجودة الدنيا (40-100)"}
+
+
+def plan_field_apply(code: str, field: str, raw: str) -> str:
+    """v6.10.0 — one-value direct edit for plan fields (validated server-side).
+    Returns the confirmation message; raises ValueError with the exact reason."""
+    if field not in PLAN_FIELD_LABELS:
+        raise ValueError("حقل غير معروف")
+    raw = (raw or "").strip().replace(",", ".")
+    try:
+        val = float(raw)
+    except ValueError:
+        raise ValueError("أرسل رقماً فقط — " + PLAN_FIELD_LABELS[field])
+    with db.conn() as c:
+        r = c.execute("SELECT 1 FROM plans WHERE code=?", (code,)).fetchone()
+        if not r:
+            raise ValueError("الباقة غير موجودة")
+        if field == "price":
+            if not (0 <= val <= 100000):
+                raise ValueError("السعر بين 0 و 100000")
+            c.execute("UPDATE plans SET price=? WHERE code=?", (val, code))
+            return f"حُفظ سعر {code}: {val:g} {c.execute('SELECT currency FROM plans WHERE code=?', (code,)).fetchone()['currency']}"
+        if field == "days":
+            n = int(val)
+            if not (0 <= n <= 3650):
+                raise ValueError("المدة بين 0 و 3650 يوماً (0 = دائم)")
+            c.execute("UPDATE plans SET duration_days=? WHERE code=?", (n, code))
+            return f"حُفظت مدة {code}: {'دائم' if n == 0 else f'{n} يوم'}"
+        if field == "quota":
+            n = int(val)
+            if not (1 <= n <= 1000):
+                raise ValueError("حد الإشارات بين 1 و 1000")
+            c.execute("UPDATE plans SET max_signals_per_day=? WHERE code=?", (n, code))
+            return f"حُفظ حد إشارات {code}: {n}/يوم"
+        if field == "anal":
+            n = int(val)
+            if not (0 <= n <= 1000):
+                raise ValueError("حد التحليلات بين 0 و 1000")
+            c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (n, code))
+            return f"حُفظ حد تحليلات {code}: {n}/يوم" + (" (بدون تحليلات)" if n == 0 else "")
+        if field == "score":
+            n = int(val)
+            if not (40 <= n <= 100):
+                raise ValueError("الجودة الدنيا بين 40 و 100")
+            c.execute("UPDATE plans SET min_score=? WHERE code=?", (n, code))
+            return f"حُفظت الجودة الدنيا لـ {code}: {n}/100"
+    raise ValueError("حقل غير معروف")
+
+
+async def admin_plan_field(q, uid, context, bot, code: str, field: str):
+    context.user_data["awaiting_plan_field"] = f"{code}:{field}"
+    await render(q, f"✏️ أرسل <b>{PLAN_FIELD_LABELS.get(field, 'القيمة')}</b> رقماً فقط "
+                    f"— يُحفظ فوراً في الباقة <b>{esc(code)}</b>:",
+                 kb.admin_nav([[kb.btn("↩️ الباقة", f"a:planedit:{code}")]]), bot)
 
 
 async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
@@ -590,6 +730,11 @@ async def admin_payment_approve(q, uid, context, bot, pid: int):
 
 
 async def admin_payment_reject(q, uid, context, bot, pid: int):
+    # v6.10.0 (owner report 3) — start the rejection flow CLEAN: any stale
+    # one-shot flag (e.g. awaiting_usdt_wallet left from a wallet page the
+    # admin never answered) used to shadow this text flow and answer with the
+    # TRC20 validator instead of saving the rejection reason.
+    clear_flows(context.user_data)
     context.user_data["reject_payment_id"] = pid
     await render(q, f"📝 أرسل <b>سبب رفض</b> الطلب #{pid} — سيصل للمستخدم كما تكتبه:", kb.admin_nav(), bot)
 

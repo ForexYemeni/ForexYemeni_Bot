@@ -19,30 +19,111 @@ from fysb.ui.cards import render_signal_card
 
 
 # --- Signals management ----------------------------------------------------------
-async def admin_signals(q, uid, context, bot, page: int = 0):
-    size = 8
+# v6.10.0 (owner report 5) — the signals center now carries the FULL lifecycle
+# categories (بانتظار التنفيذ · قيد التنفيذ في السوق · أهداف جزئية · ضربت الوقف
+# · حققت الأهداف · ملغاة/منتهية) plus a REAL profit/loss accounting page per
+# instrument — every number from the banked pips the tracker recorded.
+SIG_CATS = {
+    "pending": ("⛔ بانتظار التنفيذ", "ACTIVE", "بانتظار"),
+    "running": ("🚀 قيد التنفيذ في السوق", "RUNNING", "قيد التنفيذ"),
+    "partial": ("🏁 أهداف جزئية", "TP1_HIT,TP2_HIT", "أهداف جزئية"),
+    "sl": ("🛑 ضربت الوقف", "SL_HIT", "ضربت الوقف"),
+    "wins": ("👑 حققت الأهداف", "TP3_HIT", "حققت الأهداف"),
+    "dead": ("🧹 ملغاة/منتهية", "CANCELLED,EXPIRED", "ملغاة/منتهية"),
+    "all": ("🗂 الكل", "", "الكل"),
+}
+
+
+def _signals_page_body(statuses: tuple, page: int, size: int = 8) -> tuple[str, list, int]:
     with db.conn() as c:
-        total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-        # v6.8.0 — REAL sequential numbering: `seq` is the chronological position
-        # (oldest = #1), computed live via ROW_NUMBER so deleting any signal
-        # makes the following ones take the freed number instantly. The internal
-        # id stays the stable reference for deliveries/positions.
-        rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                            FROM signals ORDER BY id DESC LIMIT ? OFFSET ?""",
-                         (size, page * size)).fetchall()
+        if statuses:
+            marks = ",".join("?" for _ in statuses)
+            total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE status IN ({marks})", statuses).fetchone()["n"]
+            rows = c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                                 FROM signals WHERE status IN ({marks})
+                                 ORDER BY id DESC LIMIT ? OFFSET ?""",
+                             (*statuses, size, page * size)).fetchall()
+        else:
+            total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
+            rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                                 FROM signals ORDER BY id DESC LIMIT ? OFFSET ?""",
+                             (size, page * size)).fetchall()
     rows_kb = [[kb.btn(render_signal_compact(dict(r)), f"a:signalview:{r['id']}")] for r in rows]
+    return total, rows_kb, len(rows)
+
+
+async def _render_signals_center(q, bot, cat: str = "all", page: int = 0):
+    title, st_csv, tab = SIG_CATS.get(cat, SIG_CATS["all"])
+    statuses = tuple(s for s in st_csv.split(",") if s)
+    total, rows_kb, shown = _signals_page_body(statuses, page)
     nav_row = []
     if page > 0:
-        nav_row.append(kb.btn("◀️", f"a:signalspage:{page - 1}"))
-    if (page + 1) * size < total:
-        nav_row.append(kb.btn("▶️", f"a:signalspage:{page + 1}"))
+        nav_row.append(kb.btn("◀️", f"a:sigcat:{cat}:{page - 1}"))
+    if shown == 8:
+        nav_row.append(kb.btn("▶️", f"a:sigcat:{cat}:{page + 1}"))
     if nav_row:
         rows_kb.append(nav_row)
-    rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
-    rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
-    await render(q, f"📡 <b>مركز إدارة الإشارات</b>\nالإجمالي: <b>{total}</b> · صفحة {page + 1}\n"
-                    "<i>الترقيم تسلسلي حقيقي — عند حذف أي إشارة تتوالى الأرقام تلقائياً.</i>",
+    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+               for key in list(SIG_CATS)[:4]]
+    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+                for key in list(SIG_CATS)[4:]]
+    rows_kb.insert(0, cat_row)
+    rows_kb.insert(1, cat_row2)
+    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
+    rows_kb.append([kb.btn("🚀 إشارة الآن (بمراحل)", "a:signow"), kb.btn("➕ نشر إشارة يدوية", "a:newsignal")])
+    rows_kb.append([kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow"), kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
+    await render(q, f"📡 <b><u>مركز إدارة الإشارات</u></b> — {title}\n"
+                    f"<blockquote>▎الإجمالي في هذا التصنيف: <b>{total}</b> · صفحة {page + 1}\n"
+                    "▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات</blockquote>",
                  kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signals(q, uid, context, bot, page: int = 0):
+    await _render_signals_center(q, bot, "all", page)
+
+
+async def admin_signals_cat(q, uid, context, bot, cat: str, page: int = 0):
+    await _render_signals_center(q, bot, cat, page)
+
+
+async def admin_signal_pl(q, uid, context, bot):
+    """v6.10.0 (owner report 5) — REAL profit/loss accounting per instrument,
+    from the banked pips of closed signals only (TP1/TP2/TP3/SL rows). Every
+    USD figure uses the same 0.01-lot ruler the alerts use — no invented wins."""
+    from fysb import instruments
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT symbol, COUNT(*) n, SUM(pips_result>0) wins, SUM(pips_result<=0) losses,
+                      SUM(pips_result) net_pips, ROUND(AVG(pips_result),1) avg_pips
+               FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+               GROUP BY symbol ORDER BY net_pips DESC""").fetchall()]
+    lines = ["💰 <b><u>محاسبة الربح والخسارة — من كل التوصيات المغلقة</u></b>",
+             "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
+             "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
+             "▎💵 الدولار = نفس مسطرة التنبيهات (0.01 لوت).</blockquote>"]
+    grand_pips = 0.0
+    grand_wins = grand_losses = 0
+    grand_usd = 0.0
+    for r in rows:
+        net = float(r["net_pips"] or 0)
+        usd = instruments.usd_move(r["symbol"], net, 0.01)
+        wr = (int(r["wins"] or 0) / max(1, int(r["n"]))) * 100.0
+        grand_pips += net
+        grand_wins += int(r["wins"] or 0)
+        grand_losses += int(r["losses"] or 0)
+        grand_usd += usd
+        lines.append(f"▎{esc(r['symbol'])}: <b>{r['n']}</b> مغلقة · رابحة <b>{wr:.0f}%</b> "
+                     f"({r['wins'] or 0}W/{r['losses'] or 0}L) · صافي <b>{net:+.1f} pips</b> · 💵 <b>{usd:+,.2f} $</b>")
+    if len(lines) == 3:
+        lines.append("▎لا توجد إشارات مغلقة بعد — تُبنى المحاسبة تلقائياً مع كل إغلاق فعلي.")
+    else:
+        total_n = grand_wins + grand_losses
+        lines.append("▎─────────────")
+        lines.append(f"▎👑 <b>الإجمالي العام:</b> {total_n} إشارة مغلقة · رابحة "
+                     f"<b>{(grand_wins / max(1, total_n)) * 100:.0f}%</b> · صافي <b>{grand_pips:+.1f} pips</b> "
+                     f"· 💵 <b>{grand_usd:+,.2f} $</b> لكل 0.01 لوت (مجموع الأدوات)")
+    await render(q, "\n".join(lines),
+                 kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
 async def admin_signal_view(q, uid, context, bot, sid: int):
@@ -285,15 +366,13 @@ STRATS_PER_PAGE = 10
 
 
 async def admin_strategies(q, uid, context, bot, page: int = 0):
+    """v6.10.0 (owner report 9) — the plain-text wall is retired: every
+    methodology is now its own BUTTON «🟢 ICT · 82.5» opening a REAL identity
+    page (rules of the engine + measured stats + verify/toggle actions).
+    The board always fits Telegram's limits — no more «حدث خطأ» on tap."""
     from fysb.services import strategy_stats
     with db.conn() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
-    # v6.8.0 — the governance board is ordered STRONGEST-FIRST too (measured
-    # history, then the documented baseline), mirroring the user-facing order.
-    # v6.8.1 — rank numbers make the guaranteed order VISIBLE on every line,
-    # and buttons go 2-per-row so the full world catalog stays compact.
-    # v6.9.1 — the board is PAGINATED (see STRATS_PER_PAGE above): global
-    # ranks keep their meaning across pages, strongest-first order intact.
     codes = strategy_stats.ordered_codes([r["code"] for r in rows])
     by_code = {r["code"]: r for r in rows}
     ordered = [by_code[c] for c in codes if c in by_code] + [r for r in rows if r["code"] not in codes]
@@ -301,37 +380,28 @@ async def admin_strategies(q, uid, context, bot, page: int = 0):
     total = len(ordered)
     verified_n = sum(1 for r in ordered if r["verified"])
     active_n = sum(1 for r in ordered if r["enabled"] and r["verified"])
-    pages = max(1, (total + STRATS_PER_PAGE - 1) // STRATS_PER_PAGE)
+    per_page = 12
+    pages = max(1, (total + per_page - 1) // per_page)
     page = max(0, min(int(page or 0), pages - 1))
-    chunk = ordered[page * STRATS_PER_PAGE:(page + 1) * STRATS_PER_PAGE]
-    lines = [f"🧩 <b><u>حوكمة الاستراتيجيات — مرتبة من الأقوى</u></b>\n"
-             f"<blockquote>▎📄 الصفحة <b>{page + 1}</b> من <b>{pages}</b> — الترتيب عالمي متصل عبر الصفحات\n"
-             f"▎🗂 إجمالي المنهجيات: <b>{total}</b> · موثقة ومختبرة آلياً: <b>{verified_n}</b>"
-             f" · جاهزة للإشارات الآن: <b>{active_n}</b>\n"
-             "▎الترتيب حقيقي 100%: التاريخ المغلق يقيس القوة أولاً، ثم الترتيب الأساسي الموثق"
-             "</blockquote>\n"]
+    chunk = ordered[page * per_page:(page + 1) * per_page]
+    body = (f"🧩 <b><u>حوكمة الاستراتيجيات — مرتبة من الأقوى</u></b>\n"
+            f"<blockquote>▎📄 الصفحة <b>{page + 1}</b> من <b>{pages}</b> — الترتيب عالمي متصل\n"
+            f"▎🗂 إجمالي المنهجيات: <b>{total}</b> · موثقة ومختبرة: <b>{verified_n}</b> · جاهزة للإشارات: <b>{active_n}</b>\n"
+            "▎اضغط أي استراتيجية لفتح بطاقتها الملكية: القواعد الميكانيكية الحقيقية + الأداء المقاس + التفعيل/التحقق</blockquote>")
     rows_kb = []
-    for i, r in enumerate(chunk):
-        rank = page * STRATS_PER_PAGE + i + 1
-        status = "🟢" if (r["enabled"] and r["verified"]) else "⚪"
-        verified = "موثقة ومختبرة" if r["verified"] else "غير مختبرة — مغلق"
+    grid = []
+    for r in chunk:
+        rank = page * per_page + len(grid) + 1
+        state = "🟢" if (r["enabled"] and r["verified"]) else ("🔵" if r["verified"] else "⚪")
         d = board.get(r["code"])
-        perf = (f" · قوة {d['strength']:.1f} · {d['win_rate']:.0f}% رابحة ({d['n']} مغلقة)"
-                if d else "")
-        lines.append(f"{rank}. {status} <b>{esc(r['title'])}</b> · {verified}{perf}\n   {esc(r['description'])}")
-        if r["code"] in VERIFIABLE and not r["verified"]:
-            rows_kb.append([kb.btn(f"✅ {r['code']}: تحقق وتفعيل", f"a:strategy_verify:{r['code']}:{page}")])
-        else:
-            action = "إيقاف" if (r["enabled"] and r["verified"]) else "تفعيل"
-            pending = kb.btn(f"{r['code']}: {action}", f"a:strategy_toggle:{r['code']}:{page}")
-            if rows_kb and len(rows_kb[-1]) == 1 and \
-                    rows_kb[-1][0].callback_data.startswith("a:strategy_toggle:"):
-                rows_kb[-1].append(pending)          # 2-per-row compact grid
-            else:
-                rows_kb.append([pending])
-    lines.append("\n<i>التحقق يُمنح فقط للاستراتيجيات المنفذة والمختبارة آلياً — الباقي يبقى مغلق. "
-                 "أُضيفت كل مدارس العالم وترتقي تلقائياً مع كل نتيجة مغلقة.</i>")
-    # Royal pagination strip — always present so the owner sees position 1/N.
+        strength = f" · {d['strength']:.0f}" if d else ""
+        grid.append(kb.btn(f"{state} {rank}. {r['code']}{strength}",
+                           f"a:strategyinfo:{r['code']}:{page}"))
+        if len(grid) == 2:
+            rows_kb.append(grid)
+            grid = []
+    if grid:
+        rows_kb.append(grid)
     pager = []
     if page > 0:
         pager.append(kb.btn("◀️ الأقوى السابقة", f"a:strategies:{page - 1}"))
@@ -339,7 +409,39 @@ async def admin_strategies(q, uid, context, bot, page: int = 0):
     if page < pages - 1:
         pager.append(kb.btn("الأدنى التالية ▶️", f"a:strategies:{page + 1}"))
     rows_kb.append(pager)
-    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_strategy_info(q, uid, context, bot, code: str, page: int = 0):
+    """The royal identity card of ONE strategy — real rules, real stats, and
+    the actions (verify / toggle) the old error message promised but the board
+    never actually offered."""
+    from fysb.services import strategy_info
+    from fysb.services import strategy_stats
+    code = (code or "").upper()
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM strategy_catalog WHERE code=?", (code,)).fetchone()
+    if not r:
+        await render(q, "الاستراتيجية غير موجودة.", kb.admin_nav(), bot)
+        return
+    rec = dict(r)
+    body = strategy_info.info_page(code)
+    board = {d["code"]: d for d in strategy_stats.leaderboard()}
+    d = board.get(code)
+    if d:
+        body += (f"\n\n📈 <b>قياس مباشر:</b> {d['n']} مغلقة · رابحة {d['win_rate']:.0f}% · "
+                 f"TP3 {d['tp3_share']:.0f}% · متوسط R {d['avg_r']:+.2f} · قوة {d['strength']:.1f}")
+    rows_kb = []
+    from fysb.engines.strategies import VERIFIABLE
+    if code in VERIFIABLE and not rec["verified"]:
+        rows_kb.append([kb.btn("✅ تحقق وتفعيل (محرك منفذ ومختبَر آلياً)", f"a:strategy_verify:{code}:{page}")])
+    elif rec["verified"]:
+        action = "إيقاف" if rec["enabled"] else "تفعيل"
+        rows_kb.append([kb.btn(f"{'🟢' if rec['enabled'] else '⚪'} {action} الاستراتيجية", f"a:strategy_toggle:{code}:{page}")])
+    else:
+        rows_kb.append([kb.btn("🔒 مغلقة — تُفتح بعد تنفيذ محركها واختباره آلياً", "a:plannoop")])
+    rows_kb.append([kb.btn("↩️ لوحة الاستراتيجيات", f"a:strategies:{page}")])
+    await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
 async def admin_strategy_toggle(q, uid, context, bot, code: str, page: int = 0):

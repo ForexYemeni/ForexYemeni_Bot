@@ -357,6 +357,22 @@ async def channels_loop(app):
         await asyncio.sleep(120)
 
 
+async def watchers_loop(app):
+    """v6.10.0 — «إشارة الآن» auto-search (signal_watchers): every minute the
+    DUE watchers re-run the REAL engine for their exact market+strategy. A
+    found setup is emitted like any engine signal and the watcher stops; a
+    quiet market just reschedules. Nothing is ever manufactured."""
+    from fysb.handlers import signal_now
+    while True:
+        try:
+            await signal_now.run_due_watchers(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("watchers loop failed")
+        await asyncio.sleep(60)
+
+
 async def post_init(app):
     global _TASKS
     # v6.8.2: pre-warm the PostgreSQL pool in a worker thread so the FIRST
@@ -373,9 +389,10 @@ async def post_init(app):
         asyncio.create_task(subscriptions_loop(app), name="fysb-subs"),
         asyncio.create_task(demo_loop(app), name="fysb-demo"),
         asyncio.create_task(channels_loop(app), name="fysb-channels"),
+        asyncio.create_task(watchers_loop(app), name="fysb-watchers"),
     ]
     post_init._tasks_ref = _TASKS
-    log.info("background loops started (5)")
+    log.info("background loops started (6)")
 
 
 def _warm_pg() -> None:

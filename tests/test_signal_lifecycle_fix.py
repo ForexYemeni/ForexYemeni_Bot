@@ -385,7 +385,8 @@ class PlainTextSignalButtons(unittest.TestCase):
         self.assertNotIn("<b>", text)
         self.assertNotIn("</b>", text)
         self.assertIn("قيد التنفيذ", text)
-        self.assertIn("المال الذكي", text)
+        # v6.10.0 owner rule: SHORT ROYAL CODES everywhere
+        self.assertIn("SMC", text)
 
 
 if __name__ == "__main__":

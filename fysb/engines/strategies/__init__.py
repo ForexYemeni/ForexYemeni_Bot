@@ -6,7 +6,7 @@ Verification is earned by implementation + passing the automated test-suite
 marketing labels.
 """
 from fysb.engines.strategies.base import Ctx, StrategyResult
-from fysb.engines.strategies import amd, crt, fibonacci, ichimoku, ict, price_action, silver_bullet, smc, trend, turtle_soup
+from fysb.engines.strategies import amd, classic, crt, fibonacci, ichimoku, ict, price_action, silver_bullet, sk, smc, trend, turtle_soup
 
 REGISTRY: dict[str, object] = {
     "ICT": ict,
@@ -19,12 +19,14 @@ REGISTRY: dict[str, object] = {
     "FIBONACCI": fibonacci,          # golden-pocket retracement — implemented + tested (v6.8.0)
     "TREND": trend,                  # trend-following EMA pullback — implemented + tested (v6.8.0)
     "ICHIMOKU": ichimoku,            # Ichimoku Kinko Hyo cloud system — implemented + tested (v6.8.0)
+    "CLASSIC": classic,              # classic trend + S/R + candle confirmation (v6.10.0)
+    "SK": sk,                        # Scalper Key — close-confirmed momentum break (v6.10.0)
     # Kept closed until a dedicated rule engine + tests exist (honest governance):
     "WYCKOFF": None,
 }
 
 VERIFIABLE = {"ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP", "SILVER_BULLET",
-              "FIBONACCI", "TREND", "ICHIMOKU"}
+              "FIBONACCI", "TREND", "ICHIMOKU", "CLASSIC", "SK"}
 
 
 def get(code: str):

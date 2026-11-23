@@ -69,7 +69,22 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_market_add", "awaiting_user_search", "reject_payment_id",
               "awaiting_broadcast_text", "awaiting_support_config", "awaiting_support_field",
               "awaiting_restore", "awaiting_free_quota", "awaiting_demo_balance",
-              "awaiting_expiry_hours", "awaiting_chan_add")
+              "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
+              "awaiting_plan_field", "awaiting_plan_custom")
+
+# v6.10.0 — single-shot text-awaiting flags: a BUTTON PRESS means the admin is
+# navigating, not typing, so any stale one-shot flag left over from a prompt he
+# never answered must die — otherwise it silently shadows the NEXT text flow
+# (the live bug: a stale awaiting_usdt_wallet ate the payment-rejection reason
+# and answered with the TRC20 validator). Multi-step DRAFTS (plan/pm/broker)
+# are NOT cleared — their stages legitimately span many button presses.
+CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search",
+                "reject_payment_id", "awaiting_broadcast_text", "awaiting_support_config",
+                "awaiting_support_field", "awaiting_restore", "awaiting_free_quota",
+                "awaiting_demo_balance", "awaiting_expiry_hours", "awaiting_chan_add",
+                "awaiting_usdt_wallet", "awaiting_plan_field", "awaiting_plan_custom",
+                "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
+                "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt")
 
 
 def clear_flows(ud: dict) -> None:
@@ -382,6 +397,25 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             await update.effective_message.reply_text("نتائج البحث:\n" + lines, parse_mode="HTML")
         return True
 
+    # ---------- Payment rejection reason (v6.10.0: BEFORE the wallet flow —
+    # the most recent admin intent wins, and the dispatcher's CLEAR_ON_NAV
+    # already killed any stale flag; this order is the second wall of defense)
+    pid = ud.pop("reject_payment_id", None)
+    if pid:
+        res = payments_service.reject_request(int(pid), text, uid)
+        if res.get("ok"):
+            audit_log.log(uid, f"payment_rejected:{pid}")
+            p = res["payment"]
+            try:
+                await context.bot.send_message(p["user_id"],
+                                               f"⛔ تم رفض طلب الدفع #{pid}.\nالسبب: {esc(text)}")
+            except Exception:
+                pass
+            await update.effective_message.reply_text("✅ سُجل سبب الرفض وأُبلغ المستخدم.")
+        else:
+            await update.effective_message.reply_text(safe(res.get("error", "خطأ")))
+        return True
+
     # ---------- USDT per-network wallets (admin — blockchain verification) ----------
     wallet_flow = ud.pop("awaiting_usdt_wallet", None)
     if wallet_flow:
@@ -403,21 +437,44 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             parse_mode="HTML")
         return True
 
-    # ---------- Payment rejection reason ----------
-    pid = ud.pop("reject_payment_id", None)
-    if pid:
-        res = payments_service.reject_request(int(pid), text, uid)
-        if res.get("ok"):
-            audit_log.log(uid, f"payment_rejected:{pid}")
-            p = res["payment"]
-            try:
-                await context.bot.send_message(p["user_id"],
-                                               f"⛔ تم رفض طلب الدفع #{pid}.\nالسبب: {esc(text)}")
-            except Exception:
-                pass
-            await update.effective_message.reply_text("✅ سُجل سبب الرفض وأُبلغ المستخدم.")
-        else:
-            await update.effective_message.reply_text(safe(res.get("error", "خطأ")))
+    # ---------- Direct plan field edit (v6.10.0 luxury editor) ----------
+    field_flag = ud.pop("awaiting_plan_field", None)
+    if field_flag:
+        try:
+            code, field = (field_flag.split(":", 1) + [""])[:2]
+            from fysb.handlers.admin_core import plan_field_apply
+            msg = plan_field_apply(code, field, text)
+            audit_log.log(uid, f"plan_field:{code}:{field}:{text[:20]}")
+            await update.effective_message.reply_text(f"✅ {esc(msg)}", parse_mode="HTML")
+        except ValueError as e:
+            ud["awaiting_plan_field"] = field_flag
+            await update.effective_message.reply_text(f"❌ {safe(e)} — أعد الإرسال.")
+        return True
+
+    # ---------- Custom guided-plan values (days / quota / analyses / score) ----------
+    custom_flag = ud.pop("awaiting_plan_custom", None)
+    if custom_flag:
+        # custom_flag = "days"|"quota"|"analyses"|"score"
+        limits = {"days": (0, 3650, "المدة بالأيام (0 = دائم)"),
+                  "quota": (1, 1000, "حد الإشارات اليومي"),
+                  "analyses": (0, 1000, "حد التحليلات اليومي"),
+                  "score": (40, 100, "الجودة الدنيا (40-100)")}
+        lo, hi, label = limits.get(custom_flag, (0, 3650, "القيمة"))
+        try:
+            val = int(float(text.replace(",", "")))
+            if not (lo <= val <= hi):
+                raise ValueError(f"{label}: بين {lo} و {hi}")
+            d = ud.get("plan_draft")
+            if not d:
+                raise ValueError("انتهت جلسة الإنشاء — ابدأ من «إنشاء باقة جديدة»")
+            key = {"days": "days", "quota": "quota", "analyses": "analyses", "score": "min_score"}[custom_flag]
+            d[key] = val
+            stage_after = {"days": "score", "score": "quota", "quota": "analyses", "analyses": "markets"}[custom_flag]
+            d["stage"] = stage_after
+            await update.effective_message.reply_text(f"✅ {label}: <b>{val}</b>", parse_mode="HTML")
+        except ValueError as e:
+            ud["awaiting_plan_custom"] = custom_flag
+            await update.effective_message.reply_text(f"❌ {safe(e)} — أعد الإرسال رقماً.")
         return True
 
     # ---------- Broadcast text ----------
@@ -753,7 +810,11 @@ def _bot_sender(context):
     """Adapter matching signal_engine.emit_to_users signature.
     Returns the sent Message so delivery refs (chat_id/message_id) get pinned —
     the tracker then edits this exact original card live."""
-    bot = context.bot
+    return bot_sender_from(context.bot)
+
+
+def bot_sender_from(bot):
+    """Bot-object variant of _bot_sender (used by signal_now + watchers)."""
 
     async def send(uid: int, text: str):
         return await bot.send_message(uid, text, parse_mode="HTML")

@@ -69,47 +69,25 @@ STATUS_EMOJI = {
 
 DIRECTION_EMOJI = {"BUY": "🟢", "SELL": "🔴"}
 
-# --- Arabic display names (users NEVER see raw machine codes) ---------------
+# v6.10.0 — OWNER RULE: strategy names are the SHORT ROYAL CODES everywhere
+# (ICT, SMC, CRT, SK ...) — never long Arabic writings. The old Arabic map is
+# kept only as STRATEGY_DESC for catalog prose needs.
 STRATEGY_AR = {
-    "ICT": "آي سي تي المؤسسية",
-    "SMC": "المال الذكي",
-    "PRICE_ACTION": "حركة السعر",
-    "CRT": "نظرية مدى الشمعة",
-    "AMD": "قوة الثلاثة (تراكم/تلاعب/توزيع)",
-    "TURTLE_SOUP": "اصطياد السيولة",
-    "SILVER_BULLET": "الرصاصة الفضية",
-    "WYCKOFF": "وايكوف",
-    "FIBONACCI": "فيبوناتشي (الجيب الذهبي)",
-    "TREND": "اتباع الاتجاه",
-    "ICHIMOKU": "إيشيموكو (السحابة اليابانية)",
-    # --- v6.8.1: أسماء الاستراتيجيات العالمية المضافة (كل مدرسة) ---
-    "ELLIOTT_WAVE": "موجات إليوت",
-    "HARMONIC": "الأنماط التوافقية (هارمونيك)",
-    "VOLUME_PROFILE": "ملف الحجم (Volume Profile)",
-    "VWAP": "السعر المرجح بالحجم (VWAP)",
-    "BREAKOUT_RETEST": "الكسر وإعادة الاختبار",
-    "SUPPORT_RESISTANCE": "الدعم والمقاومة",
-    "RSI_DIVERGENCE": "دايفرجنس RSI",
-    "MACD_STRAT": "زخم MACD",
-    "BOLLINGER": "بولينجر باندز",
-    "DONCHIAN": "قناة دونشيان (قواعد السلاحف)",
-    "MA_CROSS": "تقاطع المتوسطات",
-    "SUPERTREND": "السوبر تريند",
-    "KELTNER": "قنوات كلتنر",
-    "ORB": "كسر مدى الافتتاح (ORB)",
-    "ASIA_RANGE": "مدى جلسة آسيا",
-    "LONDON_BREAK": "كسر لندن",
-    "PIVOT_POINTS": "نقاط المحور",
-    "CPR": "مدى المحور المركزي (CPR)",
-    "MARKET_PROFILE": "ملف السوق (TPO)",
-    "ORDER_FLOW": "تدفق الأوامر والدلتا",
-    "MEAN_REVERSION": "الارتداد للمتوسط",
-    "GAP_TRADE": "تداول الفجوات",
-    "HEIKIN_ASHI": "شموع هيكين آشي",
-    "MOMENTUM": "اندفاع الزخم",
-    "ATR_BREAKOUT": "كسر التقلب ATR",
-    "MANUAL": "إشارة يدوية من الإدارة",
-    "ALL": "جميع الاستراتيجيات",
+    "ICT": "ICT",
+    "SMC": "SMC",
+    "PRICE_ACTION": "PRICE_ACTION",
+    "CRT": "CRT",
+    "AMD": "AMD",
+    "TURTLE_SOUP": "TURTLE_SOUP",
+    "SILVER_BULLET": "SILVER_BULLET",
+    "WYCKOFF": "WYCKOFF",
+    "FIBONACCI": "FIBONACCI",
+    "TREND": "TREND",
+    "ICHIMOKU": "ICHIMOKU",
+    "CLASSIC": "CLASSIC",
+    "SK": "SK",
+    "MANUAL": "MANUAL",
+    "ALL": "ALL",
 }
 
 TIMEFRAME_AR = {

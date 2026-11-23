@@ -119,7 +119,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
         await render(q, body, kb.user_nav([
             [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
-            [kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
+            [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
             [kb.btn("💎 الباقات", "u:plans"), kb.btn("📈 إحصائياتي", "u:my_stats")],
         ]), bot)
 
@@ -393,6 +393,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
                            f"u:signalview:{r['id']}")] for r in fresh[:8]]
         if not rows_kb:
             rows_kb = [[kb.btn("🔄 تحديث الإشارات", "u:signals")]]
+        # v6.10.0 (owner report 7) — «إشارة الآن» right inside the user's
+        # signals hub + the watcher status line (honest auto-search).
+        from fysb.handlers import signal_now as _sn
+        w = _sn.active_watcher(uid)
+        if w:
+            lines.append(f"⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
+            rows_kb.append([kb.btn("🔴 إلغاء البحث التلقائي", f"u:watchoff:{w['id']}")])
+        rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow")])
         await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
 
     elif action.startswith("signalview:"):
@@ -645,6 +653,17 @@ async def user_page(q, action: str, uid: int, context) -> None:
         chains = payments_service.configured_chains()
         rows_kb = []
         body = render_plan_card(dict(p))
+        # v6.10.0 (owner report 8) — the plan's strategies: ONE LINE EACH with
+        # a button per methodology opening the REAL identity page in-chat.
+        plan_strats = [x.strip().upper() for x in (p["strategies"] or "").split(",") if x.strip() and x.upper() != "ALL"]
+        if plan_strats:
+            from fysb.services import strategy_info as _si
+            body += "\n\n🧠 <b><u>الاستراتيجيات داخل هذه الباقة — اضغط أي واحدة لقراءة عملها الحقيقي:</u></b>"
+            for s in plan_strats:
+                mark = "🟢" if _si.implemented(s) else "⚪"
+                body += f"\n▎{mark} <b>{esc(s)}</b> — {esc(_si.SHORT_LABEL.get(s, s))}"
+            for i in range(0, len(plan_strats), 2):
+                rows_kb.append([kb.btn(f"🧠 {s}", f"u:stratinfo:{s}:{code}") for s in plan_strats[i:i + 2]])
         if code != "FREE":
             # v6.9.1 ROYAL FAST LANE — the DOCUMENTED USDT wallets (the ✅ ones
             # the owner configured in «محافظ USDT») now appear DIRECTLY in the
@@ -669,6 +688,18 @@ async def user_page(q, action: str, uid: int, context) -> None:
             else:
                 rows_kb.append([kb.btn("🧾 طلب اشتراك (دفع يدوي)", f"u:requestplan:{code}:0")])
         rows_kb.append([kb.btn("↩️ كل الباقات", "u:plans")])
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("stratinfo:"):
+        # v6.10.0 (owner report 8) — the REAL identity page of one methodology,
+        # opened in the same chat from a package page (or preferences).
+        parts = action.split(":")
+        s_code = (parts[1] if len(parts) > 1 else "").upper()
+        from_plan = parts[2] if len(parts) > 2 else ""
+        from fysb.services import strategy_info as _si
+        body = _si.info_page(s_code)
+        rows_kb = [[kb.btn("↩️ الباقة", f"u:planview:{from_plan}")]] if from_plan else []
+        rows_kb.append([kb.btn("💎 كل الباقات", "u:plans")])
         await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("usdtpay:"):
@@ -1054,6 +1085,36 @@ async def user_page(q, action: str, uid: int, context) -> None:
         context.user_data["ticket_type"] = ttype
         context.user_data["awaiting_ticket"] = True
         await render(q, f"📝 اكتب موضوع ورسالتك في رسالة واحدة.", kb.user_nav(), bot)
+
+    # ---------- «إشارة الآن» — the royal staged generation (v6.10.0) ----------
+    elif action == "signow":
+        from fysb.handlers import signal_now as _sn
+        await _sn.open_flow(q, uid, context, bot, is_admin=(uid == config.ADMIN_ID))
+
+    elif action.startswith("signowstyle:"):
+        from fysb.handlers import signal_now as _sn
+        await _sn.pick_style(q, uid, context, bot, action.split(":", 1)[1])
+
+    elif action.startswith("signowsym:"):
+        from fysb.handlers import signal_now as _sn
+        await _sn.pick_symbol(q, uid, context, bot, action.split(":", 1)[1])
+
+    elif action.startswith("signowtf:"):
+        from fysb.handlers import signal_now as _sn
+        await _sn.pick_tf(q, uid, context, bot, action.split(":", 1)[1])
+
+    elif action.startswith("signowstrat:"):
+        from fysb.handlers import signal_now as _sn
+        await _sn.pick_strategy(q, uid, context, bot, action.split(":", 1)[1])
+
+    elif action.startswith("signowwatch:"):
+        from fysb.handlers import signal_now as _sn
+        minutes = _safe_int(action.split(":", 1)[1]) or 30
+        await _sn.start_watch(q, uid, context, bot, minutes)
+
+    elif action.startswith("watchoff:"):
+        from fysb.handlers import signal_now as _sn
+        await _sn.stop_watch(q, uid, context, bot, _safe_int(action.split(":", 1)[1]) or 0)
 
     elif action == "help":
         await render(q,

@@ -357,7 +357,9 @@ def _diagnose_send_error(e: Exception) -> str:
 
 
 async def _send_html(bot, chat_ref, text: str) -> dict:
-    """3-level guarded send: HTML → guard-repaired → plain. Never corrupts."""
+    """3-level guarded send: HTML → guard-repaired → plain. Never corrupts.
+    v6.10.0: returns the sent Message object so the caller can pin the
+    delivery reference (chat_id + message_id) for LIVE channel tracking."""
     variants = [("html", text, "HTML"),
                 ("repaired", htmlguard.truncate_safe(text, 3900), "HTML"),
                 ("plain", htmlguard.plain_fallback(text), None)]
@@ -365,11 +367,11 @@ async def _send_html(bot, chat_ref, text: str) -> dict:
     for mode, body, parse_mode in variants:
         try:
             if parse_mode:
-                await bot.send_message(chat_ref, body, parse_mode=parse_mode,
-                                       disable_web_page_preview=True)
+                msg = await bot.send_message(chat_ref, body, parse_mode=parse_mode,
+                                             disable_web_page_preview=True)
             else:
-                await bot.send_message(chat_ref, body, disable_web_page_preview=True)
-            return {"ok": True, "mode": mode}
+                msg = await bot.send_message(chat_ref, body, disable_web_page_preview=True)
+            return {"ok": True, "mode": mode, "message": msg}
         except Exception as e:
             last_err = e
             s = str(e).lower()
@@ -379,6 +381,22 @@ async def _send_html(bot, chat_ref, text: str) -> dict:
                 continue  # escalate to the next guard level
             return {"ok": False, "error": _diagnose_send_error(e)}
     return {"ok": False, "error": _diagnose_send_error(last_err or RuntimeError("send failed"))}
+
+
+def pin_channel_delivery(ch: dict, signal_id: int, msg) -> None:
+    """v6.10.0 — record the channel post as a LIVE delivery (user_id=0,
+    chat_id=channel, message_id=post). The tracker then edits this exact post
+    on every transition and sends it EVERY alert until the trade closes —
+    full channel alerting, exactly like a user's card."""
+    if msg is None:
+        return
+    message_id = getattr(msg, "message_id", 0)
+    if not message_id:
+        return
+    with db.conn() as c:
+        c.execute("""INSERT OR IGNORE INTO signal_deliveries(user_id,signal_id,delivered_at,chat_id,message_id)
+                     VALUES(0,?,?,?,?)""",
+                  (signal_id, config.now(), str(ch["chat_id"]), int(message_id)))
 
 
 async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
@@ -458,6 +476,11 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                     text = render_signal_card(dict(sig), user_view=True, row=row) + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
                     send = await _send_html(bot, _chat_ref(ch), text)
                     if send.get("ok"):
+                        # v6.10.0 (owner report 7): the channel post is now a LIVE
+                        # delivery — recorded so the tracker EDITS this exact post
+                        # on every transition and sends it EVERY alert (half-TP1,
+                        # TP1/2/3, SL, expiry) until the trade closes.
+                        pin_channel_delivery(ch, res["signal_id"], send.get("message"))
                         update_channel(cid, last_sent=mecca_now().isoformat())
                         return {"ok": True}
                     return send  # precise diagnosis from the guarded sender

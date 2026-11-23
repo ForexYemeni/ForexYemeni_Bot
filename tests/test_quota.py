@@ -73,7 +73,8 @@ class TestQuota(unittest.TestCase):
         subs.grant_subscription(self.uid, "PRO", source="TEST")
         state = subs.quota_state(self.uid)
         self.assertEqual(state["plan"], "PRO")
-        self.assertGreaterEqual(state["quota"], 15)
+        # v6.10.0 luxury tiering: PRO ships 5/day (floor for paid plans = 5)
+        self.assertGreaterEqual(state["quota"], 5)
         subs.cancel_subscription(self.uid)
 
     def test_release_rolls_back(self):

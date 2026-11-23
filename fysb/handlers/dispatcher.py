@@ -23,6 +23,7 @@ from telegram.ext import ContextTypes
 from fysb import config, db
 from fysb.config import log
 from fysb.handlers import admin_channels, admin_core, admin_referrals, admin_system, admin_trading, user_pages
+from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
@@ -103,6 +104,11 @@ async def _route_admin(q, context, uid: int, action: str):
         await render(q, "⛔ غير مصرح لك بالوصول إلى لوحة الإدارة.", kb.user_menu(), context.bot)
         return
     bot = context.bot
+    # v6.10.0 (owner report 3) — a button press means NAVIGATION: kill any
+    # stale one-shot text-awaiting flag so an unanswered old prompt can never
+    # shadow the next text flow (the live TRC20-vs-rejection-reason bug).
+    for k in CLEAR_ON_NAV:
+        context.user_data.pop(k, None)
     parts = action.split(":", 1)
     act = parts[0]
     arg = parts[1] if len(parts) > 1 else ""
@@ -117,7 +123,7 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "stats":
         await admin_core.admin_stats(q, uid, context, bot)
     elif act == "statistics":
-        await admin_core.admin_statistics(q, uid, context, bot)
+        await admin_core.admin_statistics(q, uid, context, bot, int(arg or 0))
     elif act == "users":
         await admin_core.admin_users(q, uid, context, bot)
     elif act == "userspage":
@@ -178,6 +184,11 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_core.admin_plan_cb(q, uid, context, bot, "confirm", "")
     elif act == "plancancel":
         await admin_core.admin_plan_cb(q, uid, context, bot, "cancel", "")
+    elif act == "plancustom":
+        await admin_core.admin_plan_cb(q, uid, context, bot, "custom", arg)
+    elif act == "planfield":
+        code, field = arg, arg2
+        await admin_core.admin_plan_field(q, uid, context, bot, code, field)
     elif act == "planedit":
         await admin_core.admin_plan_edit(q, uid, context, bot, arg)
     elif act == "planadj":
@@ -278,6 +289,31 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signals(q, uid, context, bot)
     elif act == "signalspage":
         await admin_trading.admin_signals(q, uid, context, bot, int(arg or 0))
+    elif act == "sigcat":
+        await admin_trading.admin_signals_cat(q, uid, context, bot, arg, int(arg2 or 0))
+    elif act == "sigpl":
+        await admin_trading.admin_signal_pl(q, uid, context, bot)
+    elif act == "signow":
+        from fysb.handlers import signal_now
+        await signal_now.open_flow(q, uid, context, bot, is_admin=True)
+    elif act == "signowstyle":
+        from fysb.handlers import signal_now
+        await signal_now.pick_style(q, uid, context, bot, arg)
+    elif act == "signowsym":
+        from fysb.handlers import signal_now
+        await signal_now.pick_symbol(q, uid, context, bot, arg)
+    elif act == "signowtf":
+        from fysb.handlers import signal_now
+        await signal_now.pick_tf(q, uid, context, bot, arg)
+    elif act == "signowstrat":
+        from fysb.handlers import signal_now
+        await signal_now.pick_strategy(q, uid, context, bot, arg)
+    elif act == "signowwatch":
+        from fysb.handlers import signal_now
+        await signal_now.start_watch(q, uid, context, bot, int(arg or 30))
+    elif act == "watchoff":
+        from fysb.handlers import signal_now
+        await signal_now.stop_watch(q, uid, context, bot, int(arg or 0))
     elif act == "signalview":
         await admin_trading.admin_signal_view(q, uid, context, bot, int(arg))
     elif act == "signalrecipients":
@@ -308,6 +344,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_engine_clean(q, uid, context, bot)
     elif act == "strategies":
         await admin_trading.admin_strategies(q, uid, context, bot, int(arg or 0))
+    elif act == "strategyinfo":
+        await admin_trading.admin_strategy_info(q, uid, context, bot, arg, int(arg2 or 0))
     elif act == "strategy_toggle":
         await admin_trading.admin_strategy_toggle(q, uid, context, bot, arg, int(arg2 or 0))
     elif act == "strategy_verify":

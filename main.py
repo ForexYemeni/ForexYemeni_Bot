@@ -58,7 +58,6 @@ def main() -> int:
 
         app = (Application.builder()
                .token(config.BOT_TOKEN)
-               .concurrent_updates(True)   # v6.8.2: one slow page must never delay the ANSWER of the next button
                .post_init(post_init)
                .post_shutdown(post_shutdown)
                .build())

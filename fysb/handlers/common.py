@@ -1,21 +1,15 @@
 """Common handlers — render(), start, /admin, error handler, /backup.
 
-CRITICAL (button experience, v6.8.2 — the LIVING PANEL, fixed for reality):
-  * every callback is answered IMMEDIATELY (await q.answer()) in the dispatcher
-  * the chat keeps ONE living panel per chat:
-      - tapping a button ON the current living panel mutates it in place
-        (edit_text) — zero message spam, zero scroll-storm
-      - tapping a button on an OLD/stale panel DELETES that panel (best
-        effort) and sends a FRESH page at the bottom of the chat — exactly
-        where the user is looking, so a page ALWAYS visibly appears
-      - messages Telegram refuses to serve (>48h → InaccessibleMessage) go
-        through the same fresh path using msg.chat (present on both kinds)
-  * REGRESSION THIS REPLACES (owner report 2026-11-23 15:11, «زر يُضغط ولا
-    يظهر أي شيء»): v6.8.1 edited the tapped message in place unconditionally.
-    Telegram edits do NOT move a message — tapping a button on an old panel
-    silently mutated a message high up in the chat while the user stared at
-    the bottom: no visible change, no error, and the dead `q.message_chat`
-    fallback raised RuntimeError for inaccessible messages.
+CRITICAL (v6.8.4 ROYAL RESTORE — owner demand 2026-11-23, «هذه النسخة كانت
+تعمل فيها الأزرار بشكل حقيقي وفاخر جداً»):
+  * the render contract is EXACTLY v6.8.0 again: every callback page is a
+    FRESH message (reply_text) right under the tapped panel — Telegram moves
+    nothing, hides nothing, edits nothing; the page ALWAYS appears where the
+    owner is looking. This is the last build whose buttons worked flawlessly
+    on the owner's hosting, and it is now the permanent contract again.
+  * every callback is still answered IMMEDIATELY (dispatcher: q.answer())
+  * fallback for >48h InaccessibleMessage panels uses msg.chat (v6.8.2
+    knowledge) — still a fresh page, never an edit, never a dead tap.
 """
 import html
 import time
@@ -38,16 +32,15 @@ from fysb.ui import keyboards as kb
 conflict_detected = False
 
 # ---------------------------------------------------------------------------
-# Living-panel registry: chat_id -> message_id of the panel that is currently
-# the single interactive surface of that chat. Process-local by design:
-# after a restart the registry is empty, so the first tap takes the fresh
-# path (delete stale + send at the bottom) — the safest possible default.
+# Legacy panel bookkeeping (v6.8.2–v6.8.3): kept as inert bookkeeping so all
+# call sites and tests stay stable — the v6.8.4 render NEVER consults it and
+# NEVER edits in place. One fresh page per tap, like v6.8.0. Always.
 # ---------------------------------------------------------------------------
 _last_panel: dict[int, int] = {}
 
 
 def register_panel(chat_id, message_id) -> None:
-    """Mark a message as the chat's living panel (start()/admin_command/render)."""
+    """Inert since v6.8.4 (kept for call-site/test compatibility)."""
     try:
         if chat_id is not None and message_id:
             _last_panel[int(chat_id)] = int(message_id)
@@ -60,62 +53,39 @@ def safe(s) -> str:
 
 
 async def render(q, text: str, markup=None, bot=None) -> None:
-    """Living-panel rendering — one surface per chat, a page ALWAYS appears.
+    """Deliver callback pages as FRESH messages — the proven v6.8.0 fix.
 
-    Contract (v6.8.2):
-      1. tapped message IS the chat's living panel  -> edit in place (instant,
-         no new message; identical content is a silent no-op per Telegram).
-      2. anything else (stale panel, unknown message, edit failure,
-         InaccessibleMessage >48h, media caption) -> the tapped panel is
-         deleted (best effort) and a FRESH page is sent to the chat bottom —
-         visible instantly, never lost up in the history.
-      3. every render is logged with its method and latency for support.
+    Restored 100% by owner demand (v6.8.4 ROYAL RESTORE): reply_text under
+    the tapped panel, every tap, no exceptions. Inaccessible >48h panels
+    (no reply_text) deliver via bot.send_message to msg.chat — still a
+    fresh page, never an edit, never silent.
     """
     t0 = time.monotonic()
-    msg = q.message
-    chat = getattr(msg, "chat", None)   # present on Message AND InaccessibleMessage
+    # v6.8.4 ROYAL RESTORE — the EXACT v6.8.0 button experience, restored 100%.
+    # EVERY tap delivers a FRESH message right under the tapped panel
+    # (q.message.reply_text). Nothing is ever edited in place, nothing is
+    # ever deleted, nothing can silently mutate high up in the chat history —
+    # the page ALWAYS visibly appears where the user is looking. That is
+    # precisely why v6.8.0 «كانت تعمل بشكل حقيقي وفاخر جداً».
+    if q.message is not None and hasattr(q.message, "reply_text"):
+        await q.message.reply_text(
+            text=text,
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        log.info("PAGE RENDERED | user=%s | method=new_message", q.from_user.id)
+        return
+    # Fallback (hardened, never an edit): panels older than 48h arrive as
+    # InaccessibleMessage with no reply_text — deliver a fresh page through
+    # bot.send_message to msg.chat. Still a fresh visible page, never silent.
+    chat = getattr(q.message, "chat", None) if q.message is not None \
+        else getattr(q, "message_chat", None)
     if chat is None or bot is None:
         raise RuntimeError("callback message is no longer available")
-    mid = getattr(msg, "message_id", None)
-    is_current = mid is not None and _last_panel.get(chat.id) == mid
-
-    # 1) Living panel -> mutate in place (the zero-spam luxury surface).
-    if is_current and hasattr(msg, "edit_text") and len(text) <= 4096:
-        try:
-            await msg.edit_text(text=text, reply_markup=markup,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True)
-            log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
-                     q.from_user.id, (time.monotonic() - t0) * 1000)
-            return
-        except Exception as e:
-            if "not modified" in str(e).lower():
-                log.info("PAGE RENDERED | user=%s | method=edit_noop | %.0fms",
-                         q.from_user.id, (time.monotonic() - t0) * 1000)
-                return
-            # any other edit failure -> replace with a fresh page below
-
-    # 2) Stale / uneditable / inaccessible panel -> remove it and deliver the
-    #    page fresh. Preferred: bot.send_message — the TRUE bottom of the chat,
-    #    exactly where the user is looking. Legacy call sites that omit `bot`
-    #    degrade gracefully to reply_text (right after the tapped message).
-    if msg is not None and hasattr(msg, "delete"):
-        try:
-            await msg.delete()
-        except Exception:
-            pass  # already gone / no permission / too old — never fatal
-    if bot is not None:
-        sent = await bot.send_message(chat.id, text, reply_markup=markup,
-                                      parse_mode=ParseMode.HTML,
-                                      disable_web_page_preview=True)
-        register_panel(chat.id, getattr(sent, "message_id", None))
-        log.info("PAGE RENDERED | user=%s | method=fresh | %.0fms",
-                 q.from_user.id, (time.monotonic() - t0) * 1000)
-        return
-    await msg.reply_text(text=text, reply_markup=markup,
-                         parse_mode=ParseMode.HTML,
-                         disable_web_page_preview=True)
-    log.info("PAGE RENDERED | user=%s | method=fresh_reply | %.0fms",
+    await bot.send_message(chat.id, text, reply_markup=markup,
+                           parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
 
 
@@ -142,13 +112,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("referral capture failed")
     if uid == config.ADMIN_ID:
-        sent = await update.effective_message.reply_text(
+        await update.effective_message.reply_text(
             f"👑 <b>{config.BRAND}</b>\n"
             f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
-            f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.\n"
-            f"⚙️ الإصدار <b>v{config.VERSION}</b> — فحص فوري: /ping",
+            f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
             parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
-        register_panel(sent.chat_id, sent.message_id)
         audit_log.log(uid, "admin_panel_open")
         return
     from fysb.theme import header
@@ -157,10 +125,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n\n<b>الوحدات المتاحة:</b>\n"
         "📊 لوحة الأداء · 📡 الإشارات المباشرة\n"
         "💎 الباقات · 🧪 التداول التجريبي\n"
-        "🎧 الدعم الفني · ⚙️ التفضيلات\n\n"
-        f"<i>⚙️ v{config.VERSION}</i>",
+        "🎧 الدعم الفني · ⚙️ التفضيلات",
         parse_mode=ParseMode.HTML, reply_markup=kb.user_menu())
-    register_panel(sent.chat_id, sent.message_id)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

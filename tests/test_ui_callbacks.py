@@ -3,10 +3,10 @@
 These smoke tests replay real callback payloads through the dispatcher with
 REALISTIC mocked Telegram objects (messages carry chat/message_id and support
 edit_text/delete — the exact surface production runs on), asserting:
-  q.answer() first, living-panel render (fresh page at the chat bottom for
-  stale panels, in-place edit for the current one), admin guard, no dead
-  callbacks, and the v6.8.1 regression («زر يُضغط ولا يظهر أي شيء») can
-  never return.
+  q.answer() first, the v6.8.4 ROYAL RESTORE contract (a FRESH page under
+  every tap — reply_text, exactly like the v6.8.0 build the owner loved),
+  admin guard, no dead callbacks, and that no tap can ever end without a
+  visibly delivered page.
 """
 import unittest
 import asyncio
@@ -194,43 +194,44 @@ class TestAdminCallbacks(unittest.TestCase):
         self.assertTrue(page_for(q, ctx), "unknown callbacks must reply, never die silently")
 
 
-class TestLivingPanel(unittest.TestCase):
-    """THE 2026-11-23 INCIDENT (owner: «زر يُضغط ولا يظهر أي شيء») —
-    v6.8.1 edited the tapped message in place unconditionally; Telegram edits
-    do NOT move a message, so taps on old panels silently mutated history far
-    above where the owner was looking, and >48h panels raised RuntimeError
-    through the dead q.message_chat fallback. These tests pin the fix."""
+class TestRoyalRestore(unittest.TestCase):
+    """v6.8.4 ROYAL RESTORE (owner demand 2026-11-23: «v6.8.0 كانت تعمل فيها
+    الأزرار بشكل حقيقي وفاخر جداً — استعادتها 100%») — the render contract is
+    EXACTLY v6.8.0 again: EVERY tap on ANY message kind delivers a FRESH page
+    (reply under the tapped panel, or bot.send_message for >48h panels).
+    Nothing is ever edited in place, nothing is ever deleted, nothing can
+    ever silently mutate history — the page ALWAYS visibly appears."""
 
     def setUp(self):
         db.init_db()
         common._last_panel.clear()
 
-    def test_tap_on_current_panel_edits_in_place(self):
-        # The luxury single surface: tapping the LIVING panel mutates it —
-        # no new message, no spam.
+    def test_tap_on_registered_panel_still_delivers_fresh(self):
+        # v6.8.0 semantics: even a "registered" panel gets a FRESH reply under
+        # the tap — never an in-place edit.
         q = MockQuery("a:signals", ADMIN)
         common.register_panel(777, q.message.message_id)
         ctx = MockContext()
         asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
         self.assertTrue(q._answered)
-        self.assertTrue(q.message.edits, "the current panel must be edited in place")
-        self.assertEqual(ctx.bot.sent, [], "editing the living panel must NOT send a new message")
-        self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
+        self.assertEqual(ctx.bot.sent, [], "render never uses bot.send_message for touchable panels")
+        self.assertTrue(q.message.replies, "a fresh page must appear under the tapped panel")
+        self.assertFalse(q.message.edits, "v6.8.4 NEVER edits in place — owner demand")
+        self.assertFalse(q.message.deleted, "v6.8.4 NEVER deletes the tapped panel")
+        self.assertIn("مركز إدارة الإشارات", q.message.replies[-1]["text"])
 
-    def test_tap_on_stale_panel_delivers_fresh_at_the_bottom(self):
-        # THE EXACT INCIDENT: a button on an OLD panel must produce a FRESH
-        # page in the chat (visible at the bottom) — never a silent edit.
+    def test_tap_on_stale_panel_delivers_fresh(self):
+        # THE OWNER'S CONTRACT: a button on ANY panel produces a FRESH page
+        # right under the tap — visible, always.
         q, ctx = fire("a:home", ADMIN)
-        self.assertTrue(ctx.bot.sent, "stale panel tap must deliver a fresh page")
+        self.assertTrue(q.message.replies, "stale panel tap must deliver a fresh page")
+        self.assertFalse(q.message.edits)
+        self.assertFalse(q.message.deleted)
         self.assertIn("SUPER ADMIN", page_for(q, ctx))
-        self.assertTrue(q.message.deleted, "the stale tapped panel is removed")
-        # and the fresh page becomes the new living panel
-        self.assertEqual(common._last_panel.get(777),
-                         ctx.bot.sent[-1]["message_id"])
 
     def test_inaccessible_panel_still_renders(self):
         # >48h-old panel: PTB v22 gives InaccessibleMessage (chat + message_id
-        # only). v6.8.1 raised RuntimeError here — the dead fallback.
+        # only, no reply_text). Deliver a fresh page via bot.send_message.
         msg = InaccessibleMock(chat_id=777, message_id=42)
         q, ctx = fire_raw(msg, "a:home", ADMIN)
         self.assertTrue(q._answered)
@@ -238,17 +239,17 @@ class TestLivingPanel(unittest.TestCase):
         self.assertIn("SUPER ADMIN", page_for(q, ctx))
 
     def test_first_tap_after_restart_always_delivers(self):
-        # Registry empty (fresh boot): every tap takes the fresh path — the
-        # safest possible default; a page ALWAYS appears.
+        # Fresh boot, empty registry: every tap delivers — always has, in
+        # v6.8.0, because every tap is a fresh message.
         q, ctx = fire("a:accounts", ADMIN)
-        self.assertTrue(ctx.bot.sent, "post-restart first tap must deliver a page")
+        self.assertTrue(q.message.replies, "post-restart first tap must deliver a page")
 
-    def test_registry_reset_between_taps_is_safe(self):
-        # Rapid navigation: every stale tap replaces its own panel — no
-        # accumulation, no dead ends.
+    def test_rapid_navigation_every_tap_delivers(self):
+        # Rapid navigation: EVERY tap delivers its own fresh page — no
+        # registry dependence, no dead ends, ever.
         for data in ("a:home", "a:signals", "a:accounts", "a:stats"):
             q, ctx = fire(data, ADMIN)
-            self.assertTrue(ctx.bot.sent, f"{data} must deliver a page")
+            self.assertTrue(page_for(q, ctx), f"{data} must deliver a page")
 
 
 if __name__ == "__main__":

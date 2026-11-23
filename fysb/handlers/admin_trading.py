@@ -53,8 +53,9 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
             quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
             price = float(quote["price"])
             from fysb import instruments
+            from fysb.engines.tracker import drift_pips
             entry = float(sig["entry"])
-            drift = instruments.pips(sig["symbol"], entry, price)
+            drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
             side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
             live_note = (f"\n💰 <b>سعر السوق الآن:</b> <code>{instruments.fmt_price(sig['symbol'], price)}</code>"
                          f" · {side} · <b>{drift:+.1f} pips</b>")

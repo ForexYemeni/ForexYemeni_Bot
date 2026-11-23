@@ -626,11 +626,13 @@ def broker_test_connectivity(cfg: dict, adapter_key: str) -> tuple[bool, str]:
 
 
 def _bot_sender(context):
-    """Adapter matching signal_engine.emit_to_users signature."""
+    """Adapter matching signal_engine.emit_to_users signature.
+    Returns the sent Message so delivery refs (chat_id/message_id) get pinned —
+    the tracker then edits this exact original card live."""
     bot = context.bot
 
     async def send(uid: int, text: str):
-        await bot.send_message(uid, text, parse_mode="HTML")
+        return await bot.send_message(uid, text, parse_mode="HTML")
 
     return send
 

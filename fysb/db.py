@@ -276,6 +276,11 @@ ADD_COLUMNS = {
         "expires_at": "TEXT DEFAULT ''", "entry_zone_lo": "REAL DEFAULT 0",
         "entry_zone_hi": "REAL DEFAULT 0", "notify_lock": "INTEGER DEFAULT 0",
         "half_notified": "INTEGER DEFAULT 0",
+        "live_px": "REAL DEFAULT 0",
+    },
+    "signal_deliveries": {
+        "chat_id": "TEXT DEFAULT ''",
+        "message_id": "INTEGER DEFAULT 0",
     },
     "subscriptions": {
         "source": "TEXT DEFAULT 'MANUAL'",

@@ -297,10 +297,11 @@ async def user_page(q, action: str, uid: int, context) -> None:
         if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
             try:
                 from fysb.engines import market_data
+                from fysb.engines.tracker import drift_pips
                 quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
                 price = float(quote["price"])
                 entry = float(sig["entry"])
-                drift = instruments.pips(sig["symbol"], entry, price)
+                drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
                 side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
                 card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
                               f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"

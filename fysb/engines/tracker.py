@@ -13,7 +13,7 @@ Rules:
 """
 import json
 
-from fysb import config, db
+from fysb import config, db, instruments
 from fysb.engines import market_data
 from fysb.config import log
 
@@ -83,11 +83,13 @@ def entry_filled(sig: dict, candles: list[dict]) -> bool:
 def check_open_signals(api_key: str) -> dict:
     """Scan all open signals against recent candles; update states.
 
-    Returns stats + a notifications list [(user_id, text), ...] and an
-    admin_notice — the CALLER (inside the bot's event loop) sends them.
+    Returns stats + notifications [(user_id, text), ...] + LIVE-CARD edits
+    [(user_id, chat_id, message_id, text), ...] — the caller edits the user's
+    ORIGINAL signal message in place so the first card never goes stale.
     """
-    stats = {"checked": 0, "updated": 0, "skipped_stale": 0, "errors": 0}
+    stats = {"checked": 0, "updated": 0, "refreshed": 0, "skipped_stale": 0, "errors": 0}
     notifications: list[tuple[int, str]] = []
+    edits: list[tuple[int, str, int, str]] = []
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
@@ -107,21 +109,24 @@ def check_open_signals(api_key: str) -> dict:
         if not candles:
             stats["skipped_stale"] += 1
             continue
+        live_px = _payload_close(payload)
         transition = _evaluate_signal(sig, candles)
         if transition:
             stats["updated"] += 1
-            notes, result_pips = _apply_transition(sig, transition, payload)
+            notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
             notifications.extend(notes)
-            admin_notice += f"\n📡 إشارة #{sig['id']} {sig['symbol']}: {transition} ({result_pips:+.1f} pips)"
+            edits.extend(new_edits)
             continue
         # Entry-fill activation: the moment candles confirm price traded through
         # the entry level, the signal is IN the market — «بانتظار التنفيذ» must
         # never outlive an executed trade (the exact user-reported bug).
+        activated_now = False
         if sig["status"] == "ACTIVE" and entry_filled(sig, candles):
             stats["updated"] += 1
-            notes, _ = _apply_transition(sig, "RUNNING", payload)
+            activated_now = True
+            notes, _, new_edits = _apply_transition(sig, "RUNNING", payload, live_px)
             notifications.extend(notes)
-            admin_notice += f"\n🚀 إشارة #{sig['id']} {sig['symbol']}: عُبر سعر الدخول — قيد التنفيذ"
+            edits.extend(new_edits)
             sig["status"] = "RUNNING"
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified)
         if not sig.get("half_notified") and sig["status"] in ("ACTIVE", "RUNNING"):
@@ -129,16 +134,29 @@ def check_open_signals(api_key: str) -> dict:
                 if halfway_reached(sig, candles):
                     with db.conn() as c:
                         c.execute("UPDATE signals SET half_notified=1 WHERE id=? AND half_notified=0", (sig["id"],))
-                    notes = _halfway_notes(sig, candles)
+                    notes, new_edits = _halfway_notes(sig, candles, live_px)
                     notifications.extend(notes)
-                    admin_notice += f"\n💧 إشارة #{sig['id']} {sig['symbol']}: وصل السعر نصف الطريق نحو الهدف الأول"
+                    if not activated_now:      # the activation edit already refreshes the card
+                        edits.extend(new_edits)
             except Exception:
                 pass
-    return {"stats": stats, "notifications": notifications, "admin_notice": admin_notice}
+        # Live-card pulse: re-render the ORIGINAL delivered card while the price
+        # moved meaningfully — the user's first message is the live board.
+        if not activated_now and live_px and _should_refresh(sig, live_px):
+            refs = _delivery_refs(sig["id"])
+            if refs:
+                edits.extend(_card_refresh_edits(sig, live_px, refs))
+                with db.conn() as c:
+                    c.execute("UPDATE signals SET live_px=?, data_time=? WHERE id=?",
+                              (live_px, payload["last_candle_iso"], sig["id"]))
+                stats["refreshed"] += 1
+    return {"stats": stats, "notifications": notifications,
+            "admin_notice": admin_notice, "edits": edits}
 
 
-def _halfway_notes(sig: dict, candles: list[dict]) -> list[tuple[int, str]]:
-    """Luxury half-way secure-profit advisory for every receiver + admin."""
+def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tuple[list[tuple[int, str]], list]:
+    """Luxury half-way secure-profit advisory for every receiver + admin
+    (+ live-card edits so the original message shows the current state)."""
     from fysb import instruments
     from fysb.theme import dir_badge, esc, tf_name
     from fysb import config as cfg
@@ -163,7 +181,82 @@ def _halfway_notes(sig: dict, candles: list[dict]) -> list[tuple[int, str]]:
     notes = [(uid, text) for uid in uids]
     if cfg.ADMIN_ID:
         notes.append((cfg.ADMIN_ID, f"💧 إشارة #{sig['id']} {symbol}: نصف الطريق نحو TP1"))
-    return notes
+    edits = _card_refresh_edits(sig, live_px, _delivery_refs(sig["id"]))
+    return notes, edits
+
+
+def _payload_close(payload: dict) -> float:
+    """Latest confirmed close price from the tracking payload (0.0 if absent)."""
+    vals = payload.get("values") or []
+    if vals and vals[-1].get("close"):
+        try:
+            return float(vals[-1]["close"])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def drift_pips(symbol: str, direction: str, entry: float, px: float) -> float:
+    """Signed pips from entry — positive means IN the trade's favour.
+
+    instruments.pips() is a bare absolute distance; a card that shows «+60
+    pips» on a SELL trading ABOVE its entry lies to the user. Signed drift
+    keeps every live line honest (the user compares against his real P/L)."""
+    d = instruments.pips(symbol, entry, px)
+    favourable = (px <= entry) if (direction or "").upper() == "SELL" else (px >= entry)
+    return d if favourable else -d
+
+
+def _delivery_refs(signal_id: int) -> list[dict]:
+    """Deliveries that carry an editable original card (chat_id + message_id).
+    Rows delivered before v6.7.0 have empty refs — nothing to edit for them."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT user_id, chat_id, message_id FROM signal_deliveries "
+            "WHERE signal_id=? AND message_id!=0 AND chat_id!=''", (signal_id,)).fetchall()]
+
+
+REFRESH_PIPS = 3.0   # re-render the original card after this much price travel
+
+
+def _should_refresh(sig: dict, live_px: float) -> bool:
+    prev = float(sig.get("live_px") or 0)
+    if prev <= 0:
+        return True                                  # first pulse ever
+    return abs(live_px - prev) >= REFRESH_PIPS * max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
+
+
+def _market_row(symbol: str):
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+    return dict(r) if r else None
+
+
+def _live_card_text(sig: dict, uid: int, px: float) -> str:
+    """Rebuild the EXACT luxury card the user first received — current status,
+    fresh market pulse, personal block. This text REPLACES the original
+    message body via edit_message_text, so the first card is the live board."""
+    from fysb.services import user_trade
+    from fysb.ui.cards import render_signal_card
+    row = _market_row(sig["symbol"])
+    text = render_signal_card(sig, user_view=True, row=row)
+    if px:
+        entry = float(sig["entry"])
+        side = "أعلى الدخول" if px > entry else ("عند الدخول" if px == entry else "أدنى الدخول")
+        text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
+                 f"<code>{instruments.fmt_price(sig['symbol'], px, row)}</code>"
+                 f" · {side} · <b>{drift_pips(sig['symbol'], sig['direction'], entry, px):+.1f} pips</b> من الدخول</blockquote>")
+    personal = user_trade.personal_block(sig, uid)
+    if personal:
+        text += "\n\n<blockquote>" + personal + "</blockquote>"
+    return text
+
+
+def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict]) -> list:
+    if not live_px or not refs:
+        return []
+    return [(r["user_id"], r["chat_id"], int(r["message_id"]),
+             _live_card_text(sig, r["user_id"], live_px)) for r in refs]
 
 
 def _evaluate_signal(sig: dict, candles: list[dict]) -> str | None:
@@ -239,11 +332,11 @@ def halfway_reached(sig: dict, candles: list[dict]) -> bool:
     return False
 
 
-def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[tuple[int, str]], float]:
-    """Persist the transition (idempotent); return ([(user_id, text)], pips_result)
-    notifications for receivers + the admin. The caller sends them inside the
-    bot's event loop."""
-    from fysb.theme import dir_badge, esc
+def _apply_transition(sig: dict, new_status: str, payload: dict,
+                      live_px: float = 0.0) -> tuple[list[tuple[int, str]], float, list]:
+    """Persist the transition (idempotent); return (notifications, pips_result,
+    live-card edits). The caller sends/edits inside the bot's event loop."""
+    from fysb.theme import dir_badge, esc, status_ar, tf_name
     status = new_status
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3, "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
     pips_result = 0.0
@@ -256,28 +349,32 @@ def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[t
     with db.tx(immediate=True) as c:
         r = c.execute("SELECT status FROM signals WHERE id=?", (sig["id"],)).fetchone()
         if not r or r["status"] in TERMINAL:
-            return []  # already terminal — never double-update
+            return [], 0.0, []  # already terminal — never double-update
         closed_at = config.now() if status in TERMINAL else ""
-        c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?, data_time=?
+        c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?, data_time=?, live_px=?
                      WHERE id=? AND status=?""",
-                  (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"], sig["id"], sig["status"]))
+                  (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"], live_px, sig["id"], sig["status"]))
     _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{status}", f"signal #{sig['id']} pips={pips_result:.1f}")
 
-    from fysb.theme import dir_badge, esc, status_ar, tf_name
+    # The card the user holds is re-rendered with the NEW status immediately —
+    # «بانتظار التنفيذ» never outlives the candle that ended it.
+    sig_now = dict(sig)
+    sig_now.update(status=status, hit_tp=hit_tp, pips_result=pips_result,
+                   closed_at=closed_at, data_time=payload["last_candle_iso"])
+    edits = _card_refresh_edits(sig_now, live_px, _delivery_refs(sig["id"]))
+
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
     detail = ""
     result_line = f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>\n"
     if status == "RUNNING":
         detail = ("▎🚀 <b>عُبر سعر الدخول ببيانات سوق فعلية — الإشارة الآن قيد التنفيذ "
                   "وتُتابع لحظياً حتى الأهداف أو الوقف.</b>\n")
-        vals = payload.get("values") or []
-        if vals and vals[-1].get("close"):
-            live_px = float(vals[-1]["close"])
-            drift = instruments.pips(sig["symbol"], sig["entry"], live_px)
+        if live_px:
+            side_pips = drift_pips(sig["symbol"], sig["direction"], float(sig["entry"]), live_px)
             side = "أعلى الدخول" if live_px > float(sig["entry"]) else (
                 "عند الدخول" if live_px == float(sig["entry"]) else "أدنى الدخول")
             result_line = (f"▎📍 السعر عند التفعيل: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code>"
-                           f" · {side} · <b>{drift:+.1f} pips</b> من الدخول\n")
+                           f" · {side} · <b>{side_pips:+.1f} pips</b> من الدخول\n")
     if status.startswith("TP"):
         detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>\n")
         if hit_tp == 1:
@@ -301,8 +398,19 @@ def _apply_transition(sig: dict, new_status: str, payload: dict) -> tuple[list[t
         uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
     notes = [(uid, text) for uid in uids]
     if config.ADMIN_ID:
-        notes.append((config.ADMIN_ID, f"📡 إشارة #{sig['id']} {sig['symbol']}: {status} ({pips_result:+.1f} pips)"))
-    return notes, pips_result
+        # Admin sees the SAME truth the users see — Arabic status + real numbers,
+        # never a raw machine token like «RUNNING (+0.0 pips)».
+        if status == "RUNNING" and live_px:
+            side_pips = drift_pips(sig["symbol"], sig["direction"], float(sig["entry"]), live_px)
+            admin = (f"🚀 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} — "
+                     f"السعر <code>{instruments.fmt_price(sig['symbol'], live_px)}</code> "
+                     f"({side_pips:+.1f} pips من الدخول)")
+        elif pips_result:
+            admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} ({pips_result:+.1f} pips)"
+        else:
+            admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)}"
+        notes.append((config.ADMIN_ID, admin))
+    return notes, pips_result, edits
 
 
 def expire_stale_signals() -> int:

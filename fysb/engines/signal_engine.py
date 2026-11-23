@@ -203,6 +203,22 @@ def passes_personal_filters(u, sig_symbol: str, sig_tf: str, sig_strategy: str, 
     return True
 
 
+def record_delivery_refs(uid: int, signal_id: int, msg) -> None:
+    """Pin the delivered card's chat_id + message_id so the tracker can EDIT
+    that exact original message live (status transitions + market pulse).
+    Rows delivered before this upgrade have empty refs — their card stays a
+    snapshot; every NEW delivery is live forever."""
+    if msg is None:
+        return
+    message_id = getattr(msg, "message_id", 0)
+    chat_id = getattr(msg, "chat_id", None)
+    if not message_id or chat_id is None:
+        return
+    with db.conn() as c:
+        c.execute("UPDATE signal_deliveries SET chat_id=?, message_id=? WHERE user_id=? AND signal_id=?",
+                  (str(chat_id), int(message_id), uid, signal_id))
+
+
 async def emit_to_users(signal_row, bot_send) -> dict:
     """Step 16 — deliver a stored signal to eligible users (server-side gates).
 
@@ -269,8 +285,9 @@ async def emit_to_users(signal_row, bot_send) -> dict:
         if personal:
             text += "\n\n<blockquote>" + personal + "</blockquote>"
         try:
-            await bot_send(uid, text)
+            msg = await bot_send(uid, text)
             stats["sent"] += 1
+            record_delivery_refs(uid, sig["id"], msg)
         except Exception:
             stats["failed"] += 1
             release_signal(uid, sig["id"])

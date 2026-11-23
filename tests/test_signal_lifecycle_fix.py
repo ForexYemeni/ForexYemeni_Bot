@@ -110,7 +110,12 @@ class TestTrackerEvaluationRegression(unittest.TestCase):
             row = c.execute("SELECT status,pips_result FROM signals").fetchone()
         self.assertEqual(row["status"], "SL_HIT")
         self.assertTrue(row["pips_result"] < 0)          # SELL stopped out
-        self.assertTrue(result["admin_notice"])          # admin informed
+        # admin informed — as a REAL message in notifications (Arabic label),
+        # not the dead admin_notice string no loop ever sent
+        admin_lines = [t for uid, t in result["notifications"] if uid == ADMIN]
+        self.assertTrue(admin_lines)
+        self.assertIn("ضرب وقف الخسارة", admin_lines[0])
+        self.assertNotIn("SL_HIT (", admin_lines[0])
 
     def test_candles_before_creation_ignored(self):
         # all candles BEFORE creation -> nothing evaluated, status unchanged

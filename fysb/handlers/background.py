@@ -141,7 +141,9 @@ async def market_engine_loop(app):
     from fysb.engines.signal_engine import generate_signal
 
     async def bot_send(uid: int, text: str):
-        await app.bot.send_message(uid, text, parse_mode="HTML")
+        # Return the sent Message — emit_to_users pins its chat/message ids so
+        # the tracker can edit this exact original card live later.
+        return await app.bot.send_message(uid, text, parse_mode="HTML")
 
     while True:
         try:
@@ -178,7 +180,9 @@ async def market_engine_loop(app):
 
 
 async def tracker_loop(app):
-    """Signal lifecycle updates from real prices + expiry sweep + half-TP1 alerts.
+    """Signal lifecycle updates from real prices + expiry sweep + half-TP1 alerts
+    + LIVE-CARD EDITS: the user's ORIGINAL signal message is re-rendered on
+    every transition and meaningful price move — the first card is the board.
 
     Tracking runs UNCONDITIONALLY: open signals are obligations the platform
     already issued — the engine toggle governs generating NEW signals only.
@@ -195,6 +199,12 @@ async def tracker_loop(app):
                     await app.bot.send_message(uid, text, parse_mode="HTML")
                 except Exception:
                     pass
+            for uid, chat_id, message_id, text in result.get("edits", []):
+                try:
+                    await app.bot.edit_message_text(text, chat_id=int(chat_id),
+                                                    message_id=int(message_id), parse_mode="HTML")
+                except Exception:
+                    pass  # deleted message / identical text / blocked user — never fatal
             expired = tracker.expire_stale_signals()
             if expired:
                 log.info("expired %s stale signals", expired)

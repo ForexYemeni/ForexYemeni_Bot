@@ -53,7 +53,7 @@ def main() -> int:
         from fysb.handlers import inputs
         from fysb.handlers import common
         from fysb.handlers.common import (admin_command, backup_command, error_handler,
-                                          menu_command, start)
+                                          menu_command, ping_command, start)
         from fysb.handlers.dispatcher import buttons
 
         app = (Application.builder()
@@ -64,13 +64,14 @@ def main() -> int:
                .build())
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", menu_command))
+        app.add_handler(CommandHandler("ping", ping_command))
         app.add_handler(CommandHandler("admin", admin_command))
         app.add_handler(CommandHandler("backup", backup_command))
         app.add_handler(CallbackQueryHandler(buttons))
         app.add_handler(MessageHandler(filters.PHOTO, inputs.on_photo))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inputs.on_text))
         app.add_error_handler(error_handler)
-        log.info("%s | %s | %s — starting (handlers registered: /start /menu /admin /backup + callbacks + text/photo)",
+        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /admin /backup + callbacks + text/photo)",
                  config.BRAND, config.BUILD_NAME, config.VERSION)
         app.run_polling(drop_pending_updates=False)
         if common.conflict_detected:

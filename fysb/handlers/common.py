@@ -20,6 +20,8 @@ CRITICAL (button experience, v6.8.2 — the LIVING PANEL, fixed for reality):
 import html
 import time
 
+BOOT_TS = time.time()   # v6.8.3: /ping reports uptime
+
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.error import Conflict
@@ -143,7 +145,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent = await update.effective_message.reply_text(
             f"👑 <b>{config.BRAND}</b>\n"
             f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
-            f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
+            f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.\n"
+            f"⚙️ الإصدار <b>v{config.VERSION}</b> — فحص فوري: /ping",
             parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
         register_panel(sent.chat_id, sent.message_id)
         audit_log.log(uid, "admin_panel_open")
@@ -154,13 +157,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n\n<b>الوحدات المتاحة:</b>\n"
         "📊 لوحة الأداء · 📡 الإشارات المباشرة\n"
         "💎 الباقات · 🧪 التداول التجريبي\n"
-        "🎧 الدعم الفني · ⚙️ التفضيلات",
+        "🎧 الدعم الفني · ⚙️ التفضيلات\n\n"
+        f"<i>⚙️ v{config.VERSION}</i>",
         parse_mode=ParseMode.HTML, reply_markup=kb.user_menu())
     register_panel(sent.chat_id, sent.message_id)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
+
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v6.8.3 — the 5-second remote diagnosis.
+
+    Proves INSIDE Telegram, with zero log access:
+      * which exact build the container runs (old build => no /ping at all,
+        because the handler does not exist in it — absence is the answer)
+      * which engine is live (SQLite vs PostgreSQL/Supabase) + round-trip ms
+      * how long the process has been up (a tiny uptime => the bot just
+        restart-looped; a huge uptime => the old process never restarted)
+    No secrets: engine type, latency and version only.
+    """
+    uid = update.effective_user.id
+    t0 = time.monotonic()
+    ok, _integrity = db.healthy()
+    db_ms = (time.monotonic() - t0) * 1000
+    engine = "PostgreSQL (Supabase)" if config.USE_PG else "SQLite محلية"
+    up = max(0, int(time.time() - BOOT_TS))
+    up_txt = f"{up // 3600} ساعة {up % 3600 // 60} د" if up >= 3600 else f"{up // 60} دقيقة {up % 60} ث"
+    db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
+    await update.effective_message.reply_text(
+        f"🩺 <b>فحص سريع — {config.BRAND}</b>\n"
+        f"<blockquote>◆ الإصدار: <b>v{config.VERSION}</b>\n"
+        f"◆ المحرك: {engine}\n"
+        f"◆ قاعدة البيانات: {db_state}\n"
+        f"◆ مدة التشغيل: {up_txt}</blockquote>\n"
+        "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
+        "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
+        parse_mode=ParseMode.HTML)
+    audit_log.log(uid, "ping")
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

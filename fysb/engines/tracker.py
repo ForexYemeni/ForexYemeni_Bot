@@ -253,7 +253,10 @@ def _live_card_text(sig: dict, uid: int, px: float) -> str:
 
 
 def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict]) -> list:
-    if not live_px or not refs:
+    """Edits for every delivered card. A status change deserves an edit even
+    without a price (expiry/terminal states) — the price line appears only
+    when a real close is available."""
+    if not refs:
         return []
     return [(r["user_id"], r["chat_id"], int(r["message_id"]),
              _live_card_text(sig, r["user_id"], live_px)) for r in refs]
@@ -431,6 +434,32 @@ def expire_stale_signals() -> int:
                                 OR (expires_at='' AND created_at<=?))""",
                         (config.now(), config.now(), legacy_cutoff))
         return cur.rowcount
+
+
+def expire_with_card_edits() -> tuple[int, list]:
+    """The expiry sweep PLUS live-card edits: a retired signal's own message
+    must stop claiming «بانتظار التنفيذ» — the card is re-rendered with the
+    EXPIRED badge in place (no price line; expiry makes no price claims)."""
+    from datetime import datetime, timedelta, timezone
+    hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
+    legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+               AND ((expires_at!='' AND expires_at<=?)
+                    OR (expires_at='' AND created_at<=?))""",
+            (config.now(), legacy_cutoff)).fetchall()]
+    edits: list = []
+    for sig in rows:
+        sig["status"] = "EXPIRED"
+        edits.extend(_card_refresh_edits(sig, 0.0, _delivery_refs(sig["id"])))
+    with db.conn() as c:
+        cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
+                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                           AND ((expires_at!='' AND expires_at<=?)
+                                OR (expires_at='' AND created_at<=?))""",
+                        (config.now(), config.now(), legacy_cutoff))
+    return max(cur.rowcount, 0), edits
 
 
 def _log(symbol, tf, result, detail):

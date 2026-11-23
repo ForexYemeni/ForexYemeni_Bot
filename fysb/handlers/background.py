@@ -205,7 +205,13 @@ async def tracker_loop(app):
                                                     message_id=int(message_id), parse_mode="HTML")
                 except Exception:
                     pass  # deleted message / identical text / blocked user — never fatal
-            expired = tracker.expire_stale_signals()
+            expired, expiry_edits = tracker.expire_with_card_edits()
+            for uid, chat_id, message_id, text in expiry_edits:
+                try:
+                    await app.bot.edit_message_text(text, chat_id=int(chat_id),
+                                                    message_id=int(message_id), parse_mode="HTML")
+                except Exception:
+                    pass
             if expired:
                 log.info("expired %s stale signals", expired)
         except asyncio.CancelledError:

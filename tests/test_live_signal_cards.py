@@ -226,6 +226,32 @@ class TestDeliveryRefsPinning(unittest.TestCase):
         self.assertEqual(row["chat_id"], "")
 
 
+class TestExpiryCardEdits(LiveCardBase):
+    def test_expired_signal_edits_its_own_card(self):
+        """An expired signal's original message must stop claiming
+        «بانتظار التنفيذ» — the held card is re-rendered as EXPIRED."""
+        old = (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
+        with db.conn() as c:
+            c.execute("UPDATE signals SET created_at=?, expires_at='' WHERE id=?",
+                      (old, self.sid))
+        expired, edits = tracker.expire_with_card_edits()
+        self.assertEqual(expired, 1)
+        self.assertEqual(len(edits), 1)
+        uid, chat_id, message_id, text = edits[0]
+        self.assertEqual((uid, chat_id, message_id), (555001, "555000", 777))
+        self.assertIn("منتهية الصلاحية", text)
+        self.assertNotIn("بانتظار التنفيذ", text)
+        self.assertNotIn("سعر السوق الآن", text)   # expiry makes no price claims
+        with db.conn() as c:
+            row = c.execute("SELECT status,closed_at FROM signals WHERE id=?", (self.sid,)).fetchone()
+        self.assertEqual(row["status"], "EXPIRED")
+        self.assertTrue(row["closed_at"])
+
+    def test_fresh_signal_never_expires(self):
+        expired, edits = tracker.expire_with_card_edits()
+        self.assertEqual((expired, edits), (0, []))
+
+
 class TestSchemaUpgrade(unittest.TestCase):
     def test_additive_columns_exist(self):
         db.init_db()

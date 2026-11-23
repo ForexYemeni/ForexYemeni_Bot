@@ -1,0 +1,27 @@
+name: Royal Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: "000:ci-dummy-token"
+      ADMIN_ID: "1"
+      DB_PATH: "/tmp/ci_forexyemeni.db"
+      LOG_LEVEL: "INFO"
+      TWELVEDATA_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run the royal suite (189 tests)
+        run: python -m pytest -q

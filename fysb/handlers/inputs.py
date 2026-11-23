@@ -178,16 +178,30 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 raise ValueError("ترتيب SELL يجب أن يكون SL > ENTRY > TP1 > TP2 > TP3")
             from datetime import datetime, timedelta, timezone
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+            sym = instruments.normalize(symbol)
+            # Birth truth (Real-Entry protocol, v6.7.1): manual signals carry the
+            # same honesty as auto ones — the birth quote is stamped and an
+            # already-crossed entry is born RUNNING, never «بانتظار التنفيذ».
+            from fysb.engines import market_data as _md
+            from fysb.engines.entry_state import birth_status as _birth
+            live_px = 0.0
+            try:
+                live_px = float((_md.fetch_price(sym) or {}).get("price") or 0.0)
+            except Exception:
+                live_px = 0.0
+            b_status = _birth(direction, entry, live_px) if live_px > 0 else "ACTIVE"
+            filled_at = config.now() if b_status == "RUNNING" else ""
             with db.conn() as c:
                 dup = c.execute("""SELECT id FROM signals WHERE symbol=? AND direction=? AND timeframe=? AND created_at>=?""",
-                                (instruments.normalize(symbol), direction, tf, cutoff)).fetchone()
+                                (sym, direction, tf, cutoff)).fetchone()
                 if dup:
                     raise ValueError(f"توجد إشارة مطابقة حديثاً #{dup['id']} — منع التكرار")
                 cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
-                                   strategy,reason,source,created_by,created_at,data_source,data_time)
-                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'MANUAL',?,?,?,'MANUAL','')""",
-                                (instruments.normalize(symbol), direction, tf, entry, sl, tp1, tp2, tp3,
-                                 f"{tp1},{tp2},{tp3}", reward / risk, score, strategy.upper(), reason, uid, config.now()))
+                                   strategy,reason,status,source,created_by,created_at,data_source,data_time,filled_at,live_px)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'MANUAL',?,?,?,'MANUAL','',?,?)""",
+                                (sym, direction, tf, entry, sl, tp1, tp2, tp3,
+                                 f"{tp1},{tp2},{tp3}", reward / risk, score, strategy.upper(), reason,
+                                 b_status, uid, config.now(), filled_at, live_px))
                 sid = cur.lastrowid
             audit_log.log(uid, f"signal_create:{sid}")
             with db.conn() as c:

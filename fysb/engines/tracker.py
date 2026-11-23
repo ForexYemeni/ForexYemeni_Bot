@@ -5,6 +5,12 @@ Rules:
     CANCELLED / EXPIRED). RUNNING = candle data confirms price actually traded
     through the entry level — the signal is IN the market, no longer «بانتظار
     التنفيذ». A signal whose entry was never touched stays ACTIVE honestly.
+  * REAL-ENTRY DISCIPLINE (v6.6.4): an UNFILLED (ACTIVE) signal earns NO
+    lifecycle rewards — no TP banking, no halfway celebration. Price reaching
+    TP1 without ever touching the entry KILLS the idea (CANCELLED — «فات
+    الدخول»), it never gets re-branded as a winner. Targets are evaluated
+    strictly FROM the fill candle onward (filled_at cutoff), so a pre-fill
+    visit to TP1 can never be banked after a late retrace fill.
   * A TP/SL is only recorded when provider candles confirm the price actually
     traded through the level. On gaps where a candle spans both SL and TP, the
     conservative rule applies (SL first) — documented, never optimistic.
@@ -71,13 +77,72 @@ def _tracking_payload(provider_symbol: str, api_key: str) -> dict:
     raise last_err or RuntimeError("تعذر جلب شموع التتبع — كل المزودين فشلوا")
 
 
-def entry_filled(sig: dict, candles: list[dict]) -> bool:
-    """Candle-confirmed entry execution: a SELL fills when price trades at or
-    ABOVE the entry level; a BUY fills when price trades at or BELOW it."""
+def fill_candle(sig: dict, candles: list[dict]) -> dict | None:
+    """Candle-confirmed entry fill: the FIRST candle that actually traded
+    through the entry level (a SELL fills when price trades at or ABOVE the
+    entry; a BUY fills when price trades at or BELOW it). Returns that candle
+    — its datetime becomes `filled_at`, the anchor for all TP/SL evaluation."""
     entry = float(sig["entry"])
     if sig["direction"] == "BUY":
-        return any(c["low"] <= entry for c in candles)
-    return any(c["high"] >= entry for c in candles)
+        for c in candles:
+            if float(c["low"]) <= entry:
+                return c
+        return None
+    for c in candles:
+        if float(c["high"]) >= entry:
+            return c
+    return None
+
+
+def entry_filled(sig: dict, candles: list[dict]) -> bool:
+    """Boolean form of fill_candle (kept for external callers)."""
+    return fill_candle(sig, candles) is not None
+
+
+def missed_target(sig: dict, candles: list[dict]) -> bool:
+    """The entry was NEVER touched but price already reached TP1 — the idea is
+    dead (the market ran away without giving the plan its fill). No result is
+    credited: an unentered trade cannot win."""
+    tp1 = float(sig["tp1"])
+    if sig["direction"] == "BUY":
+        return any(float(c["high"]) >= tp1 for c in candles)
+    return any(float(c["low"]) <= tp1 for c in candles)
+
+
+def _legacy_active(sig: dict) -> bool:
+    """Signals born BEFORE the Real-Entry protocol carry no birth quote and no
+    filled_at — an at-market birth under the old pipeline is invisible to the
+    candle-touch check (price left the entry forever and never came back: the
+    exact «بانتظار التنفيذ للأبد» bug). Rows created after the protocol epoch
+    have an exact birth status and are NEVER touched by the heuristic."""
+    if sig.get("filled_at"):
+        return False
+    epoch = db.get_setting("real_entry_protocol_since", "")
+    if not epoch:
+        return True          # epoch not seeded yet — treat as legacy
+    return (sig.get("created_at") or "") < epoch
+
+
+def _legacy_birth_fill(sig: dict, candles: list[dict]) -> dict | None:
+    """Salvage proof for legacy at-market births: the first tracked candle's
+    OPEN is the closest recorded witness of the birth price. If it sits ON the
+    fill side or within a small at-market band (10% of the risk leg, min 5
+    pips), the trade filled at birth. Pending-retrace rows (open far on the
+    waiting side) are never touched."""
+    if not candles:
+        return None
+    first = candles[0]
+    entry = float(sig["entry"])
+    risk = abs(entry - float(sig["stop"]))
+    pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
+    band = max(0.10 * risk, 5 * pip)
+    try:
+        o = float(first.get("open") or first.get("close") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if sig["direction"] == "BUY":
+        return first if o <= entry + band else None
+    return first if o >= entry - band else None
 
 
 def check_open_signals(api_key: str) -> dict:
@@ -110,6 +175,71 @@ def check_open_signals(api_key: str) -> dict:
             stats["skipped_stale"] += 1
             continue
         live_px = _payload_close(payload)
+
+        # ---- UNFILLED signals: fill watch or honest death — nothing else ----
+        if sig["status"] == "ACTIVE":
+            fill_c = fill_candle(sig, candles)
+            if fill_c is None and _legacy_active(sig):
+                fill_c = _legacy_birth_fill(sig, candles)
+            if fill_c:
+                stats["updated"] += 1
+                sig["filled_at"] = fill_c["datetime"]
+                # Evaluate targets from the fill candle onward FIRST: if the
+                # tracked window already contains a stop-out or a banked
+                # target, that truth is applied directly (one honest
+                # transition) instead of announcing RUNNING for a trade that
+                # already ended.
+                transition = _evaluate_signal(sig, candles, cutoff=fill_c["datetime"])
+                if transition:
+                    notes, _, new_edits = _apply_transition(
+                        sig, transition, payload, live_px, filled_at=fill_c["datetime"])
+                    notifications.extend(notes)
+                    edits.extend(new_edits)
+                    sig["status"] = transition
+                    continue
+                notes, _, new_edits = _apply_transition(
+                    sig, "RUNNING", payload, live_px, filled_at=fill_c["datetime"])
+                notifications.extend(notes)
+                edits.extend(new_edits)
+                sig["status"] = "RUNNING"
+                # Same-pass half-TP1 check (post-fill candles only) — mirrors
+                # the standing pass below; the activation edit already
+                # refreshed the card, so only notes are extended.
+                if not sig.get("half_notified"):
+                    try:
+                        post = [c for c in candles
+                                if c["datetime"] >= _utc_cutoff(sig["filled_at"])]
+                        if post and halfway_reached(sig, post):
+                            with db.conn() as c:
+                                c.execute("UPDATE signals SET half_notified=1 WHERE id=? AND half_notified=0",
+                                          (sig["id"],))
+                            notes, _ = _halfway_notes(sig, post, live_px)
+                            notifications.extend(notes)
+                    except Exception:
+                        pass
+                continue
+            if missed_target(sig, candles):
+                stats["updated"] += 1
+                notes, _, new_edits = _apply_transition(sig, "CANCELLED", payload, live_px)
+                notifications.extend(notes)
+                edits.extend(new_edits)
+                _log(symbol, sig["timeframe"], "MISSED_ENTRY",
+                     f"signal #{sig['id']} reached TP1 without ever touching the entry")
+                continue
+            # Still a live pending plan: keep the card pulsing with the real
+            # price, but NEVER bank targets or celebrate halfway for a trade
+            # the market has not given us yet.
+            if live_px and _should_refresh(sig, live_px):
+                refs = _delivery_refs(sig["id"])
+                if refs:
+                    edits.extend(_card_refresh_edits(sig, live_px, refs))
+                    with db.conn() as c:
+                        c.execute("UPDATE signals SET live_px=?, data_time=? WHERE id=?",
+                                  (live_px, payload["last_candle_iso"], sig["id"]))
+                    stats["refreshed"] += 1
+            continue
+
+        # ---- FILLED signals: full lifecycle from the fill candle onward ----
         transition = _evaluate_signal(sig, candles)
         if transition:
             stats["updated"] += 1
@@ -117,32 +247,23 @@ def check_open_signals(api_key: str) -> dict:
             notifications.extend(notes)
             edits.extend(new_edits)
             continue
-        # Entry-fill activation: the moment candles confirm price traded through
-        # the entry level, the signal is IN the market — «بانتظار التنفيذ» must
-        # never outlive an executed trade (the exact user-reported bug).
-        activated_now = False
-        if sig["status"] == "ACTIVE" and entry_filled(sig, candles):
-            stats["updated"] += 1
-            activated_now = True
-            notes, _, new_edits = _apply_transition(sig, "RUNNING", payload, live_px)
-            notifications.extend(notes)
-            edits.extend(new_edits)
-            sig["status"] = "RUNNING"
-        # Half-TP1 secure-profit advisory (one-time per signal, data-verified)
-        if not sig.get("half_notified") and sig["status"] in ("ACTIVE", "RUNNING"):
+        # Half-TP1 secure-profit advisory (one-time per signal, data-verified,
+        # post-fill candles only — a pre-fill visit to the half level counts 0)
+        if not sig.get("half_notified") and sig["status"] in ("RUNNING", "TP1_HIT", "TP2_HIT"):
             try:
-                if halfway_reached(sig, candles):
+                fill_cut = _utc_cutoff(sig.get("filled_at") or sig["created_at"])
+                post = [c for c in candles if c["datetime"] >= fill_cut]
+                if post and halfway_reached(sig, post):
                     with db.conn() as c:
                         c.execute("UPDATE signals SET half_notified=1 WHERE id=? AND half_notified=0", (sig["id"],))
-                    notes, new_edits = _halfway_notes(sig, candles, live_px)
+                    notes, new_edits = _halfway_notes(sig, post, live_px)
                     notifications.extend(notes)
-                    if not activated_now:      # the activation edit already refreshes the card
-                        edits.extend(new_edits)
+                    edits.extend(new_edits)
             except Exception:
                 pass
         # Live-card pulse: re-render the ORIGINAL delivered card while the price
         # moved meaningfully — the user's first message is the live board.
-        if not activated_now and live_px and _should_refresh(sig, live_px):
+        if live_px and _should_refresh(sig, live_px):
             refs = _delivery_refs(sig["id"])
             if refs:
                 edits.extend(_card_refresh_edits(sig, live_px, refs))
@@ -262,8 +383,13 @@ def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict]) -> list:
              _live_card_text(sig, r["user_id"], live_px)) for r in refs]
 
 
-def _evaluate_signal(sig: dict, candles: list[dict]) -> str | None:
+def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | None:
     """Return the next status if price data justifies it, else None.
+
+    Only candles AT/AFTER the fill anchor are walked — `cutoff` (or the
+    signal's filled_at, or its creation time as last resort). A retrace fill
+    that arrives AFTER price already visited TP1 can never bank that stale
+    touch: the visit happened before the trade existed.
 
     Chronological, order-honest walk:
       * A stop-loss touch BEFORE any target progress kills the trade ->
@@ -280,8 +406,12 @@ def _evaluate_signal(sig: dict, candles: list[dict]) -> str | None:
     sl, tp1, tp2, tp3 = sig["stop"], sig["tp1"], sig["tp2"], sig["tp3"]
     hit_tp = int(sig["hit_tp"] or 0)
 
+    cut = _utc_cutoff(cutoff or sig.get("filled_at") or sig.get("created_at") or "")
+    walked = [c for c in candles if c["datetime"] >= cut]
+    if not walked:
+        return None
     progress_tp = hit_tp
-    for c in candles:
+    for c in walked:
         hi, lo = c["high"], c["low"]
         if direction == "BUY":
             sl_now = lo <= sl
@@ -336,12 +466,15 @@ def halfway_reached(sig: dict, candles: list[dict]) -> bool:
 
 
 def _apply_transition(sig: dict, new_status: str, payload: dict,
-                      live_px: float = 0.0) -> tuple[list[tuple[int, str]], float, list]:
+                      live_px: float = 0.0, filled_at: str = "") -> tuple[list[tuple[int, str]], float, list]:
     """Persist the transition (idempotent); return (notifications, pips_result,
-    live-card edits). The caller sends/edits inside the bot's event loop."""
+    live-card edits). The caller sends/edits inside the bot's event loop.
+    RUNNING transitions anchor `filled_at` (the fill candle's datetime) so all
+    later target evaluation starts from the true fill moment."""
     from fysb.theme import dir_badge, esc, status_ar, tf_name
     status = new_status
-    hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3, "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
+    hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3,
+              "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
     pips_result = 0.0
     from fysb import instruments
     if status == "SL_HIT":
@@ -349,21 +482,26 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     elif status.startswith("TP"):
         tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
         pips_result = instruments.pips(sig["symbol"], sig["entry"], tp_map[hit_tp])
+    if status == "RUNNING":
+        filled_at = filled_at or sig.get("filled_at") or config.now()
+    closed_at = config.now() if status in TERMINAL else ""
     with db.tx(immediate=True) as c:
         r = c.execute("SELECT status FROM signals WHERE id=?", (sig["id"],)).fetchone()
         if not r or r["status"] in TERMINAL:
             return [], 0.0, []  # already terminal — never double-update
-        closed_at = config.now() if status in TERMINAL else ""
-        c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?, data_time=?, live_px=?
-                     WHERE id=? AND status=?""",
-                  (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"], live_px, sig["id"], sig["status"]))
-    _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{status}", f"signal #{sig['id']} pips={pips_result:.1f}")
+        c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
+                     data_time=?, live_px=?, filled_at=? WHERE id=? AND status=?""",
+                  (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
+                   live_px, filled_at or sig.get("filled_at") or "", sig["id"], sig["status"]))
+    _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{status}",
+         f"signal #{sig['id']} pips={pips_result:.1f} filled_at={filled_at or sig.get('filled_at') or '-'}")
 
     # The card the user holds is re-rendered with the NEW status immediately —
     # «بانتظار التنفيذ» never outlives the candle that ended it.
     sig_now = dict(sig)
     sig_now.update(status=status, hit_tp=hit_tp, pips_result=pips_result,
-                   closed_at=closed_at, data_time=payload["last_candle_iso"])
+                   closed_at=closed_at, data_time=payload["last_candle_iso"],
+                   filled_at=filled_at or sig.get("filled_at") or "")
     edits = _card_refresh_edits(sig_now, live_px, _delivery_refs(sig["id"]))
 
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
@@ -378,6 +516,10 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
                 "عند الدخول" if live_px == float(sig["entry"]) else "أدنى الدخول")
             result_line = (f"▎📍 السعر عند التفعيل: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code>"
                            f" · {side} · <b>{side_pips:+.1f} pips</b> من الدخول\n")
+    elif status == "CANCELLED":
+        detail = ("▎⛔ لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
+                  "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
+        result_line = ""
     if status.startswith("TP"):
         detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>\n")
         if hit_tp == 1:
@@ -408,6 +550,8 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
             admin = (f"🚀 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} — "
                      f"السعر <code>{instruments.fmt_price(sig['symbol'], live_px)}</code> "
                      f"({side_pips:+.1f} pips من الدخول)")
+        elif status == "CANCELLED":
+            admin = f"⛔ إشارة #{sig['id']} {sig['symbol']}: أُلغيت — بلغ الهدف الأول دون لمس منطقة الدخول (فات الدخول)"
         elif pips_result:
             admin = f"📡 إشارة #{sig['id']} {sig['symbol']}: {status_ar(status)} ({pips_result:+.1f} pips)"
         else:

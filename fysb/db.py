@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS signals(
   score INTEGER DEFAULT 0, strategy TEXT DEFAULT 'MANUAL',
   reason TEXT DEFAULT '', status TEXT DEFAULT 'ACTIVE',
   source TEXT DEFAULT 'MANUAL', created_by INTEGER, created_at TEXT NOT NULL,
+  filled_at TEXT DEFAULT '',
   UNIQUE(symbol,direction,timeframe,entry,created_at)
 );
 CREATE TABLE IF NOT EXISTS tickets(
@@ -277,6 +278,7 @@ ADD_COLUMNS = {
         "entry_zone_hi": "REAL DEFAULT 0", "notify_lock": "INTEGER DEFAULT 0",
         "half_notified": "INTEGER DEFAULT 0",
         "live_px": "REAL DEFAULT 0",
+        "filled_at": "TEXT DEFAULT ''",
     },
     "signal_deliveries": {
         "chat_id": "TEXT DEFAULT ''",
@@ -506,6 +508,13 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             _rename_legacy_elite_plan(c)
             for k, v in DEFAULT_SETTINGS.items():
                 c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+            # Real-Entry protocol epoch (v6.6.4): signals CREATED before this
+            # instant were born under the old pipeline that never recorded the
+            # birth quote — the tracker may prove their at-birth fill from the
+            # first tracked candle (legacy salvage). Signals created after it
+            # carry an exact birth status; the heuristic never touches them.
+            c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('real_entry_protocol_since',?)",
+                      (config.now(),))
             for sym, title, provider, cat, pip, digits, contract, spread in SEED_MARKETS:
                 c.execute(
                     """INSERT INTO market_catalog(symbol,title,provider_symbol,enabled,verified,created_at,updated_at,

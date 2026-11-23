@@ -22,6 +22,7 @@ from fysb import config, db
 from fysb.config import log
 from fysb.engines import market_data
 from fysb.engines.analysis import atr_pct, structure_labels
+from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
 from fysb.engines.strategies import evaluate_all
 from fysb.engines.strategies.base import Ctx
 from fysb.engines import risk
@@ -125,6 +126,40 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False) -> di
         _log_run(symbol, entry_tf, "RISK_REJECTED", risk_gate.reason)
         return {"status": "REJECTED", "signal_id": None, "reason": risk_gate.reason, "score": best.score}
 
+    # 13.5: REAL-ENTRY GATE — a signal must be born actionable.
+    # The plan's prices are computed from candle history; the market does not
+    # wait for the pipeline. If the LIVE quote has already consumed >25% of
+    # the entry→TP1 leg on the waiting side (a stale retrace nobody filled)
+    # or blown through the entry toward the stop, this setup is a RELIC —
+    # publishing it would print an R:R the market no longer offers (the exact
+    # user report: «+288.6 pips أعلى الدخول» at birth). Refused, logged.
+    live_px = 0.0
+    try:
+        quote = market_data.fetch_price(symbol, api_key)
+        live_px = float((quote or {}).get("price") or 0.0)
+    except Exception:
+        live_px = 0.0
+    if live_px <= 0:
+        vals = payload.get("values") or []
+        if vals:
+            try:
+                live_px = float(vals[-1].get("close") or 0.0)
+            except (TypeError, ValueError):
+                live_px = 0.0
+    birth_run = False
+    if live_px > 0:
+        stale, stale_detail = is_stale_entry(symbol, best.direction, best.entry,
+                                             best.stop, best.tp1, live_px)
+        if stale:
+            _log_run(symbol, entry_tf, "STALE_ENTRY", stale_detail)
+            return {"status": "REJECTED", "signal_id": None,
+                    "reason": ("stale entry — السعر ابتعد عن منطقة الدخول قبل النشر "
+                               f"({stale_detail}); لا تُنشر فكرة فات قطارها"),
+                    "score": best.score}
+        birth_status_now = birth_status(best.direction, best.entry, live_px)
+    else:
+        birth_status_now = "ACTIVE"
+
     # 14: duplicate check — same symbol+direction+TF within freshness window
     hours = max(1, min(db.get_setting_int("signal_expiry_hours", 72) // 2, 36))
     cutoff = (config_now() - timedelta(hours=hours)).isoformat()
@@ -135,18 +170,23 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False) -> di
             _log_run(symbol, entry_tf, "DUPLICATE_SKIPPED", f"recent signal #{dup['id']}")
             return {"status": "DUPLICATE", "signal_id": dup["id"], "reason": "recent duplicate", "score": best.score}
 
-        # 15: store (full precision floats; formatting happens only at display)
+        # 15: store (full precision floats; formatting happens only at display).
+        # Birth truth: the birth quote is stored (live_px) and an at-market or
+        # already-crossed entry is born RUNNING with filled_at set — the first
+        # card the world sees can never lie about the execution state.
+        filled_at_birth = config_now().isoformat() if birth_status_now == "RUNNING" else ""
         cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
                            strategy,reason,status,source,created_by,created_at,data_source,data_time,
-                           strategy_scores,expires_at,entry_zone_lo,entry_zone_hi)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','AUTO',0,?,?,?,?,?,?,?)""",
+                           strategy_scores,expires_at,entry_zone_lo,entry_zone_hi,filled_at,live_px)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'AUTO',0,?,?,?,?,?,?,?,?,?)""",
                         (symbol, best.direction, entry_tf, best.entry, best.stop, best.tp1, best.tp2, best.tp3,
                          f"{best.tp1},{best.tp2},{best.tp3}", best.rr, best.score, best.code,
-                         " | ".join(best.reasons), config.now(), "LIVE", payload["last_candle_iso"],
+                         " | ".join(best.reasons), birth_status_now, config.now(), "LIVE", payload["last_candle_iso"],
                          json.dumps({r.code: r.score for r in results}), _expiry_iso(),
-                         0.0, 0.0))
+                         0.0, 0.0, filled_at_birth, live_px))
         sid = cur.lastrowid
-    _log_run(symbol, entry_tf, "SIGNAL_CREATED", f"id={sid} {best.summary()} | {bias_note}")
+    _log_run(symbol, entry_tf, "SIGNAL_CREATED",
+             f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}")
     return {"status": "SIGNAL_CREATED", "signal_id": sid, "reason": best.summary(), "score": best.score}
 
 
@@ -281,6 +321,9 @@ async def emit_to_users(signal_row, bot_send) -> dict:
         # 4) deliver: luxury card + personal plan block (single message)
         row = _market_row(sig_symbol)
         text = render_signal_card(sig, user_view=True, row=row)
+        pulse = birth_pulse_line(sig, row)
+        if pulse:
+            text += "\n\n<blockquote>" + pulse + "</blockquote>"
         personal = user_trade.personal_block(sig, uid)
         if personal:
             text += "\n\n<blockquote>" + personal + "</blockquote>"

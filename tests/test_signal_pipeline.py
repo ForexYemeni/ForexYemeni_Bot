@@ -70,7 +70,13 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(r["result"], "DATA_ERROR", "failure must be recorded in engine_runs")
 
     def test_duplicate_rejected(self):
-        with patch.object(market_data, "fetch_candles", return_value=_valid_payload()), \
+        # The Real-Entry gate needs a live quote; in this suite the candles are
+        # synthetic — freeze the quote to the payload's own close (no network)
+        # and bypass the stale check so the DUPLICATE semantics stay isolated.
+        payload = _valid_payload()
+        with patch.object(market_data, "fetch_candles", return_value=payload), \
+             patch.object(market_data, "fetch_price", side_effect=RuntimeError("no quote in tests")), \
+             patch.object(signal_engine, "is_stale_entry", return_value=(False, "")), \
              patch("fysb.engines.signal_engine._allowed_strategies", return_value=["PRICE_ACTION"]):
             with db.conn() as c:
                 c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,

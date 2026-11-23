@@ -86,14 +86,26 @@ postgresql://postgres.<المعرف>:<كلمة_المرور>@aws-1-ap-northeast-
 3. إن نسيت: لديك مهلة سماح 3 أيام إضافية (~7 أيام كاملة) ثم يُحذف السيرفر
    (تُحفظ نسخة احتياطية يوماً واحداً). بياناتك الحقيقية في Supabase لا تتأثر إطلاقاً.
 
-## التحديثات لاحقاً (عند أي تعديل على الكود)
+## التحديثات لاحقاً — ثلاث طرق، كلها بلا تنزيل ولا رفع ملفات (منذ v6.9.0)
+
+| الطريقة | ما تفعله أنت | ملاحظات |
+|---|---|---|
+| **أمر `/update` في تلغرام** | لا شيء — رسالة واحدة | أسرع طريقة: فحص ← تنزيل ← تثبيت ← إعادة تشغيل، برسائل عربية |
+| **زر Restart في اللوحة** | لا شيء — نقرة واحدة | الإقلاع يفحص GitHub Releases ويُحدّث ذاتياً قبل تشغيل البوت (`BOOT: UPDATE ✓`) |
+| **سحب commit تلقائي** | لا شيء | إن كان النشر Source: GitHub — تسحب اللوحة آخر commit عند كل إعادة تشغيل |
 
 ```bash
-# على جهازك بعد تعديل الكود:
-git add -A && git commit -m "وصف التعديل" && git push
+# عند أي تعديل جديد على الكود (يُنشر من جهتنا على GitHub):
+# 1) push إلى main + Release جديد باسم ForexYemeni1.zip
+# 2) أنت: /update في تلغرام أو Restart في اللوحة — فقط.
 ```
-ثم في لوحة bot-hosting: **Restart** — أو **More → GitHub → Pull now**.
-السحب التلقائي عند الإعادة التشغيل يحدث البوت بأحدث نسخة.
+
+الرابط الدائم لأحدث حزمة (يتحدّث مع كل Release):
+`https://github.com/ForexYemeni/ForexYemeni_Bot/releases/latest/download/ForexYemeni1.zip`
+
+للتعطيل: `AUTO_UPDATE=0` في تبويب Environment ثم Restart.
+الاستعادة للنسخة المؤكدة v6.8.4:
+`https://github.com/ForexYemeni/ForexYemeni_Bot/releases/download/v6.8.4/ForexYemeni1.zip`
 
 ## النسخ الاحتياطي (طبقتان)
 

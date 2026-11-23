@@ -64,9 +64,17 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "6.8.4"
+VERSION = "6.9.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
+
+# --- GitHub self-update (v6.9.0) --------------------------------------------
+# The bot pulls the newest ForexYemeni1.zip from GitHub Releases by itself:
+# at every boot (updater.boot_check, disable with AUTO_UPDATE=0) and via /update.
+# The public repo needs NO token; if it ever turns private, set GITHUB_TOKEN in .env.
+REPO_OWNER = os.getenv("REPO_OWNER", "ForexYemeni").strip()
+REPO_NAME = os.getenv("REPO_NAME", "ForexYemeni_Bot").strip()
+UPDATE_ASSET = os.getenv("UPDATE_ASSET", "ForexYemeni1.zip").strip()
 
 BACKUP_DIR = BASE_DIR / "backups"
 LOG_DIR = BASE_DIR / "logs"

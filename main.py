@@ -4,7 +4,37 @@
 Usage: python main.py
 Environment: .env (BOT_TOKEN, ADMIN_ID, DB_PATH, LOG_LEVEL, TWELVEDATA_API_KEY)
 """
+import os
 import sys
+
+
+def _bootstrap_self_update() -> None:
+    """v6.9.0 — فحص GitHub Releases قبل تحميل أي كود من fysb.
+
+    يجري فقط عند التشغيل المباشر (python main.py)، وليس عند الاستيراد.
+    وجود إصدار أحدث ⇒ تثبيته ثم إعادة تشغيل فورية — لا يعود أبداً.
+    أي فشل ⇒ سطر BOOT واضح ثم متابعة الإقلاع الطبيعي بالإصدار الحالي.
+    تعطيل كامل: AUTO_UPDATE=0 في البيئة.
+    """
+    if os.getenv("AUTO_UPDATE", "1").strip().lower() in ("0", "false", "no", "off"):
+        print("BOOT: UPDATE — معطل (AUTO_UPDATE=0)")
+        return
+    try:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()          # لملء GITHUB_TOKEN إن كان المستودع خاصاً
+        except Exception:
+            pass
+        import updater
+        updater.boot_check()
+    except SystemExit:
+        raise
+    except Exception as exc:      # فحص التحديث لا يحجب الإقلاع أبداً
+        print(f"BOOT: UPDATE ✗ تم تجاهل الفحص ({type(exc).__name__}) — متابعة بالإصدار الحالي")
+
+
+if __name__ == "__main__":
+    _bootstrap_self_update()
 
 from fysb import config, db
 from fysb.config import log
@@ -53,7 +83,7 @@ def main() -> int:
         from fysb.handlers import inputs
         from fysb.handlers import common
         from fysb.handlers.common import (admin_command, backup_command, error_handler,
-                                          menu_command, ping_command, start)
+                                          menu_command, ping_command, start, update_command)
         from fysb.handlers.dispatcher import buttons
 
         app = (Application.builder()
@@ -64,13 +94,14 @@ def main() -> int:
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", menu_command))
         app.add_handler(CommandHandler("ping", ping_command))
+        app.add_handler(CommandHandler("update", update_command))
         app.add_handler(CommandHandler("admin", admin_command))
         app.add_handler(CommandHandler("backup", backup_command))
         app.add_handler(CallbackQueryHandler(buttons))
         app.add_handler(MessageHandler(filters.PHOTO, inputs.on_photo))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inputs.on_text))
         app.add_error_handler(error_handler)
-        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /admin /backup + callbacks + text/photo)",
+        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup + callbacks + text/photo)",
                  config.BRAND, config.BUILD_NAME, config.VERSION)
         app.run_polling(drop_pending_updates=False)
         if common.conflict_detected:

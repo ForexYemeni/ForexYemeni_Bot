@@ -11,6 +11,7 @@ CRITICAL (v6.8.4 ROYAL RESTORE — owner demand 2026-11-23, «هذه النسخ�
   * fallback for >48h InaccessibleMessage panels uses msg.chat (v6.8.2
     knowledge) — still a fresh page, never an edit, never a dead tap.
 """
+import asyncio
 import html
 import time
 
@@ -162,6 +163,54 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
         parse_mode=ParseMode.HTML)
     audit_log.log(uid, "ping")
+
+
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v6.9.0 — التحديث الذاتي من داخل تلغرام (الإدارة فقط).
+
+    يجلب أحدث ForexYemeni1.zip من GitHub Releases، يثبّته بأمان
+    (بلا مساس لـ .env وقواعد البيانات والسجلات)، ثم يعيد تشغيل العملية.
+    بلا تحديث أحدث ⇒ رسالة واضحة، وبأي فشل ⇒ السبب + الإقلاع القادم
+    يفحص تلقائياً على أي حال.
+    """
+    uid = update.effective_user.id
+    if uid != config.ADMIN_ID:
+        audit_log.log(uid, "security:update_command_denied")
+        await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
+        return
+    import updater
+    msg = await update.effective_message.reply_text(
+        "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
+        f"◆ الإصدار الحالي: v{config.VERSION}",
+        parse_mode=ParseMode.HTML)
+    res = await asyncio.to_thread(updater.self_update)
+    status = res.get("status")
+    if status == "updated":
+        audit_log.log(uid, f"self_update:{res.get('local')}->{res.get('remote')}")
+        await msg.edit_text(
+            f"✅ <b>تم تنزيل وتثبيت الإصدار v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
+            f"◆ الملفات المثبتة: {res.get('files', 0)}\n"
+            "♻️ إعادة تشغيل البوت الآن — جاهز خلال لحظات.\n"
+            "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار الجديد.</i>",
+            parse_mode=ParseMode.HTML)
+        await asyncio.sleep(1.5)     # الوقت اللازم لتوصيل الرد قبل استبدال العملية
+        updater.restart()            # استبدال فوري للعملية — لا يعود
+        return
+    if status == "no_update":
+        audit_log.log(uid, "self_update:no_update")
+        await msg.edit_text(
+            "🟢 <b>أنت على أحدث إصدار بالفعل.</b>\n"
+            f"◆ المحلي: v{safe(res.get('local'))}\n"
+            f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}",
+            parse_mode=ParseMode.HTML)
+        return
+    audit_log.log(uid, f"self_update:error:{str(res.get('detail', ''))[:80]}")
+    await msg.edit_text(
+        "⚠️ <b>تعذّر التحديث الآن — الإصدار الحالي ما زال يعمل بشكل طبيعي.</b>\n"
+        f"◆ الإصدار الحالي: v{safe(res.get('local'))}\n"
+        f"◆ السبب: {safe(res.get('detail') or 'غير معروف')}\n"
+        "<i>جرّب لاحقاً من جديد، أو أعد التشغيل من اللوحة — الإقلاع يفحص التحديث تلقائياً.</i>",
+        parse_mode=ParseMode.HTML)
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

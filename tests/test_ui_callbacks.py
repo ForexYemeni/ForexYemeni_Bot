@@ -336,7 +336,11 @@ class TestRoyalFixesV691(unittest.TestCase):
         src = inspect.getsource(inputs)
         self.assertNotIn('InlineKeyboardButton("↩️ الإعلانات", "a:broadcast")', src,
                          "positional arg = URL — the exact owner-reported defect")
-        self.assertEqual(src.count('InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")'), 2,
+        safe_count = (
+            src.count('InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")')
+            + src.count('btn("↩️ الإعلانات", "a:broadcast"')
+        )
+        self.assertEqual(safe_count, 2,
                          "both broadcast flows (text preview + photo attach) must carry callback_data")
 
     # --- fix 3: documented USDT wallets visible on the user's plan page ---------

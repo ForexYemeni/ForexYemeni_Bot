@@ -476,7 +476,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             ud["broadcast_draft"] = bid
             ud["awaiting_broadcast_photo"] = True   # a photo may now follow
             targets = broadcast_service.audience_ids(audience, plan)
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb
             # v6.8.1 — the preview IS the final look: the plain text is wrapped
             # in the royal announcement frame (never parsed as the admin's own
             # HTML), so what the admin confirms is exactly what users receive.
@@ -488,9 +489,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 "🖼 أرسل صورة الآن لإرفاقها بالإعلان (اختيارية)، أو أكد الإرسال.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=f"a:bcgo:{bid}")],
-                    [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
+                    [kb.btn("✅ تأكيد الإرسال", f"a:bcgo:{bid}", style="success")],
+                    [kb.btn("🚫 إلغاء", f"a:bccancel:{bid}", style="danger")],
+                    [kb.btn("↩️ الإعلانات", "a:broadcast", style="primary")],
                 ]))
         except Exception as e:
             # The broadcast flow must NEVER die with the generic error card —
@@ -579,10 +580,11 @@ async def _plan_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: in
                 raise ValueError("السعر خارج النطاق")
             d["price"] = price
             d["step"] = "currency"
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(c, callback_data=f"a:plancur:{c}") for c in ("USD", "YER")],
-                                       [InlineKeyboardButton(c, callback_data=f"a:plancur:{c}") for c in ("SAR", "EUR")]])
-            await update.effective_message.reply_text(f"✅ السعر: <b>{price:g}</b>\n💎 اختر <b>العملة</b>:", parse_mode="HTML", reply_markup=kb)
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb_ui
+            kb_mk = InlineKeyboardMarkup([[kb_ui.btn(c, f"a:plancur:{c}", style="primary") for c in ("USD", "YER")],
+                                          [kb_ui.btn(c, f"a:plancur:{c}", style="primary") for c in ("SAR", "EUR")]])
+            await update.effective_message.reply_text(f"✅ السعر: <b>{price:g}</b>\n💎 اختر <b>العملة</b>:", parse_mode="HTML", reply_markup=kb_mk)
         else:
             ud.pop("plan_draft", None)
             await update.effective_message.reply_text("أعد إنشاء الباقة من قسم الباقات.")
@@ -694,15 +696,17 @@ async def _pm_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int,
     elif step == "instructions":
         d["instructions"] = text[:300]
         d["step"] = "plans"
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from telegram import InlineKeyboardMarkup
+        from fysb.ui import keyboards as kb_ui
         plans = await afn.run(_fetch_plans_list)
-        kb = [[InlineKeyboardButton(("✅ " if p["code"] in d.get("linked", []) else "") + p["title"],
-                                    callback_data=f"a:pmplan:{p['code']}")] for p in plans]
-        kb.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
-                   InlineKeyboardButton("🗑 إلغاء", callback_data="a:pmcancel")])
+        kb_rows = [[kb_ui.btn(("✅ " if p["code"] in d.get("linked", []) else "▫️ ") + p["title"],
+                              f"a:pmplan:{p['code']}",
+                              style="success" if p["code"] in d.get("linked", []) else "primary")] for p in plans]
+        kb_rows.append([kb_ui.btn("💾 حفظ الوسيلة", "a:pmsave", style="success"),
+                        kb_ui.btn("🗑 إلغاء", "a:pmcancel", style="danger")])
         await update.effective_message.reply_text(
             f"✅ التعليمات حُفظت.\n💎 اختر <b>الباقات المرتبطة</b> (اضغط للتبديل) ثم احفظ:",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_rows))
     else:
         context.user_data.pop("pm_draft", None)
         await update.effective_message.reply_text("أعد إضافة الوسيلة من قسم وسائل الدفع.")
@@ -889,13 +893,14 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if b:
             await afn.run(_broadcast_set_photo, bid, photo.file_id)
             targets = await afn.run(broadcast_service.audience_ids, b["audience"], b["plan_code"])
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb_ui
             await update.effective_message.reply_text(
                 f"✅ أُرفقت الصورة بالإعلان #{bid}.\nعدد المستلمين: {len(targets)}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 إرسال الآن", callback_data=f"a:bcgo:{bid}")],
-                    [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
+                    [kb_ui.btn("🚀 إرسال الآن", f"a:bcgo:{bid}", style="success")],
+                    [kb_ui.btn("🚫 إلغاء", f"a:bccancel:{bid}", style="danger")],
+                    [kb_ui.btn("↩️ الإعلانات", "a:broadcast", style="primary")],
                 ]))
         else:
             await update.effective_message.reply_text("⚠️ لا يوجد مسودة إعلان — ابدأ من قسم الإعلانات.")

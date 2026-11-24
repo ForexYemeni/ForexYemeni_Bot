@@ -800,12 +800,13 @@ async def admin_pm_toggle_plan(q, uid, context, bot, code: str):
         await render(q, "انتهت الجلسة — ابدأ من إضافة وسيلة.", kb.admin_nav(), bot)
         return
     d["linked"] = (d["linked"] - [code]) if code in d["linked"] else (d["linked"] + [code])
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import InlineKeyboardMarkup
     plans = await afn.run(_plan_code_title_rows)
-    kb_rows = [[InlineKeyboardButton(("✅ " if p["code"] in d["linked"] else "") + p["title"],
-                                     callback_data=f"a:pmplan:{p['code']}")] for p in plans]
-    kb_rows.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
-                    InlineKeyboardButton("🗑 إلغاء", callback_data="a:pmcancel")])
+    kb_rows = [[kb.btn(("✅ " if p["code"] in d["linked"] else "▫️ ") + p["title"],
+                       f"a:pmplan:{p['code']}",
+                       style="success" if p["code"] in d["linked"] else "primary")] for p in plans]
+    kb_rows.append([kb.btn("💾 حفظ الوسيلة", "a:pmsave", style="success"),
+                    kb.btn("🗑 إلغاء", "a:pmcancel", style="danger")])
     await render(q, f"💎 الباقات المرتبطة: <b>{', '.join(d['linked']) or 'الكل'}</b>",
                  InlineKeyboardMarkup(kb_rows), bot)
 

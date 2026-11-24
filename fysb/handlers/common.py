@@ -201,13 +201,14 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
     import telegram as _tg
     ui_mode = "تعديل مكاني" if (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1" else "رسالة جديدة (فورية)"
+    color_state = "✅ مفعّلة بالكامل" if kb._HAS_STYLE else "⚠️ تحتاج تحديث python-telegram-bot>=22.7"
     await update.effective_message.reply_text(
         f"🩺 <b>فحص سريع — {config.BRAND}</b>\n"
         f"<blockquote>◆ الإصدار: <b>v{config.VERSION}</b>\n"
         f"◆ المحرك: {engine}\n"
         f"◆ قاعدة البيانات: {db_state}\n"
-        f"◆ وضع الأزرار: {ui_mode} · PTB v{getattr(_tg, '__version__', '?')}\n"
-        f"◆ مدة التشغيل: {up_txt}</blockquote>\n"
+        f"◆ وضع الأزرار: {ui_mode} · الألوان الفاخرة: {color_state}\n"
+        f"◆ مكتبة تلغرام: PTB v{getattr(_tg, '__version__', '?')} · مدة التشغيل: {up_txt}</blockquote>\n"
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
         parse_mode=ParseMode.HTML)

@@ -196,3 +196,53 @@ def test_partner_panel_isolation_and_admin_ui_colors():
     assert "ملف الشريك" in txt
     btns = [b for row in mk.inline_keyboard for b in row]
     assert all(b.to_dict().get("style") in ("primary", "success", "danger") for b in btns)
+
+
+def test_partner_channel_full_auto_controls_strategies_and_schedule():
+    p = partners_svc.create_partner(75001, title="شريك النخبة", commission_pct=30.0)
+    cid = partners_svc.link_partner_channel(p["id"], "-1005556667778", "قناة النخبة")["channel_id"]
+    bot = SimpleNamespace(send_message=AsyncMock())
+    ctx = SimpleNamespace(user_data={}, bot=bot)
+    q, rep = _mk_q(75001)
+
+    # Partner channel screen displays auto-analysis, auto-signals, strategies, schedule
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"ch:{cid}"))
+    txt, mk = rep[-1]
+    assert "النشر التلقائي للتحليلات" in txt
+    assert "النشر التلقائي للإشارات" in txt
+    assert "الاستراتيجيات" in txt
+    assert "الجدولة" in txt
+    datas = [b.callback_data for row in mk.inline_keyboard for b in row]
+    assert f"p:chmode:{cid}:analysis" in datas
+    assert f"p:chmode:{cid}:signals" in datas
+    assert f"p:chfeat:{cid}:markets" in datas
+    assert f"p:chfeat:{cid}:timeframes" in datas
+    assert f"p:chfeat:{cid}:strategies" in datas
+    assert f"p:chint:{cid}" in datas
+    assert f"p:chall:{cid}" in datas
+
+    # Toggle auto_analysis off -> persisted
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"chmode:{cid}:analysis"))
+    assert admin_channels.get_channel(cid)["auto_analysis"] == 0
+
+    # Toggle auto_signals off -> persisted
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"chmode:{cid}:signals"))
+    assert admin_channels.get_channel(cid)["auto_signals"] == 0
+
+    # Pick strategy ICT
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"chfeatset:{cid}:strategies:ict"))
+    assert admin_channels.get_channel(cid)["strategies"] == "ict"
+
+    # Set schedule interval to 120 minutes
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"chsetint:{cid}:120"))
+    assert admin_channels.get_channel(cid)["interval_minutes"] == 120
+
+    # 1-tap enable ALL restores auto_analysis=1, auto_signals=1, markets/tfs/strategies='ALL'
+    asyncio.run(admin_partners.handle_partner_callback(q, 75001, ctx, bot, f"chall:{cid}"))
+    ch_after = admin_channels.get_channel(cid)
+    assert ch_after["auto_analysis"] == 1
+    assert ch_after["auto_signals"] == 1
+    assert ch_after["markets"] == "ALL"
+    assert ch_after["timeframes"] == "ALL"
+    assert ch_after["strategies"] == "ALL"
+

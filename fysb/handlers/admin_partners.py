@@ -463,6 +463,78 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         await _render_partner_channel(q, p, ch, bot)
         return
 
+    if act == "chall":
+        upd = {"enabled": 1}
+        if p.get("perm_auto_signals"):
+            upd["auto_signals"] = 1
+        if p.get("perm_auto_analysis"):
+            upd["auto_analysis"] = 1
+        if p.get("perm_choose_markets"):
+            upd["markets"] = "ALL"
+            upd["timeframes"] = "ALL"
+            upd["strategies"] = "ALL"
+        await afn.run(admin_channels.update_channel, cid, **upd)
+        ch = await afn.run(admin_channels.get_channel, cid)
+        await _render_partner_channel(q, p, ch, bot)
+        return
+
+    if act == "chmode":
+        which = parts[2] if len(parts) > 2 else ""
+        if which == "analysis":
+            if not p.get("perm_auto_analysis"):
+                await render(q, "⛔ صلاحية النشر التلقائي للتحليلات غير مفعّلة لحسابك — تواصل مع الإدارة.",
+                             kb.user_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
+                return
+            await afn.run(admin_channels.update_channel, cid, auto_analysis=0 if ch["auto_analysis"] else 1)
+        elif which == "signals":
+            if not p.get("perm_auto_signals"):
+                await render(q, "⛔ صلاحية النشر التلقائي للإشارات غير مفعّلة لحسابك — تواصل مع الإدارة.",
+                             kb.user_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
+                return
+            await afn.run(admin_channels.update_channel, cid, auto_signals=0 if ch["auto_signals"] else 1)
+        ch = await afn.run(admin_channels.get_channel, cid)
+        await _render_partner_channel(q, p, ch, bot)
+        return
+
+    if act == "chint":
+        cur_iv = int(ch.get("interval_minutes") or 60)
+        rows = [
+            [
+                kb.btn(
+                    (f"✅ كل {m} د" if cur_iv == m else f"كل {m} د"),
+                    f"p:chsetint:{cid}:{m}",
+                    style="success" if cur_iv == m else "primary",
+                )
+                for m in (30, 60, 120)
+            ],
+            [
+                kb.btn(
+                    (f"✅ كل {m} د" if cur_iv == m else f"كل {m} د"),
+                    f"p:chsetint:{cid}:{m}",
+                    style="success" if cur_iv == m else "primary",
+                )
+                for m in (180, 240, 360)
+            ],
+            [kb.btn("↩️ إدارة القناة", f"p:ch:{cid}", style="primary")],
+        ]
+        await render(
+            q,
+            f"⏰ <b><u>جدولة النشر التلقائي لقناتك ({esc(ch['title'])})</u></b>\n"
+            f"<blockquote>الفاصل الحالي: كل <b>{cur_iv} دقيقة</b> (توقيت مكة · سكون ليلي 01:00–07:00).\n"
+            f"اختر الفاصل الزمني المناسب للنشر الدوري للتحليلات والإشارات:</blockquote>",
+            kb.user_nav(rows),
+            bot,
+        )
+        return
+
+    if act == "chsetint":
+        mins = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 60
+        mins = max(30, min(360, mins))
+        await afn.run(admin_channels.update_channel, cid, interval_minutes=mins)
+        ch = await afn.run(admin_channels.get_channel, cid)
+        await _render_partner_channel(q, p, ch, bot)
+        return
+
     if act == "chvip":
         if not p.get("perm_vip_gatekeeper"):
             await render(q, "⛔ صلاحية حارس VIP غير مفعّلة لحسابك — تواصل مع الإدارة لتفعيلها.",
@@ -520,8 +592,10 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
 
     if act == "chfeat":
         kind = parts[2] if len(parts) > 2 else "markets"
+        if kind not in ("markets", "timeframes", "strategies"):
+            kind = "markets"
         if not p.get("perm_choose_markets"):
-            await render(q, "⛔ اختيار الأسواق والأطر مضبوط من قبل الإدارة.",
+            await render(q, "⛔ اختيار الأسواق والأطر والاستراتيجيات مضبوط من قبل الإدارة.",
                          kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
             return
         await _render_partner_feat(q, ch, kind, bot)
@@ -531,6 +605,8 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         if not p.get("perm_choose_markets"):
             return
         kind = parts[2] if len(parts) > 2 else "markets"
+        if kind not in ("markets", "timeframes", "strategies"):
+            return
         item = parts[3] if len(parts) > 3 else "ALL"
         cur = [x.strip() for x in (ch.get(kind) or "").split(",") if x.strip()]
         if item.upper() == "ALL":
@@ -558,23 +634,84 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
 async def _render_partner_channel(q, p: dict, ch: dict, bot):
     cid = ch["id"]
     mode_ar = partners_svc.POST_MODE_SHORT.get(partners_svc.effective_post_mode(ch, p), "تشويقي")
-    mkts = ch.get("markets") or "ALL"
-    tfs = ch.get("timeframes") or "ALL"
+    mkts_raw = [x.strip() for x in (ch.get("markets") or "").split(",") if x.strip()]
+    tfs_raw = [x.strip() for x in (ch.get("timeframes") or "").split(",") if x.strip()]
+    strats_raw = [x.strip() for x in (ch.get("strategies") or "").split(",") if x.strip()]
+
+    mkt_label = "جميع الأسواق (ALL)" if (not mkts_raw or "ALL" in [m.upper() for m in mkts_raw]) else "، ".join(mkts_raw)
+    tf_label = "جميع الأطر (ALL)" if (not tfs_raw or "ALL" in [t.upper() for t in tfs_raw]) else "، ".join(tf_name(t) for t in tfs_raw)
+    strat_label = (
+        "جميع الاستراتيجيات (13)"
+        if (not strats_raw or "ALL" in [s.upper() for s in strats_raw])
+        else "، ".join(strategy_name(s) for s in strats_raw)
+    )
+
+    auto_an_txt = (
+        ("🟢 مفعل" if ch.get("auto_analysis") else "⚪ متوقف")
+        if p.get("perm_auto_analysis")
+        else "🔒 مقفل من الإدارة"
+    )
+    auto_sig_txt = (
+        ("🟢 مفعلة" if ch.get("auto_signals") else "⚪ متوقفة")
+        if p.get("perm_auto_signals")
+        else "🔒 مقفل من الإدارة"
+    )
+    iv = int(ch.get("interval_minutes") or 60)
+    last_sent = (ch.get("last_sent") or "")[:19].replace("T", " ") or "—"
+
     body = (
         f"📺 <b><u>إدارة قناتك — {esc(ch['title'])}</u></b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "<blockquote>"
-        f"▎📌 الحالة: <b>{'🟢 البث نشط' if ch['enabled'] else '⚪ متوقف'}</b>\n"
+        f"▎📌 حالة القناة: <b>{'🟢 البث نشط' if ch['enabled'] else '⚪ متوقف'}</b>\n"
+        f"▎🔬 النشر التلقائي للتحليلات: <b>{auto_an_txt}</b>\n"
+        f"▎📡 النشر التلقائي للإشارات: <b>{auto_sig_txt}</b>\n"
         f"▎📣 وضع النشر: <b>{mode_ar}</b>\n"
         f"▎🔐 حارس قناة VIP: <b>{'🟢 مفعّل (إدخال/طرد تلقائي)' if ch.get('is_vip_gate') else '⚪ متوقف'}</b>\n"
-        f"▎🌐 الأسواق: <b>{esc('جميع الأسواق (ALL)' if mkts.upper() == 'ALL' else mkts)}</b>\n"
-        f"▎⏱ الأطر: <b>{esc('جميع الأطر (ALL)' if tfs.upper() == 'ALL' else tfs)}</b>"
+        f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"
+        f"▎⏱ الأطر الزمنية: <b>{esc(tf_label)}</b>\n"
+        f"▎🧠 الاستراتيجيات: <b>{esc(strat_label)}</b>\n"
+        f"▎⏰ الجدولة: كل <b>{iv} دقيقة</b> (توقيت مكة · سكون ليلي 01–07)\n"
+        f"▎🕐 آخر نشر: <code>{esc(last_sent)}</code>"
         "</blockquote>"
     )
+
     rows = [
-        [kb.btn("⏹ إيقاف البث" if ch["enabled"] else "▶️ تفعيل البث", f"p:chtoggle:{cid}",
+        [kb.btn("🌐 تفعيل البث الشامل لكل الأسواق والأطر", f"p:chall:{cid}", style="success")],
+        [kb.btn("⏹ إيقاف القناة" if ch["enabled"] else "▶️ تفعيل القناة", f"p:chtoggle:{cid}",
                 style="danger" if ch["enabled"] else "success")],
     ]
+
+    auto_row = []
+    if p.get("perm_auto_analysis"):
+        auto_row.append(
+            kb.btn(
+                "⏹ إيقاف التحليل التلقائي" if ch.get("auto_analysis") else "▶️ تفعيل التحليل التلقائي",
+                f"p:chmode:{cid}:analysis",
+                style="danger" if ch.get("auto_analysis") else "success",
+            )
+        )
+    if p.get("perm_auto_signals"):
+        auto_row.append(
+            kb.btn(
+                "⏹ إيقاف الإشارات التلقائية" if ch.get("auto_signals") else "▶️ تفعيل الإشارات التلقائية",
+                f"p:chmode:{cid}:signals",
+                style="danger" if ch.get("auto_signals") else "success",
+            )
+        )
+    if auto_row:
+        rows.append(auto_row)
+
+    if p.get("perm_choose_markets"):
+        rows.append([
+            kb.btn("🌐 الأسواق", f"p:chfeat:{cid}:markets", style="primary"),
+            kb.btn("⏱ الأطر", f"p:chfeat:{cid}:timeframes", style="primary"),
+            kb.btn("🧠 الاستراتيجيات", f"p:chfeat:{cid}:strategies", style="primary"),
+        ])
+
+    if p.get("perm_auto_analysis") or p.get("perm_auto_signals"):
+        rows.append([kb.btn(f"⏰ الجدولة (كل {iv} دقيقة)", f"p:chint:{cid}", style="primary")])
+
     if p.get("perm_vip_gatekeeper"):
         rows.append([
             kb.btn(
@@ -583,16 +720,13 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
                 style="danger" if ch.get("is_vip_gate") else "success",
             )
         ])
-    if p.get("perm_choose_markets"):
-        rows.append([
-            kb.btn("🌐 الأسواق", f"p:chfeat:{cid}:markets", style="primary"),
-            kb.btn("⏱ الأطر الزمنية", f"p:chfeat:{cid}:timeframes", style="primary"),
-        ])
+
     if p.get("perm_manual_post"):
         rows.append([
             kb.btn("🚀 تحليل الآن", f"p:chpost:{cid}:analysis", style="success"),
             kb.btn("📡 إشارة الآن", f"p:chpost:{cid}:signal", style="success"),
         ])
+
     rows.append([
         kb.btn("🗑 فصل القناة", f"p:chdel:{cid}", style="danger"),
         kb.btn("↩️ لوحة الشريك", "p:home", style="primary"),
@@ -607,13 +741,18 @@ async def _render_partner_feat(q, ch: dict, kind: str, bot):
     if kind == "markets":
         items = ["ALL"] + await afn.run(admin_channels._enabled_verified_market_symbols)
         title = "الأسواق"
-    else:
-        items = ["ALL", "M5", "M15", "M30", "H1", "H4", "D1"]
+    elif kind == "timeframes":
+        items = ["ALL", "M1", "M5", "M15", "M30", "H1", "H4", "D1"]
         title = "الأطر الزمنية"
+    else:
+        from fysb.engines.strategies import VERIFIABLE
+        items = ["ALL"] + list(VERIFIABLE)
+        title = "الاستراتيجيات (13)"
     rows = [
         [
             kb.btn(
-                ("✅ " if it.upper() in cur else "▫️ ") + ("الكل (ALL)" if it == "ALL" else it),
+                ("✅ " if it.upper() in cur else "▫️ ")
+                + ("الكل (ALL)" if it == "ALL" else (strategy_name(it) if kind == "strategies" else it)),
                 f"p:chfeatset:{cid}:{kind}:{it}",
                 style="success" if it.upper() in cur else "primary",
             )
@@ -622,7 +761,13 @@ async def _render_partner_feat(q, ch: dict, kind: str, bot):
         for i in range(0, len(items), 3)
     ]
     rows.append([kb.btn("↩️ إدارة القناة", f"p:ch:{cid}", style="primary")])
-    await render(q, f"⚙️ <b>تعديل {title} لقناتك ({esc(ch['title'])})</b>:", kb.user_nav(rows), bot)
+    await render(
+        q,
+        f"⚙️ <b>تعديل {title} لقناتك ({esc(ch['title'])})</b>\n"
+        "اضغط للتبديل (اختر <b>الكل (ALL)</b> للبث الشامل تلقائياً):",
+        kb.user_nav(rows),
+        bot,
+    )
 
 
 # ============================================================================

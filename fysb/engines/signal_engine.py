@@ -130,24 +130,14 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         _log_run(symbol, entry_tf, "NO_SETUP", "no strategy conditions met; no signal manufactured")
         return {"status": "NO_SETUP", "signal_id": None, "reason": "no qualifying setup", "score": None}
 
-    # 9: merge — best score wins; require margin over runner-up only for equal directions
-    best = results[0]
+    # 9: merge & multi-candidate gate evaluation (v6.19.0)
+    # Evaluate ranked candidates in score order so if candidate #1 fails
+    # per-candidate gates (stale entry or low RR), the engine seamlessly
+    # promotes the next highest-scoring LIVE candidate instead of discarding
+    # every other valid methodology.
     vol = atr_pct(candles)
-
-    # 12-13: RR + risk gate (SIGNAL_NOW isolated from global max_open_signals)
     sig_source = (source or "AUTO").upper()
-    risk_gate = risk.check_signal(symbol, best.rr, vol, source=sig_source, created_by=created_by)
-    if not risk_gate.allowed:
-        _log_run(symbol, entry_tf, "RISK_REJECTED", risk_gate.reason)
-        return {"status": "REJECTED", "signal_id": None, "reason": risk_gate.reason, "score": best.score}
 
-    # 13.5: REAL-ENTRY GATE — a signal must be born actionable.
-    # The plan's prices are computed from candle history; the market does not
-    # wait for the pipeline. If the LIVE quote has already consumed >25% of
-    # the entry→TP1 leg on the waiting side (a stale retrace nobody filled)
-    # or blown through the entry toward the stop, this setup is a RELIC —
-    # publishing it would print an R:R the market no longer offers (the exact
-    # user report: «+288.6 pips أعلى الدخول» at birth). Refused, logged.
     live_px = 0.0
     try:
         quote = market_data.fetch_price(symbol, api_key)
@@ -161,19 +151,59 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 live_px = float(vals[-1].get("close") or 0.0)
             except (TypeError, ValueError):
                 live_px = 0.0
-    birth_run = False
-    if live_px > 0:
-        stale, stale_detail = is_stale_entry(symbol, best.direction, best.entry,
-                                             best.stop, best.tp1, live_px)
-        if stale:
-            _log_run(symbol, entry_tf, "STALE_ENTRY", stale_detail)
-            return {"status": "REJECTED", "signal_id": None,
-                    "reason": ("stale entry — السعر ابتعد عن منطقة الدخول قبل النشر "
-                               f"({stale_detail}); لا تُنشر فكرة فات قطارها"),
-                    "score": best.score}
-        birth_status_now = birth_status(best.direction, best.entry, live_px)
-    else:
-        birth_status_now = "ACTIVE"
+
+    best = None
+    birth_status_now = "ACTIVE"
+    first_reject_tag = ""
+    first_reject_reason = ""
+    first_reject_score = results[0].score
+    skipped_notes: list[str] = []
+
+    for cand in results:
+        # 12-13: RR + risk gate (per-symbol, global cap, ADMIN_SIGNAL_NOW exemption)
+        risk_gate = risk.check_signal(symbol, cand.rr, vol, source=sig_source, created_by=created_by)
+        if not risk_gate.allowed:
+            # Cap / volatility blocks apply identically to every candidate -> stop immediately.
+            is_rr_only = ("rr" not in (risk_gate.metrics or {}))
+            if not is_rr_only:
+                _log_run(symbol, entry_tf, "RISK_REJECTED", risk_gate.reason)
+                return {"status": "REJECTED", "signal_id": None, "reason": risk_gate.reason, "score": cand.score}
+            if not first_reject_reason:
+                first_reject_tag = "RISK_REJECTED"
+                first_reject_reason = risk_gate.reason
+                first_reject_score = cand.score
+            skipped_notes.append(f"{cand.code}:low_rr")
+            continue
+
+        # 13.5: REAL-ENTRY GATE — a signal must be born actionable.
+        if live_px > 0:
+            stale, stale_detail = is_stale_entry(symbol, cand.direction, cand.entry,
+                                                 cand.stop, cand.tp1, live_px)
+            if stale:
+                if not first_reject_reason:
+                    first_reject_tag = "STALE_ENTRY"
+                    first_reject_reason = (
+                        "stale entry — السعر ابتعد عن منطقة الدخول قبل النشر "
+                        f"({stale_detail}); لا تُنشر فكرة فات قطارها"
+                    )
+                    first_reject_score = cand.score
+                skipped_notes.append(f"{cand.code}:stale({stale_detail})")
+                continue
+            birth_status_now = birth_status(cand.direction, cand.entry, live_px)
+        else:
+            birth_status_now = "ACTIVE"
+
+        best = cand
+        break
+
+    if best is None:
+        _log_run(symbol, entry_tf, first_reject_tag or "REJECTED", first_reject_reason)
+        return {"status": "REJECTED", "signal_id": None,
+                "reason": first_reject_reason, "score": first_reject_score}
+
+    if skipped_notes:
+        _log_run(symbol, entry_tf, "CANDIDATE_FALLBACK",
+                 f"selected {best.code} ({best.score}) after skipping {'; '.join(skipped_notes[:4])}")
 
     # 14: duplicate check — same symbol+direction+TF within freshness window
     hours = max(1, min(db.get_setting_int("signal_expiry_hours", 72) // 2, 36))

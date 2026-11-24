@@ -56,19 +56,27 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     close = last["close"]
     bias_dir = "BUY" if close > (or_hi + or_lo) / 2 else "SELL"
 
-    # FVGs formed inside this window (recent 10 candles)
+    # FVGs formed inside this window (recent 10 candles) — INTACT only (v6.19.0):
+    # a bullish FVG with close already below fvg['lo'] (or bearish above hi) is
+    # invalidated and must never produce a born-in-drawdown signal.
     fvgs = fair_value_gaps(candles[-10:], 4)
     fvg = None
     for f in fvgs:
         kind_dir = "BUY" if f["kind"] == "bullish" else "SELL"
-        if kind_dir == bias_dir:
-            fvg = f
-            break
+        if kind_dir != bias_dir:
+            continue
+        if bias_dir == "BUY" and close < f["lo"]:
+            continue
+        if bias_dir == "SELL" and close > f["hi"]:
+            continue
+        fvg = f
+        break
     if not fvg:
         return None
 
     direction = bias_dir
-    entry = (fvg["lo"] + fvg["hi"]) / 2
+    fvg_mid = (fvg["lo"] + fvg["hi"]) / 2
+    entry = min(fvg_mid, close) if direction == "BUY" else max(fvg_mid, close)
     a_ptr = atr_pct(candles)
     struct = structure_labels(candles)
     bias = structure_labels(ctx.bias_candles)

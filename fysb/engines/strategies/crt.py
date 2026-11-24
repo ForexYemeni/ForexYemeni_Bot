@@ -67,14 +67,19 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
               (bias["trend"] == "down" and direction == "SELL") or \
               (mss["choch"] and mss["bos_dir"] == ("up" if direction == "BUY" else "down"))
 
-    # 4) Entry: CRT mid (50% of range) — only accept when price can still reach it
+    # 4) Entry: CRT mid (50% of range) — v6.19.0: reject invalidated range
+    # breakouts and never place a BUY limit above close or SELL limit below close.
     a = atr(candles)
     if a <= 0:
         return None
     if direction == "BUY":
-        entry = mid if close >= mid - 0.25 * a else close
+        if close < r_lo:
+            return None
+        entry = mid if close >= mid else close
     else:
-        entry = mid if close <= mid + 0.25 * a else close
+        if close > r_hi:
+            return None
+        entry = mid if close <= mid else close
 
     # 5) Invalidation = swept extreme + buffer
     if direction == "BUY":

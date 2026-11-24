@@ -62,18 +62,33 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not direction:
         return None
 
-    # --- Entry: retrace into the nearest FVG/OB in trade direction ---------
+    # --- Entry: retrace into the nearest INTACT FVG/OB in trade direction ---
+    # v6.19.0: skip zones already broken against the trade direction (BUY with
+    # close below zone low, or SELL with close above zone high) and never place
+    # a limit entry already in drawdown against current close.
     entry_zone = None
     for f in fvgs:
         if f["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+            if direction == "BUY" and close < f["lo"]:
+                continue
+            if direction == "SELL" and close > f["hi"]:
+                continue
             entry_zone = (f["lo"], f["hi"])
             break
     if entry_zone is None:
         for ob in obs:
             if ob["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+                if direction == "BUY" and close < ob["lo"]:
+                    continue
+                if direction == "SELL" and close > ob["hi"]:
+                    continue
                 entry_zone = (ob["lo"], ob["hi"])
                 break
-    entry = (entry_zone[0] + entry_zone[1]) / 2 if entry_zone else close
+    if entry_zone:
+        z_mid = (entry_zone[0] + entry_zone[1]) / 2
+        entry = min(z_mid, close) if direction == "BUY" else max(z_mid, close)
+    else:
+        entry = close
 
     # --- Stop: beyond the swept liquidity level / recent extreme -----------
     a = atr(candles)

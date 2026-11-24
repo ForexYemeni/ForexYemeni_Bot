@@ -294,7 +294,7 @@ async def admin_engine(q, uid, context, bot):
 def _enabled_backtest_markets() -> list[str]:
     with db.conn() as c:
         rows = c.execute(
-            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY id LIMIT 12"
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol LIMIT 12"
         ).fetchall()
     return [r["symbol"] for r in rows] or ["XAUUSD", "EURUSD", "BTCUSD"]
 

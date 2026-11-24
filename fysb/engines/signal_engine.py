@@ -187,7 +187,7 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
             ).fetchone()
         else:
             dup = c.execute(
-                """SELECT id FROM signals WHERE source='AUTO' AND symbol=? AND direction=? AND timeframe=?
+                """SELECT id FROM signals WHERE source IN ('AUTO','ADMIN_SIGNAL_NOW') AND symbol=? AND direction=? AND timeframe=?
                    AND created_at>=? LIMIT 1""",
                 (symbol, best.direction, entry_tf, cutoff),
             ).fetchone()

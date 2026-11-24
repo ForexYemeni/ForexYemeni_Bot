@@ -373,7 +373,8 @@ DEFAULT_SETTINGS = {
     "risk_per_trade_pct": "1.0",
     "max_daily_risk_pct": "3.0",
     "max_daily_loss_pct": "5.0",
-    "max_open_signals": "3",
+    "max_open_per_symbol": "3",
+    "max_open_signals": "12",
     "min_rr": "2.0",
     "volatility_filter": "1",
     "atr_pct_max": "6.0",
@@ -624,6 +625,24 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 with _settings_lock:
                     _settings_cache["ui_edit_in_place"] = ("0", time.time())
                     _settings_cache["ui_render_reset_v6141"] = ("1", time.time())
+            # v6.18.0 one-time multi-market risk upgrade: databases still at the
+            # old single-market default max_open_signals='3' are smoothly raised
+            # to '12' paired with max_open_per_symbol='2' (custom admin values
+            # are preserved untouched).
+            if get_setting("risk_multimarket_v6180", "") != "1":
+                r_cur = c.execute("SELECT value FROM settings WHERE key='max_open_signals'").fetchone()
+                cur_max = (r_cur["value"] if r_cur else "").strip()
+                if cur_max in ("", "3", "3.0"):
+                    c.execute(
+                        "INSERT INTO settings(key,value) VALUES('max_open_signals','12') "
+                        "ON CONFLICT(key) DO UPDATE SET value='12'"
+                    )
+                    with _settings_lock:
+                        _settings_cache["max_open_signals"] = ("12", time.time())
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('max_open_per_symbol','3')")
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('risk_multimarket_v6180','1')")
+                with _settings_lock:
+                    _settings_cache["risk_multimarket_v6180"] = ("1", time.time())
             # Real-Entry protocol epoch (v6.6.4): signals CREATED before this
             # instant were born under the old pipeline that never recorded the
             # birth quote — the tracker may prove their at-birth fill from the

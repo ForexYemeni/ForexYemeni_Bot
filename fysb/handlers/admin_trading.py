@@ -477,7 +477,8 @@ async def admin_risk(q, uid, context, bot):
         ("risk_per_signal_pct", "المخاطرة لكل إشارة", 0.1, 0.1),
         ("max_daily_risk_pct", "أقصى مخاطرة يومية", 0.5, 0.5),
         ("max_daily_loss_pct", "أقصى خسارة يومية", 0.5, 1.0),
-        ("max_open_signals", "أقصى إشارات مفتوحة", 1, 1),
+        ("max_open_per_symbol", "أقصى إشارات مفتوحة لكل سوق", 1, 3),
+        ("max_open_signals", "أقصى إشارات مفتوحة (الكلي)", 1, 12),
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
     ]
@@ -485,7 +486,9 @@ async def admin_risk(q, uid, context, bot):
     vf = await afn.run(db.get_setting, "volatility_filter", "1")
     lines = ["🛡 <b>محرك إدارة المخاطر</b>",
              f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
-             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>", "",
+             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>",
+             "<blockquote>▎✨ <b>سقف السوق</b> يمنع تكدّس الإشارات على سوق واحد دون خنق باقي الأسواق.\n"
+             "▎👑 <b>⚡ إشارة الآن للإدارة</b> مستثناة من سقف الإشارات الآلية ولا تستهلك حصتها.</blockquote>",
              "<b>الحدود (تطبق على السيرفر قبل أي إشارة):</b>"]
     rows_kb = []
     for key, title, step, _d in keys:
@@ -499,7 +502,8 @@ async def admin_risk(q, uid, context, bot):
 
 async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
     bounds = {"risk_per_signal_pct": (0.1, 5.0), "max_daily_risk_pct": (1.0, 20.0),
-              "max_daily_loss_pct": (1.0, 30.0), "max_open_signals": (1, 20),
+              "max_daily_loss_pct": (1.0, 30.0), "max_open_per_symbol": (1, 10),
+              "max_open_signals": (1, 50),
               "min_rr": (1.0, 10.0), "atr_pct_max": (1.0, 15.0)}
     if key not in bounds:
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)

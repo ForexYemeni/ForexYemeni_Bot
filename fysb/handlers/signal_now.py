@@ -334,7 +334,7 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     )
     await _render(q, f"🚀 <b>جارٍ تشغيل المحرك الحقيقي على {scan_desc}</b>\n"
                      "<i>السوق والمنهجية والإطار تُفحص فعلياً — لا إشارات مصطنعة أبداً.</i>", None, bot)
-    sig_source = "AUTO" if is_admin else "SIGNAL_NOW"
+    sig_source = "ADMIN_SIGNAL_NOW" if is_admin else "SIGNAL_NOW"
     try:
         res = await asyncio.to_thread(
             generate_signal, symbol, tf, False, only_strats, sig_source, uid
@@ -445,7 +445,7 @@ async def run_due_watchers(app) -> None:
                 pass
             continue
         is_admin_w = (uid == config.ADMIN_ID)
-        sig_source = "AUTO" if is_admin_w else "SIGNAL_NOW"
+        sig_source = "ADMIN_SIGNAL_NOW" if is_admin_w else "SIGNAL_NOW"
         w_strat = (w["strategy"] or "").strip().upper()
         if w_strat == "ALL":
             only_strats = (await afn.run(choices_for, uid, is_admin_w))["strategies"]

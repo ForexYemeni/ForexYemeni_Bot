@@ -200,7 +200,8 @@ def admin_hub_system() -> InlineKeyboardMarkup:
          btn("💾 النسخ الاحتياطي", "a:backup", style="primary")],
         [btn("⚙️ الإعدادات", "a:settings"),
          btn("🧾 سجل الإدارة", "a:audit")],
-        [btn("🖥 حالة النظام", "a:health", style="success")],
+        [btn("🔄 إدارة التحديثات", "a:updates", style="primary"),
+         btn("🖥 حالة النظام", "a:health", style="success")],
     ])
 
 

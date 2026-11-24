@@ -33,6 +33,40 @@ def plan_for(uid: int):
     return row
 
 
+def plans_for_users(uids: list[int]) -> dict[int, dict]:
+    """v6.16.0 batch resolver: resolve active plan (with FREE fallback) for a
+    whole batch of user_ids in 2 SQL queries instead of 2N queries."""
+    if not uids:
+        return {}
+    now_iso = config.now()
+    uid_set = {int(u) for u in uids}
+    with db.conn() as c:
+        plans_by_code = {
+            r["code"]: dict(r)
+            for r in c.execute("SELECT * FROM plans").fetchall()
+        }
+        subs_rows = c.execute(
+            "SELECT user_id, plan_code, ends_at FROM subscriptions "
+            "WHERE status='ACTIVE' ORDER BY id DESC"
+        ).fetchall()
+    free_plan = plans_by_code.get("FREE")
+    active_code: dict[int, str] = {}
+    for r in subs_rows:
+        u = int(r["user_id"])
+        if u not in uid_set or u in active_code:
+            continue
+        ends = r["ends_at"]
+        if not ends or ends > now_iso:
+            active_code[u] = r["plan_code"]
+    out: dict[int, dict] = {}
+    for u in uid_set:
+        code = active_code.get(u, "FREE")
+        plan = plans_by_code.get(code) or free_plan
+        if plan:
+            out[u] = plan
+    return out
+
+
 def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", actor: int = 0,
                        override_days: int | None = None) -> dict:
     """Activate/extend a subscription. Previous ACTIVE subs of the user end now
@@ -118,8 +152,9 @@ def _quota_for(user_id: int, plan_row=None) -> int:
     return max(1, db.get_setting_int("free_daily_signals", 2))
 
 
-def quota_state(user_id: int) -> dict:
-    plan_row = plan_for(user_id)
+def quota_state(user_id: int, plan_row=None) -> dict:
+    if plan_row is None:
+        plan_row = plan_for(user_id)
     quota = _quota_for(user_id, plan_row)
     day = db.day_start_utc()
     with db.conn() as c:
@@ -129,18 +164,17 @@ def quota_state(user_id: int) -> dict:
             "quota": quota, "used": used, "remaining": max(0, quota - used), "day": day}
 
 
-def try_consume_signal(user_id: int, signal_row) -> bool:
+def try_consume_signal(user_id: int, signal_row, plan_row=None) -> bool:
     """Atomically consume one quota slot. False => quota exhausted (send blocked)."""
-    state = quota_state(user_id)
-    if state["remaining"] <= 0:
-        return False
+    if plan_row is None:
+        plan_row = plan_for(user_id)
+    quota = _quota_for(user_id, plan_row)
     try:
         with db.tx(immediate=True) as c:
             # Re-check inside the write-lock: two racing consumers can't both pass.
             day = db.day_start_utc()
             used = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
                              (user_id, day)).fetchone()["n"]
-            quota = _quota_for(user_id)
             if used >= quota:
                 return False
             c.execute("""INSERT OR IGNORE INTO signal_deliveries(user_id,signal_id,delivered_at)

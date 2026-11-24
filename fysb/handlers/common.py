@@ -218,12 +218,13 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """v6.9.0 — التحديث الذاتي من داخل تلغرام (الإدارة فقط).
+    """v6.16.0 — التحديث الذاتي الفاخر من داخل تلغرام (الإدارة فقط).
 
-    يجلب أحدث ForexYemeni1.zip من GitHub Releases، يثبّته بأمان
-    (بلا مساس لـ .env وقواعد البيانات والسجلات)، ثم يعيد تشغيل العملية.
-    بلا تحديث أحدث ⇒ رسالة واضحة، وبأي فشل ⇒ السبب + الإقلاع القادم
-    يفحص تلقائياً على أي حال.
+    الأوضاع المدعومة:
+      * /update              ← التحديث لأحدث إصدار منشور على GitHub
+      * /update v6.14.1      ← تثبيت إصدار محدد (ترقية أو رجوع لإصدار سابق أو إعادة تثبيت)
+      * /update list         ← عرض أحدث الإصدارات بأزرار تثبيت وتراجع فوري
+      * /update rollback     ← تراجع فوري لآخر نسخة محفوظة محلياً (حتى بلا إنترنت)
     """
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
@@ -231,19 +232,121 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     import updater
-    msg = await update.effective_message.reply_text(
-        "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
-        f"◆ الإصدار الحالي: v{config.VERSION}",
-        parse_mode=ParseMode.HTML)
-    res = await asyncio.to_thread(updater.self_update)
+    args = list(getattr(context, "args", None) or [])
+    arg = (args[0].strip() if args else "")
+    arg_l = arg.lower()
+
+    # --- 1) List available versions with 1-tap buttons -----------------------
+    if arg_l in ("list", "versions", "ls", "الإصدارات", "اصدارات"):
+        msg = await update.effective_message.reply_text(
+            "🔎 <b>جارٍ جلب قائمة الإصدارات من GitHub...</b>",
+            parse_mode=ParseMode.HTML)
+        releases = await asyncio.to_thread(updater.list_releases, 8)
+        snaps = await asyncio.to_thread(updater.list_rollback_snapshots)
+        lines = [
+            "🔄 <b><u>إدارة إصدارات البوت</u></b>",
+            f"<blockquote>◆ الإصدار الحالي: <b>v{safe(config.VERSION)}</b>",
+        ]
+        if snaps:
+            lines.append(f"◆ نسخة تراجع محلية جاهزة: <b>v{safe(updater.snapshot_version(snaps[0]))}</b>")
+        lines.append("</blockquote>")
+        rows_kb = []
+        if releases:
+            lines.append("<b>الإصدارات المتاحة على GitHub (اضغط للتثبيت أو الرجوع):</b>")
+            for rel in releases[:8]:
+                tag = rel["tag"]
+                ver = updater.display_tag(tag)
+                is_cur = updater.parse_version(tag) == updater.parse_version(config.VERSION)
+                mark = "✅ الحالي" if is_cur else ("⬆️ أحدث" if updater.is_newer(tag, config.VERSION) else "⬇️ سابق")
+                lines.append(f"  • <code>/update {safe(tag)}</code> — {mark}")
+                rows_kb.append([kb.btn(
+                    f"{'🔄 إعادة تثبيت' if is_cur else ('⬆️ ترقية' if updater.is_newer(tag, config.VERSION) else '⬇️ رجوع')} v{ver}",
+                    f"a:updver:{tag}",
+                    style="success" if updater.is_newer(tag, config.VERSION) else ("primary" if not is_cur else ""),
+                )])
+        else:
+            lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك كتابة <code>/update v6.14.1</code> مباشرة أو استخدام التراجع المحلي.")
+        if snaps:
+            rows_kb.append([kb.btn(
+                f"↩️ تراجع فوري للنسخة السابقة (v{updater.snapshot_version(snaps[0])})",
+                "a:updrollback",
+                style="danger",
+            )])
+        lines.append("\n<i>مثال سريع للرجوع لأي إصدار: <code>/update v6.14.1</code></i>")
+        await _send_guarded(msg.edit_text, "\n".join(lines), kb.InlineKeyboardMarkup(rows_kb) if rows_kb else None)
+        return
+
+    # --- 2) Instant offline rollback to previous local snapshot --------------
+    if arg_l in ("rollback", "back", "prev", "تراجع", "رجوع"):
+        msg = await update.effective_message.reply_text(
+            "↩️ <b>جارٍ استعادة النسخة السابقة المحفوظة محلياً...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.rollback_update)
+        if res.get("status") == "rolled_back":
+            await afn.run(audit_log.log, uid,
+                          f"self_update_rollback:{res.get('local')}->{res.get('restored_version')}")
+            await msg.edit_text(
+                f"✅ <b>تم التراجع بنجاح إلى الإصدار v{safe(res.get('restored_version'))}.</b>\n"
+                f"◆ الملفات المستعادة: {res.get('files', 0)}\n"
+                "♻️ إعادة تشغيل البوت الآن — جاهز خلال لحظات.\n"
+                "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار.</i>",
+                parse_mode=ParseMode.HTML)
+            await asyncio.sleep(1.5)
+            updater.restart()
+            return
+        await afn.run(audit_log.log, uid, f"self_update_rollback:error:{str(res.get('detail', ''))[:80]}")
+        await msg.edit_text(
+            "⚠️ <b>تعذّر التراجع المحلي.</b>\n"
+            f"◆ السبب: {safe(res.get('detail') or 'غير معروف')}\n"
+            "<i>يمكنك الرجوع لأي إصدار من GitHub مباشرة: <code>/update v6.14.1</code></i>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    # --- 3) Pin / install a specific version (upgrade, downgrade, reinstall) -
+    if arg:
+        norm = updater.normalize_tag(arg)
+        if not norm:
+            await update.effective_message.reply_text(
+                "⚠️ <b>صيغة أمر التحديث غير معروفة.</b>\n"
+                "<blockquote>◆ أحدث إصدار: <code>/update</code>\n"
+                "◆ إصدار محدد: <code>/update v6.14.1</code>\n"
+                "◆ قائمة الإصدارات: <code>/update list</code>\n"
+                "◆ تراجع فوري: <code>/update rollback</code></blockquote>",
+                parse_mode=ParseMode.HTML)
+            return
+        msg = await update.effective_message.reply_text(
+            f"🔎 <b>جارٍ جلب وتثبيت الإصدار {safe(norm)}...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}\n"
+            "<i>سيتم حفظ نسخة تراجع تلقائية قبل التثبيت دون المساس بـ .env أو قاعدة البيانات.</i>",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.self_update, None, norm, True)
+    else:
+        # --- 4) Default: upgrade to latest GitHub release --------------------
+        msg = await update.effective_message.reply_text(
+            "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.self_update)
+
     status = res.get("status")
     if status == "updated":
-        await afn.run(audit_log.log, uid, f"self_update:{res.get('local')}->{res.get('remote')}")
+        direction = res.get("direction") or "upgrade"
+        dir_label = {
+            "downgrade": "⬇️ تم الرجوع وتثبيت الإصدار",
+            "reinstall": "🔄 تمت إعادة تثبيت الإصدار",
+        }.get(direction, "✅ تم تنزيل وتثبيت الإصدار")
+        sha_line = "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
+        bak_line = (f"◆ نسخة تراجع محفوظة: <code>{safe(res.get('rollback_backup'))}</code>\n"
+                    if res.get("rollback_backup") else "")
+        await afn.run(audit_log.log, uid,
+                      f"self_update:{direction}:{res.get('local')}->{res.get('remote')}")
         await msg.edit_text(
-            f"✅ <b>تم تنزيل وتثبيت الإصدار v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
+            f"<b>{dir_label} v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
             f"◆ الملفات المثبتة: {res.get('files', 0)}\n"
+            f"{sha_line}{bak_line}"
             "♻️ إعادة تشغيل البوت الآن — جاهز خلال لحظات.\n"
-            "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار الجديد.</i>",
+            "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار، وللتراجع أرسل /update rollback.</i>",
             parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.5)     # الوقت اللازم لتوصيل الرد قبل استبدال العملية
         updater.restart()            # استبدال فوري للعملية — لا يعود
@@ -253,7 +356,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(
             "🟢 <b>أنت على أحدث إصدار بالفعل.</b>\n"
             f"◆ المحلي: v{safe(res.get('local'))}\n"
-            f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}",
+            f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}\n"
+            "<i>لعرض كل الإصدارات أو الرجوع لإصدار سابق: <code>/update list</code> أو <code>/update v6.14.1</code></i>",
             parse_mode=ParseMode.HTML)
         return
     await afn.run(audit_log.log, uid, f"self_update:error:{str(res.get('detail', ''))[:80]}")
@@ -261,7 +365,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ <b>تعذّر التحديث الآن — الإصدار الحالي ما زال يعمل بشكل طبيعي.</b>\n"
         f"◆ الإصدار الحالي: v{safe(res.get('local'))}\n"
         f"◆ السبب: {safe(res.get('detail') or 'غير معروف')}\n"
-        "<i>جرّب لاحقاً من جديد، أو أعد التشغيل من اللوحة — الإقلاع يفحص التحديث تلقائياً.</i>",
+        "<i>جرّب <code>/update list</code> لعرض الإصدارات أو <code>/update rollback</code> للتراجع المحلي.</i>",
         parse_mode=ParseMode.HTML)
 
 

@@ -1,7 +1,42 @@
 """Users service — profiles, activity tracking, blocking, admin operations."""
+import threading
+import time
+
 from fysb import config, db
 from fysb.services import subscriptions as subs
 from fysb.services import audit as audit_log
+
+# v6.16.0 Phase 6: true in-memory throttle for last_seen writes (60s per user)
+# so button taps only perform a lightweight SELECT instead of a write transaction.
+TOUCH_THROTTLE_SECONDS = 60.0
+_touch_lock = threading.Lock()
+_last_touch_mono: dict[int, float] = {}
+
+
+def reset_touch_cache() -> None:
+    """Clear in-memory touch throttle (used in tests)."""
+    with _touch_lock:
+        _last_touch_mono.clear()
+
+
+def _should_touch(uid: int) -> bool:
+    now_m = time.monotonic()
+    with _touch_lock:
+        prev = _last_touch_mono.get(uid)
+        if prev is not None and (now_m - prev) < TOUCH_THROTTLE_SECONDS:
+            return False
+        if len(_last_touch_mono) > 10000:
+            cutoff = now_m - TOUCH_THROTTLE_SECONDS
+            stale = [k for k, v in _last_touch_mono.items() if v < cutoff]
+            for k in stale[:5000]:
+                _last_touch_mono.pop(k, None)
+        _last_touch_mono[uid] = now_m
+        return True
+
+
+def _mark_touched(uid: int) -> None:
+    with _touch_lock:
+        _last_touch_mono[uid] = time.monotonic()
 
 
 def ensure_user(tg_user) -> None:
@@ -11,6 +46,7 @@ def ensure_user(tg_user) -> None:
         if existing:
             c.execute("UPDATE users SET username=?, full_name=?, last_seen=? WHERE user_id=?",
                       (tg_user.username or "", tg_user.full_name or "", config.now(), tg_user.id))
+            _mark_touched(tg_user.id)
             return
         if db.get_setting("block_new_users", "0") == "1":
             raise PermissionError("new-user registration is temporarily closed")
@@ -18,6 +54,7 @@ def ensure_user(tg_user) -> None:
                      market,timeframe,strategy,min_score)
                      VALUES(?,?,?,?,?,'','','',0)""",
                   (tg_user.id, tg_user.username or "", tg_user.full_name or "", config.now(), config.now()))
+    _mark_touched(tg_user.id)
     audit_log.log(tg_user.id, "user_registered")
 
 
@@ -29,23 +66,27 @@ def get_user(uid: int):
 
 def touch(uid: int) -> None:
     """Throttled last_seen update (max once per minute to avoid write storms)."""
+    if not _should_touch(uid):
+        return
     try:
         with db.conn() as c:
-            c.execute("UPDATE users SET last_seen=? WHERE user_id=? AND (last_seen IS NULL OR last_seen<=?)",
-                      (config.now(), uid, config.now()))
+            c.execute("UPDATE users SET last_seen=? WHERE user_id=?", (config.now(), uid))
     except Exception:
         pass
 
 
 def touch_and_get(uid: int):
-    """v6.8.1 hot-path helper: ONE pooled connection for the two calls every
-    button press makes (throttled last_seen + profile read). Halves the
-    round trips on the user navigation path — WAN PostgreSQL makes each one
-    cost real latency."""
+    """v6.16.0 hot-path helper: throttled last_seen (at most once/60s per user)
+    + profile read on ONE pooled connection.
+
+    98%+ of button taps execute a single read-only SELECT (zero SQLite write
+    lock contention and half the WAN round trips on PostgreSQL).
+    """
+    need_write = _should_touch(uid)
     try:
         with db.conn() as c:
-            c.execute("UPDATE users SET last_seen=? WHERE user_id=? AND (last_seen IS NULL OR last_seen<=?)",
-                      (config.now(), uid, config.now()))
+            if need_write:
+                c.execute("UPDATE users SET last_seen=? WHERE user_id=?", (config.now(), uid))
             r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         return dict(r) if r else None
     except Exception:

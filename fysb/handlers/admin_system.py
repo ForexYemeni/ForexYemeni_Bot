@@ -548,7 +548,174 @@ async def admin_health(q, uid, context, bot):
         f"🧠 المحرك: <b>{'يعمل' if eng == '1' else 'متوقف'}</b>",
         f"🔒 LIVE: <b>{'مفعل ⚠️' if live == '1' else 'مغلق'}</b>",
     ]
-    await render(q, "\n".join(lines), kb.admin_nav(), bot)
+    await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("🔄 إدارة التحديثات والإصدارات", "a:updates", style="primary")]]), bot)
+
+
+# --- Updates & Version Rollback Manager (v6.16.0) ---------------------------------------------
+async def admin_updates(q, uid, context, bot):
+    import updater
+    releases = await asyncio.to_thread(updater.list_releases, 6)
+    snaps = await asyncio.to_thread(updater.list_rollback_snapshots)
+    lines = [
+        "🔄 <b><u>إدارة التحديثات والإصدارات</u></b>",
+        f"<blockquote>◆ الإصدار العامل حالياً: <b>v{esc(config.VERSION)}</b>",
+    ]
+    if snaps:
+        lines.append(f"◆ آخر نسخة تراجع محلية: <b>v{esc(updater.snapshot_version(snaps[0]))}</b> ({len(snaps)} محفوظة)")
+    else:
+        lines.append("◆ نسخ التراجع المحلية: تُنشأ تلقائياً قبل كل تحديث")
+    lines.append("</blockquote>")
+    rows_kb = [[kb.btn("⬆️ فحص وتثبيت أحدث إصدار", "a:updlatest", style="success")]]
+    if releases:
+        lines.append("<b>اختر أي إصدار للتثبيت أو الرجوع الفوري:</b>")
+        for rel in releases[:6]:
+            tag = rel["tag"]
+            ver = updater.display_tag(tag)
+            is_cur = updater.parse_version(tag) == updater.parse_version(config.VERSION)
+            is_new = updater.is_newer(tag, config.VERSION)
+            badge = "✅ الحالي" if is_cur else ("⬆️ أحدث" if is_new else "⬇️ سابق")
+            lines.append(f"  • <code>{esc(tag)}</code> — {badge}")
+            rows_kb.append([kb.btn(
+                f"{'🔄 إعادة تثبيت' if is_cur else ('⬆️ ترقية إلى' if is_new else '⬇️ رجوع إلى')} v{ver}",
+                f"a:updver:{tag}",
+                style="success" if is_new else ("primary" if not is_cur else ""),
+            )])
+    else:
+        lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك إرسال <code>/update v6.14.1</code> مباشرة.")
+    if snaps:
+        rows_kb.append([kb.btn(
+            f"↩️ تراجع فوري للنسخة السابقة (v{updater.snapshot_version(snaps[0])})",
+            "a:updrollback",
+            style="danger",
+        )])
+    lines.append("\n<i>الأوامر المباشرة: <code>/update</code> · <code>/update v6.14.1</code> · <code>/update list</code> · <code>/update rollback</code></i>")
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_update_latest(q, uid, context, bot):
+    import updater
+    await render(q, f"🔎 <b>جارٍ فحص وتثبيت أحدث إصدار...</b>\n◆ الحالي: v{esc(config.VERSION)}", None, bot)
+    res = await asyncio.to_thread(updater.self_update)
+    if res.get("status") == "updated":
+        await afn.run(audit_log.log, uid, f"self_update:{res.get('local')}->{res.get('remote')}")
+        await render(
+            q,
+            f"✅ <b>تم تثبيت v{esc(updater.display_tag(res.get('remote')))} بنجاح</b> ({res.get('files', 0)} ملف).\n"
+            "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
+            None, bot,
+        )
+        await asyncio.sleep(1.5)
+        updater.restart()
+        return
+    if res.get("status") == "no_update":
+        await render(
+            q,
+            f"🟢 <b>أنت على أحدث إصدار بالفعل (v{esc(res.get('local'))}).</b>",
+            kb.admin_nav([[kb.btn("🔄 قائمة الإصدارات", "a:updates", style="primary")]]), bot,
+        )
+        return
+    await render(
+        q,
+        f"⚠️ <b>تعذّر التحديث:</b> {esc(res.get('detail') or 'غير معروف')}",
+        kb.admin_nav([[kb.btn("🔄 إدارة التحديثات", "a:updates", style="primary")]]), bot,
+    )
+
+
+async def admin_update_ver_confirm(q, uid, context, bot, tag: str):
+    import updater
+    norm = updater.normalize_tag(tag)
+    if not norm:
+        await render(q, "⚠️ رقم الإصدار غير صالح.", kb.admin_nav([[kb.btn("🔄 إدارة التحديثات", "a:updates")]]), bot)
+        return
+    is_down = updater.parse_version(norm) < updater.parse_version(config.VERSION)
+    action_txt = "الرجوع إلى الإصدار السابق" if is_down else "تثبيت الإصدار"
+    body = (
+        f"🔄 <b>تأكيد {action_txt}</b>\n"
+        f"<blockquote>◆ الحالي: <b>v{esc(config.VERSION)}</b>\n"
+        f"◆ المطلوب: <b>{esc(norm)}</b>\n"
+        "◆ حماية البيانات: <code>.env</code> وقاعدة البيانات والسجلات لن تُمس\n"
+        "◆ نسخة تراجع تلقائية ستُحفظ قبل التبديل</blockquote>"
+    )
+    rows_kb = [
+        [kb.btn(f"✅ نعم، ثبّت {norm} الآن", f"a:updvergo:{norm}", style="success" if not is_down else "danger")],
+        [kb.btn("❌ إلغاء والعودة", "a:updates")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_update_ver_go(q, uid, context, bot, tag: str):
+    import updater
+    norm = updater.normalize_tag(tag)
+    if not norm:
+        await render(q, "⚠️ رقم الإصدار غير صالح.", kb.admin_nav(), bot)
+        return
+    await render(q, f"⏳ <b>جارٍ تنزيل وتثبيت {esc(norm)}...</b>", None, bot)
+    res = await asyncio.to_thread(updater.self_update, None, norm, True)
+    if res.get("status") == "updated":
+        await afn.run(audit_log.log, uid,
+                      f"self_update:{res.get('direction')}:{res.get('local')}->{res.get('remote')}")
+        await render(
+            q,
+            f"✅ <b>تم تثبيت {esc(norm)} بنجاح</b> ({res.get('files', 0)} ملف).\n"
+            "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
+            None, bot,
+        )
+        await asyncio.sleep(1.5)
+        updater.restart()
+        return
+    await render(
+        q,
+        f"⚠️ <b>تعذّر تثبيت {esc(norm)}:</b> {esc(res.get('detail') or 'غير معروف')}",
+        kb.admin_nav([[kb.btn("🔄 إدارة التحديثات", "a:updates", style="primary")]]), bot,
+    )
+
+
+async def admin_update_rollback_confirm(q, uid, context, bot):
+    import updater
+    snaps = await asyncio.to_thread(updater.list_rollback_snapshots)
+    if not snaps:
+        await render(
+            q,
+            "⚠️ لا توجد نسخة تراجع محلية محفوظة بعد.\n"
+            "<i>يمكنك الرجوع لأي إصدار من GitHub عبر <code>/update v6.14.1</code> أو من قائمة الإصدارات.</i>",
+            kb.admin_nav([[kb.btn("🔄 إدارة التحديثات", "a:updates", style="primary")]]), bot,
+        )
+        return
+    ver = updater.snapshot_version(snaps[0])
+    body = (
+        "↩️ <b>تأكيد التراجع المحلي الفوري</b>\n"
+        f"<blockquote>◆ الإصدار الحالي: <b>v{esc(config.VERSION)}</b>\n"
+        f"◆ النسخة المستعادة: <b>v{esc(ver)}</b>\n"
+        f"◆ الملف: <code>{esc(snaps[0].name)}</code></blockquote>"
+    )
+    rows_kb = [
+        [kb.btn(f"↩️ نعم، تراجع إلى v{ver} الآن", "a:updrollbackgo", style="danger")],
+        [kb.btn("❌ إلغاء", "a:updates")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_update_rollback_go(q, uid, context, bot):
+    import updater
+    await render(q, "↩️ <b>جارٍ استعادة النسخة السابقة المحفوظة محلياً...</b>", None, bot)
+    res = await asyncio.to_thread(updater.rollback_update)
+    if res.get("status") == "rolled_back":
+        await afn.run(audit_log.log, uid,
+                      f"self_update_rollback:{res.get('local')}->{res.get('restored_version')}")
+        await render(
+            q,
+            f"✅ <b>تم التراجع إلى v{esc(res.get('restored_version'))} بنجاح</b> ({res.get('files', 0)} ملف).\n"
+            "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
+            None, bot,
+        )
+        await asyncio.sleep(1.5)
+        updater.restart()
+        return
+    await render(
+        q,
+        f"⚠️ <b>تعذّر التراجع:</b> {esc(res.get('detail') or 'غير معروف')}",
+        kb.admin_nav([[kb.btn("🔄 إدارة التحديثات", "a:updates", style="primary")]]), bot,
+    )
 
 
 _BOOT_EPOCH = __import__("time").time()

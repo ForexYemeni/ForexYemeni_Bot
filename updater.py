@@ -170,16 +170,72 @@ def display_tag(tag) -> str:
     return t[1:] if t[:1].lower() == "v" else t
 
 
+_TAG_RE = re.compile(r"^[vV]?[0-9]+(?:\.[0-9]+){1,3}(?:-[A-Za-z0-9._-]+)?$")
+
+
+def normalize_tag(tag: str) -> str:
+    """'6.14.1' أو 'v6.14.1' → 'v6.14.1'. يعيد '' لأي نص غير صالح."""
+    t = str(tag or "").strip()
+    if not t or not _TAG_RE.match(t):
+        return ""
+    return "v" + t[1:] if t[:1].lower() == "v" else "v" + t
+
+
+def _parse_release_payload(data: dict, asset_name: str):
+    """Extract {tag, url, name, sha256?, sha256_url?, title?, published_at?}."""
+    if not isinstance(data, dict):
+        return None
+    tag = (data.get("tag_name") or "").strip()
+    asset_url = ""
+    sha256_hex = ""
+    sha256_url = ""
+    for asset in data.get("assets") or []:
+        aname = asset.get("name") or ""
+        if aname == asset_name:
+            asset_url = asset.get("browser_download_url") or ""
+            sha256_hex = _parse_sha256_text(asset.get("digest") or "", asset_name)
+        elif aname in (f"{asset_name}.sha256", f"{asset_name}.sha256sum", "SHA256SUMS.txt", "checksums.txt"):
+            sha256_url = asset.get("browser_download_url") or ""
+    if not sha256_hex and data.get("body"):
+        sha256_hex = _parse_sha256_text(data.get("body") or "", asset_name)
+    if not (tag and asset_url):
+        return None
+    out = {
+        "tag": tag,
+        "url": asset_url,
+        "name": asset_name,
+        "title": (data.get("name") or tag).strip(),
+        "published_at": (data.get("published_at") or "").strip(),
+    }
+    if sha256_hex:
+        out["sha256"] = sha256_hex
+    if sha256_url:
+        out["sha256_url"] = sha256_url
+    return out
+
+
 # --- GitHub Releases ---------------------------------------------------------
 
-def latest_tag_from_feed(owner, repo):
-    """آخر تاغ من تغذية releases.atom — بلا حدود طلبات API (مسار احتياطي)."""
+def tags_from_feed(owner, repo, limit: int = 10) -> list[str]:
+    """قائمة التاغات من تغذية releases.atom — بلا حدود طلبات API."""
     url = f"https://github.com/{owner}/{repo}/releases.atom"
     req = urllib.request.Request(url, headers={"User-Agent": _headers()["User-Agent"]})
     with urllib.request.urlopen(req, timeout=TIMEOUT_JSON, context=_ssl_context()) as resp:
         text = resp.read().decode("utf-8", errors="replace")
-    m = re.search(r"releases/tag/([^\"<>]+)\"", text)
-    return m.group(1) if m else ""
+    seen = []
+    for m in re.finditer(r"releases/tag/([^\"<>]+)\"", text):
+        t = m.group(1).strip()
+        if t and t not in seen:
+            seen.append(t)
+            if len(seen) >= limit:
+                break
+    return seen
+
+
+def latest_tag_from_feed(owner, repo):
+    """آخر تاغ من تغذية releases.atom — بلا حدود طلبات API (مسار احتياطي)."""
+    tags = tags_from_feed(owner, repo, limit=1)
+    return tags[0] if tags else ""
 
 
 def asset_exists(url) -> bool:
@@ -209,27 +265,9 @@ def latest_release(owner=None, repo=None, asset_name=None):
         asset_name = asset_name or c_asset
     try:
         data = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases/latest")
-        tag = (data.get("tag_name") or "").strip()
-        asset_url = ""
-        sha256_hex = ""
-        sha256_url = ""
-        for asset in data.get("assets") or []:
-            aname = asset.get("name") or ""
-            if aname == asset_name:
-                asset_url = asset.get("browser_download_url") or ""
-                # GitHub Releases API may include "digest": "sha256:<64hex>"
-                sha256_hex = _parse_sha256_text(asset.get("digest") or "", asset_name)
-            elif aname in (f"{asset_name}.sha256", f"{asset_name}.sha256sum", "SHA256SUMS.txt", "checksums.txt"):
-                sha256_url = asset.get("browser_download_url") or ""
-        if not sha256_hex and data.get("body"):
-            sha256_hex = _parse_sha256_text(data.get("body") or "", asset_name)
-        if tag and asset_url:
-            out = {"tag": tag, "url": asset_url, "name": asset_name}
-            if sha256_hex:
-                out["sha256"] = sha256_hex
-            if sha256_url:
-                out["sha256_url"] = sha256_url
-            return out
+        parsed = _parse_release_payload(data, asset_name)
+        if parsed:
+            return parsed
     except Exception:
         pass                      # أي فشل API ⇒ المسار الاحتياطي أدناه
     # المسار الاحتياطي (بلا حد طلبات): تغذية Atom + رابط التنزيل المباشر
@@ -242,6 +280,68 @@ def latest_release(owner=None, repo=None, asset_name=None):
     except Exception:
         pass
     return None
+
+
+def release_by_tag(tag: str, owner=None, repo=None, asset_name=None):
+    """جلب إصدار محدد برقم الإصدار (مثل v6.14.1 أو 6.14.1) للترقية أو الرجوع."""
+    norm = normalize_tag(tag)
+    if not norm:
+        return None
+    if owner is None or repo is None or asset_name is None:
+        c_owner, c_repo, c_asset = _config()
+        owner = owner or c_owner
+        repo = repo or c_repo
+        asset_name = asset_name or c_asset
+    try:
+        data = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{norm}")
+        parsed = _parse_release_payload(data, asset_name)
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+    # مسار احتياطي مباشر عند حد الطلبات (بدون API)
+    try:
+        url = f"https://github.com/{owner}/{repo}/releases/download/{norm}/{asset_name}"
+        if asset_exists(url):
+            out = {"tag": norm, "url": url, "name": asset_name, "title": norm}
+            sha_url = url + ".sha256"
+            if asset_exists(sha_url):
+                out["sha256_url"] = sha_url
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def list_releases(limit: int = 8, owner=None, repo=None, asset_name=None) -> list[dict]:
+    """قائمة بأحدث الإصدارات المتاحة للتثبيت أو التراجع من GitHub Releases."""
+    if owner is None or repo is None or asset_name is None:
+        c_owner, c_repo, c_asset = _config()
+        owner = owner or c_owner
+        repo = repo or c_repo
+        asset_name = asset_name or c_asset
+    limit = max(1, min(int(limit or 8), 20))
+    out: list[dict] = []
+    try:
+        items = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases?per_page={limit}")
+        if isinstance(items, list):
+            for item in items:
+                if item.get("draft"):
+                    continue
+                parsed = _parse_release_payload(item, asset_name)
+                if parsed:
+                    out.append(parsed)
+            if out:
+                return out
+    except Exception:
+        pass
+    try:
+        for tag in tags_from_feed(owner, repo, limit=limit):
+            url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
+            out.append({"tag": tag, "url": url, "name": asset_name, "title": tag, "published_at": ""})
+    except Exception:
+        pass
+    return out
 
 
 # --- استخراج آمن --------------------------------------------------------------
@@ -313,11 +413,109 @@ def _clear_pycache(root) -> None:
         shutil.rmtree(p, ignore_errors=True)
 
 
+ROLLBACK_PREFIX = "update_rollback_v"
+ROLLBACK_KEEP = 5
+_SNAPSHOT_SKIP_DIRS = PRESERVE_DIRS | {".venv", "venv", ".mypy_cache", ".ruff_cache"}
+
+
+def create_rollback_snapshot(dest_root, version_label: str = "") -> pathlib.Path | None:
+    """أخذ نسخة احتياطية فورية لكود النسخة الحالية قبل التحديث للتراجع الفوري.
+
+    لا تتضمن أبداً .env أو قواعد البيانات أو السجلات — ملفات الكود فقط.
+    تُحفظ داخل backups/update_rollback_v<ver>_<ts>.zip مع الإبقاء على أحدث 5 نسخ.
+    """
+    root = pathlib.Path(dest_root).resolve()
+    if not ((root / "main.py").is_file() and (root / "fysb" / "config.py").is_file()):
+        return None
+    bdir = root / "backups"
+    bdir.mkdir(parents=True, exist_ok=True)
+    safe_ver = re.sub(r"[^0-9A-Za-z._-]", "", display_tag(version_label) or "unknown") or "unknown"
+    ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    snap = bdir / f"{ROLLBACK_PREFIX}{safe_ver}_{ts}.zip"
+    try:
+        with zipfile.ZipFile(snap, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for p in root.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(root)
+                parts = rel.parts
+                if any(part in _SNAPSHOT_SKIP_DIRS for part in parts):
+                    continue
+                if parts[-1] in PRESERVE_EXACT or parts[-1].endswith(PRESERVE_SUFFIXES):
+                    continue
+                z.write(p, f"ForexYemeni_Bot/{rel.as_posix()}")
+        if not validate_package(snap):
+            snap.unlink(missing_ok=True)
+            return None
+        # prune older rollback snapshots beyond ROLLBACK_KEEP
+        snaps = list_rollback_snapshots(root)
+        for old in snaps[ROLLBACK_KEEP:]:
+            old.unlink(missing_ok=True)
+        return snap
+    except Exception:
+        snap.unlink(missing_ok=True)
+        return None
+
+
+def list_rollback_snapshots(dest_root=None) -> list[pathlib.Path]:
+    """قائمة نسخ التراجع المحلية مرتبة من الأحدث للأقدم."""
+    root = pathlib.Path(dest_root).resolve() if dest_root else ROOT
+    bdir = root / "backups"
+    if not bdir.is_dir():
+        return []
+    snaps = [p for p in bdir.glob(f"{ROLLBACK_PREFIX}*.zip") if p.is_file()]
+    snaps.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return snaps
+
+
+def snapshot_version(path: pathlib.Path) -> str:
+    """استخراج رقم الإصدار من اسم ملف نسخة التراجع."""
+    m = re.match(rf"^{re.escape(ROLLBACK_PREFIX)}([^_]+)_", path.name)
+    return m.group(1) if m else "?"
+
+
+def rollback_update(dest_root=None, snapshot_path=None) -> dict:
+    """تراجع فوري لآخر نسخة محفوظة محلياً (يعمل حتى بلا إنترنت أو GitHub)."""
+    result = {"status": "error", "local": None, "restored_version": None,
+              "backup_name": "", "files": 0, "detail": ""}
+    dest_root = pathlib.Path(dest_root).resolve() if dest_root else ROOT
+    try:
+        from fysb import config
+        result["local"] = config.VERSION
+    except Exception:
+        pass
+    try:
+        snap = pathlib.Path(snapshot_path) if snapshot_path else None
+        if snap is None:
+            snaps = list_rollback_snapshots(dest_root)
+            snap = snaps[0] if snaps else None
+        if snap is None or not snap.is_file():
+            result["detail"] = "لا توجد نسخة تراجع محلية محفوظة بعد — استخدم /update v<الإصدار> للرجوع من GitHub"
+            return result
+        if not validate_package(snap):
+            result["detail"] = "ملف نسخة التراجع غير سليم — أُلغي التراجع لحماية النظام"
+            return result
+        result["files"] = safe_extract(snap, dest_root)
+        result["restored_version"] = snapshot_version(snap)
+        result["backup_name"] = snap.name
+        result["status"] = "rolled_back"
+        return result
+    except Exception as exc:
+        result["detail"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
 # --- الدورة الكاملة ----------------------------------------------------------
 
-def self_update(dest_root=None) -> dict:
-    """فحص ← تنزيل ← تثبيت. يعيد تقريراً بلا أي استثناءات."""
-    result = {"status": "error", "local": None, "remote": None, "detail": "", "files": 0}
+def self_update(dest_root=None, target_tag: str = "", force: bool = False) -> dict:
+    """فحص ← تنزيل ← نسخة أمان ← تثبيت. يعيد تقريراً بلا أي استثناءات.
+
+    * target_tag فارغ: يجلب أحدث إصدار فقط إذا كان أحدث من المحلي (ما لم تكن force=True).
+    * target_tag محدد (مثل 'v6.14.1' أو '6.14.1'): يثبّت ذلك الإصدار بالضبط
+      (ترقية أو رجوع لإصدار سابق أو إعادة تثبيت) مع حفظ نسخة تراجع محلية تلقائياً.
+    """
+    result = {"status": "error", "local": None, "remote": None, "detail": "",
+              "files": 0, "direction": "upgrade", "rollback_backup": ""}
     dest_root = pathlib.Path(dest_root) if dest_root else ROOT
     try:
         from fysb import config
@@ -325,14 +523,33 @@ def self_update(dest_root=None) -> dict:
     except Exception:
         pass
     try:
-        rel = latest_release()
-        if not rel:
-            result["detail"] = "لا يوجد إصدار منشور على GitHub Releases"
-            return result
-        result["remote"] = rel["tag"]
-        if not is_newer(rel["tag"], result["local"] or "0"):
-            result["status"] = "no_update"
-            return result
+        if target_tag:
+            norm = normalize_tag(target_tag)
+            if not norm:
+                result["detail"] = f"صيغة رقم الإصدار غير صالحة: {target_tag} (مثال صحيح: v6.14.1)"
+                return result
+            rel = release_by_tag(norm)
+            if not rel:
+                result["detail"] = f"الإصدار {norm} غير موجود أو لا يحتوي على حزمة {(_config()[2])}"
+                return result
+            result["remote"] = rel["tag"]
+            lv = parse_version(result["local"] or "0")
+            rv = parse_version(rel["tag"])
+            if rv > lv:
+                result["direction"] = "upgrade"
+            elif rv < lv:
+                result["direction"] = "downgrade"
+            else:
+                result["direction"] = "reinstall"
+        else:
+            rel = latest_release()
+            if not rel:
+                result["detail"] = "لا يوجد إصدار منشور على GitHub Releases"
+                return result
+            result["remote"] = rel["tag"]
+            if not force and not is_newer(rel["tag"], result["local"] or "0"):
+                result["status"] = "no_update"
+                return result
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix="fysb_upd_"))
         tmp_zip = tmp_dir / "update.zip"
         _download(rel["url"], tmp_zip)
@@ -363,6 +580,10 @@ def self_update(dest_root=None) -> dict:
             if not validate_package(tmp_zip):
                 result["detail"] = "الحزمة ناقصة (main.py أو fysb مفقود) — أُلغي التثبيت"
                 return result
+            # Save automatic pre-update rollback snapshot of current live code
+            snap = create_rollback_snapshot(dest_root, result["local"] or "")
+            if snap is not None:
+                result["rollback_backup"] = snap.name
             result["files"] = safe_extract(tmp_zip, dest_root)
         finally:
             try:

@@ -489,6 +489,18 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_audit(q, uid, context, bot, int(arg or 0))
     elif act == "health":
         await admin_system.admin_health(q, uid, context, bot)
+    elif act == "updates":
+        await admin_system.admin_updates(q, uid, context, bot)
+    elif act == "updlatest":
+        await admin_system.admin_update_latest(q, uid, context, bot)
+    elif act == "updver":
+        await admin_system.admin_update_ver_confirm(q, uid, context, bot, arg)
+    elif act == "updvergo":
+        await admin_system.admin_update_ver_go(q, uid, context, bot, arg)
+    elif act == "updrollback":
+        await admin_system.admin_update_rollback_confirm(q, uid, context, bot)
+    elif act == "updrollbackgo":
+        await admin_system.admin_update_rollback_go(q, uid, context, bot)
     elif act == "analytics":
         await admin_system.admin_analytics(q, uid, context, bot)
     elif act == "anladj":

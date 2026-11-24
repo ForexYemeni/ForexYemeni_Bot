@@ -295,10 +295,27 @@ def sync_positions_with_real_prices(user_id: int, api_key: str = "") -> list[dic
         acc = dict(acc)
         positions = [dict(r) for r in c.execute(
             "SELECT * FROM demo_positions WHERE account_id=? AND status='OPEN' ORDER BY id", (acc["id"],)).fetchall()]
+        if not positions:
+            return events
+        syms = sorted({p["symbol"] for p in positions})
+        ph_s = ",".join("?" * len(syms))
+        catalog_map = {
+            r["symbol"]: dict(r)
+            for r in c.execute(f"SELECT * FROM market_catalog WHERE symbol IN ({ph_s})", tuple(syms)).fetchall()
+        }
+        sig_ids = sorted({int(p["signal_id"]) for p in positions if int(p.get("signal_id") or 0) > 0})
+        tp1_map: dict[int, float] = {}
+        if sig_ids:
+            ph_i = ",".join("?" * len(sig_ids))
+            for r in c.execute(f"SELECT id, tp1 FROM signals WHERE id IN ({ph_i})", tuple(sig_ids)).fetchall():
+                if r["tp1"]:
+                    try:
+                        tp1_map[int(r["id"])] = float(r["tp1"])
+                    except (TypeError, ValueError):
+                        pass
     for pos in positions:
         symbol = pos["symbol"]
-        with db.conn() as c:
-            row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+        row = catalog_map.get(symbol)
         if not row:
             continue
         try:
@@ -335,18 +352,12 @@ def sync_positions_with_real_prices(user_id: int, api_key: str = "") -> list[dic
 
         # 2) half-TP1 secure-profit for auto-traded signal positions
         if pos["signal_id"] and not pos["partials_done"] and tp:
-            # Resolve the signal's true TP1 (open_from_signal stores TP3 in pos.tp)
-            # so HALF_TP1 triggers at 50% of entry->TP1, falling back to pos.tp.
+            # Resolve the signal's true TP1 (preloaded in batch) so HALF_TP1
+            # triggers at 50% of entry->TP1, falling back to pos.tp.
             tp1_target = tp
-            with db.conn() as c:
-                sr = c.execute("SELECT tp1 FROM signals WHERE id=?", (pos["signal_id"],)).fetchone()
-            if sr and sr["tp1"]:
-                try:
-                    cand_tp1 = float(sr["tp1"])
-                    if (d == "BUY" and cand_tp1 > pos["entry"]) or (d == "SELL" and cand_tp1 < pos["entry"]):
-                        tp1_target = cand_tp1
-                except (TypeError, ValueError):
-                    pass
+            cand_tp1 = tp1_map.get(int(pos["signal_id"]))
+            if cand_tp1 and ((d == "BUY" and cand_tp1 > pos["entry"]) or (d == "SELL" and cand_tp1 < pos["entry"])):
+                tp1_target = cand_tp1
             progress = 0.0
             if d == "BUY" and price > pos["entry"]:
                 progress = (price - pos["entry"]) / max(1e-12, (tp1_target - pos["entry"]))
@@ -383,12 +394,23 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
         agg = c.execute(
             "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN pnl>=0 THEN 1 ELSE 0 END),0) wins "
             "FROM demo_positions WHERE account_id=? AND status!='OPEN'", (acc["id"],)).fetchone()
+        catalog_map: dict[str, dict] = {}
+        if open_pos:
+            syms = sorted({p["symbol"] for p in open_pos})
+            ph = ",".join("?" * len(syms))
+            catalog_map = {
+                r["symbol"]: dict(r)
+                for r in c.execute(f"SELECT * FROM market_catalog WHERE symbol IN ({ph})", tuple(syms)).fetchall()
+            }
     floating = 0.0
     stale = False
     for pos in open_pos:
         try:
-            with db.conn() as c:
-                row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone()
+            row = catalog_map.get(pos["symbol"])
+            if not row:
+                pos["current"] = None
+                stale = True
+                continue
             quote = market_data.fetch_price(row["provider_symbol"], api_key)
             floating += instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], quote["price"], row)
             pos["current"] = quote["price"]

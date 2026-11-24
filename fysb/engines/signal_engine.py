@@ -372,28 +372,67 @@ def record_delivery_refs(uid: int, signal_id: int, msg) -> None:
                   (str(chat_id), int(message_id), uid, signal_id))
 
 
+def _preload_demo_accounts(uids: list[int]) -> dict[int, dict]:
+    """Batch-load existing demo accounts for a set of user_ids in 1 SQL query."""
+    if not uids:
+        return {}
+    uniq = sorted({int(u) for u in uids if int(u) > 0})
+    if not uniq:
+        return {}
+    out: dict[int, dict] = {}
+    with db.conn() as c:
+        # Chunk to stay safely below SQLite's parameter limit on large audiences.
+        for i in range(0, len(uniq), 400):
+            chunk = uniq[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            for r in c.execute(f"SELECT * FROM demo_accounts WHERE user_id IN ({ph})", tuple(chunk)).fetchall():
+                out[int(r["user_id"])] = dict(r)
+    return out
+
+
+async def _offload_auto_executes(sig: dict, items: list[tuple[int, dict | None]], bot_send) -> int:
+    """v6.16.0 Phase 6: run demo auto_execute OFF the critical signal delivery
+    path in bounded worker threads so signal delivery & button taps never stall."""
+    if not items:
+        return 0
+    import asyncio as _asyncio
+    from fysb.services import user_trade
+    sem = _asyncio.Semaphore(6)
+    executed = 0
+
+    async def _one(uid: int, acc: dict | None):
+        nonlocal executed
+        async with sem:
+            exec_res = await _asyncio.to_thread(user_trade.auto_execute, sig, uid, acc)
+            if exec_res and exec_res.get("ok"):
+                executed += 1
+                try:
+                    await bot_send(uid, user_trade.execution_card(exec_res, sig))
+                except Exception:
+                    pass
+
+    await _asyncio.gather(*(_one(uid, acc) for uid, acc in items), return_exceptions=True)
+    return executed
+
+
 async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool = True) -> dict:
     """Step 16 — deliver a stored signal to eligible users AND enabled broadcast channels.
 
-    bot_send: async callable(user_id, text) -> Message|None. MUST be awaited inside the
-    bot's event loop (PTB's httpx client is loop-bound).
-    Gates applied per user, all server-side (anti-bypass):
-      1. package entitlement: symbol/timeframe/strategy must be IN the plan (slash-normalized)
-      2. personal preferences (market=""/timeframe="" => all allowed by plan)
-      3. quality floor (min_score)
-      4. daily quota (atomic ledger)
-    Each delivered message carries the user's PERSONAL risk/profit block, and
-    when auto-trade is on, the trade is opened on his demo account instantly.
-    When `include_channels=True` and a Telegram bot instance is available
-    (`bot` param or `bot_send._bot`), matching enabled `broadcast_channels`
-    receive the live-tracked signal post in the same unified pass.
+    v6.16.0 Phase 6 optimizations:
+      * Market catalog row, base signal card, and birth pulse computed ONCE per
+        signal instead of N times.
+      * Plans resolved in O(1) batch (plans_for_users) + demo accounts preloaded
+        in 1 batch query (eliminating ~4N SQL queries per broadcast).
+      * All signal cards + channel broadcasts are delivered FIRST; demo
+        auto_execute runs offloaded in bounded worker threads afterwards so no
+        recipient waits on another user's demo execution or price fetch.
     """
-    from fysb.services.subscriptions import try_consume_signal, release_signal, plan_for
+    from fysb.services.subscriptions import try_consume_signal, release_signal, plans_for_users
     from fysb.services import user_trade
     from fysb.ui.cards import render_signal_card
 
     stats = {"sent": 0, "skipped_quota": 0, "failed": 0, "skipped_filters": 0,
-             "channels_sent": 0, "channels_failed": 0}
+             "channels_sent": 0, "channels_failed": 0, "auto_executed": 0}
     sig = dict(signal_row)
     sig_symbol = sig["symbol"]
     sig_sym_norm = _norm_sym(sig_symbol)
@@ -404,13 +443,25 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     with db.conn() as c:
         users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
 
+    # Pre-compute invariant signal payload + batch-load plans & demo accounts ONCE
+    row = _market_row(sig_symbol)
+    base_card = render_signal_card(sig, user_view=True, row=row)
+    pulse = birth_pulse_line(sig, row)
+    if pulse:
+        base_card += "\n\n<blockquote>" + pulse + "</blockquote>"
+
+    candidate_uids = [int(u["user_id"]) for u in users if int(u["user_id"]) != config.ADMIN_ID]
+    plans_map = plans_for_users(candidate_uids)
+    demo_map = _preload_demo_accounts(candidate_uids)
+    auto_exec_queue: list[tuple[int, dict | None]] = []
+
     for u in users:
-        uid = u["user_id"]
+        uid = int(u["user_id"])
         if uid == config.ADMIN_ID:
             continue  # the admin is never treated as a signal recipient
 
         # 1) package entitlement — hard gate (slash-normalized symbol matching)
-        plan = plan_for(uid)
+        plan = plans_map.get(uid)
         if not plan:
             stats["skipped_filters"] += 1
             continue
@@ -432,20 +483,15 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             stats["skipped_filters"] += 1
             continue
 
-        # 3) quota (atomic)
-        if not try_consume_signal(uid, sig):
+        # 3) quota (atomic, reusing preloaded plan_row)
+        if not try_consume_signal(uid, sig, plan_row=plan):
             stats["skipped_quota"] += 1
             continue
 
-        # 4) deliver: luxury card + personal plan block (single message)
-        row = _market_row(sig_symbol)
-        text = render_signal_card(sig, user_view=True, row=row)
-        pulse = birth_pulse_line(sig, row)
-        if pulse:
-            text += "\n\n<blockquote>" + pulse + "</blockquote>"
-        personal = user_trade.personal_block(sig, uid)
-        if personal:
-            text += "\n\n<blockquote>" + personal + "</blockquote>"
+        # 4) deliver: pre-rendered luxury card + personal plan block (single message)
+        acc = demo_map.get(uid)
+        personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
+        text = base_card + ("\n\n<blockquote>" + personal + "</blockquote>" if personal else "")
         try:
             msg = await bot_send(uid, text)
             stats["sent"] += 1
@@ -455,15 +501,11 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             release_signal(uid, sig["id"])
             continue
 
-        # 5) auto-execution on the user's demo account (his own risk/lot)
-        exec_res = user_trade.auto_execute(sig, uid)
-        if exec_res and exec_res.get("ok"):
-            try:
-                await bot_send(uid, user_trade.execution_card(exec_res, sig))
-            except Exception:
-                pass
+        # Queue demo auto-execution off the critical delivery path
+        if acc and acc.get("auto_trade"):
+            auto_exec_queue.append((uid, acc))
 
-    # 6) unified broadcast to all matching enabled Telegram channels/groups
+    # 5) unified broadcast to all matching enabled Telegram channels/groups
     real_bot = bot or getattr(bot_send, "_bot", None)
     if include_channels and real_bot is not None:
         try:
@@ -473,4 +515,8 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             stats["channels_failed"] = ch_stats.get("channels_failed", 0)
         except Exception as e:
             log.warning("emit_to_channels failed for signal #%s: %s", sig.get("id"), type(e).__name__)
+
+    # 6) offloaded demo auto-execution (bounded thread pool, non-blocking loop)
+    if auto_exec_queue:
+        stats["auto_executed"] = await _offload_auto_executes(sig, auto_exec_queue, bot_send)
     return stats

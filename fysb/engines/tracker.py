@@ -193,12 +193,15 @@ def check_open_signals(api_key: str) -> dict:
         rows = [dict(r) for r in c.execute(
             "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') "
             "AND (closed_at IS NULL OR closed_at='') ORDER BY id").fetchall()]
+    catalog_map = _load_market_catalog_map() if rows else {}
     for sig in rows:
         stats["checked"] += 1
         symbol = sig["symbol"]
+        mkt_row = catalog_map.get(symbol)
+        prov_sym = (mkt_row["provider_symbol"] if mkt_row and mkt_row.get("provider_symbol") else symbol)
         try:
             since = sig.get("filled_at") or sig.get("created_at") or ""
-            payload = _tracking_payload(_provider_symbol(symbol), api_key, since_iso=since)
+            payload = _tracking_payload(prov_sym, api_key, since_iso=since)
         except RuntimeError as e:
             stats["errors"] += 1
             _log(symbol, sig["timeframe"], "TRACK_ERROR", str(e)[:200])
@@ -450,13 +453,32 @@ def _market_row(symbol: str):
     return dict(r) if r else None
 
 
-def _live_card_text(sig: dict, uid: int, px: float) -> str:
-    """Rebuild the EXACT luxury card the user first received — current status,
-    fresh market pulse, personal block. This text REPLACES the original
-    message body via edit_message_text, so the first card is the live board."""
-    from fysb.services import user_trade
+def _load_market_catalog_map() -> dict[str, dict]:
+    """Batch-load market_catalog once per tracker pass (eliminates N+1 queries)."""
+    with db.conn() as c:
+        return {r["symbol"]: dict(r) for r in c.execute("SELECT * FROM market_catalog").fetchall()}
+
+
+def _load_demo_accounts_map(uids: list[int]) -> dict[int, dict]:
+    """Batch-load demo_accounts for a signal's recipients in 1 SQL query."""
+    uniq = sorted({int(u) for u in uids if int(u or 0) > 0})
+    if not uniq:
+        return {}
+    out: dict[int, dict] = {}
+    with db.conn() as c:
+        for i in range(0, len(uniq), 400):
+            chunk = uniq[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            for r in c.execute(f"SELECT * FROM demo_accounts WHERE user_id IN ({ph})", tuple(chunk)).fetchall():
+                out[int(r["user_id"])] = dict(r)
+    return out
+
+
+def _base_live_card_text(sig: dict, px: float, row=None) -> str:
+    """Build the invariant portion of the live signal card ONCE per signal."""
     from fysb.ui.cards import render_signal_card
-    row = _market_row(sig["symbol"])
+    if row is None:
+        row = _market_row(sig["symbol"])
     text = render_signal_card(sig, user_view=True, row=row)
     if px:
         entry = float(sig["entry"])
@@ -464,20 +486,36 @@ def _live_card_text(sig: dict, uid: int, px: float) -> str:
         text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
                  f"<code>{instruments.fmt_price(sig['symbol'], px, row)}</code>"
                  f" · {side} · <b>{drift_pips(sig['symbol'], sig['direction'], entry, px):+.1f} pips</b> من الدخول</blockquote>")
-    personal = user_trade.personal_block(sig, uid)
-    if personal:
-        text += "\n\n<blockquote>" + personal + "</blockquote>"
     return text
 
 
-def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict]) -> list:
-    """Edits for every delivered card. A status change deserves an edit even
-    without a price (expiry/terminal states) — the price line appears only
-    when a real close is available."""
+def _live_card_text(sig: dict, uid: int, px: float, row=None, acc=None, base_text: str | None = None) -> str:
+    """Rebuild the EXACT luxury card the user first received — current status,
+    fresh market pulse, personal block. This text REPLACES the original
+    message body via edit_message_text, so the first card is the live board."""
+    from fysb.services import user_trade
+    if row is None:
+        row = _market_row(sig["symbol"])
+    text = base_text if base_text is not None else _base_live_card_text(sig, px, row=row)
+    if int(uid or 0) > 0:
+        personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
+        if personal:
+            text += "\n\n<blockquote>" + personal + "</blockquote>"
+    return text
+
+
+def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict], market_row=None) -> list:
+    """Edits for every delivered card — builds the base card ONCE and
+    batch-loads all recipients' demo accounts in 1 SQL query (O(1) instead of 3N)."""
     if not refs:
         return []
+    row = market_row if market_row is not None else _market_row(sig["symbol"])
+    base_text = _base_live_card_text(sig, live_px, row=row)
+    acc_map = _load_demo_accounts_map([r["user_id"] for r in refs])
     return [(r["user_id"], r["chat_id"], int(r["message_id"]),
-             _live_card_text(sig, r["user_id"], live_px)) for r in refs]
+             _live_card_text(sig, r["user_id"], live_px, row=row,
+                             acc=acc_map.get(int(r["user_id"] or 0)), base_text=base_text))
+            for r in refs]
 
 
 def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | None:

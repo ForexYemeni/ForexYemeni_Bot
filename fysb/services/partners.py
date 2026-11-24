@@ -57,7 +57,8 @@ _ALLOWED_PARTNER_COLS = {
     "title", "commission_pct", "post_mode", "sample_daily_limit",
     "perm_auto_signals", "perm_auto_analysis", "perm_manual_post",
     "perm_choose_markets", "perm_custom_branding", "perm_vip_gatekeeper",
-    "max_channels", "brand_label", "enabled",
+    "max_channels", "manual_analysis_limit", "manual_signal_limit",
+    "brand_label", "enabled",
 }
 
 
@@ -155,6 +156,9 @@ def update_partner(pid: int, **fields) -> dict | None:
         clean["commission_pct"] = max(0.0, min(70.0, float(clean["commission_pct"])))
     if "post_mode" in clean and clean["post_mode"] not in POST_MODES:
         clean["post_mode"] = "teaser"
+    for lim_col in ("manual_analysis_limit", "manual_signal_limit"):
+        if lim_col in clean:
+            clean[lim_col] = max(0, min(9999, int(clean[lim_col])))
     clean["updated_at"] = config.now()
     sets = ", ".join(f"{k}=?" for k in clean)
     with db.tx() as c:
@@ -178,6 +182,93 @@ def delete_partner(pid: int) -> bool:
         c.execute("UPDATE ref_campaigns SET enabled=0, updated_at=? WHERE code=?", (config.now(), p["campaign_code"]))
         cur = c.execute("DELETE FROM channel_partners WHERE id=?", (int(pid),))
     return cur.rowcount > 0
+
+
+# ----------------------------------------------------------------------------
+# Per-Partner Manual Post Daily Quotas (Analysis Now & Signal Now) — v6.21.3
+#   limit == 0 -> Unlimited (مفتوح دائماً بلا حد)
+#   limit > 0  -> Strict daily cap per UTC day, persisted in DB
+# ----------------------------------------------------------------------------
+
+def _utc_day() -> str:
+    return config.now()[:10]
+
+
+def manual_quota_status(pid: int, partner_row: dict | None = None) -> dict:
+    """Return today's persistent usage & configured limits for a partner."""
+    p = partner_row or get_partner(pid)
+    today = _utc_day()
+    if not p:
+        return {
+            "date": today,
+            "analysis_used": 0, "analysis_limit": 6,
+            "signal_used": 0, "signal_limit": 6,
+        }
+    same_day = (p.get("manual_usage_date") or "") == today
+    a_lim = int(p.get("manual_analysis_limit") if p.get("manual_analysis_limit") is not None else 6)
+    s_lim = int(p.get("manual_signal_limit") if p.get("manual_signal_limit") is not None else 6)
+    return {
+        "date": today,
+        "analysis_used": int(p.get("manual_analysis_used") or 0) if same_day else 0,
+        "analysis_limit": max(0, a_lim),
+        "signal_used": int(p.get("manual_signal_used") or 0) if same_day else 0,
+        "signal_limit": max(0, s_lim),
+    }
+
+
+def can_manual_post(pid: int, kind: str) -> tuple[bool, int, int]:
+    """Check whether partner `pid` can perform a manual post of `kind`
+    ('analysis' or 'signal'). Returns `(allowed, used_today, limit)` where
+    `limit == 0` means unlimited (always allowed)."""
+    st = manual_quota_status(pid)
+    is_sig = (kind == "signal")
+    used = st["signal_used"] if is_sig else st["analysis_used"]
+    limit = st["signal_limit"] if is_sig else st["analysis_limit"]
+    if limit == 0:
+        return True, used, 0
+    return used < limit, used, limit
+
+
+def record_manual_post(pid: int, kind: str) -> tuple[int, int]:
+    """Increment today's persistent manual-post counter AFTER a successful post.
+    Returns `(new_used, limit)`."""
+    today = _utc_day()
+    is_sig = (kind == "signal")
+    with db.tx() as c:
+        r = c.execute(
+            """SELECT manual_usage_date, manual_analysis_used, manual_signal_used,
+                      manual_analysis_limit, manual_signal_limit
+               FROM channel_partners WHERE id=?""",
+            (int(pid),),
+        ).fetchone()
+        if not r:
+            return 0, 6
+        same_day = (r["manual_usage_date"] or "") == today
+        a_used = int(r["manual_analysis_used"] or 0) if same_day else 0
+        s_used = int(r["manual_signal_used"] or 0) if same_day else 0
+        if is_sig:
+            s_used += 1
+        else:
+            a_used += 1
+        c.execute(
+            """UPDATE channel_partners
+               SET manual_usage_date=?, manual_analysis_used=?, manual_signal_used=?, updated_at=?
+               WHERE id=?""",
+            (today, a_used, s_used, config.now(), int(pid)),
+        )
+        lim = int(r["manual_signal_limit"] if is_sig else r["manual_analysis_limit"])
+        return (s_used if is_sig else a_used), max(0, lim)
+
+
+def reset_manual_quota(pid: int) -> None:
+    """Reset today's manual-post usage counters for partner `pid` to 0."""
+    with db.tx() as c:
+        c.execute(
+            """UPDATE channel_partners
+               SET manual_usage_date=?, manual_analysis_used=0, manual_signal_used=0, updated_at=?
+               WHERE id=?""",
+            (_utc_day(), config.now(), int(pid)),
+        )
 
 
 def partner_channels(pid: int) -> list[dict]:

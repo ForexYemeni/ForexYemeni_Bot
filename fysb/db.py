@@ -291,6 +291,11 @@ CREATE TABLE IF NOT EXISTS channel_partners(
   perm_custom_branding INTEGER NOT NULL DEFAULT 1,
   perm_vip_gatekeeper INTEGER NOT NULL DEFAULT 1,
   max_channels INTEGER NOT NULL DEFAULT 2,
+  manual_analysis_limit INTEGER NOT NULL DEFAULT 6,
+  manual_signal_limit INTEGER NOT NULL DEFAULT 6,
+  manual_usage_date TEXT DEFAULT '',
+  manual_analysis_used INTEGER NOT NULL DEFAULT 0,
+  manual_signal_used INTEGER NOT NULL DEFAULT 0,
   brand_label TEXT DEFAULT '',
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
@@ -386,6 +391,13 @@ ADD_COLUMNS = {
         "vip_min_plan": "TEXT DEFAULT ''",
         "daily_full_date": "TEXT DEFAULT ''",
         "daily_full_count": "INTEGER DEFAULT 0",
+    },
+    "channel_partners": {
+        "manual_analysis_limit": "INTEGER NOT NULL DEFAULT 6",
+        "manual_signal_limit": "INTEGER NOT NULL DEFAULT 6",
+        "manual_usage_date": "TEXT DEFAULT ''",
+        "manual_analysis_used": "INTEGER NOT NULL DEFAULT 0",
+        "manual_signal_used": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 

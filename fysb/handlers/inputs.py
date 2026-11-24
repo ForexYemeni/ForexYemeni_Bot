@@ -71,7 +71,8 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_restore", "awaiting_free_quota", "awaiting_demo_balance",
               "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
               "awaiting_plan_field", "awaiting_plan_custom",
-              "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand")
+              "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
+              "awaiting_partner_limit")
 
 # v6.10.0 — single-shot text-awaiting flags: a BUTTON PRESS means the admin is
 # navigating, not typing, so any stale one-shot flag left over from a prompt he
@@ -86,7 +87,8 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_usdt_wallet", "awaiting_plan_field", "awaiting_plan_custom",
                 "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
                 "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt",
-                "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand")
+                "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
+                "awaiting_partner_limit")
 
 
 def clear_flows(ud: dict) -> None:
@@ -573,6 +575,11 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
     if ud.get("awaiting_partner_add"):
         from fysb.handlers import admin_partners
         await admin_partners.handle_partner_add_input(update, context, uid, text)
+        return True
+
+    if ud.get("awaiting_partner_limit"):
+        from fysb.handlers import admin_partners
+        await admin_partners.handle_partner_limit_input(update, context, uid, text)
         return True
 
     return False

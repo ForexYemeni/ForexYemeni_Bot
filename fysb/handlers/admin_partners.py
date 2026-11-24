@@ -10,7 +10,6 @@ Strict isolation guarantees:
 """
 from __future__ import annotations
 
-import time
 from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -21,22 +20,16 @@ from fysb.services import partners as partners_svc
 from fysb.theme import esc, strategy_name, tf_name
 from fysb.ui import keyboards as kb
 
-# Simple in-memory per-partner manual-post rate limiter (max 6 manual posts/day)
-_PARTNER_POST_CAP = 6
-_partner_post_log: dict[tuple[int, str], int] = {}
+
+def _fmt_quota(used: int, limit: int) -> str:
+    """Format a partner manual-post daily quota cleanly in Arabic."""
+    if limit <= 0:
+        return f"♾️ مفتوح دائماً (استُخدم اليوم: {used})"
+    return f"{used}/{limit} اليوم"
 
 
-def _today_utc() -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime())
-
-
-def _consume_manual_post_quota(pid: int) -> tuple[bool, int]:
-    key = (int(pid), _today_utc())
-    used = _partner_post_log.get(key, 0)
-    if used >= _PARTNER_POST_CAP:
-        return False, used
-    _partner_post_log[key] = used + 1
-    return True, used + 1
+def _fmt_limit_badge(limit: int) -> str:
+    return "♾️ مفتوح دائماً" if limit <= 0 else f"{limit}/يوم"
 
 
 # ============================================================================
@@ -113,6 +106,7 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         return await admin_partners(q, uid, context, bot)
     st = await afn.run(partners_svc.partner_stats, pid)
     chans = await afn.run(partners_svc.partner_channels, pid)
+    mq = await afn.run(partners_svc.manual_quota_status, pid, p)
     link = partners_svc.partner_link(p["campaign_code"])
     mode_ar = partners_svc.POST_MODE_AR.get(p["post_mode"], p["post_mode"])
 
@@ -139,6 +133,8 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         f"▎🔗 كود الإحالة: <code>{esc(p['campaign_code'])}</code>",
         f"▎💰 نسبة العمولة: <b>{p['commission_pct']:.0f}%</b>",
         f"▎📣 وضع النشر: <b>{mode_ar}</b>",
+        f"▎🔬 حد «تحليل الآن» اليومي: <b>{_fmt_quota(mq['analysis_used'], mq['analysis_limit'])}</b>",
+        f"▎📡 حد «إشارة الآن» اليومي: <b>{_fmt_quota(mq['signal_used'], mq['signal_limit'])}</b>",
         f"▎🏷 التوقيع المخصص: <b>{esc(p.get('brand_label') or 'افتراضي البوت')}</b>",
         "</blockquote>",
         "<blockquote>",
@@ -188,6 +184,7 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         [kb.copy_btn("📋 نسخ رابط الشريك", link, style="primary")],
         pct_row,
         mode_row,
+        [kb.btn("🚀 حدود النشر اليدوي (تحليل / إشارة الآن)", f"a:partlim:{pid}", style="primary")],
         *perm_rows,
         [
             kb.btn(
@@ -262,6 +259,121 @@ async def admin_partner_perm(q, uid, context, bot, pid: int, col: str):
         await afn.run(partners_svc.update_partner, pid, **{col: new_val})
         await afn.run(audit_log.log, uid, f"partner_perm:{pid}:{col}:{new_val}")
     await admin_partner_view(q, uid, context, bot, pid)
+
+
+async def admin_partner_limits(q, uid, context, bot, pid: int):
+    """Per-partner daily manual posting limits panel (Analysis Now & Signal Now)."""
+    p = await afn.run(partners_svc.get_partner, pid)
+    if not p:
+        return await admin_partners(q, uid, context, bot)
+    mq = await afn.run(partners_svc.manual_quota_status, pid, p)
+    a_lim, s_lim = mq["analysis_limit"], mq["signal_limit"]
+
+    body = (
+        f"🚀 <b><u>حدود النشر اليدوي اليومي — {esc(p['title'])}</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        f"▎🔬 حد <b>«تحليل الآن»</b>: <b>{_fmt_quota(mq['analysis_used'], a_lim)}</b>\n"
+        f"▎📡 حد <b>«إشارة الآن»</b>: <b>{_fmt_quota(mq['signal_used'], s_lim)}</b>\n"
+        "▎♾️ القيمة <b>0</b> تعني <b>مفتوح دائماً بلا حد يومي</b>.\n"
+        "▎🛡 الفرص الفارغة (لا توجد فرصة حالياً) لا تُحتسب من رصيد الشريك."
+        "</blockquote>"
+    )
+
+    presets = (3, 6, 15, 30, 0)
+    an_row = [
+        kb.btn(
+            (("✅ " if a_lim == v else "") + ("♾️ مفتوح" if v == 0 else f"🔬 {v}")),
+            f"a:partlimset:{pid}:analysis:{v}",
+            style="success" if a_lim == v else "primary",
+        )
+        for v in presets
+    ]
+    sig_row = [
+        kb.btn(
+            (("✅ " if s_lim == v else "") + ("♾️ مفتوح" if v == 0 else f"📡 {v}")),
+            f"a:partlimset:{pid}:signal:{v}",
+            style="success" if s_lim == v else "primary",
+        )
+        for v in presets
+    ]
+    rows_kb = [
+        [kb.btn("♾️ فتح الكل بلا حد دائماً (تحليل + إشارة)", f"a:partlimset:{pid}:both:0", style="success")],
+        an_row,
+        sig_row,
+        [
+            kb.btn("✏️ رقم مخصص للتحليل", f"a:partlimask:{pid}:analysis", style="primary"),
+            kb.btn("✏️ رقم مخصص للإشارات", f"a:partlimask:{pid}:signal", style="primary"),
+        ],
+        [
+            kb.btn("🔄 تصفير عداد اليوم", f"a:partlimreset:{pid}", style="danger"),
+            kb.btn(f"↩️ ملف الشريك #{pid}", f"a:partview:{pid}", style="primary"),
+        ],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_partner_limit_set(q, uid, context, bot, pid: int, kind: str, val: int):
+    v = max(0, min(9999, int(val)))
+    upd = {}
+    if kind in ("analysis", "both"):
+        upd["manual_analysis_limit"] = v
+    if kind in ("signal", "both"):
+        upd["manual_signal_limit"] = v
+    if upd:
+        await afn.run(partners_svc.update_partner, pid, **upd)
+        await afn.run(audit_log.log, uid, f"partner_limit:{pid}:{kind}:{v}")
+    await admin_partner_limits(q, uid, context, bot, pid)
+
+
+async def admin_partner_limit_ask(q, uid, context, bot, pid: int, kind: str):
+    label = "تحليل الآن 🔬" if kind == "analysis" else "إشارة الآن 📡"
+    context.user_data["awaiting_partner_limit"] = (int(pid), kind)
+    await render(
+        q,
+        f"✏️ <b><u>تعيين حد يومي مخصص — {label}</u></b>\n"
+        "<blockquote>"
+        "أرسل الآن الرقم اليومي المسموح لهذا الشريك (مثال: <code>10</code> أو <code>25</code>).\n"
+        "أو أرسل <code>0</code> لجعله <b>♾️ مفتوحاً دائماً بلا حد</b>."
+        "</blockquote>",
+        kb.admin_nav([[kb.btn("🚫 إلغاء", f"a:partlim:{pid}", style="danger")]]),
+        bot,
+    )
+
+
+async def admin_partner_limit_reset(q, uid, context, bot, pid: int):
+    await afn.run(partners_svc.reset_manual_quota, pid)
+    await afn.run(audit_log.log, uid, f"partner_limit_reset:{pid}")
+    await admin_partner_limits(q, uid, context, bot, pid)
+
+
+async def handle_partner_limit_input(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, text: str) -> bool:
+    info = context.user_data.pop("awaiting_partner_limit", None)
+    if not info:
+        return False
+    pid, kind = info
+    raw = text.strip().replace(",", "")
+    if not raw.isdigit():
+        await update.effective_message.reply_text(
+            "⛔ أرسل رقماً صحيحاً فقط (مثل <code>10</code> أو <code>0</code> لمفتوح دائماً).",
+            parse_mode="HTML",
+            reply_markup=kb.admin_nav([[kb.btn("↩️ حدود الشريك", f"a:partlim:{pid}", style="primary")]]),
+        )
+        return True
+    v = max(0, min(9999, int(raw)))
+    col = "manual_analysis_limit" if kind == "analysis" else "manual_signal_limit"
+    label = "تحليل الآن 🔬" if kind == "analysis" else "إشارة الآن 📡"
+    await afn.run(partners_svc.update_partner, pid, **{col: v})
+    await afn.run(audit_log.log, uid, f"partner_limit_custom:{pid}:{kind}:{v}")
+    await update.effective_message.reply_text(
+        f"✅ <b>تم تحديث حد {label} للشريك #{pid}:</b> <b>{_fmt_limit_badge(v)}</b>",
+        parse_mode="HTML",
+        reply_markup=kb.admin_nav([
+            [kb.btn("🚀 حدود النشر اليدوي", f"a:partlim:{pid}", style="success")],
+            [kb.btn(f"↩️ ملف الشريك #{pid}", f"a:partview:{pid}", style="primary")],
+        ]),
+    )
+    return True
 
 
 async def admin_partner_settle(q, uid, context, bot, pid: int):
@@ -611,16 +723,23 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
 
     if act == "chpost":
         kind = parts[2] if len(parts) > 2 else "analysis"
+        if kind not in ("analysis", "signal"):
+            kind = "analysis"
         if not p.get("perm_manual_post"):
             await render(q, "⛔ صلاحية النشر اليدوي غير مفعّلة لحسابك.",
                          _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
             return
-        ok_q, used = _consume_manual_post_quota(p["id"])
+        ok_q, used_now, cap = await afn.run(partners_svc.can_manual_post, p["id"], kind)
+        kind_ar = "تحليل الآن" if kind == "analysis" else "إشارة الآن"
         if not ok_q:
             await render(
                 q,
-                f"⏳ <b>بلغت الحد اليومي للنشر اليدوي ({_PARTNER_POST_CAP} منشورات/يوم)</b> — البث التلقائي مستمر دون توقف.",
-                _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]),
+                f"⏳ <b>بلغت الحد اليومي لـ «{kind_ar}» ({used_now}/{cap} اليوم)</b> — البث التلقائي مستمر دون توقف.\n"
+                "<blockquote>يمكنك التواصل مع الإدارة لرفع الحد اليومي أو فتحه دائماً.</blockquote>",
+                _partner_nav([
+                    [kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary")],
+                    [kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")],
+                ]),
                 bot,
             )
             return
@@ -631,10 +750,16 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             else admin_channels.post_signal(cid, bot, ch)
         )
         if res.get("ok"):
+            used_after, cap_after = await afn.run(partners_svc.record_manual_post, p["id"], kind)
+            quota_txt = (
+                f"♾️ مفتوح دائماً (استُخدم اليوم: <b>{used_after}</b>)"
+                if cap_after <= 0
+                else f"<b>{used_after}/{cap_after}</b>"
+            )
             await render(
                 q,
                 f"✅ <b>تم النشر بنجاح في قناتك ({esc(ch['title'])})!</b>\n"
-                f"<blockquote>استخدام النشر اليدوي اليوم: <b>{used}/{_PARTNER_POST_CAP}</b></blockquote>",
+                f"<blockquote>استخدام «{kind_ar}» اليوم: {quota_txt}</blockquote>",
                 _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")]]),
                 bot,
             )
@@ -722,6 +847,9 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
     )
     iv = int(ch.get("interval_minutes") or 60)
     last_sent = (ch.get("last_sent") or "")[:19].replace("T", " ") or "—"
+    mq = await afn.run(partners_svc.manual_quota_status, p["id"], p)
+    an_q_txt = "♾️ مفتوح" if mq["analysis_limit"] <= 0 else f"{mq['analysis_used']}/{mq['analysis_limit']}"
+    sig_q_txt = "♾️ مفتوح" if mq["signal_limit"] <= 0 else f"{mq['signal_used']}/{mq['signal_limit']}"
 
     body = (
         f"📺 <b><u>إدارة قناتك — {esc(ch['title'])}</u></b>\n"
@@ -730,6 +858,7 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
         f"▎📌 حالة القناة: <b>{'🟢 البث نشط' if ch['enabled'] else '⚪ متوقف'}</b>\n"
         f"▎🔬 النشر التلقائي للتحليلات: <b>{auto_an_txt}</b>\n"
         f"▎📡 النشر التلقائي للإشارات: <b>{auto_sig_txt}</b>\n"
+        f"▎🚀 رصيد النشر اليدوي اليوم: تحليل <b>{an_q_txt}</b> · إشارة <b>{sig_q_txt}</b>\n"
         f"▎📣 وضع النشر: <b>{mode_ar}</b>\n"
         f"▎🔐 حارس قناة VIP: <b>{'🟢 مفعّل (إدخال/طرد تلقائي)' if ch.get('is_vip_gate') else '⚪ متوقف'}</b>\n"
         f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"

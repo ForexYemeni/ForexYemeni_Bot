@@ -333,3 +333,74 @@ def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted()
     assert any(c.startswith("u:") for c in u_cb2)
 
 
+def test_partner_manual_limits_admin_controls_unlimited_and_reset(monkeypatch):
+    """v6.21.3: Super Admin controls per-partner daily manual limits for
+    Analysis Now and Signal Now (presets, unlimited=0, custom number, daily reset),
+    and failed/NO_SETUP posts never consume quota."""
+    p = partners_svc.create_partner(79001, title="شريك الحدود", commission_pct=25.0)
+    cid = partners_svc.link_partner_channel(p["id"], "-1007778889990", "قناة الحدود")["channel_id"]
+    bot = SimpleNamespace(send_message=AsyncMock())
+    ctx = SimpleNamespace(user_data={}, bot=bot)
+
+    # 1. Admin partner profile shows limits + button to a:partlim:<pid>
+    q_adm, rep_adm = _mk_q(config.ADMIN_ID)
+    asyncio.run(admin_partners.admin_partner_view(q_adm, config.ADMIN_ID, ctx, bot, p["id"]))
+    txt_v, mk_v = rep_adm[-1]
+    assert "تحليل الآن" in txt_v
+    assert "إشارة الآن" in txt_v
+    cbs_v = [b.callback_data for row in mk_v.inline_keyboard for b in row if b.callback_data]
+    assert f"a:partlim:{p['id']}" in cbs_v
+
+    # 2. Admin limits panel renders with 100% colored buttons
+    asyncio.run(admin_partners.admin_partner_limits(q_adm, config.ADMIN_ID, ctx, bot, p["id"]))
+    txt_l, mk_l = rep_adm[-1]
+    assert "حدود النشر اليدوي اليومي" in txt_l
+    btns_l = [b for row in mk_l.inline_keyboard for b in row]
+    assert all(b.to_dict().get("style") in ("primary", "success", "danger") for b in btns_l)
+
+    # 3. Admin sets analysis limit = 2 and signal limit = 0 (unlimited)
+    asyncio.run(admin_partners.admin_partner_limit_set(q_adm, config.ADMIN_ID, ctx, bot, p["id"], "analysis", 2))
+    asyncio.run(admin_partners.admin_partner_limit_set(q_adm, config.ADMIN_ID, ctx, bot, p["id"], "signal", 0))
+    mq = partners_svc.manual_quota_status(p["id"])
+    assert mq["analysis_limit"] == 2
+    assert mq["signal_limit"] == 0
+
+    # 4. Failed / NO_SETUP manual post does NOT burn quota
+    monkeypatch.setattr(admin_channels, "post_analysis", AsyncMock(return_value={"ok": False, "error": "no data"}))
+    q_p, rep_p = _mk_q(79001)
+    asyncio.run(admin_partners.handle_partner_callback(q_p, 79001, ctx, bot, f"chpost:{cid}:analysis"))
+    assert partners_svc.manual_quota_status(p["id"])["analysis_used"] == 0
+
+    # 5. Two successful manual analyses consume 2/2; 3rd is blocked
+    monkeypatch.setattr(admin_channels, "post_analysis", AsyncMock(return_value={"ok": True}))
+    asyncio.run(admin_partners.handle_partner_callback(q_p, 79001, ctx, bot, f"chpost:{cid}:analysis"))
+    asyncio.run(admin_partners.handle_partner_callback(q_p, 79001, ctx, bot, f"chpost:{cid}:analysis"))
+    assert partners_svc.manual_quota_status(p["id"])["analysis_used"] == 2
+    asyncio.run(admin_partners.handle_partner_callback(q_p, 79001, ctx, bot, f"chpost:{cid}:analysis"))
+    assert "بلغت الحد اليومي" in rep_p[-1][0]
+
+    # 6. Signal Now is unlimited (0) -> stays allowed after 10 posts
+    for _ in range(10):
+        ok, _, lim = partners_svc.can_manual_post(p["id"], "signal")
+        assert ok is True and lim == 0
+        partners_svc.record_manual_post(p["id"], "signal")
+    ok_11, used_11, lim_11 = partners_svc.can_manual_post(p["id"], "signal")
+    assert ok_11 is True and used_11 == 10 and lim_11 == 0
+
+    # 7. Admin resets today's counter -> partner can immediately post analysis again
+    asyncio.run(admin_partners.admin_partner_limit_reset(q_adm, config.ADMIN_ID, ctx, bot, p["id"]))
+    mq_after = partners_svc.manual_quota_status(p["id"])
+    assert mq_after["analysis_used"] == 0 and mq_after["signal_used"] == 0
+
+    # 8. Admin sets custom numeric limit (18) via text input
+    ctx.user_data["awaiting_partner_limit"] = (p["id"], "analysis")
+    adm_replies = []
+    async def _adm_reply(t, **kw):
+        adm_replies.append(t)
+    upd_in = SimpleNamespace(effective_message=SimpleNamespace(reply_text=_adm_reply))
+    handled = asyncio.run(admin_partners.handle_partner_limit_input(upd_in, ctx, config.ADMIN_ID, "18"))
+    assert handled is True
+    assert partners_svc.manual_quota_status(p["id"])["analysis_limit"] == 18
+
+
+

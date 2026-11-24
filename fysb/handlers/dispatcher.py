@@ -291,6 +291,15 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_partners.admin_partner_mode(q, uid, context, bot, int(arg), arg2)
     elif act == "partperm":
         await admin_partners.admin_partner_perm(q, uid, context, bot, int(arg), arg2)
+    elif act == "partlim":
+        await admin_partners.admin_partner_limits(q, uid, context, bot, int(arg))
+    elif act == "partlimset":
+        kind, val = (arg2.split(":", 1) + ["6"])[:2]
+        await admin_partners.admin_partner_limit_set(q, uid, context, bot, int(arg), kind, int(val))
+    elif act == "partlimask":
+        await admin_partners.admin_partner_limit_ask(q, uid, context, bot, int(arg), arg2)
+    elif act == "partlimreset":
+        await admin_partners.admin_partner_limit_reset(q, uid, context, bot, int(arg))
     elif act == "partsettle":
         await admin_partners.admin_partner_settle(q, uid, context, bot, int(arg))
     elif act == "partdel":

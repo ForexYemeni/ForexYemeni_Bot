@@ -22,7 +22,7 @@ from telegram.constants import ParseMode
 from telegram.error import Conflict
 from telegram.ext import ContextTypes
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.config import log
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
@@ -94,12 +94,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_user = update.effective_user
     uid = tg_user.id
     try:
-        users_service.ensure_user(tg_user)
+        await afn.run(users_service.ensure_user, tg_user)
     except PermissionError:
         await update.effective_message.reply_text(
             "⛔ التسجيل مغلق مؤقتاً. تواصل مع الدعم إذا كان لديك حساب قائم.")
         return
-    users_service.touch(uid)
+    await afn.run(users_service.touch, uid)
     # --- Royal referral capture (first link wins, server-side only) ---------
     # /start ref<CODE> — e.g. https://t.me/<bot>?start=refROYAL
     payload = (context.args or [""])[0] if context.args else ""
@@ -107,9 +107,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and uid != config.ADMIN_ID:
         try:
             from fysb.services import referrals
-            cap = referrals.capture(payload[3:], uid)
+            cap = await afn.run(referrals.capture, payload[3:], uid)
             if cap.get("captured"):
-                audit_log.log(uid, f"referral_captured:{payload[3:].upper()}")
+                await afn.run(audit_log.log, uid, f"referral_captured:{payload[3:].upper()}")
         except Exception:
             log.exception("referral capture failed")
     if uid == config.ADMIN_ID:
@@ -118,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
             f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
             parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
-        audit_log.log(uid, "admin_panel_open")
+        await afn.run(audit_log.log, uid, "admin_panel_open")
         return
     from fysb.theme import header
     sent = await update.effective_message.reply_text(
@@ -147,7 +147,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     uid = update.effective_user.id
     t0 = time.monotonic()
-    ok, _integrity = db.healthy()
+    ok, _integrity = await afn.run(db.healthy)
     db_ms = (time.monotonic() - t0) * 1000
     engine = "PostgreSQL (Supabase)" if config.USE_PG else "SQLite محلية"
     up = max(0, int(time.time() - BOOT_TS))
@@ -162,7 +162,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
         parse_mode=ParseMode.HTML)
-    audit_log.log(uid, "ping")
+    await afn.run(audit_log.log, uid, "ping")
 
 
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,7 +175,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
-        audit_log.log(uid, "security:update_command_denied")
+        await afn.run(audit_log.log, uid, "security:update_command_denied")
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     import updater
@@ -186,7 +186,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await asyncio.to_thread(updater.self_update)
     status = res.get("status")
     if status == "updated":
-        audit_log.log(uid, f"self_update:{res.get('local')}->{res.get('remote')}")
+        await afn.run(audit_log.log, uid, f"self_update:{res.get('local')}->{res.get('remote')}")
         await msg.edit_text(
             f"✅ <b>تم تنزيل وتثبيت الإصدار v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
             f"◆ الملفات المثبتة: {res.get('files', 0)}\n"
@@ -197,14 +197,14 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         updater.restart()            # استبدال فوري للعملية — لا يعود
         return
     if status == "no_update":
-        audit_log.log(uid, "self_update:no_update")
+        await afn.run(audit_log.log, uid, "self_update:no_update")
         await msg.edit_text(
             "🟢 <b>أنت على أحدث إصدار بالفعل.</b>\n"
             f"◆ المحلي: v{safe(res.get('local'))}\n"
             f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}",
             parse_mode=ParseMode.HTML)
         return
-    audit_log.log(uid, f"self_update:error:{str(res.get('detail', ''))[:80]}")
+    await afn.run(audit_log.log, uid, f"self_update:error:{str(res.get('detail', ''))[:80]}")
     await msg.edit_text(
         "⚠️ <b>تعذّر التحديث الآن — الإصدار الحالي ما زال يعمل بشكل طبيعي.</b>\n"
         f"◆ الإصدار الحالي: v{safe(res.get('local'))}\n"
@@ -216,7 +216,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
-        audit_log.log(uid, "security:admin_command_denied")
+        await afn.run(audit_log.log, uid, "security:admin_command_denied")
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     sent = await update.effective_message.reply_text(
@@ -232,14 +232,14 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     from fysb.services import backup as backup_service
     try:
-        dest = backup_service.quick_db_snapshot("admin")
+        dest = await afn.run(backup_service.quick_db_snapshot, "admin")
         if dest is None:
             await update.effective_message.reply_text(
                 "⏳ قاعدة البيانات مشغولة حالياً — تعذر أخذ نسخة لحظية الآن. حاول بعد قليل.")
             return
         with open(dest, "rb") as f:
             await update.effective_message.reply_document(f, filename=dest.name)
-        audit_log.log(uid, f"database_backup:{dest.name}")
+        await afn.run(audit_log.log, uid, f"database_backup:{dest.name}")
         await update.effective_message.reply_text(
             f"✅ تم إنشاء النسخة الاحتياطية ({dest.stat().st_size // 1024} KB) وإرسالها.")
     except Exception:

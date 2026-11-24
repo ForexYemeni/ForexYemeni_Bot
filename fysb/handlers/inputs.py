@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from fysb import config, db, instruments
+from fysb import afn, config, db, instruments
 from fysb.services import chain_verify
 from fysb.handlers.common import safe
 from fysb.services import payments as payments_service
@@ -111,7 +111,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not (10 <= val <= 10_000_000):
                 raise ValueError("الرصيد يجب أن يكون بين 10 و 10,000,000")
             from fysb.engines import demo as demo_engine
-            demo_engine.set_balance(uid, val)
+            await afn.run(demo_engine.set_balance, uid, val)
             await update.effective_message.reply_text(
                 f"✅ أصبح رصيد حسابك التجريبي: <b>{val:,.2f} USD</b> — وأُغلقت الصفقات المفتوحة ضمن إعادة الضبط.\n"
                 f"🤖 <b>التنفيذ التلقائي مُسلّح الآن:</b> كل إشارة مؤهلة تُنفذ في حسابك فوراً بحجم يُحسب "
@@ -129,17 +129,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tx_pid:
         from fysb.services import chain_verify
         pid = int(tx_pid)
-        req = payments_service.get_request(pid)
+        req = await afn.run(payments_service.get_request, pid)
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await update.effective_message.reply_text("⚠️ الطلب غير متاح للتحقق (مُراجع مسبقاً أو غير موجود).")
             return
         chain = (ud.pop("usdt_chain", "") or (req.get("chain") if isinstance(req, dict) else "") or "TRC20").upper()
-        used = payments_service.txid_used(text.strip())
+        used = await afn.run(payments_service.txid_used, text.strip())
         if used:
             await update.effective_message.reply_text(
                 f"🔒 هذا TXID مُستخدم مسبقاً في الطلب #{used} — المعاملة محجوبة نهائياً ولا تُقبل مرتين.")
             return
-        wallet = payments_service.chain_wallet(chain)
+        wallet = await afn.run(payments_service.chain_wallet, chain)
         if not wallet:
             await update.effective_message.reply_text(
                 f"⛓ لم يُضبَط عنوان محفظة USDT على شبكة {chain} بعد — أرسل صورة الإيصال للمراجعة اليدوية أو تواصل مع الدعم.")
@@ -155,19 +155,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "أعد إرسال TXID صحيحاً، أو أرسل صورة الإيصال للمراجعة اليدوية.",
                 parse_mode="HTML")
             return
-        bound = payments_service.attach_txid(pid, uid, text.strip(), chain)
+        bound = await afn.run(payments_service.attach_txid, pid, uid, text.strip(), chain)
         if not bound.get("ok"):
             ud.pop("awaiting_usdt_txid", None)
             await update.effective_message.reply_text("🔒 " + bound.get("error", ""))
             return
-        appr = payments_service.approve_request(pid, actor=0)
+        appr = await afn.run(payments_service.approve_request, pid, actor=0)
         ud.pop("awaiting_usdt_txid", None)
         if not appr.get("ok"):
             await update.effective_message.reply_text("⚠️ المعاملة موثقة ومسجلة، لكن التفعيل أعاد: "
                                                       + safe(appr.get("error", "خطأ")) + " — تواصل مع الدعم.")
             return
-        with db.conn() as c:
-            plan = c.execute("SELECT * FROM plans WHERE code=?", (req["plan_code"],)).fetchone()
+        plan = await afn.run(_fetch_plan_row, req["plan_code"])
         title = esc(plan["title"]) if plan else esc(req["plan_code"])
         days = plan["duration_days"] if plan else 0
         tx_short = f"{text.strip()[:12]}…{text.strip()[-8:]}"
@@ -200,8 +199,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ud.pop("awaiting_ticket", False):
         ttype = ud.pop("ticket_type", "general")
         subject = text.split("\n")[0][:100] or "دعم عام"
-        tid = support_service.create_ticket(uid, subject, ttype, text)
-        audit_log.log(uid, f"support_ticket:{tid}")
+        tid = await afn.run(support_service.create_ticket, uid, subject, ttype, text)
+        await afn.run(audit_log.log, uid, f"support_ticket:{tid}")
         await update.effective_message.reply_text(
             f"✅ تم فتح تذكرة الدعم #{tid}. سيتم إشعارك عند رد الإدارة.")
         if config.ADMIN_ID:
@@ -220,10 +219,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Reply inside an open ticket thread (attachment replies reuse ticket_reply_to)
     tid = ud.pop("ticket_reply_to", None)
     if tid:
-        t = support_service.get_ticket(tid)
+        t = await afn.run(support_service.get_ticket, tid)
         if t and t["user_id"] == uid and t["status"] in ("OPEN", "ANSWERED"):
-            support_service.add_message(tid, "user", uid, text)
-            support_service.set_status(tid, "OPEN")
+            await afn.run(support_service.add_message, tid, "user", uid, text)
+            await afn.run(support_service.set_status, tid, "OPEN")
             if config.ADMIN_ID:
                 try:
                     await context.bot.send_message(config.ADMIN_ID,
@@ -279,26 +278,17 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             from fysb.engines.entry_state import birth_status as _birth
             live_px = 0.0
             try:
-                live_px = float((_md.fetch_price(sym) or {}).get("price") or 0.0)
+                px_row = await afn.run(_md.fetch_price, sym)
+                live_px = float((px_row or {}).get("price") or 0.0)
             except Exception:
                 live_px = 0.0
             b_status = _birth(direction, entry, live_px) if live_px > 0 else "ACTIVE"
             filled_at = config.now() if b_status == "RUNNING" else ""
-            with db.conn() as c:
-                dup = c.execute("""SELECT id FROM signals WHERE symbol=? AND direction=? AND timeframe=? AND created_at>=?""",
-                                (sym, direction, tf, cutoff)).fetchone()
-                if dup:
-                    raise ValueError(f"توجد إشارة مطابقة حديثاً #{dup['id']} — منع التكرار")
-                cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
-                                   strategy,reason,status,source,created_by,created_at,data_source,data_time,filled_at,live_px)
-                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'MANUAL',?,?,?,'MANUAL','',?,?)""",
-                                (sym, direction, tf, entry, sl, tp1, tp2, tp3,
-                                 f"{tp1},{tp2},{tp3}", reward / risk, score, strategy.upper(), reason,
-                                 b_status, uid, config.now(), filled_at, live_px))
-                sid = cur.lastrowid
-            audit_log.log(uid, f"signal_create:{sid}")
-            with db.conn() as c:
-                row = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+            sid = await afn.run(_insert_manual_signal, sym, direction, tf, entry, sl, tp1, tp2, tp3,
+                                reward / risk, score, strategy.upper(), reason, b_status, uid,
+                                filled_at, live_px, cutoff)
+            await afn.run(audit_log.log, uid, f"signal_create:{sid}")
+            row = await afn.run(_fetch_signal_row, sid)
             from fysb.engines.signal_engine import emit_to_users
             stats = await emit_to_users(dict(row), _bot_sender(context))
             await update.effective_message.reply_text(
@@ -323,13 +313,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 raise ValueError("رمز السوق غير صالح")
             if category not in ("forex", "metal", "crypto", "index", "commodity"):
                 category = "forex"
-            with db.conn() as c:
-                c.execute("""INSERT INTO market_catalog(symbol,title,provider_symbol,enabled,verified,created_at,updated_at)
-                             VALUES(?,?,?,0,0,?,?)
-                             ON CONFLICT(symbol) DO UPDATE SET title=excluded.title,
-                             provider_symbol=excluded.provider_symbol,enabled=0,verified=0,updated_at=excluded.updated_at""",
-                          (symbol, title[:80], provider[:30], config.now(), config.now()))
-            audit_log.log(uid, "market_added_unverified:" + symbol)
+            await afn.run(_insert_market_row, symbol, title[:80], provider[:30])
+            await afn.run(audit_log.log, uid, "market_added_unverified:" + symbol)
             await update.effective_message.reply_text(
                 f"✅ أُضيف السوق {symbol} مغلقًا وغير موثق. استخدم زر «تحقق» في صفحة الأسواق لاختبار المزود فعلياً.")
         except Exception as e:
@@ -356,12 +341,12 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
     field = ud.get("awaiting_support_field")
     if field:
         val = "" if text in ("-", "—", "لا") else text
-        cfg = support_service.config_row() or {}
+        cfg = await afn.run(support_service.config_row) or {}
         cfg[field] = val.lstrip("@") if field == "username" else val
-        support_service.set_config(cfg.get("username", ""), cfg.get("phone", ""),
-                                   cfg.get("channel", ""), cfg.get("group_chat", ""))
+        await afn.run(support_service.set_config, cfg.get("username", ""), cfg.get("phone", ""),
+                      cfg.get("channel", ""), cfg.get("group_chat", ""))
         ud.pop("awaiting_support_field", None)
-        audit_log.log(uid, f"support_config_field:{field}")
+        await afn.run(audit_log.log, uid, f"support_config_field:{field}")
         await update.effective_message.reply_text(
             f"✅ حُفظ الحقل <b>{esc(field)}</b>.\n"
             f"القيم الحالية: @{esc(cfg.get('username') or '—')} · {esc(cfg.get('phone') or '—')} · "
@@ -377,8 +362,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 raise ValueError("أدخل أربعة حقول مفصولة بـ |")
             username, phone, channel, group = parts
             vals = ["" if x == "-" else x for x in (username, phone, channel, group)]
-            support_service.set_config(*vals)
-            audit_log.log(uid, "support_config_updated")
+            await afn.run(support_service.set_config, *vals)
+            await afn.run(audit_log.log, uid, "support_config_updated")
             await update.effective_message.reply_text("✅ تم حفظ بيانات الدعم.")
         except Exception as e:
             ud["awaiting_support_config"] = True
@@ -387,7 +372,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
 
     # ---------- User search ----------
     if ud.pop("awaiting_user_search", False):
-        rows = users_service.search(text)
+        rows = await afn.run(users_service.search, text)
         rows = [r for r in rows if r["user_id"] != config.ADMIN_ID]
         if not rows:
             await update.effective_message.reply_text("لا نتائج مطابقة.")
@@ -402,9 +387,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
     # already killed any stale flag; this order is the second wall of defense)
     pid = ud.pop("reject_payment_id", None)
     if pid:
-        res = payments_service.reject_request(int(pid), text, uid)
+        res = await afn.run(payments_service.reject_request, int(pid), text, uid)
         if res.get("ok"):
-            audit_log.log(uid, f"payment_rejected:{pid}")
+            await afn.run(audit_log.log, uid, f"payment_rejected:{pid}")
             p = res["payment"]
             try:
                 await context.bot.send_message(p["user_id"],
@@ -428,8 +413,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                     else "عنوان EVM صحيح يبدأ بـ 0x يليه 40 خانة سداسية عشرية")
             await update.effective_message.reply_text(f"❌ {hint} — أعد الإرسال أو أرسل - للمسح.")
             return True
-        payments_service.set_chain_wallet(chain, val)
-        audit_log.log(uid, f"usdt_wallet_set:{chain}" if val else f"usdt_wallet_cleared:{chain}")
+        await afn.run(payments_service.set_chain_wallet, chain, val)
+        await afn.run(audit_log.log, uid, f"usdt_wallet_set:{chain}" if val else f"usdt_wallet_cleared:{chain}")
         await update.effective_message.reply_text(
             (f"✅ تم ضبط محفظة USDT على شبكة <b>{chain}</b> للتحقق البلوكيشن الفوري:\n<code>{esc(val)}</code>\n"
              "كل دفعة تُتحقق على الشبكة (التأكيد + العقد + العنوان + المبلغ)، والـ TXID يُحجب بعد القبول."
@@ -443,8 +428,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         try:
             code, field = (field_flag.split(":", 1) + [""])[:2]
             from fysb.handlers.admin_core import plan_field_apply
-            msg = plan_field_apply(code, field, text)
-            audit_log.log(uid, f"plan_field:{code}:{field}:{text[:20]}")
+            msg = await afn.run(plan_field_apply, code, field, text)
+            await afn.run(audit_log.log, uid, f"plan_field:{code}:{field}:{text[:20]}")
             await update.effective_message.reply_text(f"✅ {esc(msg)}", parse_mode="HTML")
         except ValueError as e:
             ud["awaiting_plan_field"] = field_flag
@@ -518,7 +503,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             if not (1 <= val <= 10):
                 raise ValueError("القيمة يجب أن تكون بين 1 و 10")
             db.set_setting("free_daily_signals", val)
-            audit_log.log(uid, f"free_quota_set:{val}")
+            await afn.run(audit_log.log, uid, f"free_quota_set:{val}")
             await update.effective_message.reply_text(f"✅ أصبح الحد اليومي للباقة المجانية: <b>{val}</b> إشارة.", parse_mode="HTML")
         except ValueError as e:
             ud["awaiting_free_quota"] = True
@@ -532,7 +517,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             if not (10 <= val <= 10_000_000):
                 raise ValueError("الرصيد يجب أن يكون بين 10 و 10,000,000")
             db.set_setting("demo_start_balance", val)
-            audit_log.log(uid, f"demo_balance_set:{val:g}")
+            await afn.run(audit_log.log, uid, f"demo_balance_set:{val:g}")
             await update.effective_message.reply_text(
                 f"✅ أصبح الرصيد الابتدائي للحسابات التجريبية الجديدة: <b>{val:,.2f} USD</b>.\n"
                 "<i>الحسابات القائمة تُعدل من حساب كل مستخدم أو زر تصفير.</i>", parse_mode="HTML")
@@ -548,7 +533,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             if not (2 <= val <= 720):
                 raise ValueError("الصلاحية يجب أن تكون بين 2 و 720 ساعة")
             db.set_setting("signal_expiry_hours", val)
-            audit_log.log(uid, f"signal_expiry_set:{val}")
+            await afn.run(audit_log.log, uid, f"signal_expiry_set:{val}")
             await update.effective_message.reply_text(f"✅ صلاحية الإشارة الجديدة: <b>{val} ساعة</b>.", parse_mode="HTML")
         except ValueError as e:
             ud["awaiting_expiry_hours"] = True
@@ -575,9 +560,8 @@ async def _plan_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: in
             code = text.upper().strip()
             if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,15}", code):
                 raise ValueError("رمز الباقة: حروف لاتينية كبيرة وأرقام فقط (مثال VIP)")
-            with db.conn() as c:
-                if c.execute("SELECT 1 FROM plans WHERE code=?", (code,)).fetchone():
-                    raise ValueError(f"الرمز {code} موجود — استخدم المحرر لتعديله أو اختر رمزاً آخر")
+            if await afn.run(_plan_code_exists, code):
+                raise ValueError(f"الرمز {code} موجود — استخدم المحرر لتعديله أو اختر رمزاً آخر")
             d["code"] = code
             d["step"] = "title"
             await update.effective_message.reply_text(f"✅ الرمز: <b>{esc(code)}</b>\n✍️ أرسل <b>عنوان</b> الباقة (مثال: VIP Plan):", parse_mode="HTML")
@@ -601,6 +585,72 @@ async def _plan_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: in
     except ValueError as e:
         await update.effective_message.reply_text(f"❌ {safe(e)} — أعد الإرسال.")
     return True
+
+
+def _fetch_plan_row(plan_code: str):
+    """(v6.11.0 thread-offload helper) plan row for the on-chain success card."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans WHERE code=?", (plan_code,)).fetchone()
+
+
+def _insert_manual_signal(sym, direction, tf, entry, sl, tp1, tp2, tp3, rr, score,
+                          strategy, reason, b_status, uid, filled_at, live_px, cutoff) -> int:
+    """(v6.11.0 thread-offload helper) duplicate-guarded manual signal insert."""
+    with db.conn() as c:
+        dup = c.execute("""SELECT id FROM signals WHERE symbol=? AND direction=? AND timeframe=? AND created_at>=?""",
+                        (sym, direction, tf, cutoff)).fetchone()
+        if dup:
+            raise ValueError(f"توجد إشارة مطابقة حديثاً #{dup['id']} — منع التكرار")
+        cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
+                           strategy,reason,status,source,created_by,created_at,data_source,data_time,filled_at,live_px)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'MANUAL',?,?,?,'MANUAL','',?,?)""",
+                        (sym, direction, tf, entry, sl, tp1, tp2, tp3,
+                         f"{tp1},{tp2},{tp3}", rr, score, strategy, reason,
+                         b_status, uid, config.now(), filled_at, live_px))
+        return cur.lastrowid
+
+
+def _fetch_signal_row(sid: int):
+    """(v6.11.0 thread-offload helper) full signal row after insert."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+
+
+def _insert_market_row(symbol: str, title: str, provider: str) -> None:
+    """(v6.11.0 thread-offload helper) unverified market-catalog upsert."""
+    with db.conn() as c:
+        c.execute("""INSERT INTO market_catalog(symbol,title,provider_symbol,enabled,verified,created_at,updated_at)
+                     VALUES(?,?,?,0,0,?,?)
+                     ON CONFLICT(symbol) DO UPDATE SET title=excluded.title,
+                     provider_symbol=excluded.provider_symbol,enabled=0,verified=0,updated_at=excluded.updated_at""",
+                  (symbol, title, provider, config.now(), config.now()))
+
+
+def _plan_code_exists(code: str) -> bool:
+    """(v6.11.0 thread-offload helper) guided-plan uniqueness check."""
+    with db.conn() as c:
+        return c.execute("SELECT 1 FROM plans WHERE code=?", (code,)).fetchone() is not None
+
+
+def _fetch_plans_list():
+    """(v6.11.0 thread-offload helper) plan picker rows for PM linking."""
+    with db.conn() as c:
+        return c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+
+
+def _insert_broker(adapter_key: str, title: str, config_json: str) -> int:
+    """(v6.11.0 thread-offload helper) CONFIGURED broker adapter insert."""
+    with db.conn() as c:
+        cur = c.execute("""INSERT INTO broker_adapters(key,title,status,enabled,config_json,created_at,updated_at)
+                           VALUES(?,?, 'CONFIGURED', 0, ?, ?, ?)""",
+                        (adapter_key, title, config_json, config.now(), config.now()))
+        return cur.lastrowid
+
+
+def _broadcast_set_photo(bid: int, file_id: str) -> None:
+    """(v6.11.0 thread-offload helper) attach photo file_id to broadcast."""
+    with db.conn() as c:
+        c.execute("UPDATE broadcasts SET file_id=?, has_photo=1 WHERE id=?", (file_id, bid))
 
 
 def plan_persist(d: dict) -> None:
@@ -641,8 +691,7 @@ async def _pm_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int,
         d["instructions"] = text[:300]
         d["step"] = "plans"
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        with db.conn() as c:
-            plans = c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+        plans = await afn.run(_fetch_plans_list)
         kb = [[InlineKeyboardButton(("✅ " if p["code"] in d.get("linked", []) else "") + p["title"],
                                     callback_data=f"a:pmplan:{p['code']}")] for p in plans]
         kb.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
@@ -682,13 +731,9 @@ async def _broker_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: 
         # Save (credentials stored only in config_json; never rendered)
         cfg = {"base_url": d.get("base_url", ""), "api_key": d["api_key"],
                "api_secret": d["api_secret"], "account_id": d["account_id"]}
-        with db.conn() as c:
-            cur = c.execute("""INSERT INTO broker_adapters(key,title,status,enabled,config_json,created_at,updated_at)
-                               VALUES(?,?, 'CONFIGURED', 0, ?, ?, ?)""",
-                            (d["type"], d["name"], json.dumps(cfg), config.now(), config.now()))
-            bid = cur.lastrowid
+        bid = await afn.run(_insert_broker, d["type"], d["name"], json.dumps(cfg))
         context.user_data.pop("broker_draft", None)
-        audit_log.log(uid, f"broker_added:{d['type']}:{bid}")
+        await afn.run(audit_log.log, uid, f"broker_added:{d['type']}:{bid}")
         await update.effective_message.reply_text(
             f"🏦 <b>سُجل الوسيط #{bid}</b> — {esc(d['name'])} ({esc(d['type'])})\n"
             f"🔑 المفاتيح محفوظة مشفرة في قاعدة البيانات ولا تعرض أبداً.\n"
@@ -833,11 +878,10 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bid = ud.get("broadcast_draft", 0)
         ud["awaiting_broadcast_photo"] = False
         from fysb.services import broadcast as broadcast_service
-        b = broadcast_service.get(bid) if bid else None
+        b = await afn.run(broadcast_service.get, bid) if bid else None
         if b:
-            with db.conn() as c:
-                c.execute("UPDATE broadcasts SET file_id=?, has_photo=1 WHERE id=?", (photo.file_id, bid))
-            targets = broadcast_service.audience_ids(b["audience"], b["plan_code"])
+            await afn.run(_broadcast_set_photo, bid, photo.file_id)
+            targets = await afn.run(broadcast_service.audience_ids, b["audience"], b["plan_code"])
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             await update.effective_message.reply_text(
                 f"✅ أُرفقت الصورة بالإعلان #{bid}.\nعدد المستلمين: {len(targets)}",
@@ -853,14 +897,15 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # User: payment receipt
     pid = ud.pop("awaiting_receipt", None)
     if pid:
-        ok = payments_service.attach_receipt(int(pid), uid, photo.file_id)
+        ok = await afn.run(payments_service.attach_receipt, int(pid), uid, photo.file_id)
         if ok:
             await update.effective_message.reply_text(f"✅ استلمنا إيصال الطلب #{pid}. سيظهر للإدارة للمراجعة.")
             if config.ADMIN_ID:
                 try:
+                    preq = await afn.run(payments_service.get_request, pid)
                     await context.bot.send_photo(config.ADMIN_ID, photo.file_id,
                                                  caption=f"🧾 إيصال دفع جديد #{pid}\nالمستخدم: {uid}\n"
-                                                         f"الباقة: {payments_service.get_request(pid)['plan_code']}")
+                                                         f"الباقة: {preq['plan_code']}")
                 except Exception:
                     pass
         else:
@@ -870,7 +915,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # User: attachment to an open ticket reply
     tid = ud.get("ticket_reply_to")
     if tid:
-        support_service.add_message(int(tid), "user", uid, caption or "📎 مرفق", file_id=photo.file_id)
+        await afn.run(support_service.add_message, int(tid), "user", uid, caption or "📎 مرفق", file_id=photo.file_id)
         if config.ADMIN_ID:
             try:
                 await context.bot.send_photo(config.ADMIN_ID, photo.file_id,

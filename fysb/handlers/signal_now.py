@@ -20,7 +20,7 @@ fabricated: no setup → no signal, forever.
 """
 import asyncio
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.config import log
 from fysb.engines.signal_engine import generate_signal
 from fysb.services import subscriptions as subs
@@ -136,6 +136,33 @@ def choices_for(uid: int, is_admin: bool) -> dict:
     return {"markets": markets, "strategies": strategies, "plan": plan}
 
 
+def _fetch_signal_by_id(sig_id: int):
+    """(v6.11.0 thread-offload helper) full signal row by id."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM signals WHERE id=?", (sig_id,)).fetchone()
+
+
+def _fetch_market_row(symbol: str):
+    """(v6.11.0 thread-offload helper) market_catalog row for a symbol."""
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+    return dict(r) if r else None
+
+
+def _delivery_exists(uid: int, sig_id: int) -> bool:
+    """(v6.11.0 thread-offload helper) delivery dedupe check."""
+    with db.conn() as c:
+        return c.execute("SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=?",
+                         (uid, sig_id)).fetchone() is not None
+
+
+def _enabled_timeframes() -> set:
+    """(v6.11.0 thread-offload helper) enabled+verified timeframe codes."""
+    with db.conn() as c:
+        return {r["code"] for r in c.execute(
+            "SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchall()}
+
+
 # ---------------------------------------------------------------------------
 # Staged flow (callback-driven; the draft lives in context.user_data)
 # ---------------------------------------------------------------------------
@@ -173,7 +200,7 @@ async def pick_style(q, uid: int, context, bot, style: str) -> None:
     d["style"] = style
     d["stage"] = "market"
     context.user_data[DRAFT_KEY] = d
-    ch = choices_for(uid, d.get("is_admin", False))
+    ch = await afn.run(choices_for, uid, d.get("is_admin", False))
     mkts = ch["markets"]
     if not mkts:
         await _render(q, "⛔ لا توجد أسواق مفعلة وموثقة متاحة لباقتك بعد — تواصل مع الإدارة.",
@@ -194,11 +221,9 @@ async def pick_symbol(q, uid: int, context, bot, symbol: str) -> None:
     symbol = symbol.upper()
     d["symbol"] = symbol
     d["stage"] = "tf"
-    plan = subs.plan_for(uid)
+    plan = await afn.run(subs.plan_for, uid)
     p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
-    with db.conn() as c:
-        enabled = {r["code"] for r in c.execute(
-            "SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchall()}
+    enabled = await afn.run(_enabled_timeframes)
     usable = [t for t in STYLE_TFS.get(d.get("style", "INTRADAY"), []) if t in enabled]
     if not d.get("is_admin", False):
         usable = [t for t in usable if t in p_tfs]
@@ -222,7 +247,7 @@ async def pick_tf(q, uid: int, context, bot, tf: str) -> None:
     tf = tf.upper()
     d["tf"] = tf
     d["stage"] = "strategy"
-    strategies = choices_for(uid, d.get("is_admin", False))["strategies"]
+    strategies = (await afn.run(choices_for, uid, d.get("is_admin", False)))["strategies"]
     if not strategies:
         await _render(q, "⛔ لا توجد منهجيات مفعلة وموثقة متاحة — فعّل استراتيجيات من قسم الاستراتيجيات.",
                       kb.user_nav(), bot)
@@ -255,8 +280,7 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     if res.get("status") == "SIGNAL_CREATED":
         from fysb.engines.signal_engine import emit_to_users
         from fysb.engines.tracker import seq_of
-        with db.conn() as c:
-            sig = c.execute("SELECT * FROM signals WHERE id=?", (res["signal_id"],)).fetchone()
+        sig = await afn.run(_fetch_signal_by_id, res["signal_id"])
         sig = dict(sig) if sig else {}
         stats = {"sent": 0, "skipped_quota": 0, "failed": 0}
         if sig:
@@ -264,17 +288,12 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
             stats = await emit_to_users(sig, bot_sender_from(bot))
             # The requester MUST hold his own copy too (quota consumed like any
             # delivery) — even if his notifications toggle or plan gate skipped him.
-            with db.conn() as c:
-                got = c.execute("SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=?",
-                                (uid, sig["id"])).fetchone()
+            got = await afn.run(_delivery_exists, uid, sig["id"])
             if not got:
                 from fysb.services import user_trade
                 from fysb.ui.cards import render_signal_card
-                if subs.try_consume_signal(uid, sig):
-                    row = None
-                    with db.conn() as c:
-                        r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sig["symbol"],)).fetchone()
-                        row = dict(r) if r else None
+                if await afn.run(subs.try_consume_signal, uid, sig):
+                    row = await afn.run(_fetch_market_row, sig["symbol"])
                     text = render_signal_card(sig, user_view=True, row=row)
                     personal = user_trade.personal_block(sig, uid)
                     if personal:
@@ -282,8 +301,8 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
                     try:
                         msg = await bot.send_message(uid, text, parse_mode="HTML")
                         from fysb.engines.signal_engine import record_delivery_refs
-                        record_delivery_refs(uid, sig["id"], msg)
-                        exec_res = user_trade.auto_execute(sig, uid)
+                        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+                        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
                         if exec_res and exec_res.get("ok"):
                             await bot.send_message(uid, user_trade.execution_card(exec_res, sig),
                                                    parse_mode="HTML")
@@ -326,8 +345,8 @@ async def start_watch(q, uid: int, context, bot, minutes: int) -> None:
     if not (symbol and tf and strategy):
         await _render(q, "ابدأ من «إشارة الآن» أولاً ثم فعّل البحث التلقائي.", kb.user_nav(), bot)
         return
-    wid = start_watcher(uid, symbol, tf, strategy, style, minutes)
-    w = active_watcher(uid)
+    wid = await afn.run(start_watcher, uid, symbol, tf, strategy, style, minutes)
+    w = await afn.run(active_watcher, uid)
     body = ("⏰ <b><u>البحث التلقائي الملكي مفعّل</u></b>\n"
             "<blockquote>"
             f"▎🎯 الهدف: إشارة حقيقية على <b>{esc(symbol)} · {tf_name(tf)} · {esc(strategy)}</b>\n"
@@ -341,7 +360,7 @@ async def start_watch(q, uid: int, context, bot, minutes: int) -> None:
 
 
 async def stop_watch(q, uid: int, context, bot, wid: int) -> None:
-    cancel_watchers(uid)
+    await afn.run(cancel_watchers, uid)
     await _render(q, "🔴 أُلغي البحث التلقائي بالكامل — لا يوجد أي فحص مجدول باسمك الآن.",
                   kb.user_nav([[kb.btn("🚀 إشارة الآن", "u:signow")]]), bot)
 
@@ -351,7 +370,7 @@ async def stop_watch(q, uid: int, context, bot, wid: int) -> None:
 # ---------------------------------------------------------------------------
 async def run_due_watchers(app) -> None:
     from fysb.ui.cards import render_signal_card
-    for w in due_watchers():
+    for w in await afn.run(due_watchers):
         uid = w["user_id"]
         if w.get("_expired"):
             try:
@@ -367,9 +386,8 @@ async def run_due_watchers(app) -> None:
             log.warning("watcher %s generation failed: %s", w["id"], type(e).__name__)
             res = {"status": "ERROR"}
         if res.get("status") == "SIGNAL_CREATED":
-            finish_watcher(w["id"], "FOUND")
-            with db.conn() as c:
-                sig = c.execute("SELECT * FROM signals WHERE id=?", (res["signal_id"],)).fetchone()
+            await afn.run(finish_watcher, w["id"], "FOUND")
+            sig = await afn.run(_fetch_signal_by_id, res["signal_id"])
             sig = dict(sig) if sig else {}
             if not sig:
                 continue
@@ -377,14 +395,9 @@ async def run_due_watchers(app) -> None:
             from fysb.engines.tracker import seq_of
             from fysb.handlers.inputs import bot_sender_from
             stats = await emit_to_users(sig, bot_sender_from(app.bot))
-            with db.conn() as c:
-                got = c.execute("SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=?",
-                                (uid, sig["id"])).fetchone()
-            if not got and subs.try_consume_signal(uid, sig):
-                row = None
-                with db.conn() as c:
-                    r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sig["symbol"],)).fetchone()
-                    row = dict(r) if r else None
+            got = await afn.run(_delivery_exists, uid, sig["id"])
+            if not got and await afn.run(subs.try_consume_signal, uid, sig):
+                row = await afn.run(_fetch_market_row, sig["symbol"])
                 from fysb.services import user_trade
                 text = render_signal_card(sig, user_view=True, row=row)
                 personal = user_trade.personal_block(sig, uid)
@@ -392,8 +405,8 @@ async def run_due_watchers(app) -> None:
                     text += "\n\n<blockquote>" + personal + "</blockquote>"
                 try:
                     msg = await app.bot.send_message(uid, text, parse_mode="HTML")
-                    record_delivery_refs(uid, sig["id"], msg)
-                    exec_res = user_trade.auto_execute(sig, uid)
+                    await afn.run(record_delivery_refs, uid, sig["id"], msg)
+                    exec_res = await afn.run(user_trade.auto_execute, sig, uid)
                     if exec_res and exec_res.get("ok"):
                         await app.bot.send_message(uid, user_trade.execution_card(exec_res, sig),
                                                    parse_mode="HTML")
@@ -408,4 +421,4 @@ async def run_due_watchers(app) -> None:
                 pass
             log.info("watcher %s FOUND signal #%s (sent=%s)", w["id"], sig["id"], stats.get("sent"))
         elif res.get("status") in ("NO_SETUP", "REJECTED", "DUPLICATE", "ERROR"):
-            reschedule_watcher(w["id"], w["interval_minutes"])
+            await afn.run(reschedule_watcher, w["id"], w["interval_minutes"])

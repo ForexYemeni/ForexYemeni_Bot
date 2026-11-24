@@ -451,7 +451,7 @@ class TestSignalNow(_Base):
         with patch("fysb.engines.market_data.fetch_candles", lambda *a, **k: _fake_payload(candles)), \
              patch("fysb.engines.market_data.is_stale", lambda p: False), \
              patch("fysb.engines.market_data.fetch_price", lambda *a, **k: {"price": 104.0}):
-            res = generate_signal("XAUUSD", "M15", True, ["WYCKOFF"])  # closed engine
+            res = generate_signal("XAUUSD", "M15", True, ["ELLIOTT_WAVE"])  # still a closed engine (WYCKOFF graduated v6.11.0)
             self.assertEqual(res["status"], "REJECTED")
             self.assertIn("غير مفعلة", res["reason"])
 
@@ -533,7 +533,7 @@ class TestStrategyInfo(_Base):
         self.assertIn("القواعد الميكانيكية", text)
 
     def test_identity_page_closed_is_honest(self):
-        q, ctx = fire("u:stratinfo:WYCKOFF:PRO", USER)
+        q, ctx = fire("u:stratinfo:ELLIOTT_WAVE:PRO", USER)   # still closed (WYCKOFF graduated v6.11.0)
         text = page_for(q, ctx)
         self.assertIn("غير منفذة كمحرك بعد", text)
 

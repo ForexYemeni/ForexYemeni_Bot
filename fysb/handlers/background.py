@@ -7,7 +7,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.config import log
 
 LOCK_FILE = config.BASE_DIR / "fysb.lock"
@@ -147,18 +147,15 @@ async def market_engine_loop(app):
 
     while True:
         try:
-            if db.get_setting("engine_enabled", "0") == "1" \
-                    and not db.kill_switch_on() \
-                    and db.get_setting("signal_push_enabled", "1") == "1":
-                with db.conn() as c:
-                    markets = [dict(r) for r in c.execute(
-                        "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()]
+            if await afn.run(db.get_setting, "engine_enabled", "0") == "1" \
+                    and not await afn.run(db.kill_switch_on) \
+                    and await afn.run(db.get_setting, "signal_push_enabled", "1") == "1":
+                markets = await afn.run(_armed_market_rows)
                 for m in markets:
                     try:
                         result = await asyncio.to_thread(generate_signal, m["symbol"])
                         if result["status"] == "SIGNAL_CREATED":
-                            with db.conn() as c:
-                                sig = c.execute("SELECT * FROM signals WHERE id=?", (result["signal_id"],)).fetchone()
+                            sig = await afn.run(_signal_row_by_id, result["signal_id"])
                             if sig:
                                 from fysb.engines.signal_engine import emit_to_users
                                 stats = await emit_to_users(dict(sig), bot_send)
@@ -171,13 +168,12 @@ async def market_engine_loop(app):
                                     # signals center), never the internal id.
                                     from fysb.engines.tracker import seq_of
                                     from fysb.ui.cards import render_signal_card
-                                    with db.conn() as c:
-                                        mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?",
-                                                         (m["symbol"],)).fetchone()
+                                    mrow = await afn.run(_market_row, m["symbol"])
+                                    seq = await afn.run(seq_of, result["signal_id"])
                                     card = render_signal_card(
                                         dict(sig), user_view=False,
                                         row=dict(mrow) if mrow else None)
-                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq_of(result['signal_id'])}"
+                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
                                              f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
                                              f"▎📤 التسليم: {stats['sent']} مستلم"
                                              f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
@@ -192,7 +188,8 @@ async def market_engine_loop(app):
             raise
         except Exception:
             log.exception("market engine loop iteration failed")
-        await asyncio.sleep(max(60, db.get_setting_int("engine_interval_seconds", 300)))
+        interval = await afn.run(db.get_setting_int, "engine_interval_seconds", 300)
+        await asyncio.sleep(max(60, interval))
 
 
 async def tracker_loop(app):
@@ -221,7 +218,7 @@ async def tracker_loop(app):
                                                     message_id=int(message_id), parse_mode="HTML")
                 except Exception:
                     pass  # deleted message / identical text / blocked user — never fatal
-            expired, expiry_edits = tracker.expire_with_card_edits()
+            expired, expiry_edits = await afn.run(tracker.expire_with_card_edits)
             for uid, chat_id, message_id, text in expiry_edits:
                 try:
                     await app.bot.edit_message_text(text, chat_id=int(chat_id),
@@ -243,7 +240,7 @@ async def subscriptions_loop(app):
     last_digest_day = ""
     while True:
         try:
-            expired_targets = subs.mark_expired_and_notify_targets()
+            expired_targets = await afn.run(subs.mark_expired_and_notify_targets)
             for t in expired_targets:
                 try:
                     await app.bot.send_message(t["user_id"],
@@ -251,7 +248,7 @@ async def subscriptions_loop(app):
                                                parse_mode="HTML")
                 except Exception:
                     pass
-            for s in subs.due_reminders():
+            for s in await afn.run(subs.due_reminders):
                 hours_left = max(1, 24 * 3)
                 try:
                     from datetime import datetime
@@ -263,12 +260,12 @@ async def subscriptions_loop(app):
                     await app.bot.send_message(s["user_id"],
                                                f"⏳ تنبيه: ينتهي اشتراكك ({s['plan_code']}) بعد <b>~{hours_left} ساعة</b>. جدّد مبكراً لتفادي التوقف.",
                                                parse_mode="HTML")
-                    subs.mark_reminded(s["id"], s["stage"])
+                    await afn.run(subs.mark_reminded, s["id"], s["stage"])
                 except Exception:
                     pass
             day = config.now()[:10]
             if day != last_digest_day and config.ADMIN_ID:
-                pending = db.get_setting and _pending_payments_count()
+                pending = db.get_setting and await afn.run(_pending_payments_count)
                 if pending:
                     try:
                         await app.bot.send_message(config.ADMIN_ID,
@@ -297,9 +294,7 @@ async def demo_loop(app):
     from fysb.theme import esc
     while True:
         try:
-            with db.conn() as c:
-                uids = [r["user_id"] for r in c.execute(
-                    "SELECT DISTINCT user_id FROM demo_positions WHERE status='OPEN'").fetchall()]
+            uids = await afn.run(_open_position_uids)
             for uid in uids:
                 events = await asyncio.to_thread(demo.sync_positions_with_real_prices, uid, config.market_api_key())
                 for e in events:
@@ -342,7 +337,7 @@ async def channels_loop(app):
     from fysb.handlers import admin_channels
     while True:
         try:
-            for ch in admin_channels.due_channels():
+            for ch in await afn.run(admin_channels.due_channels):
                 try:
                     if ch["auto_analysis"]:
                         await admin_channels.post_analysis(ch["id"], app.bot, ch)
@@ -398,7 +393,9 @@ async def post_init(app):
 def _warm_pg() -> None:
     """Warm the PG pool + prove connectivity with one cheap statement."""
     from fysb import pglayer
-    pglayer.warm(2)
+    # v6.11.0: four pre-opened keepalive sessions — with parallel worker-thread
+    # DB calls the first buttons never pay a WAN connect, even under bursts.
+    pglayer.warm(4)
     c = pglayer._acquire()
     try:
         cur = c.cursor()
@@ -418,3 +415,30 @@ async def post_shutdown(app):
         except asyncio.CancelledError:
             pass
     log.info("background loops stopped")
+
+
+# --- v6.11.0 thread-offload helpers ---
+def _armed_market_rows() -> list[dict]:
+    """(v6.11.0 thread-offload helper) enabled+verified market rows for the engine."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()]
+
+
+def _signal_row_by_id(signal_id: int):
+    """(v6.11.0 thread-offload helper) one full signal row by id."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+
+
+def _market_row(symbol: str):
+    """(v6.11.0 thread-offload helper) market_catalog row for card rendering."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+
+
+def _open_position_uids() -> list[int]:
+    """(v6.11.0 thread-offload helper) users with OPEN demo positions."""
+    with db.conn() as c:
+        return [r["user_id"] for r in c.execute(
+            "SELECT DISTINCT user_id FROM demo_positions WHERE status='OPEN'").fetchall()]

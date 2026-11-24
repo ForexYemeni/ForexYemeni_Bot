@@ -5,7 +5,7 @@ import json
 
 from telegram.ext import ContextTypes
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.engines import market_data
 from fysb.handlers.common import render, safe
 from fysb.handlers.user_pages import _safe_int
@@ -33,7 +33,8 @@ async def admin_reports(q, uid, context, bot):
 
 
 async def _report(q, uid, context, bot, fn, title):
-    await render(q, fn(), kb.admin_nav(), bot)
+    body = await afn.run(fn)
+    await render(q, body, kb.admin_nav(), bot)
 
 
 async def admin_rep_users(q, uid, context, bot):
@@ -63,11 +64,8 @@ async def admin_rep_engine(q, uid, context, bot):
 
 # --- Analytics governance (per-plan daily quota) --------------------------------------
 async def admin_analytics(q, uid, context, bot):
-    enabled = analytics_service.analytics_enabled()
-    with db.conn() as c:
-        plans = c.execute("SELECT code, title, enabled, max_analyses_per_day FROM plans ORDER BY price").fetchall()
-        today = c.execute("SELECT COUNT(*) n FROM analyses WHERE created_at>=?", (db.day_start_utc(),)).fetchone()["n"]
-        total = c.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"]
+    enabled = await afn.run(analytics_service.analytics_enabled)
+    plans, today, total = await afn.run(_analytics_page_rows)
     body = [f"🔬 <b><u>إدارة التحليلات</u></b>",
             f"▎القسم للمستخدمين: <b>{'🟢 مفعّل' if enabled else '⚪ معطل'}</b>",
             f"▎تحليلات اليوم: <b>{today}</b> · الإجمالي: <b>{total}</b>", "",
@@ -85,21 +83,20 @@ async def admin_analytics(q, uid, context, bot):
 
 
 async def admin_anl_adjust(q, uid, context, bot, code: str, delta: float):
-    with db.conn() as c:
-        r = c.execute("SELECT max_analyses_per_day FROM plans WHERE code=?", (code,)).fetchone()
-        if not r:
-            await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
-            return
-        val = max(0, min(500, int((r["max_analyses_per_day"] or 0) + delta)))
-        c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (val, code))
-    audit_log.log(uid, f"analytics_quota:{code}:{val}")
+    r = await afn.run(_anal_quota_row, code)
+    if not r:
+        await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
+        return
+    val = max(0, min(500, int((r["max_analyses_per_day"] or 0) + delta)))
+    await afn.run(_anal_quota_set, code, val)
+    await afn.run(audit_log.log, uid, f"analytics_quota:{code}:{val}")
     await admin_analytics(q, uid, context, bot)
 
 
 async def admin_anl_global(q, uid, context, bot):
-    val = "0" if analytics_service.analytics_enabled() else "1"
-    db.set_setting("analytics_enabled", val)
-    audit_log.log(uid, f"analytics_global:{val}")
+    val = "0" if await afn.run(analytics_service.analytics_enabled) else "1"
+    await afn.run(db.set_setting, "analytics_enabled", val)
+    await afn.run(audit_log.log, uid, f"analytics_global:{val}")
     await admin_analytics(q, uid, context, bot)
 
 
@@ -110,11 +107,9 @@ async def admin_rep_anal(q, uid, context, bot):
 
 # --- Notifications -------------------------------------------------------------------
 async def admin_notifications(q, uid, context, bot):
-    push = db.get_setting("signal_push_enabled", "1") == "1"
-    remind_days = db.get_setting_int("expiry_remind_days", 3)
-    with db.conn() as c:
-        unread = c.execute("SELECT COUNT(*) n FROM notification_events WHERE read=0").fetchone()["n"]
-        recent = c.execute("SELECT * FROM notification_events ORDER BY id DESC LIMIT 8").fetchall()
+    push = await afn.run(db.get_setting, "signal_push_enabled", "1") == "1"
+    remind_days = await afn.run(db.get_setting_int, "expiry_remind_days", 3)
+    unread, recent = await afn.run(_notification_rows)
     lines = ["🔔 <b>مركز الإشعارات</b>",
              f"📡 دفع الإشارات الجديدة: <b>{'مفعل' if push else 'متوقف'}</b>",
              f"⏳ تذكير انتهاء الاشتراك قبل: <b>{remind_days}</b> يوم",
@@ -131,23 +126,21 @@ async def admin_notifications(q, uid, context, bot):
 
 
 async def admin_toggle_push(q, uid, context, bot):
-    val = "0" if db.get_setting("signal_push_enabled", "1") == "1" else "1"
-    db.set_setting("signal_push_enabled", val)
-    audit_log.log(uid, f"signal_push:{val}")
+    val = "0" if await afn.run(db.get_setting, "signal_push_enabled", "1") == "1" else "1"
+    await afn.run(db.set_setting, "signal_push_enabled", val)
+    await afn.run(audit_log.log, uid, f"signal_push:{val}")
     await admin_notifications(q, uid, context, bot)
 
 
 async def admin_remind_days(q, uid, context, bot, days: int):
     days = max(1, min(14, days))
-    db.set_setting("expiry_remind_days", days)
+    await afn.run(db.set_setting, "expiry_remind_days", days)
     await admin_notifications(q, uid, context, bot)
 
 
 # --- Broadcast ------------------------------------------------------------------------
 async def admin_broadcast(q, uid, context, bot):
-    with db.conn() as c:
-        recent = c.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT 6").fetchall()
-        active = c.execute("SELECT COUNT(*) n FROM broadcasts WHERE status IN ('PENDING','RUNNING')").fetchone()["n"]
+    recent, active = await afn.run(_broadcast_page_rows)
     lines = ["📣 <b>مركز الإعلانات</b>",
              f"🚦 حملات نشطة/معلقة: <b>{active}</b>", "", "<b>الأحدث:</b>"]
     rows_kb = []
@@ -174,8 +167,7 @@ async def admin_bc_audience(q, uid, context, bot, audience: str):
 
 
 async def admin_bc_plan(q, uid, context, bot):
-    with db.conn() as c:
-        plans = c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+    plans = await afn.run(_plan_code_title_rows)
     rows_kb = [[kb.btn(f"💎 {esc(p['title'])}", f"a:bcpick:{p['code']}")] for p in plans]
     await render(q, "💎 اختر الباقة المستهدفة للإعلان:", kb.admin_nav(rows_kb), bot)
 
@@ -188,20 +180,21 @@ async def admin_bc_pick(q, uid, context, bot, code: str):
 
 
 async def admin_bc_go(q, uid, context, bot, bid: int):
-    b = broadcast_service.get(bid)
+    b = await afn.run(broadcast_service.get, bid)
     if not b:
         await render(q, "الحملة غير موجودة.", kb.admin_nav(), bot)
         return
     if b["status"] not in ("PENDING",):
         await render(q, f"⛔ الحملة بحالة {esc(b['status'])} — لا تكرار للإرسال.", kb.admin_nav(), bot)
         return
-    targets = broadcast_service.audience_ids(b["audience"], b["plan_code"])
+    targets = await afn.run(broadcast_service.audience_ids, b["audience"], b["plan_code"])
     if not targets:
         await render(q, "لا يوجد مستلمون مطابقون للجمهور المحدد.", kb.admin_nav(), bot)
         return
-    audit_log.log(uid, f"broadcast_start:{bid}:{len(targets)}")
+    await afn.run(audit_log.log, uid, f"broadcast_start:{bid}:{len(targets)}")
+    rate = await afn.run(db.get_setting_int, "broadcast_rate_per_sec", 20)
     asyncio.create_task(_run_broadcast(bid, bot, targets))
-    await render(q, f"🚀 <b>بدأ الإرسال #{bid}</b>\nالمستلمون: <b>{len(targets)}</b>\nمعدل الإرسال: {db.get_setting_int('broadcast_rate_per_sec', 20)} رسالة/ثانية\nتابع العدّاد من قسم الإعلانات.",
+    await render(q, f"🚀 <b>بدأ الإرسال #{bid}</b>\nالمستلمون: <b>{len(targets)}</b>\nمعدل الإرسال: {rate} رسالة/ثانية\nتابع العدّاد من قسم الإعلانات.",
                  kb.admin_nav(), bot)
 
 
@@ -211,27 +204,27 @@ async def _run_broadcast(bid: int, bot, targets: list[int]):
     except Exception:
         from fysb.config import log
         log.exception("broadcast %s failed", bid)
-        broadcast_service.mark_status(bid, "FAILED")
+        await afn.run(broadcast_service.mark_status, bid, "FAILED")
 
 
 async def admin_bc_abort(q, uid, context, bot, bid: int):
-    broadcast_service.abort(bid)
-    audit_log.log(uid, f"broadcast_abort:{bid}")
+    await afn.run(broadcast_service.abort, bid)
+    await afn.run(audit_log.log, uid, f"broadcast_abort:{bid}")
     await admin_broadcast(q, uid, context, bot)
 
 
 async def admin_bc_cancel(q, uid, context, bot, bid: int):
-    b = broadcast_service.get(bid)
+    b = await afn.run(broadcast_service.get, bid)
     if b and b["status"] == "PENDING":
-        broadcast_service.mark_status(bid, "ABORTED")
+        await afn.run(broadcast_service.mark_status, bid, "ABORTED")
     await admin_broadcast(q, uid, context, bot)
 
 
 # --- Support center ---------------------------------------------------------------------
 async def admin_support(q, uid, context, bot):
-    tickets = support_service.list_tickets("OPEN")
-    answered = support_service.list_tickets("ANSWERED")
-    cfg = support_service.config_row()
+    tickets = await afn.run(support_service.list_tickets, "OPEN")
+    answered = await afn.run(support_service.list_tickets, "ANSWERED")
+    cfg = await afn.run(support_service.config_row)
     lines = ["🎧 <b>مركز الدعم الفني</b>",
              f"🎫 مفتوحة: <b>{len(tickets)}</b> · بانتظار رد المستخدم: <b>{len(answered)}</b>", "",
              "<b>التذاكر المفتوحة:</b>"]
@@ -249,7 +242,7 @@ async def admin_support(q, uid, context, bot):
 
 
 async def admin_support_config(q, uid, context, bot):
-    cfg = support_service.config_row() or {}
+    cfg = await afn.run(support_service.config_row) or {}
     fields = [("username", "✉️ معرّف الدعم", f"@{cfg.get('username') or '—'}"),
               ("phone", "📞 رقم الهاتف/واتساب", cfg.get('phone') or '—'),
               ("channel", "📢 قناة البوت", cfg.get('channel') or '—'),
@@ -271,11 +264,11 @@ async def admin_support_field(q, uid, context, bot, field: str):
 
 
 async def admin_ticket_view(q, uid, context, bot, tid: int):
-    t = support_service.get_ticket(tid)
+    t = await afn.run(support_service.get_ticket, tid)
     if not t:
         await render(q, "التذكرة غير موجودة.", kb.admin_nav(), bot)
         return
-    msgs = support_service.ticket_messages(tid)
+    msgs = await afn.run(support_service.ticket_messages, tid)
     lines = [f"🎫 <b>تذكرة #{tid}</b> · {esc(t['subject'])} · <b>{esc(t['status'])}</b>",
              f"👤 المستخدم: <code>{t['user_id']}</code>", ""]
     for m in msgs[-8:]:
@@ -299,9 +292,9 @@ async def admin_ticket_reply(q, uid, context, bot, tid: int):
 
 
 async def admin_ticket_close(q, uid, context, bot, tid: int):
-    t = support_service.get_ticket(tid)
-    support_service.set_status(tid, "CLOSED")
-    audit_log.log(uid, f"ticket_closed:{tid}")
+    t = await afn.run(support_service.get_ticket, tid)
+    await afn.run(support_service.set_status, tid, "CLOSED")
+    await afn.run(audit_log.log, uid, f"ticket_closed:{tid}")
     if t:
         try:
             await bot.send_message(t["user_id"], f"✅ أُغلقت تذكرتك #{tid}. يمكنك إعادة فتحها من سجل الدعم.")
@@ -311,29 +304,31 @@ async def admin_ticket_close(q, uid, context, bot, tid: int):
 
 
 async def admin_ticket_reopen(q, uid, context, bot, tid: int):
-    support_service.set_status(tid, "OPEN")
-    audit_log.log(uid, f"ticket_reopened:{tid}")
+    await afn.run(support_service.set_status, tid, "OPEN")
+    await afn.run(audit_log.log, uid, f"ticket_reopened:{tid}")
     await admin_ticket_view(q, uid, context, bot, tid)
 
 
 # --- Security center ----------------------------------------------------------------------
 async def admin_security(q, uid, context, bot):
-    events = audit_log.security_events(10)
-    ok, integrity = db.healthy()
+    events = await afn.run(audit_log.security_events, 10)
+    ok, integrity = await afn.run(db.healthy)
+    maint = await afn.run(db.maintenance_on)
+    bn = await afn.run(db.get_setting, "block_new_users", "0")
     lines = ["🔐 <b>مركز الأمان</b>",
              f"👑 Super Admin: <code>{masked_admin()}</code> (من ADMIN_ID في .env)",
              f"🛡 التحقق من الصلاحيات: <b>على السيرفر</b> في كل callback",
              f"🗄 سلامة قاعدة البيانات: <b>{'✅ ' + esc(integrity) if ok else '❌ ' + esc(integrity)}</b>",
              f"🚫 تسريب الأسرار: التوكن والمفاتيح لا تُطبع في السجلات ولا تُعرض في الواجهة",
-             f"🔧 صيانة: <b>{'مفعلة' if db.maintenance_on() else 'معطلة'}</b>",
-             f"🆕 منع تسجيل مستخدمين جدد: <b>{'مفعل' if db.get_setting('block_new_users','0')=='1' else 'معطل'}</b>",
+             f"🔧 صيانة: <b>{'مفعلة' if maint else 'معطلة'}</b>",
+             f"🆕 منع تسجيل مستخدمين جدد: <b>{'مفعل' if bn == '1' else 'معطل'}</b>",
              "", "<b>أحدث الأحداث الأمنية:</b>"]
     for e in events:
         lines.append(f"  {human_dt(e['created_at'])} · actor {e['actor']} · {esc(e['action'])[:60]}")
     if not events:
         lines.append("  لا أحداث أمنية مسجلة.")
     rows_kb = [[kb.btn("🔧 وضع الصيانة", "a:togglemaintenance"),
-                kb.btn(f"🆕 منع الجدد: {'إيقاف' if db.get_setting('block_new_users','0')=='1' else 'تفعيل'}", "a:toggleblocknew")]]
+                kb.btn(f"🆕 منع الجدد: {'إيقاف' if bn == '1' else 'تفعيل'}", "a:toggleblocknew")]]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
@@ -342,23 +337,23 @@ def masked_admin() -> str:
 
 
 async def admin_toggle_maintenance(q, uid, context, bot):
-    new = "0" if db.maintenance_on() else "1"
-    db.set_setting("maintenance", new)
-    audit_log.log(uid, f"maintenance:{new}")
+    new = "0" if await afn.run(db.maintenance_on) else "1"
+    await afn.run(db.set_setting, "maintenance", new)
+    await afn.run(audit_log.log, uid, f"maintenance:{new}")
     await admin_security(q, uid, context, bot)
 
 
 async def admin_toggle_blocknew(q, uid, context, bot):
-    val = "0" if db.get_setting("block_new_users", "0") == "1" else "1"
-    db.set_setting("block_new_users", val)
-    audit_log.log(uid, f"block_new_users:{val}")
+    val = "0" if await afn.run(db.get_setting, "block_new_users", "0") == "1" else "1"
+    await afn.run(db.set_setting, "block_new_users", val)
+    await afn.run(audit_log.log, uid, f"block_new_users:{val}")
     await admin_security(q, uid, context, bot)
 
 
 # --- Backup & restore -----------------------------------------------------------------------
 async def admin_backup(q, uid, context, bot):
-    backups = backup_service.list_backups()
-    ok, integrity = db.healthy()
+    backups = await afn.run(backup_service.list_backups)
+    ok, integrity = await afn.run(db.healthy)
     lines = ["💾 <b>النسخ الاحتياطي والاستعادة</b>",
              f"🗄 سلامة القاعدة الحالية: <b>{'✅' if ok else '❌ ' + esc(integrity)}</b>",
              f"📁 النسخ المحفوظة: <b>{len(backups)}</b>", "", "<b>أحدث النسخ:</b>"]
@@ -376,12 +371,12 @@ async def admin_backup(q, uid, context, bot):
 
 async def admin_backup_now(q, uid, context, bot):
     try:
-        dest = backup_service.quick_db_snapshot("admin")
+        dest = await afn.run(backup_service.quick_db_snapshot, "admin")
         if dest is None:
             await render(q, "⏳ تعذر أخذ نسخة الآن — قاعدة البيانات مشغولة (حاول بعد قليل).",
                          kb.admin_nav(), bot)
             return
-        audit_log.log(uid, f"backup_created:{dest.name}")
+        await afn.run(audit_log.log, uid, f"backup_created:{dest.name}")
         with open(dest, "rb") as f:
             await bot.send_document(uid, f, filename=dest.name, caption=f"💾 نسخة قاعدة بيانات ({dest.stat().st_size // 1024} KB)")
         await admin_backup(q, uid, context, bot)
@@ -393,8 +388,8 @@ async def admin_backup_full(q, uid, context, bot):
     await render(q, "📦 جارٍ تجهيز نسخة المشروع الكاملة (قد تستغرق لحظات)...", None)
     try:
         dest = await asyncio.to_thread(backup_service.full_project_archive)
-        ok, detail = backup_service.verify_archive(dest)
-        audit_log.log(uid, f"project_backup:{dest.name}:{ok}")
+        ok, detail = await afn.run(backup_service.verify_archive, dest)
+        await afn.run(audit_log.log, uid, f"project_backup:{dest.name}:{ok}")
         if ok:
             with open(dest, "rb") as f:
                 await bot.send_document(uid, f, filename=dest.name,
@@ -408,7 +403,7 @@ async def admin_backup_full(q, uid, context, bot):
 
 
 async def admin_backup_settings(q, uid, context, bot):
-    dest = backup_service.settings_export()
+    dest = await afn.run(backup_service.settings_export)
     with open(dest, "rb") as f:
         await bot.send_document(uid, f, filename=dest.name, caption="⚙️ تصدير الإعدادات والفهارس (بدون أسرار)")
     await admin_backup(q, uid, context, bot)
@@ -435,8 +430,8 @@ async def admin_backup_restore(q, uid, context, bot):
 async def admin_do_restore(q, uid, context, bot, file_path):
     context.user_data["awaiting_restore"] = False
     await render(q, "♻️ جارٍ التحقق من الملف والاستعادة...", None)
-    ok, detail = backup_service.restore_from(file_path)
-    audit_log.log(uid, f"restore:{ok}:{detail}")
+    ok, detail = await afn.run(backup_service.restore_from, file_path)
+    await afn.run(audit_log.log, uid, f"restore:{ok}:{detail}")
     if ok:
         await render(q, f"✅ <b>تمت الاستعادة بنجاح</b>\nالتحقق: {esc(detail)}\nنسخة الأمان محفوظة في مجلد backups.",
                      kb.admin_nav(), bot)
@@ -461,7 +456,7 @@ async def admin_settings(q, uid, context, bot):
     lines = ["⚙️ <b>الإعدادات العامة</b>", ""]
     rows_kb = []
     for key, title in pairs:
-        val = db.get_setting(key, "—")
+        val = await afn.run(db.get_setting, key, "—")
         lines.append(f"{title}: <b>{esc(val)}</b>")
     rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
@@ -488,9 +483,8 @@ async def admin_expiry_set(q, uid, context, bot):
 # --- Audit log ------------------------------------------------------------------------------
 async def admin_audit(q, uid, context, bot, page: int = 0):
     size = 12
-    rows = audit_log.recent(size, page * size)
-    with db.conn() as c:
-        total = c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]
+    rows = await afn.run(audit_log.recent, size, page * size)
+    total = await afn.run(_audit_total)
     lines = [f"🧾 <b>سجل الإدارة</b> · صفحة {page + 1} · الإجمالي {total}", ""]
     for r in rows:
         lines.append(f"  {r['created_at'][5:16]} · {r['actor']} · {esc(r['action'])[:70]}")
@@ -511,7 +505,9 @@ async def admin_health(q, uid, context, bot):
     import platform
     import resource
     import time as _time
-    ok, integrity = db.healthy()
+    ok, integrity = await afn.run(db.healthy)
+    eng = await afn.run(db.get_setting, "engine_enabled", "0")
+    live = await afn.run(db.get_setting, "live_enabled", "0")
     try:
         mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
@@ -534,10 +530,60 @@ async def admin_health(q, uid, context, bot):
         f"🗄 قاعدة البيانات: <b>{db_size} KB</b> (WAL: {wal_size} KB) · <b>{'✅ سليمة' if ok else '❌ ' + esc(integrity)}</b>",
         f"🌐 مزود البيانات: <b>{esc(provider.get('state', '?'))}</b> · مفاتيح مضبوطة: {'نعم' if provider.get('configured') else 'لا'}",
         f"🤖 البوت: <b>متصل</b> (polling نشط)",
-        f"🧠 المحرك: <b>{'يعمل' if db.get_setting('engine_enabled','0')=='1' else 'متوقف'}</b>",
-        f"🔒 LIVE: <b>{'مفعل ⚠️' if db.get_setting('live_enabled','0')=='1' else 'مغلق'}</b>",
+        f"🧠 المحرك: <b>{'يعمل' if eng == '1' else 'متوقف'}</b>",
+        f"🔒 LIVE: <b>{'مفعل ⚠️' if live == '1' else 'مغلق'}</b>",
     ]
     await render(q, "\n".join(lines), kb.admin_nav(), bot)
 
 
 _BOOT_EPOCH = __import__("time").time()
+
+
+# --- v6.11.0 thread-offload helpers ---
+def _analytics_page_rows():
+    """(v6.11.0 thread-offload helper) plans grid + today/total analyses counters."""
+    with db.conn() as c:
+        plans = c.execute("SELECT code, title, enabled, max_analyses_per_day FROM plans ORDER BY price").fetchall()
+        today = c.execute("SELECT COUNT(*) n FROM analyses WHERE created_at>=?", (db.day_start_utc(),)).fetchone()["n"]
+        total = c.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"]
+    return plans, today, total
+
+
+def _anal_quota_row(code: str):
+    """(v6.11.0 thread-offload helper) current analyses quota of one plan."""
+    with db.conn() as c:
+        return c.execute("SELECT max_analyses_per_day FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _anal_quota_set(code: str, val: int) -> None:
+    """(v6.11.0 thread-offload helper) write the analyses quota of one plan."""
+    with db.conn() as c:
+        c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (val, code))
+
+
+def _notification_rows():
+    """(v6.11.0 thread-offload helper) unread counter + recent notification events."""
+    with db.conn() as c:
+        unread = c.execute("SELECT COUNT(*) n FROM notification_events WHERE read=0").fetchone()["n"]
+        recent = c.execute("SELECT * FROM notification_events ORDER BY id DESC LIMIT 8").fetchall()
+    return unread, recent
+
+
+def _broadcast_page_rows():
+    """(v6.11.0 thread-offload helper) recent broadcasts + active/pending count."""
+    with db.conn() as c:
+        recent = c.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT 6").fetchall()
+        active = c.execute("SELECT COUNT(*) n FROM broadcasts WHERE status IN ('PENDING','RUNNING')").fetchone()["n"]
+    return recent, active
+
+
+def _plan_code_title_rows():
+    """(v6.11.0 thread-offload helper) plan picker rows ordered by price."""
+    with db.conn() as c:
+        return c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+
+
+def _audit_total() -> int:
+    """(v6.11.0 thread-offload helper) total audit rows for pagination."""
+    with db.conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]

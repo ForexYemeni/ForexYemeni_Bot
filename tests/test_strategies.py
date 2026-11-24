@@ -82,21 +82,22 @@ class TestRegistry(unittest.TestCase):
     def test_unimplemented_strategies_are_closed(self):
         from fysb.engines.strategies import REGISTRY, VERIFIABLE
         # v6.8.0: TREND + ICHIMOKU + FIBONACCI are implemented & tested; only
-        # WYCKOFF stays closed until a dedicated rule engine exists.
-        self.assertIsNone(REGISTRY["WYCKOFF"], "WYCKOFF must stay closed until implemented+tested")
-        self.assertNotIn("WYCKOFF", VERIFIABLE)
+        # v6.11.0 — WYCKOFF graduated: implemented + tested + verified on boot.
+        self.assertIsNotNone(REGISTRY.get("WYCKOFF"), "WYCKOFF must now be implemented+tested")
+        self.assertIn("WYCKOFF", VERIFIABLE)
         for code in ("FIBONACCI", "TREND", "ICHIMOKU"):
             self.assertIsNotNone(REGISTRY[code], f"{code} must be implemented")
             self.assertIn(code, VERIFIABLE)
 
     def test_ten_strategies_shipped(self):
-        """The owner contract: 12 real, tested strategies live (v6.10.0 added
-        CLASSIC + SK to the v6.8.0 ten)."""
+        """The owner contract: 13 real, tested strategies live (v6.11.0 added
+        WYCKOFF to the v6.10.0 twelve)."""
         from fysb.db import IMPLEMENTED_STRATEGIES
         from fysb.engines.strategies import VERIFIABLE
-        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 12)
+        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 13)
         self.assertIn("CLASSIC", IMPLEMENTED_STRATEGIES)
         self.assertIn("SK", IMPLEMENTED_STRATEGIES)
+        self.assertIn("WYCKOFF", IMPLEMENTED_STRATEGIES)
         self.assertTrue(set(IMPLEMENTED_STRATEGIES) <= VERIFIABLE)
 
     def test_evaluate_all_sorted_by_score(self):

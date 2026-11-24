@@ -6,7 +6,7 @@ The panel tracks BOTH royal counts per campaign — invited vs actually
 subscribed — against the launch targets (default 50 invited → 5 real
 subscribers), with luxury progress bars and a per-campaign invitee ledger.
 """
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.handlers.common import render
 from fysb.services import audit as audit_log
 from fysb.services import referrals as ref
@@ -24,8 +24,8 @@ def _invitee_badge(row: dict) -> str:
 
 
 async def admin_refs(q, uid, context, bot):
-    st = ref.overall_stats()
-    camps = ref.list_campaigns()
+    st = await afn.run(ref.overall_stats)
+    camps = await afn.run(ref.list_campaigns)
     body = [
         "🤝 <b><u>نظام الإحالات والتحويل الملكي</u></b>",
         "▎كل حملة = رابط دعوة فاخر يتبع من فتح البوت ومن اشترك فعلاً بالباقات.",
@@ -54,19 +54,19 @@ async def admin_refs(q, uid, context, bot):
 
 
 async def admin_ref_new(q, uid, context, bot):
-    code = ref.new_code()
-    camp = ref.ensure_campaign(code, f"حملة إحالات #{code}", owner_id=config.ADMIN_ID)
-    audit_log.log(uid, f"referral_campaign_created:{camp['id']}")
+    code = await afn.run(ref.new_code)
+    camp = await afn.run(ref.ensure_campaign, code, f"حملة إحالات #{code}", owner_id=config.ADMIN_ID)
+    await afn.run(audit_log.log, uid, f"referral_campaign_created:{camp['id']}")
     await admin_ref_view(q, uid, context, bot, camp["id"])
 
 
 async def admin_ref_view(q, uid, context, bot, cid: int):
-    camp = ref.get_campaign(cid)
+    camp = await afn.run(ref.get_campaign, cid)
     if not camp:
         await render(q, "الحملة غير موجودة.", kb.admin_nav([[kb.btn("🤝 الإحالات", "a:refs")]]), bot)
         return
-    st = ref.campaign_stats(cid)
-    link = ref.link_for(camp["code"])
+    st = await afn.run(ref.campaign_stats, cid)
+    link = ref.link_for(camp["code"])  # pure string build — no DB (v6.11.0)
     body = [
         f"🎯 <b><u>{esc(camp['title'])}</u></b> · {'🟢 نشطة' if camp['enabled'] else '⚪ متوقفة'}",
         "",
@@ -95,21 +95,21 @@ async def admin_ref_view(q, uid, context, bot, cid: int):
 
 
 async def admin_ref_toggle(q, uid, context, bot, cid: int):
-    camp = ref.get_campaign(cid)
+    camp = await afn.run(ref.get_campaign, cid)
     if camp:
-        ref.set_enabled(cid, 0 if camp["enabled"] else 1)
-        audit_log.log(uid, f"referral_toggle:{cid}:{'on' if not camp['enabled'] else 'off'}")
+        await afn.run(ref.set_enabled, cid, 0 if camp["enabled"] else 1)
+        await afn.run(audit_log.log, uid, f"referral_toggle:{cid}:{'on' if not camp['enabled'] else 'off'}")
     await admin_ref_view(q, uid, context, bot, cid)
 
 
 async def admin_ref_delete(q, uid, context, bot, cid: int):
-    ref.delete_campaign(cid)
-    audit_log.log(uid, f"referral_deleted:{cid}")
+    await afn.run(ref.delete_campaign, cid)
+    await afn.run(audit_log.log, uid, f"referral_deleted:{cid}")
     await admin_refs(q, uid, context, bot)
 
 
 async def admin_ref_targets(q, uid, context, bot, cid: int, kind: str):
-    camp = ref.get_campaign(cid)
+    camp = await afn.run(ref.get_campaign, cid)
     if not camp:
         return
     label = "الدعوات" if kind == "invited" else "المشتركين الفعليين"
@@ -122,20 +122,20 @@ async def admin_ref_targets(q, uid, context, bot, cid: int, kind: str):
 
 async def admin_ref_targets_set(q, uid, context, bot, cid: int, kind: str, value: int):
     if kind == "invited":
-        ref.set_targets(cid, target_invited=value)
+        await afn.run(ref.set_targets, cid, target_invited=value)
     else:
-        ref.set_targets(cid, target_converted=value)
-    audit_log.log(uid, f"referral_target:{cid}:{kind}:{value}")
+        await afn.run(ref.set_targets, cid, target_converted=value)
+    await afn.run(audit_log.log, uid, f"referral_target:{cid}:{kind}:{value}")
     await admin_ref_view(q, uid, context, bot, cid)
 
 
 async def admin_ref_list(q, uid, context, bot, cid: int, page: int = 0):
-    camp = ref.get_campaign(cid)
+    camp = await afn.run(ref.get_campaign, cid)
     if not camp:
         return await admin_refs(q, uid, context, bot)
     per = 10
-    rows = ref.invitees(cid, limit=per, offset=page * per)
-    total = ref.invitees_total(cid)
+    rows = await afn.run(ref.invitees, cid, limit=per, offset=page * per)
+    total = await afn.run(ref.invitees_total, cid)
     pages = max(1, (total + per - 1) // per)
     body = [f"👥 <b><u>قائمة المدعوين — {esc(camp['title'])}</u></b>",
             f"▎الإجمالي: <b>{total}</b> مدعو",

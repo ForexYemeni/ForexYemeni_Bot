@@ -5,7 +5,7 @@ import json
 
 from telegram.ext import ContextTypes
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.engines import market_data
 from fysb.engines.strategies import VERIFIABLE
 from fysb.handlers.common import render, safe
@@ -55,7 +55,7 @@ def _signals_page_body(statuses: tuple, page: int, size: int = 8) -> tuple[str, 
 async def _render_signals_center(q, bot, cat: str = "all", page: int = 0):
     title, st_csv, tab = SIG_CATS.get(cat, SIG_CATS["all"])
     statuses = tuple(s for s in st_csv.split(",") if s)
-    total, rows_kb, shown = _signals_page_body(statuses, page)
+    total, rows_kb, shown = await afn.run(_signals_page_body, statuses, page)
     nav_row = []
     if page > 0:
         nav_row.append(kb.btn("◀️", f"a:sigcat:{cat}:{page - 1}"))
@@ -91,12 +91,7 @@ async def admin_signal_pl(q, uid, context, bot):
     from the banked pips of closed signals only (TP1/TP2/TP3/SL rows). Every
     USD figure uses the same 0.01-lot ruler the alerts use — no invented wins."""
     from fysb import instruments
-    with db.conn() as c:
-        rows = [dict(r) for r in c.execute(
-            """SELECT symbol, COUNT(*) n, SUM(pips_result>0) wins, SUM(pips_result<=0) losses,
-                      SUM(pips_result) net_pips, ROUND(AVG(pips_result),1) avg_pips
-               FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-               GROUP BY symbol ORDER BY net_pips DESC""").fetchall()]
+    rows = await afn.run(_pl_account_rows)
     lines = ["💰 <b><u>محاسبة الربح والخسارة — من كل التوصيات المغلقة</u></b>",
              "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
              "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
@@ -127,9 +122,7 @@ async def admin_signal_pl(q, uid, context, bot):
 
 
 async def admin_signal_view(q, uid, context, bot, sid: int):
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
-        deliveries = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE signal_id=?", (sid,)).fetchone()["n"]
+    r, deliveries = await afn.run(_signal_with_deliveries, sid)
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
@@ -163,9 +156,7 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
 
 async def admin_delete_signal_confirm(q, uid, context, bot, sid: int):
     """Luxury double-confirmation before PERMANENT signal deletion."""
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
-        deliveries = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE signal_id=?", (sid,)).fetchone()["n"]
+    r, deliveries = await afn.run(_signal_with_deliveries, sid)
     if not r:
         await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
         return
@@ -185,14 +176,11 @@ async def admin_delete_signal_confirm(q, uid, context, bot, sid: int):
 
 async def admin_delete_signal_go(q, uid, context, bot, sid: int):
     """ERASE the signal row + its deliveries forever (audit-logged)."""
-    with db.tx() as c:
-        sig = c.execute("SELECT symbol, direction FROM signals WHERE id=?", (sid,)).fetchone()
-        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id=?", (sid,)).rowcount)
-        s = abs(c.execute("DELETE FROM signals WHERE id=?", (sid,)).rowcount)
+    sig, d, s = await afn.run(_signal_delete_tx, sid)
     if not s:
         await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
         return
-    audit_log.log(uid, f"signal_deleted_forever:{sid}")
+    await afn.run(audit_log.log, uid, f"signal_deleted_forever:{sid}")
     body = (f"✅ <b>تم حذف الإشارة #{sid} نهائياً</b>"
             + (f" ({esc(sig['symbol'])} {esc(sig['direction'])})" if sig else "")
             + f"\n<blockquote>▎🗑 سجل الإشارة: مُمحى\n▎📬 سجلات التسليم المُمحاة: <b>{d}</b>\n"
@@ -201,9 +189,7 @@ async def admin_delete_signal_go(q, uid, context, bot, sid: int):
 
 
 async def admin_signal_recipients(q, uid, context, bot, sid: int):
-    with db.conn() as c:
-        rows = c.execute("""SELECT d.user_id, d.delivered_at FROM signal_deliveries d
-                            WHERE d.signal_id=? ORDER BY d.delivered_at DESC LIMIT 15""", (sid,)).fetchall()
+    rows = await afn.run(_signal_recipients, sid)
     lines = [f"📬 <b>مستلمو الإشارة #{sid}</b>"]
     lines += [f"  <code>{r['user_id']}</code> · {human_dt(r['delivered_at'])}" for r in rows] or ["  لا يوجد مستلمون."]
     await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
@@ -211,8 +197,7 @@ async def admin_signal_recipients(q, uid, context, bot, sid: int):
 
 async def admin_signal_purge(q, uid, context, bot):
     """Bulk permanent deletion of CANCELLED/EXPIRED signals (double confirm)."""
-    with db.conn() as c:
-        n = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('CANCELLED','EXPIRED')").fetchone()["n"]
+    n = await afn.run(_dead_signals_count)
     if not n:
         await render(q, "✅ لا توجد إشارات ملغاة أو منتهية — السجل نظيف بالكامل.",
                      kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals")]]), bot)
@@ -224,31 +209,25 @@ async def admin_signal_purge(q, uid, context, bot):
 
 
 async def admin_signal_purge_go(q, uid, context, bot):
-    with db.tx() as c:
-        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id IN "
-                          "(SELECT id FROM signals WHERE status IN ('CANCELLED','EXPIRED'))").rowcount)
-        s = abs(c.execute("DELETE FROM signals WHERE status IN ('CANCELLED','EXPIRED')").rowcount)
-    audit_log.log(uid, f"signals_purged:{s}")
+    d, s = await afn.run(_signal_purge_tx)
+    await afn.run(audit_log.log, uid, f"signals_purged:{s}")
     await render(q, f"✅ <b>تم التنظيف النهائي</b>\n<blockquote>▎🗑 إشارات مُمحاة: <b>{s}</b>\n▎📬 تسليمات مُمحاة: <b>{d}</b>\n"
                     f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>",
                  kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
 async def admin_cancel_signal(q, uid, context, bot, sid: int):
-    with db.tx() as c:
-        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
-                        (config.now(), sid))
-    audit_log.log(uid, f"cancel_signal:{sid}")
-    if cur.rowcount:
+    cancelled = await afn.run(_cancel_signal_tx, sid)
+    await afn.run(audit_log.log, uid, f"cancel_signal:{sid}")
+    if cancelled:
         from fysb.engines.tracker import TERMINAL, seq_of
         from fysb.theme import dir_badge, esc, status_ar
-        with db.conn() as c:
-            sig = dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
-        text = (f"⛔ <b><u>تحديث الإشارة الملكية #{seq_of(sid)}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
+        sig = await afn.run(_signal_row_full, sid)
+        seq = await afn.run(seq_of, sid)
+        text = (f"⛔ <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
                 f"<blockquote>▎📌 الحالة الجديدة: <b>{status_ar('CANCELLED')}</b>\n"
                 f"▎📌 السبب: قرار إداري موثق من الإدارة الملكية</blockquote>")
-        with db.conn() as c:
-            uids = [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sid,))]
+        uids = await afn.run(_signal_recipient_uids, sid)
         for note_uid in uids + [config.ADMIN_ID]:
             try:
                 await bot.send_message(note_uid, text, parse_mode="HTML")
@@ -274,7 +253,7 @@ async def admin_track_now(q, uid, context, bot):
             await bot.send_message(note_uid, text, parse_mode="HTML")
         except Exception:
             pass
-    expired = tracker.expire_stale_signals()
+    expired = await afn.run(tracker.expire_stale_signals)
     stats = result["stats"]
     await render(q, f"✅ <b>نتيجة الفحص</b>\nفُحصت: {stats['checked']} · حُدثت: <b>{stats['updated']}</b>\n"
                     f"تخطيت بسبب قدم البيانات: {stats['skipped_stale']} · أخطاء مزود: {stats['errors']} · انتهت صلاحيتها: {expired}",
@@ -288,12 +267,10 @@ async def update_message(q, text):
 
 # --- Trading engine --------------------------------------------------------------
 async def admin_engine(q, uid, context, bot):
-    enabled = db.get_setting("engine_enabled", "0") == "1"
-    interval = db.get_setting_int("engine_interval_seconds", 300)
-    min_score = db.get_setting_int("engine_min_score", 80)
-    with db.conn() as c:
-        markets = c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
-        runs = c.execute("SELECT * FROM engine_runs ORDER BY id DESC LIMIT 10").fetchall()
+    enabled = await afn.run(db.get_setting, "engine_enabled", "0") == "1"
+    interval = await afn.run(db.get_setting_int, "engine_interval_seconds", 300)
+    min_score = await afn.run(db.get_setting_int, "engine_min_score", 80)
+    markets, runs = await afn.run(_engine_page_rows)
     lines = ["🧠 <b>محرك السوق والتحليل</b>",
              f"📌 الحالة: <b>{'🟢 يعمل' if enabled else '⚪ متوقف'}</b>",
              f"⏱ فاصل الدورة: {interval} ثانية",
@@ -313,9 +290,9 @@ async def admin_engine(q, uid, context, bot):
 
 
 async def admin_engine_toggle(q, uid, context, bot):
-    val = "0" if db.get_setting("engine_enabled", "0") == "1" else "1"
-    db.set_setting("engine_enabled", val)
-    audit_log.log(uid, f"engine:{val}")
+    val = "0" if await afn.run(db.get_setting, "engine_enabled", "0") == "1" else "1"
+    await afn.run(db.set_setting, "engine_enabled", val)
+    await afn.run(audit_log.log, uid, f"engine:{val}")
     await admin_engine(q, uid, context, bot)
 
 
@@ -325,17 +302,17 @@ async def admin_engine_adjust(q, uid, context, bot, key: str, delta: float):
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)
         return
     setting_key, lo, hi = bounds[key]
-    cur = db.get_setting_int(setting_key, 300 if key == "interval" else 80)
-    db.set_setting(setting_key, int(max(lo, min(hi, cur + delta))))
-    audit_log.log(uid, f"engine_setting:{setting_key}:{db.get_setting(setting_key)}")
+    cur = await afn.run(db.get_setting_int, setting_key, 300 if key == "interval" else 80)
+    await afn.run(db.set_setting, setting_key, int(max(lo, min(hi, cur + delta))))
+    val_after = await afn.run(db.get_setting, setting_key)
+    await afn.run(audit_log.log, uid, f"engine_setting:{setting_key}:{val_after}")
     await admin_engine(q, uid, context, bot)
 
 
 async def admin_engine_now(q, uid, context, bot):
     from fysb.engines.signal_engine import generate_signal
     await render(q, "🚀 جارٍ تشغيل دورة فورية للمحرك على الأسواق المفعلة...", None)
-    with db.conn() as c:
-        markets = [dict(r) for r in c.execute("SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()]
+    markets = await afn.run(_enabled_verified_market_dicts)
     if not markets:
         await render(q, "⛔ لا توجد أسواق مفعلة وموثقة. فعّل سوقاً من قسم الأسواق أولاً (زر التحقق).", kb.admin_nav(), bot)
         return
@@ -348,11 +325,9 @@ async def admin_engine_now(q, uid, context, bot):
 
 
 async def admin_engine_clean(q, uid, context, bot):
-    with db.conn() as c:
-        cur = c.execute("""DELETE FROM engine_runs WHERE id NOT IN
-                           (SELECT id FROM engine_runs ORDER BY id DESC LIMIT 500)""")
-    audit_log.log(uid, f"engine_runs_cleaned:{cur.rowcount}")
-    await render(q, f"🧹 أُرشفت وأُزيلت {abs(cur.rowcount)} سجل دورة قديم (بقي آخر 500).", kb.admin_nav(), bot)
+    cleaned = await afn.run(_engine_runs_clean)
+    await afn.run(audit_log.log, uid, f"engine_runs_cleaned:{cleaned}")
+    await render(q, f"🧹 أُرشفت وأُزيلت {abs(cleaned)} سجل دورة قديم (بقي آخر 500).", kb.admin_nav(), bot)
 
 
 # --- Strategies ------------------------------------------------------------------
@@ -371,12 +346,11 @@ async def admin_strategies(q, uid, context, bot, page: int = 0):
     page (rules of the engine + measured stats + verify/toggle actions).
     The board always fits Telegram's limits — no more «حدث خطأ» on tap."""
     from fysb.services import strategy_stats
-    with db.conn() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
-    codes = strategy_stats.ordered_codes([r["code"] for r in rows])
+    rows = await afn.run(_strategy_catalog_rows)
+    codes = await afn.run(strategy_stats.ordered_codes, [r["code"] for r in rows])
     by_code = {r["code"]: r for r in rows}
     ordered = [by_code[c] for c in codes if c in by_code] + [r for r in rows if r["code"] not in codes]
-    board = {d["code"]: d for d in strategy_stats.leaderboard()}
+    board = {d["code"]: d for d in await afn.run(strategy_stats.leaderboard)}
     total = len(ordered)
     verified_n = sum(1 for r in ordered if r["verified"])
     active_n = sum(1 for r in ordered if r["enabled"] and r["verified"])
@@ -419,14 +393,13 @@ async def admin_strategy_info(q, uid, context, bot, code: str, page: int = 0):
     from fysb.services import strategy_info
     from fysb.services import strategy_stats
     code = (code or "").upper()
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM strategy_catalog WHERE code=?", (code,)).fetchone()
+    r = await afn.run(_strategy_row, code)
     if not r:
         await render(q, "الاستراتيجية غير موجودة.", kb.admin_nav(), bot)
         return
     rec = dict(r)
-    body = strategy_info.info_page(code)
-    board = {d["code"]: d for d in strategy_stats.leaderboard()}
+    body = await afn.run(strategy_info.info_page, code)
+    board = {d["code"]: d for d in await afn.run(strategy_stats.leaderboard)}
     d = board.get(code)
     if d:
         body += (f"\n\n📈 <b>قياس مباشر:</b> {d['n']} مغلقة · رابحة {d['win_rate']:.0f}% · "
@@ -445,18 +418,16 @@ async def admin_strategy_info(q, uid, context, bot, code: str, page: int = 0):
 
 
 async def admin_strategy_toggle(q, uid, context, bot, code: str, page: int = 0):
-    with db.conn() as c:
-        r = c.execute("SELECT enabled,verified FROM strategy_catalog WHERE code=?", (code,)).fetchone()
-        if not r:
-            await render(q, "الاستراتيجية غير موجودة.", kb.admin_nav(), bot)
-            return
-        if not r["verified"]:
-            await render(q, "⛔ الاستراتيجية غير مختبرة؛ لا يمكن تفعيلها. استخدم زر التحقق إن كانت ضمن المنفذة.",
-                         kb.admin_nav(), bot)
-            return
-        c.execute("UPDATE strategy_catalog SET enabled=?,updated_at=? WHERE code=?",
-                  (0 if r["enabled"] else 1, config.now(), code))
-    audit_log.log(uid, f"strategy_toggle:{code}")
+    r = await afn.run(_strategy_toggle_state, code)
+    if not r:
+        await render(q, "الاستراتيجية غير موجودة.", kb.admin_nav(), bot)
+        return
+    if not r["verified"]:
+        await render(q, "⛔ الاستراتيجية غير مختبرة؛ لا يمكن تفعيلها. استخدم زر التحقق إن كانت ضمن المنفذة.",
+                     kb.admin_nav(), bot)
+        return
+    await afn.run(_strategy_toggle_apply, code, 0 if r["enabled"] else 1)
+    await afn.run(audit_log.log, uid, f"strategy_toggle:{code}")
     await admin_strategies(q, uid, context, bot, page)
 
 
@@ -464,17 +435,14 @@ async def admin_strategy_verify(q, uid, context, bot, code: str, page: int = 0):
     if code not in VERIFIABLE:
         await render(q, "⛔ هذه الاستراتيجية غير منفذة بعد؛ لا يمكن التحقق منها.", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        c.execute("UPDATE strategy_catalog SET verified=1,enabled=1,updated_at=? WHERE code=?", (config.now(), code))
-    audit_log.log(uid, f"strategy_verified:{code}")
+    await afn.run(_strategy_verify_apply, code)
+    await afn.run(audit_log.log, uid, f"strategy_verified:{code}")
     await admin_strategies(q, uid, context, bot, page)
 
 
 # --- Operating modes -------------------------------------------------------------
 async def admin_modes(q, uid, context, bot):
-    with db.conn() as c:
-        rows = c.execute("SELECT * FROM mode_registry ORDER BY code").fetchall()
-        current = db.get_setting("trading_mode", "SIGNALS_ONLY")
+    rows, current = await afn.run(_modes_page_rows)
     lines = [f"⚙️ <b>أوضاع التشغيل</b>\nالوضع الحالي: <b>{esc(current)}</b>", ""]
     rows_kb = []
     for r in rows:
@@ -489,17 +457,16 @@ async def admin_modes(q, uid, context, bot):
 
 
 async def admin_mode_set(q, uid, context, bot, code: str):
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM mode_registry WHERE code=?", (code,)).fetchone()
-        if not r or not r["executable"] or not r["enabled"]:
-            await render(q, "⛔ هذا الوضع غير قابل للتنفيذ في هذه النسخة.", kb.admin_nav(), bot)
-            return
-        if code == "C":
-            # LIVE requires the explicit double-confirmation flow; never settable here.
-            await render(q, "⛔ الوضع LIVE يُفعّل حصراً عبر قسم «التداول الحقيقي» بتأكيد مزدوج.", kb.admin_nav(), bot)
-            return
-        db.set_setting("trading_mode", r["code"])
-    audit_log.log(uid, f"mode_set:{code}")
+    r = await afn.run(_mode_row, code)
+    if not r or not r["executable"] or not r["enabled"]:
+        await render(q, "⛔ هذا الوضع غير قابل للتنفيذ في هذه النسخة.", kb.admin_nav(), bot)
+        return
+    if code == "C":
+        # LIVE requires the explicit double-confirmation flow; never settable here.
+        await render(q, "⛔ الوضع LIVE يُفعّل حصراً عبر قسم «التداول الحقيقي» بتأكيد مزدوج.", kb.admin_nav(), bot)
+        return
+    await afn.run(db.set_setting, "trading_mode", r["code"])
+    await afn.run(audit_log.log, uid, f"mode_set:{code}")
     await admin_modes(q, uid, context, bot)
 
 
@@ -513,13 +480,15 @@ async def admin_risk(q, uid, context, bot):
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
     ]
+    ks = await afn.run(db.kill_switch_on)
+    vf = await afn.run(db.get_setting, "volatility_filter", "1")
     lines = ["🛡 <b>محرك إدارة المخاطر</b>",
-             f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if db.kill_switch_on() else 'غير مفعل'}</b>",
-             f"🌊 فلتر التقلب: <b>{'مفعل' if db.get_setting('volatility_filter','1')=='1' else 'متوقف'}</b>", "",
+             f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
+             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>", "",
              "<b>الحدود (تطبق على السيرفر قبل أي إشارة):</b>"]
     rows_kb = []
     for key, title, step, _d in keys:
-        val = db.get_setting_float(key, 0)
+        val = await afn.run(db.get_setting_float, key, 0)
         lines.append(f"  {title}: <b>{val:g}</b>")
         rows_kb.append([kb.btn("➖", f"a:riskadj:{key}:-{step}"), kb.btn(f"{title} {val:g}", "a:plannoop"), kb.btn("➕", f"a:riskadj:{key}:{step}")])
     rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch"), kb.btn(f"🌊 فلتر التقلب", "a:volfilter")])
@@ -534,23 +503,24 @@ async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)
         return
     lo, hi = bounds[key]
-    cur = db.get_setting_float(key, lo)
-    db.set_setting(key, round(max(lo, min(hi, cur + delta)), 2))
-    audit_log.log(uid, f"risk_setting:{key}:{db.get_setting(key)}")
+    cur = await afn.run(db.get_setting_float, key, lo)
+    await afn.run(db.set_setting, key, round(max(lo, min(hi, cur + delta)), 2))
+    val_after = await afn.run(db.get_setting, key)
+    await afn.run(audit_log.log, uid, f"risk_setting:{key}:{val_after}")
     await admin_risk(q, uid, context, bot)
 
 
 async def admin_kill_switch(q, uid, context, bot):
-    val = "0" if db.kill_switch_on() else "1"
-    db.set_setting("global_kill_switch", val)
-    audit_log.log(uid, f"kill_switch:{val}")
+    val = "0" if await afn.run(db.kill_switch_on) else "1"
+    await afn.run(db.set_setting, "global_kill_switch", val)
+    await afn.run(audit_log.log, uid, f"kill_switch:{val}")
     await admin_risk(q, uid, context, bot)
 
 
 async def admin_vol_filter(q, uid, context, bot):
-    val = "0" if db.get_setting("volatility_filter", "1") == "1" else "1"
-    db.set_setting("volatility_filter", val)
-    audit_log.log(uid, f"volatility_filter:{val}")
+    val = "0" if await afn.run(db.get_setting, "volatility_filter", "1") == "1" else "1"
+    await afn.run(db.set_setting, "volatility_filter", val)
+    await afn.run(audit_log.log, uid, f"volatility_filter:{val}")
     await admin_risk(q, uid, context, bot)
 
 
@@ -564,8 +534,7 @@ async def admin_markets(q, uid, context, bot):
     real counts, live-state markers and a 2-per-row button grid — the old
     flat alphabetical wall is gone."""
     from fysb.theme import CATEGORY_AR, CATEGORY_ICON
-    with db.conn() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
+    rows = await afn.run(_market_catalog_all)
     if not rows:
         await render(q, "🌐 لا توجد أسواق في الفهرس بعد.", kb.admin_nav([[kb.btn("➕ إضافة سوق", "a:market_add")]]), bot)
         return
@@ -614,24 +583,21 @@ async def admin_markets(q, uid, context, bot):
 
 
 async def admin_market_toggle(q, uid, context, bot, symbol: str):
-    with db.conn() as c:
-        r = c.execute("SELECT enabled,verified FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
-        if not r:
-            await render(q, "السوق غير موجود.", kb.admin_nav(), bot)
-            return
-        if not r["verified"]:
-            await render(q, "⛔ السوق غير موثق لدى المزود — لا يمكن تفعيله قبل التحقق.", kb.admin_nav(), bot)
-            return
-        c.execute("UPDATE market_catalog SET enabled=?,updated_at=? WHERE symbol=?",
-                  (0 if r["enabled"] else 1, config.now(), symbol))
-    audit_log.log(uid, f"market_toggle:{symbol}")
+    r = await afn.run(_market_state, symbol)
+    if not r:
+        await render(q, "السوق غير موجود.", kb.admin_nav(), bot)
+        return
+    if not r["verified"]:
+        await render(q, "⛔ السوق غير موثق لدى المزود — لا يمكن تفعيله قبل التحقق.", kb.admin_nav(), bot)
+        return
+    await afn.run(_market_toggle_apply, symbol, 0 if r["enabled"] else 1)
+    await afn.run(audit_log.log, uid, f"market_toggle:{symbol}")
     await admin_markets(q, uid, context, bot)
 
 
 async def admin_market_verify(q, uid, context, bot, symbol: str):
     """REAL provider verification: fetch a live candle through the data chain."""
-    with db.conn() as c:
-        r = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+    r = await afn.run(_market_provider_symbol, symbol)
     if not r:
         await render(q, "السوق غير موجود.", kb.admin_nav(), bot)
         return
@@ -643,9 +609,8 @@ async def admin_market_verify(q, uid, context, bot, symbol: str):
     except RuntimeError as e:
         ok = False
         detail = str(e)
-    with db.conn() as c:
-        c.execute("UPDATE market_catalog SET verified=?, updated_at=? WHERE symbol=?", (1 if ok else 0, config.now(), symbol))
-    audit_log.log(uid, f"market_verify:{symbol}:{ok}")
+    await afn.run(_market_verify_apply, symbol, 1 if ok else 0)
+    await afn.run(audit_log.log, uid, f"market_verify:{symbol}:{ok}")
     icon = "✅" if ok else "❌"
     await render(q, f"{icon} <b>نتيجة التحقق من {esc(symbol)}</b>\n{esc(detail)}\n\n"
                     f"<i>{'أصبح السوق موثقاً — يمكنك تفعيله الآن.' if ok else 'لم يوافق المزود؛ بقي السوق مغلقاً.'}</i>",
@@ -660,8 +625,7 @@ async def admin_market_add(q, uid, context, bot):
 
 # --- Timeframes ------------------------------------------------------------------
 async def admin_timeframes(q, uid, context, bot):
-    with db.conn() as c:
-        rows = c.execute("SELECT * FROM timeframe_catalog ORDER BY code").fetchall()
+    rows = await afn.run(_timeframe_rows)
     lines = ["⏱ <b>إدارة الأطر الزمنية</b>\nالإطار غير الموثق لا يُتاح للمستخدمين أو المحرك.", ""]
     rows_kb = []
     for r in rows:
@@ -675,41 +639,36 @@ async def admin_timeframes(q, uid, context, bot):
 
 
 async def admin_tf_toggle(q, uid, context, bot, code: str):
-    with db.conn() as c:
-        r = c.execute("SELECT enabled,verified FROM timeframe_catalog WHERE code=?", (code,)).fetchone()
-        if not r:
-            await render(q, "الإطار غير موجود.", kb.admin_nav(), bot)
-            return
-        if not r["verified"]:
-            await render(q, "⛔ الإطار غير موثق لدى المزود.", kb.admin_nav(), bot)
-            return
-        c.execute("UPDATE timeframe_catalog SET enabled=?,updated_at=? WHERE code=?",
-                  (0 if r["enabled"] else 1, config.now(), code))
-    audit_log.log(uid, f"timeframe_toggle:{code}")
+    r = await afn.run(_tf_state, code)
+    if not r:
+        await render(q, "الإطار غير موجود.", kb.admin_nav(), bot)
+        return
+    if not r["verified"]:
+        await render(q, "⛔ الإطار غير موثق لدى المزود.", kb.admin_nav(), bot)
+        return
+    await afn.run(_tf_toggle_apply, code, 0 if r["enabled"] else 1)
+    await afn.run(audit_log.log, uid, f"timeframe_toggle:{code}")
     await admin_timeframes(q, uid, context, bot)
 
 
 async def admin_tf_verify(q, uid, context, bot, code: str):
     from fysb.engines.market_data import parse_interval
     interval = parse_interval(code)
-    with db.conn() as c:
-        r = c.execute("SELECT provider_symbol FROM market_catalog WHERE verified=1 LIMIT 1").fetchone()
+    r = await afn.run(_verified_provider_symbol)
     symbol = r["provider_symbol"] if r else "XAU/USD"
     try:
         payload = await asyncio.to_thread(market_data.fetch_candles, symbol, interval, config.market_api_key(), 40, False)
         ok, detail = True, f"استلم {len(payload['values'])} شمعة بإطار {interval}"
     except RuntimeError as e:
         ok, detail = False, str(e)
-    with db.conn() as c:
-        c.execute("UPDATE timeframe_catalog SET verified=?, updated_at=? WHERE code=?", (1 if ok else 0, config.now(), code))
-    audit_log.log(uid, f"tf_verify:{code}:{ok}")
+    await afn.run(_tf_verify_apply, code, 1 if ok else 0)
+    await afn.run(audit_log.log, uid, f"tf_verify:{code}:{ok}")
     await render(q, f"{'✅' if ok else '❌'} <b>تحقق الإطار {code}</b>\n{esc(detail)}", kb.admin_nav(), bot)
 
 
 # --- Brokers (real adapter registry: add API → test → approve) ----------------------
 async def admin_brokers(q, uid, context, bot):
-    with db.conn() as c:
-        rows = c.execute("SELECT * FROM broker_adapters ORDER BY id DESC").fetchall()
+    rows = await afn.run(_broker_rows)
     body = [f"🏦 <b><u>إدارة الوسطاء (Broker Adapters)</u></b>",
             "▎سجّل وسيطاً بمفاتيح API حقيقية، افحص الاتصال فعلياً، ثم اعتمده من هنا.",
             "▎المفاتيح لا تُعرض ولا تُطبع أبداً — تُخزن في قاعدة البيانات فقط.", ""]
@@ -759,8 +718,7 @@ async def admin_broker_cancel(q, uid, context, bot):
 
 
 async def admin_broker_test(q, uid, context, bot, bid: int):
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM broker_adapters WHERE id=?", (bid,)).fetchone()
+    r = await afn.run(_broker_adapter, bid)
     if not r:
         await render(q, "الوسيط غير موجود.", kb.admin_nav(), bot)
         return
@@ -768,9 +726,8 @@ async def admin_broker_test(q, uid, context, bot, bid: int):
     await render(q, f"🔌 جارٍ فحص الاتصال الحقيقي مع <b>{esc(r['title'])}</b>...", None)
     ok, detail = await asyncio.to_thread(broker_test_connectivity, cfg, r["key"])
     new_status = "VERIFIED" if ok else ("CONFIGURED" if r["status"] not in ("ACTIVE",) else "ACTIVE")
-    with db.conn() as c:
-        c.execute("UPDATE broker_adapters SET status=?, updated_at=? WHERE id=?", (new_status, config.now(), bid))
-    audit_log.log(uid, f"broker_test:{bid}:{ok}")
+    await afn.run(_broker_status_apply, bid, new_status)
+    await afn.run(audit_log.log, uid, f"broker_test:{bid}:{ok}")
     icon = "✅" if ok else "❌"
     note = "يمكنك اعتماد الوسيط الآن." if ok else "لم ينجح الفحص — راجع المفاتيح/العنوان ثم أعد الفحص."
     await render(q, f"{icon} <b>نتيجة فحص الاتصال</b>\n▎الوسيط: <b>{esc(r['title'])}</b>\n▎النتيجة: <b>{esc(detail)}</b>\n\n{note}",
@@ -778,31 +735,26 @@ async def admin_broker_test(q, uid, context, bot, bid: int):
 
 
 async def admin_broker_approve(q, uid, context, bot, bid: int):
-    with db.conn() as c:
-        r = c.execute("SELECT status FROM broker_adapters WHERE id=?", (bid,)).fetchone()
+    r = await afn.run(_broker_status, bid)
     if not r:
         await render(q, "الوسيط غير موجود.", kb.admin_nav(), bot)
         return
     if r["status"] != "VERIFIED":
         await render(q, "⛔ لا يُعتمد وسيط قبل فحص اتصال ناجح — اضغط «فحص اتصال» أولاً.", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        c.execute("UPDATE broker_adapters SET status='ACTIVE', enabled=1, updated_at=? WHERE id=?", (config.now(), bid))
-    audit_log.log(uid, f"broker_approved:{bid}")
+    await afn.run(_broker_approve_apply, bid)
+    await afn.run(audit_log.log, uid, f"broker_approved:{bid}")
     await admin_brokers(q, uid, context, bot)
 
 
 async def admin_broker_delete(q, uid, context, bot, bid: int):
-    with db.conn() as c:
-        c.execute("DELETE FROM broker_adapters WHERE id=?", (bid,))
-    audit_log.log(uid, f"broker_deleted:{bid}")
+    await afn.run(_broker_delete_row, bid)
+    await afn.run(audit_log.log, uid, f"broker_deleted:{bid}")
     await admin_brokers(q, uid, context, bot)
 
 
 async def admin_accounts(q, uid, context, bot):
-    with db.conn() as c:
-        rows = c.execute("""SELECT a.*, u.full_name FROM user_accounts a LEFT JOIN users u ON u.user_id=a.user_id
-                            ORDER BY a.id DESC LIMIT 10""").fetchall()
+    rows = await afn.run(_account_rows)
     lines = ["🔗 <b>حسابات التداول المرتبطة</b>", ""]
     if rows:
         for r in rows:
@@ -814,12 +766,7 @@ async def admin_accounts(q, uid, context, bot):
 
 # --- Demo overview (admin) ----------------------------------------------------------
 async def admin_demo(q, uid, context, bot):
-    with db.conn() as c:
-        accounts = c.execute("SELECT COUNT(*) n FROM demo_accounts").fetchone()["n"]
-        open_n = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE status='OPEN'").fetchone()["n"]
-        closed = c.execute("SELECT COUNT(*) n, COALESCE(SUM(pnl),0) s FROM demo_positions WHERE status!='OPEN'").fetchone()
-        recent = c.execute("""SELECT p.*, u.full_name FROM demo_positions p LEFT JOIN users u ON u.user_id=p.user_id
-                              ORDER BY p.id DESC LIMIT 8""").fetchall()
+    accounts, open_n, closed, recent = await afn.run(_demo_overview_rows)
     lines = ["🧪 <b>مركز التداول التجريبي</b>", "",
              f"👥 حسابات تجريبية: <b>{accounts}</b>",
              f"📂 صفقات مفتوحة: <b>{open_n}</b>",
@@ -835,7 +782,7 @@ async def admin_demo(q, uid, context, bot):
 
 # --- LIVE (locked, double confirmation) ----------------------------------------------
 async def admin_live(q, uid, context, bot):
-    live = db.get_setting("live_enabled", "0") == "1"
+    live = await afn.run(db.get_setting, "live_enabled", "0") == "1"
     body = [
         "🔒 <b>التداول الحقيقي (LIVE)</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -847,3 +794,256 @@ async def admin_live(q, uid, context, bot):
         "<i>لا يوجد زر تفعيل هنا عن قصد: تفعيل LIVE دون وسيط موثق = ادعاء زائف، ومرفوض في هذه المنصة.</i>",
     ]
     await render(q, "\n".join(body), kb.admin_nav(), bot)
+
+
+# --- v6.11.0 thread-offload helpers ---
+def _pl_account_rows() -> list[dict]:
+    """(v6.11.0 thread-offload helper) closed-signals P/L accounting per symbol."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT symbol, COUNT(*) n, SUM(pips_result>0) wins, SUM(pips_result<=0) losses,
+                      SUM(pips_result) net_pips, ROUND(AVG(pips_result),1) avg_pips
+               FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+               GROUP BY symbol ORDER BY net_pips DESC""").fetchall()]
+
+
+def _signal_with_deliveries(sid: int):
+    """(v6.11.0 thread-offload helper) full signal row + delivery count, ONE trip."""
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+        deliveries = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE signal_id=?", (sid,)).fetchone()["n"]
+    return r, deliveries
+
+
+def _signal_delete_tx(sid: int):
+    """(v6.11.0 thread-offload helper) erase one signal + its deliveries (tx)."""
+    with db.tx() as c:
+        sig = c.execute("SELECT symbol, direction FROM signals WHERE id=?", (sid,)).fetchone()
+        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id=?", (sid,)).rowcount)
+        s = abs(c.execute("DELETE FROM signals WHERE id=?", (sid,)).rowcount)
+    return sig, d, s
+
+
+def _signal_recipients(sid: int) -> list:
+    """(v6.11.0 thread-offload helper) last delivery rows of one signal."""
+    with db.conn() as c:
+        return c.execute("""SELECT d.user_id, d.delivered_at FROM signal_deliveries d
+                            WHERE d.signal_id=? ORDER BY d.delivered_at DESC LIMIT 15""", (sid,)).fetchall()
+
+
+def _signal_recipient_uids(sid: int) -> list[int]:
+    """(v6.11.0 thread-offload helper) user ids that received one signal."""
+    with db.conn() as c:
+        return [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sid,))]
+
+
+def _signal_row_full(sid: int) -> dict:
+    """(v6.11.0 thread-offload helper) one full signal row as dict."""
+    with db.conn() as c:
+        return dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
+
+
+def _dead_signals_count() -> int:
+    """(v6.11.0 thread-offload helper) count of CANCELLED/EXPIRED signals."""
+    with db.conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('CANCELLED','EXPIRED')").fetchone()["n"]
+
+
+def _signal_purge_tx():
+    """(v6.11.0 thread-offload helper) bulk-erase dead signals + deliveries (tx)."""
+    with db.tx() as c:
+        d = abs(c.execute("DELETE FROM signal_deliveries WHERE signal_id IN "
+                          "(SELECT id FROM signals WHERE status IN ('CANCELLED','EXPIRED'))").rowcount)
+        s = abs(c.execute("DELETE FROM signals WHERE status IN ('CANCELLED','EXPIRED')").rowcount)
+    return d, s
+
+
+def _cancel_signal_tx(sid: int) -> int:
+    """(v6.11.0 thread-offload helper) cancel an open signal (tx) — rowcount."""
+    with db.tx() as c:
+        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
+                        (config.now(), sid))
+        return cur.rowcount
+
+
+def _engine_page_rows():
+    """(v6.11.0 thread-offload helper) armed-markets count + last engine runs."""
+    with db.conn() as c:
+        markets = c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
+        runs = c.execute("SELECT * FROM engine_runs ORDER BY id DESC LIMIT 10").fetchall()
+    return markets, runs
+
+
+def _enabled_verified_market_dicts() -> list[dict]:
+    """(v6.11.0 thread-offload helper) enabled+verified market rows."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute("SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()]
+
+
+def _engine_runs_clean() -> int:
+    """(v6.11.0 thread-offload helper) archive-trim engine_runs to last 500 — rowcount."""
+    with db.conn() as c:
+        cur = c.execute("""DELETE FROM engine_runs WHERE id NOT IN
+                           (SELECT id FROM engine_runs ORDER BY id DESC LIMIT 500)""")
+        return cur.rowcount
+
+
+def _strategy_catalog_rows() -> list[dict]:
+    """(v6.11.0 thread-offload helper) the whole strategy_catalog as dicts."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM strategy_catalog").fetchall()]
+
+
+def _strategy_row(code: str):
+    """(v6.11.0 thread-offload helper) one strategy_catalog row by code."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM strategy_catalog WHERE code=?", (code,)).fetchone()
+
+
+def _strategy_toggle_state(code: str):
+    """(v6.11.0 thread-offload helper) enabled/verified flags of one strategy."""
+    with db.conn() as c:
+        return c.execute("SELECT enabled,verified FROM strategy_catalog WHERE code=?", (code,)).fetchone()
+
+
+def _strategy_toggle_apply(code: str, new_val: int) -> None:
+    """(v6.11.0 thread-offload helper) write the enabled flag of one strategy."""
+    with db.conn() as c:
+        c.execute("UPDATE strategy_catalog SET enabled=?,updated_at=? WHERE code=?",
+                  (new_val, config.now(), code))
+
+
+def _strategy_verify_apply(code: str) -> None:
+    """(v6.11.0 thread-offload helper) mark one strategy verified+enabled."""
+    with db.conn() as c:
+        c.execute("UPDATE strategy_catalog SET verified=1,enabled=1,updated_at=? WHERE code=?", (config.now(), code))
+
+
+def _modes_page_rows():
+    """(v6.11.0 thread-offload helper) mode registry rows + current trading mode."""
+    with db.conn() as c:
+        rows = c.execute("SELECT * FROM mode_registry ORDER BY code").fetchall()
+        current = db.get_setting("trading_mode", "SIGNALS_ONLY")
+    return rows, current
+
+
+def _mode_row(code: str):
+    """(v6.11.0 thread-offload helper) one mode_registry row by code."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM mode_registry WHERE code=?", (code,)).fetchone()
+
+
+def _market_catalog_all() -> list[dict]:
+    """(v6.11.0 thread-offload helper) the whole market_catalog as dicts."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
+
+
+def _market_state(symbol: str):
+    """(v6.11.0 thread-offload helper) enabled/verified flags of one market."""
+    with db.conn() as c:
+        return c.execute("SELECT enabled,verified FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+
+
+def _market_toggle_apply(symbol: str, new_val: int) -> None:
+    """(v6.11.0 thread-offload helper) write the enabled flag of one market."""
+    with db.conn() as c:
+        c.execute("UPDATE market_catalog SET enabled=?,updated_at=? WHERE symbol=?",
+                  (new_val, config.now(), symbol))
+
+
+def _market_provider_symbol(symbol: str):
+    """(v6.11.0 thread-offload helper) provider symbol of one market row."""
+    with db.conn() as c:
+        return c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+
+
+def _market_verify_apply(symbol: str, verified: int) -> None:
+    """(v6.11.0 thread-offload helper) write the verified flag of one market."""
+    with db.conn() as c:
+        c.execute("UPDATE market_catalog SET verified=?, updated_at=? WHERE symbol=?", (verified, config.now(), symbol))
+
+
+def _timeframe_rows() -> list:
+    """(v6.11.0 thread-offload helper) the whole timeframe_catalog."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM timeframe_catalog ORDER BY code").fetchall()
+
+
+def _tf_state(code: str):
+    """(v6.11.0 thread-offload helper) enabled/verified flags of one timeframe."""
+    with db.conn() as c:
+        return c.execute("SELECT enabled,verified FROM timeframe_catalog WHERE code=?", (code,)).fetchone()
+
+
+def _tf_toggle_apply(code: str, new_val: int) -> None:
+    """(v6.11.0 thread-offload helper) write the enabled flag of one timeframe."""
+    with db.conn() as c:
+        c.execute("UPDATE timeframe_catalog SET enabled=?,updated_at=? WHERE code=?",
+                  (new_val, config.now(), code))
+
+
+def _verified_provider_symbol():
+    """(v6.11.0 thread-offload helper) one verified market to probe TFs against."""
+    with db.conn() as c:
+        return c.execute("SELECT provider_symbol FROM market_catalog WHERE verified=1 LIMIT 1").fetchone()
+
+
+def _tf_verify_apply(code: str, verified: int) -> None:
+    """(v6.11.0 thread-offload helper) write the verified flag of one timeframe."""
+    with db.conn() as c:
+        c.execute("UPDATE timeframe_catalog SET verified=?, updated_at=? WHERE code=?", (verified, config.now(), code))
+
+
+def _broker_rows() -> list:
+    """(v6.11.0 thread-offload helper) all broker_adapters, newest first."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM broker_adapters ORDER BY id DESC").fetchall()
+
+
+def _broker_adapter(bid: int):
+    """(v6.11.0 thread-offload helper) one full broker_adapter row."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM broker_adapters WHERE id=?", (bid,)).fetchone()
+
+
+def _broker_status(bid: int):
+    """(v6.11.0 thread-offload helper) approval status of one broker_adapter."""
+    with db.conn() as c:
+        return c.execute("SELECT status FROM broker_adapters WHERE id=?", (bid,)).fetchone()
+
+
+def _broker_status_apply(bid: int, new_status: str) -> None:
+    """(v6.11.0 thread-offload helper) write broker_adapter status after a test."""
+    with db.conn() as c:
+        c.execute("UPDATE broker_adapters SET status=?, updated_at=? WHERE id=?", (new_status, config.now(), bid))
+
+
+def _broker_approve_apply(bid: int) -> None:
+    """(v6.11.0 thread-offload helper) mark one broker_adapter ACTIVE+enabled."""
+    with db.conn() as c:
+        c.execute("UPDATE broker_adapters SET status='ACTIVE', enabled=1, updated_at=? WHERE id=?", (config.now(), bid))
+
+
+def _broker_delete_row(bid: int) -> None:
+    """(v6.11.0 thread-offload helper) erase one broker_adapter."""
+    with db.conn() as c:
+        c.execute("DELETE FROM broker_adapters WHERE id=?", (bid,))
+
+
+def _account_rows() -> list:
+    """(v6.11.0 thread-offload helper) latest linked user_accounts with names."""
+    with db.conn() as c:
+        return c.execute("""SELECT a.*, u.full_name FROM user_accounts a LEFT JOIN users u ON u.user_id=a.user_id
+                            ORDER BY a.id DESC LIMIT 10""").fetchall()
+
+
+def _demo_overview_rows():
+    """(v6.11.0 thread-offload helper) demo counters + recent positions, ONE trip."""
+    with db.conn() as c:
+        accounts = c.execute("SELECT COUNT(*) n FROM demo_accounts").fetchone()["n"]
+        open_n = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE status='OPEN'").fetchone()["n"]
+        closed = c.execute("SELECT COUNT(*) n, COALESCE(SUM(pnl),0) s FROM demo_positions WHERE status!='OPEN'").fetchone()
+        recent = c.execute("""SELECT p.*, u.full_name FROM demo_positions p LEFT JOIN users u ON u.user_id=p.user_id
+                              ORDER BY p.id DESC LIMIT 8""").fetchall()
+    return accounts, open_n, closed, recent

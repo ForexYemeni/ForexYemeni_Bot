@@ -5,7 +5,7 @@ from datetime import timedelta
 from telegram import InlineKeyboardButton, Update
 from telegram.ext import ContextTypes
 
-from fysb import config, db, instruments
+from fysb import afn, config, db, instruments
 from fysb.config import log
 from fysb.handlers.common import render, safe
 from fysb.services import payments as payments_service
@@ -23,10 +23,8 @@ TICKET_TYPES = [("عام", "general"), ("مشكلة تقنية", "technical"), (
 
 async def _upsell(q, uid, bot, why: str) -> None:
     """The luxury locked-content card — shown whenever a plan gate trips."""
-    from fysb.handlers.user_pages import subs as _subs  # already imported
-    plan = _subs.plan_for(uid)
-    with db.conn() as c:
-        plans = c.execute("SELECT * FROM plans WHERE enabled=1 AND price>0 ORDER BY price").fetchall()
+    plan = await afn.run(subs.plan_for, uid)
+    plans = await afn.run(_plans_for_sale)
     body = (f"{ICON['lock']} <b><u>محتوى ملكي — يتطلب باقة أعلى</u></b>\n"
             f"<blockquote>"
             f"▎⛔ {esc(why)}.\n"
@@ -46,7 +44,7 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
     chain = (chain or "").upper()
     label = {"TRC20": "USDT TRC20 (شبكة Tron)",
              **{k: v["label"] for k, v in EVM_CHAINS.items()}}.get(chain, chain)
-    wallet = payments_service.chain_wallet(chain)
+    wallet = await afn.run(payments_service.chain_wallet, chain)
     pid = req["id"]
     if not wallet:
         await render(q, "⛓ هذه الشبكة غير مفعلة حالياً — اختر شبكة أخرى من صفحة الباقة أو تواصل مع الدعم.",
@@ -74,7 +72,9 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
 async def user_page(q, action: str, uid: int, context) -> None:
     bot = context.bot
     # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
-    u = users_service.touch_and_get(uid)
+    # v6.11.0: every blocking call below runs in the worker pool — the loop
+    # never waits on WAN, so buttons stay instant even while Supabase is slow.
+    u = await afn.run(users_service.touch_and_get, uid)
     if not u:
         await render(q, "لم يتم العثور على حسابك. أرسل /start أولاً.", kb.user_menu(), bot)
         return
@@ -84,7 +84,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         await render(q, f"👑 <b>{config.BRAND}</b>\nالقائمة الرئيسية:", kb.user_menu(), bot)
 
     elif action == "profile":
-        profile = users_service.profile_summary(uid)
+        profile = await afn.run(users_service.profile_summary, uid)
         await render(q, render_user_card(u, profile),
                      kb.user_nav([
                          [kb.btn("🎛 تخصيص الإشارات", "u:preferences"), kb.btn("💎 الاشتراك", "u:plans")],
@@ -92,18 +92,12 @@ async def user_page(q, action: str, uid: int, context) -> None:
                      ]), bot)
 
     elif action == "dashboard":
-        p = subs.plan_for(uid)
-        state = subs.quota_state(uid)
-        with db.conn() as c:
-            total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-            active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
-            wins = c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"]
-            delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
-            anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
-                                 (uid, db.day_start_utc())).fetchone()["n"]
+        p = await afn.run(subs.plan_for, uid)
+        state = await afn.run(subs.quota_state, uid)
+        total, active, wins, delivered, anl_used = await afn.run(_dashboard_counts, uid)
         plan_title = esc(p["title"] if p else "Free")
         anl_quota = int(p["max_analyses_per_day"] or 0) if p else 0
-        mrow = _market_row(u["market"])
+        mrow = await afn.run(_market_row, u["market"])
         mcat = (mrow or {}).get("category") if mrow else instruments.spec(u["market"]).category
         from fysb.engines.market_data import market_state
         mstate = market_state(mcat)
@@ -114,7 +108,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 f"▎🧾 إجمالي ما وصلتك: <b>{delivered}</b>\n\n"
                 f"🔬 <b>التحليلات:</b>\n"
                 f"▎استهلاك اليوم: <b>{anl_used}/{anl_quota}</b>\n\n"
-                f"🛡 وضع المنصة: <b>{esc(db.get_setting('trading_mode', 'SIGNALS_ONLY'))}</b>\n"
+                f"🛡 وضع المنصة: <b>{esc(await afn.run(db.get_setting, 'trading_mode', 'SIGNALS_ONLY'))}</b>\n"
                 f"🌍 أفضلك ({esc(u['market'])}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
         await render(q, body, kb.user_nav([
@@ -126,19 +120,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
     elif action == "analytics":
         from fysb.services import analytics as anl
-        if not anl.analytics_enabled():
+        if not await afn.run(anl.analytics_enabled):
             await render(q, "🔬 قسم التحليلات معطل حالياً من الإدارة.", kb.user_nav(), bot)
             return
-        state = anl.quota_state(uid)
-        plan = subs.plan_for(uid)
+        state = await afn.run(anl.quota_state, uid)
+        plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            # v6.8.1 — EVERYONE sees the FULL catalog (owner rule): markets
-            # outside the plan render as 🔒 and open the upsell card; markets
-            # inside the plan but not yet armed by the admin render as ⚪.
-            # Rows are converted to dicts immediately (sqlite3.Row has no .get).
-            rows = [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
+        rows = await afn.run(_catalog_rows)
         if not rows:
             # LEGACY-DEAD CATALOG FALLBACK (picker-empty bug 2026-11-22): the
             # picker must never dead-end — offer the plan's own markets (the
@@ -224,8 +213,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         await render(q, body, kb.user_nav(mkt_rows), bot)
 
     elif action == "upgrade":
-        with db.conn() as c:
-            plans = c.execute("SELECT * FROM plans WHERE enabled=1 AND price>0 ORDER BY price").fetchall()
+        plans = await afn.run(_plans_for_sale)
         body = (f"{ICON['diamond']} <b><u>بطاقة الترقية الملكية</u></b>\n"
                 "<blockquote>"
                 "▎🔒 هذا المحتوى يمنحك باقات أعلى: أسواق إضافية، أطر زمنية أكثر،\n"
@@ -240,7 +228,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action.startswith("anlsym:"):
         from fysb.services import analytics as anl
         symbol = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         if not is_admin and symbol.upper() not in p_markets:
@@ -252,8 +240,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         draft = {"symbol": symbol}
         context.user_data["anl_draft"] = draft
         p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            enabled = {r["code"] for r in c.execute("SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1")}
+        enabled = await afn.run(_enabled_tf_codes)
         # PICKER CAN NEVER BE EMPTY (user bug report 2026-11-22): plan codes are
         # the access authority — if the legacy catalog filter empties them, we
         # fall back to the plan's own timeframes. Boot self-heal fixes the root.
@@ -282,7 +269,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
             await render(q, "ابدأ من قسم التحليلات أولاً.", kb.user_nav([[kb.btn("🔬 التحليلات", "u:analytics")]]), bot)
             return
         tf = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
         if not is_admin and tf.upper() != "ALL" and tf.upper() not in p_tfs:
@@ -291,8 +278,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         draft["tf"] = tf.upper()
         context.user_data["anl_draft"] = draft
         p_strats = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            enabled = {r["code"] for r in c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1")}
+        enabled = await afn.run(_enabled_strategy_codes)
         # PICKER CAN NEVER BE EMPTY: fall back to the plan's own methodologies
         # (implemented ones first) — a legacy-dead catalog can never blank this page.
         usable = [s for s in p_strats if s in enabled and s != "ALL"]
@@ -304,7 +290,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         # is visible to everyone in guaranteed strength order; methodologies
         # outside the plan wear 🔒 and tapping one opens the upsell card.
         from fysb.services import strategy_stats as _ss
-        universe = _ss.ordered_codes(sorted(enabled))
+        universe = await afn.run(_ss.ordered_codes, sorted(enabled))
         if is_admin:
             usable = universe
         elif not universe:
@@ -334,14 +320,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
             await render(q, "أكمل الخطوات السابقة أولاً — ابدأ من قسم التحليلات.", kb.user_nav(), bot)
             return
         strategy = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_strats = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
         if not is_admin and strategy.upper() != "ALL" and strategy.upper() not in p_strats:
             await _upsell(q, uid, bot, "هذه المنهجية غير مشمولة في باقتك")
             return
         draft["strategy"] = strategy.upper()
-        state = anl.quota_state(uid)
+        state = await afn.run(anl.quota_state, uid)
         tf_txt = "تحليل متعدد الأطباق (الأدنى ← الأعلى)" if draft["tf"] == "ALL" else tf_name(draft["tf"])
         quota_line = ("👑 تحليل إدارة ملكي — بلا حدود" if is_admin
                       else f"▎حصتك قبل التوليد: <b>{state['used']}/{state['quota']}</b>")
@@ -355,8 +341,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
                          kb.user_nav([[kb.btn("↩️ التحليلات", "u:analytics")]]), bot)
             return
         an = res["analysis"]
-        q_state = res.get("quota") or anl.quota_state(uid)
-        row = _market_row(an["symbol"])
+        q_state = res.get("quota") or (await afn.run(anl.quota_state, uid))
+        row = await afn.run(_market_row, an["symbol"])
         card_text = render_analysis_card(an, market_row=row)
         card_text += f"\n\n📊 <b>حصتك الآن:</b> <b>{q_state['used']}/{q_state['quota']}</b> {bar(q_state['used'], q_state['quota'])}"
         await render(q, card_text,
@@ -365,8 +351,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     # ---------- Signals (quota enforced server-side) ----------
     elif action == "signals":
-        state = subs.quota_state(uid)
-        plan = subs.plan_for(uid)
+        state = await afn.run(subs.quota_state, uid)
+        plan = await afn.run(subs.plan_for, uid)
         markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
         timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
         strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
@@ -375,17 +361,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
         marks_t = ",".join("?" for _ in timeframes)
         marks_s = ",".join("?" for _ in strategies)
         args = markets + timeframes + strategies + [min_score]
-        with db.conn() as c:
-            # v6.8.1 — seq = the REAL chronological number (same as the admin
-            # center): after any deletion the following signals take the freed
-            # numbers, so the user sees the same # the admin sees.
-            rows = c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                 FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
-                                 AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
-                                 AND strategy IN ({marks_s}) AND score>=?
-                                 ORDER BY id DESC LIMIT 12""", args).fetchall()
+        rows = await afn.run(_live_signals_page, markets, timeframes, strategies, min_score)
         # Which of these are still viewable under the remaining quota?
-        fresh = [r for r in rows if _already_delivered(uid, r["id"]) or state["remaining"] > 0]
+        delivered_ids = await afn.run(_delivered_set, uid, [r["id"] for r in rows])
+        fresh = [r for r in rows if r["id"] in delivered_ids or state["remaining"] > 0]
         lines = [f"💎 <b>الباقة:</b> {esc(plan['title'])}",
                  f"📊 الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
                  "اختر إشارة لعرض بطاقة الدخول الكاملة:"]
@@ -396,7 +375,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         # v6.10.0 (owner report 7) — «إشارة الآن» right inside the user's
         # signals hub + the watcher status line (honest auto-search).
         from fysb.handlers import signal_now as _sn
-        w = _sn.active_watcher(uid)
+        w = await afn.run(_sn.active_watcher, uid)
         if w:
             lines.append(f"⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
             rows_kb.append([kb.btn("🔴 إلغاء البحث التلقائي", f"u:watchoff:{w['id']}")])
@@ -408,22 +387,21 @@ async def user_page(q, action: str, uid: int, context) -> None:
         if sid is None:
             await render(q, "معرّف غير صالح.", kb.user_nav(), bot)
             return
-        with db.conn() as c:
-            sig = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+        sig = await afn.run(_signal_row, sid)
         if not sig or sig["status"] in ("CANCELLED",):
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
         # Server-side quota consumption (anti-bypass: re-check on every callback)
-        consumption = subs.consume_on_view(uid, sid)
+        consumption = await afn.run(subs.consume_on_view, uid, sid)
         if not consumption["ok"] and not consumption.get("already"):
-            plan = subs.plan_for(uid)
+            plan = await afn.run(subs.plan_for, uid)
             await render(q,
                          f"⛔ <b>انتهى حد الإشارات اليومي</b>\n"
                          f"الباقة: {esc(plan['title'])} · المستهلك: {consumption['used']}/{consumption['quota']}\n"
                          f"الحد يتجدد يومياً على السيرفر ولا يمكن تجاوزه من الجهاز.",
                          kb.user_nav([[kb.btn("💎 ترقية الباقة", "u:plans"), kb.btn("🔄 لاحقاً", "u:signals")]]), bot)
             return
-        row = _market_row(sig["symbol"])
+        row = await afn.run(_market_row, sig["symbol"])
         card_text = render_signal_card(dict(sig), user_view=True, row=row)
         # Live market pulse for open trades — the card is alive, not a snapshot.
         if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
@@ -441,7 +419,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
             except Exception:
                 pass
         from fysb.services import user_trade
-        personal = user_trade.personal_block(dict(sig), uid)
+        personal = await afn.run(user_trade.personal_block, dict(sig), uid)
         if personal:
             card_text += "\n\n<blockquote>" + personal + "</blockquote>"
         await render(q, card_text,
@@ -450,7 +428,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     # ---------- Preferences ----------
     elif action == "preferences":
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         mkt_pref = "الكل (حسب باقتك)" if not (u["market"] or "").strip() else esc(u["market"])
         tf_pref = "الكل (حسب باقتك)" if not (u["timeframe"] or "").strip() else tf_name(u["timeframe"])
         body = (f"🎛 <b>تخصيص الإشارات</b>\n\n"
@@ -469,10 +447,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         ]), bot)
 
     elif action == "markets":
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            rows = c.execute("SELECT * FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()
+        rows = await afn.run(_live_market_rows)
         available = [r["symbol"] for r in rows if r["symbol"].upper() in allowed] or allowed
         rows_kb = [[kb.btn("🌍 الكل (حسب باقتك)", "u:setmarket:ALL")]]
         rows_kb += [[kb.btn(("✅ " if s == u["market"] else "") + s, f"u:setmarket:{s}") for s in available[i:i + 3]]
@@ -483,23 +460,22 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("setmarket:"):
         symbol = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         if symbol == "ALL":
-            users_service.set_preference(uid, "market", "", {"market"})
+            await afn.run(users_service.set_preference, uid, "market", "", {"market"})
             await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من الأسواق مباشرة.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
             return
         if symbol.upper() not in allowed:
             await _upsell(q, uid, bot, "هذا السوق غير متاح في باقتك")
             return
-        users_service.set_preference(uid, "market", symbol, {"market"})
+        await afn.run(users_service.set_preference, uid, "market", symbol, {"market"})
         await render(q, f"✅ تم حفظ السوق المفضل: <b>{esc(symbol)}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "timeframes":
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            enabled = {r["code"] for r in c.execute("SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1")}
+        enabled = await afn.run(_enabled_tf_codes)
         usable = [t for t in allowed if t in enabled] or allowed
         rows_kb = [[kb.btn("🌍 الكل (حسب باقتك)", "u:settf:ALL")]]
         rows_kb += [[kb.btn(("✅ " if t == (u["timeframe"] or "").upper() else "") + f"{t} — {tf_name(t)}", f"u:settf:{t}") for t in usable[i:i + 3]]
@@ -509,31 +485,30 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("settf:"):
         tf = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
         if tf == "ALL":
-            users_service.set_preference(uid, "timeframe", "", {"timeframe"})
+            await afn.run(users_service.set_preference, uid, "timeframe", "", {"timeframe"})
             await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من الأطر الزمنية.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
             return
         if tf.upper() not in allowed:
             await _upsell(q, uid, bot, "هذا الإطار غير متاح في باقتك")
             return
-        users_service.set_preference(uid, "timeframe", tf, {"timeframe"})
+        await afn.run(users_service.set_preference, uid, "timeframe", tf, {"timeframe"})
         await render(q, f"✅ تم حفظ الإطار: <b>{esc(tf_name(tf))}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "strategies":
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
-        with db.conn() as c:
-            enabled = {r["code"] for r in c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1")}
+        enabled = await afn.run(_enabled_strategy_codes)
         usable = [s for s in allowed if s in enabled and s != "ALL"] or [s for s in allowed if s != "ALL"]
         # v6.8.0 — REAL GUARANTEED ORDERING: measured strength first (closed
         # signals), then the documented baseline — never a cosmetic shuffle.
         from fysb.services import strategy_stats
-        usable = strategy_stats.ordered_codes(usable)
-        board = {d["code"]: d["rank"] for d in strategy_stats.leaderboard()}
+        usable = await afn.run(strategy_stats.ordered_codes, usable)
+        board = {d["code"]: d["rank"] for d in (await afn.run(strategy_stats.leaderboard))}
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        body = ("🧠 <b>اختر الاستراتيجية المفضلة — مرتبة من الأقوى للأفضل دائماً</b>\n\n" + strategy_stats.leaderboard_text())
+        body = ("🧠 <b>اختر الاستراتيجية المفضلة — مرتبة من الأقوى للأفضل دائماً</b>\n\n" + (await afn.run(strategy_stats.leaderboard_text)))
         rows_kb = [[kb.btn("👑 الكل (حسب باقتك)", "u:setstrategy:ALL")]]
         def _label(s: str) -> str:
             rank = board.get(s)
@@ -546,20 +521,20 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("setstrategy:"):
         st = action.split(":", 1)[1]
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         allowed = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
         if st == "ALL":
-            users_service.set_preference(uid, "strategy", "", {"strategy"})
+            await afn.run(users_service.set_preference, uid, "strategy", "", {"strategy"})
             await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من المنهجيات.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
             return
         if st.upper() not in allowed:
             await _upsell(q, uid, bot, "هذه الاستراتيجية غير متاحة في باقتك")
             return
-        users_service.set_preference(uid, "strategy", st, {"strategy"})
+        await afn.run(users_service.set_preference, uid, "strategy", st, {"strategy"})
         await render(q, f"✅ تم حفظ الاستراتيجية: <b>{esc(strategy_name(st))}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "quality":
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         floor = int(plan["min_score"] or 60)
         options = [n for n in (60, 65, 70, 75, 80, 85, 90) if n >= floor] or [floor]
         rows_kb = [[kb.btn(f"{n} / 100", f"u:setquality:{n}")] for n in options]
@@ -568,17 +543,17 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("setquality:"):
         n = _safe_int(action.split(":", 1)[1])
-        plan = subs.plan_for(uid)
+        plan = await afn.run(subs.plan_for, uid)
         floor = int(plan["min_score"] or 60)
         if n is None or n < floor or n > 100:
             await render(q, "⛔ قيمة أقل من حد باقتك.", kb.user_nav(), bot)
             return
-        users_service.set_preference(uid, "min_score", n, {"min_score"})
+        await afn.run(users_service.set_preference, uid, "min_score", n, {"min_score"})
         await render(q, f"✅ الجودة الدنيا الآن: <b>{n}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "notifications":
         new = 0 if u["notifications"] else 1
-        users_service.set_notifications(uid, bool(new))
+        await afn.run(users_service.set_notifications, uid, bool(new))
         await render(q, f"🔔 الإشعارات الآن <b>{'مفعلة' if new else 'متوقفة'}</b>.",
                      kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
@@ -586,7 +561,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action == "referrals":
         from urllib.parse import quote as _urlquote
         from fysb.services import referrals as ref
-        st = ref.user_stats(uid)
+        st = await afn.run(ref.user_stats, uid)
         # v6.8.1 — LUXURY SHARE TEXT: the message a friend receives when the
         # user taps «شارك رابط الدعوة». No bot-handle duplication, no raw
         # tech-talk — a clean royal invitation, then the clickable link.
@@ -633,9 +608,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     # ---------- Plans & payments ----------
     elif action == "plans":
-        with db.conn() as c:
-            rows = c.execute("SELECT * FROM plans WHERE enabled=1 ORDER BY price").fetchall()
-        current = subs.plan_for(uid)
+        rows = await afn.run(_all_plans)
+        current = await afn.run(subs.plan_for, uid)
         rows_kb = [[kb.btn(f"💎 {esc(r['title'])} · {r['price']:g} {r['currency']} · {'مجاني' if not r['duration_days'] else str(r['duration_days']) + ' يوم'}",
                            f"u:planview:{r['code']}")] for r in rows]
         rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments")])
@@ -644,13 +618,12 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("planview:"):
         code = action.split(":", 1)[1]
-        with db.conn() as c:
-            p = c.execute("SELECT * FROM plans WHERE code=? AND enabled=1", (code,)).fetchone()
+        p = await afn.run(_plan_row, code)
         if not p:
             await render(q, "هذه الباقة غير متاحة حالياً.", kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
             return
-        methods = payments_service.list_methods(enabled_only=True)
-        chains = payments_service.configured_chains()
+        methods = await afn.run(payments_service.list_methods, enabled_only=True)
+        chains = await afn.run(payments_service.configured_chains)
         rows_kb = []
         body = render_plan_card(dict(p))
         # v6.10.0 (owner report 8) — the plan's strategies: ONE LINE EACH with
@@ -697,7 +670,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         s_code = (parts[1] if len(parts) > 1 else "").upper()
         from_plan = parts[2] if len(parts) > 2 else ""
         from fysb.services import strategy_info as _si
-        body = _si.info_page(s_code)
+        body = await afn.run(_si.info_page, s_code)
         rows_kb = [[kb.btn("↩️ الباقة", f"u:planview:{from_plan}")]] if from_plan else []
         rows_kb.append([kb.btn("💎 كل الباقات", "u:plans")])
         await render(q, body, kb.user_nav(rows_kb), bot)
@@ -708,17 +681,16 @@ async def user_page(q, action: str, uid: int, context) -> None:
         # same royal chain page as u:paychain (identical contract, zero drift).
         _, code, chain = action.split(":", 2)
         chain = chain.upper()
-        with db.conn() as c:
-            p = c.execute("SELECT * FROM plans WHERE code=? AND enabled=1", (code,)).fetchone()
+        p = await afn.run(_plan_row, code)
         if not p or code == "FREE":
             await render(q, "الباقة غير متاحة.", kb.user_nav([[kb.btn("↩️ كل الباقات", "u:plans")]]), bot)
             return
-        if chain not in payments_service.configured_chains():
+        if chain not in (await afn.run(payments_service.configured_chains)):
             await render(q, "⛓ هذه الشبكة غير موثقة حالياً — اختر شبكة موثقة من صفحة الباقة أو تواصل مع الدعم.",
                          kb.user_nav([[kb.btn("↩️ الباقة", f"u:planview:{code}")]]), bot)
             return
-        pid = payments_service.create_request(uid, code, p["price"], f"USDT-{chain}")
-        req = payments_service.get_request(pid)
+        pid = await afn.run(payments_service.create_request, uid, code, p["price"], f"USDT-{chain}")
+        req = await afn.run(payments_service.get_request, pid)
         await _render_chain_payment(q, bot, req, chain)
 
     elif action.startswith("requestplan:"):
@@ -728,19 +700,18 @@ async def user_page(q, action: str, uid: int, context) -> None:
         except ValueError:
             await render(q, "طلب غير صالح.", kb.user_nav(), bot)
             return
-        with db.conn() as c:
-            p = c.execute("SELECT * FROM plans WHERE code=? AND enabled=1", (code,)).fetchone()
+        p = await afn.run(_plan_row, code)
         if not p:
             await render(q, "الباقة غير متاحة.", kb.user_nav(), bot)
             return
-        method = payments_service.get_method(mid) if mid else None
-        pay_req = payments_service.create_request(uid, code, p["price"], method["title"] if method else "MANUAL")
+        method = await afn.run(payments_service.get_method, mid) if mid else None
+        pay_req = await afn.run(payments_service.create_request, uid, code, p["price"], method["title"] if method else "MANUAL")
         context.user_data["awaiting_receipt"] = pay_req
         body = [f"🧾 <b>طلب اشتراك #{pay_req}</b>",
                 f"💎 الباقة: <b>{esc(p['title'])}</b>",
                 f"💰 المبلغ: <b>{p['price']:g} {esc(p['currency'])}</b>"]
         is_usdt = bool(method and "USDT" in (method["title"] or "").upper())
-        chains = payments_service.configured_chains() if is_usdt else []
+        chains = (await afn.run(payments_service.configured_chains)) if is_usdt else []
         if method:
             body.append("\n💳 <b>وسيلة الدفع:</b> " + esc(method["title"]))
             if method["country"]:
@@ -776,7 +747,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         _, pid_s, chain = action.split(":", 2)
         pid = _safe_int(pid_s)
         chain = chain.upper()
-        req = payments_service.get_request(pid) if pid else None
+        req = (await afn.run(payments_service.get_request, pid)) if pid else None
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await render(q, "الطلب غير متاح (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
             return
@@ -788,11 +759,11 @@ async def user_page(q, action: str, uid: int, context) -> None:
         parts = action.split(":", 2)
         pid = _safe_int(parts[1])
         chain = (parts[2].upper() if len(parts) > 2 else "TRC20")
-        req = payments_service.get_request(pid) if pid else None
+        req = (await afn.run(payments_service.get_request, pid)) if pid else None
         if not req or req["user_id"] != uid or req["status"] != "PENDING":
             await render(q, "الطلب غير متاح للتحقق (مُراجع مسبقاً أو غير موجود).", kb.user_nav(), bot)
             return
-        if not payments_service.chain_wallet(chain):
+        if not (await afn.run(payments_service.chain_wallet, chain)):
             await render(q, "⛓ هذه الشبكة غير مضبوطة حالياً — اختر شبكة أخرى.", kb.user_nav(), bot)
             return
         context.user_data["awaiting_usdt_txid"] = pid
@@ -803,8 +774,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                      kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
 
     elif action == "payments":
-        with db.conn() as c:
-            rows = c.execute("SELECT * FROM payments WHERE user_id=? ORDER BY id DESC LIMIT 8", (uid,)).fetchall()
+        rows = await afn.run(_my_payments, uid)
         rows_kb = [[kb.btn(f"🧾 #{r['id']} · {esc(r['plan_code'])} · {r['amount']:g} · {esc(r['status'])}",
                            f"u:paymentview:{r['id']}")] for r in rows]
         if not rows_kb:
@@ -813,12 +783,11 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("paymentview:"):
         pid = _safe_int(action.split(":", 1)[1])
-        r = payments_service.get_request(pid) if pid else None
+        r = (await afn.run(payments_service.get_request, pid)) if pid else None
         if not r or r["user_id"] != uid:
             await render(q, "طلب الدفع غير موجود.", kb.user_nav(), bot)
             return
-        with db.conn() as c:
-            plan_title = c.execute("SELECT title FROM plans WHERE code=?", (r["plan_code"],)).fetchone()
+        plan_title = await afn.run(_plan_title_of, r["plan_code"])
         from fysb.ui.cards import render_payment_card
         await render(q, render_payment_card(r, plan_title["title"] if plan_title else ""),
                      kb.user_nav([[kb.btn("↩️ مدفوعاتي", "u:payments"), kb.btn("💎 الباقات", "u:plans")]]), bot)
@@ -827,7 +796,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action == "demo":
         from fysb.engines import demo as demo_engine
         api_key = config.market_api_key()
-        overview = demo_engine.account_overview(uid, api_key)
+        overview = await afn.run(demo_engine.account_overview, uid, api_key)
         body = [
             "🧪 <b>التداول التجريبي — محاكاة على بيانات حقيقية</b>",
             "",
@@ -854,7 +823,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "demoset":
         from fysb.engines import demo as demo_engine
-        s = demo_engine.demo_settings(uid)
+        s = await afn.run(demo_engine.demo_settings, uid)
         lot_word = "تلقائي حسب المخاطرة ورأس المال" if s["lot_mode"] == "auto" else f"ثابت {s['fixed_lot']:g}"
         body = (
             "⚙️ <b><u>إعدادات حسابي التجريبي</u></b>\n"
@@ -887,7 +856,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action.startswith("demosetrisk:"):
         from fysb.engines import demo as demo_engine
         v = float(action.split(":", 1)[1])
-        demo_engine.set_risk_pct(uid, v)
+        await afn.run(demo_engine.set_risk_pct, uid, v)
         await render(q, f"✅ أصبحت مخاطرتك لكل صفقة: <b>{v:g}%</b> من رأس مالك — سيُحسب حجم اللوت تلقائياً "
                         f"من رصيدك وهذه النسبة ومسافة الوقف (بدون إدخال لوت).\n"
                         f"🤖 <b>التنفيذ التلقائي مُسلّح:</b> كل إشارة مؤهلة تُفتح في حسابك فوراً بهذا الحساب — "
@@ -904,23 +873,20 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action.startswith("demosetlot:"):
         from fysb.engines import demo as demo_engine
         _pfx, mode, lot = action.split(":", 2)
-        demo_engine.set_lot_mode(uid, mode, float(lot) if float(lot) > 0 else None)
+        await afn.run(demo_engine.set_lot_mode, uid, mode, float(lot) if float(lot) > 0 else None)
         word = "تلقائي حسب المخاطرة ورأس المال" if mode == "auto" else f"ثابت {float(lot):g}"
         await render(q, f"✅ حجم اللوت الآن: <b>{word}</b>", kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
 
     elif action == "demoauto":
         from fysb.engines import demo as demo_engine
-        s = demo_engine.demo_settings(uid)
-        demo_engine.set_auto_trade(uid, not s["auto_trade"])
+        s = await afn.run(demo_engine.demo_settings, uid)
+        await afn.run(demo_engine.set_auto_trade, uid, not s["auto_trade"])
         state = "مفعل 🤖 — ستنفذ كل إشارة مؤهلة تلقائياً في حسابك بحجمك ومخاطرتك" if not s["auto_trade"] else "متوقف"
         await render(q, f"🤖 التنفيذ التلقائي الآن: <b>{state}</b>.",
                      kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
 
     elif action == "demopick":
-        with db.conn() as c:
-            rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
-                                ORDER BY id DESC LIMIT 6""").fetchall()
+        rows = await afn.run(_open_signals_rows)
         rows_kb = [[kb.btn(f"#{r['seq']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
         rows_kb.append([kb.btn("↩️ التجريبي", "u:demo")])
         await render(q, "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):",
@@ -928,8 +894,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("demolots:"):
         sid = _safe_int(action.split(":", 1)[1])
-        with db.conn() as c:
-            sig = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+        sig = await afn.run(_signal_row, sid)
         if not sig:
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
@@ -947,16 +912,15 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         sig_row = context.user_data.get("demo_signal") or {}
         if sig_row.get("id") != sid:
-            with db.conn() as c:
-                sig = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+            sig = await afn.run(_signal_row, sid)
             sig_row = dict(sig) if sig else {}
         if not sig_row:
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
         from fysb.engines import demo as demo_engine
-        res = demo_engine.open_position(uid, sig_row["symbol"], sig_row["direction"], lots,
-                                        sl=sig_row.get("sl") or 0, tp=sig_row.get("tp1") or 0,
-                                        api_key=config.market_api_key())
+        res = await afn.run(demo_engine.open_position, uid, sig_row["symbol"], sig_row["direction"], lots,
+                            sl=sig_row.get("sl") or 0, tp=sig_row.get("tp1") or 0,
+                            api_key=config.market_api_key())
         if not res.get("ok"):
             await render(q, f"⛔ تعذر فتح الصفقة التجريبية:\n{esc(res.get('error', ''))}", kb.user_nav(), bot)
             return
@@ -964,7 +928,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         await render(q,
                      f"✅ <b>تم فتح صفقة تجريبية #{res['position_id']}</b>\n\n"
                      f"🌐 {esc(sym)} · {esc(sig_row['direction'])} · 📦 {lots:g} lots\n"
-                     f"🎯 سعر الدخول (مع السبريد): <code>{instruments.fmt_price(sym, res['entry'], row=_market_row(sym))}</code>\n"
+                     f"🎯 سعر الدخول (مع السبريد): <code>{instruments.fmt_price(sym, res['entry'], row=(await afn.run(_market_row, sym)))}</code>\n"
                      f"🕐 وقت السعر: {human_dt(res['price_time'])}\n\n"
                      f"<i>يُغلق تلقائياً عند SL/TP بيانات حقيقية، أو الإغلاق اليدوي من الصفقات المفتوحة.</i>",
                      kb.user_nav([[kb.btn("📂 الصفقات المفتوحة", "u:demoopen_list")]]), bot)
@@ -972,15 +936,15 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action == "demoopen_list":
         from fysb.engines import demo as demo_engine
         api_key = config.market_api_key()
-        demo_engine.auto_close_on_targets(uid, api_key)
-        overview = demo_engine.account_overview(uid, api_key)
+        await afn.run(demo_engine.auto_close_on_targets, uid, api_key)
+        overview = await afn.run(demo_engine.account_overview, uid, api_key)
         if not overview["open"]:
             await render(q, "📂 لا توجد صفقات مفتوحة.", kb.user_nav([[kb.btn("🚀 فتح صفقة", "u:demopick")]]), bot)
             return
         rows_kb = []
         for p in overview["open"]:
             cur = p.get("current")
-            cur_txt = instruments.fmt_price(p["symbol"], cur, _market_row(p["symbol"])) if cur else "—"
+            cur_txt = instruments.fmt_price(p["symbol"], cur, (await afn.run(_market_row, p["symbol"]))) if cur else "—"
             rows_kb.append([kb.btn(f"#{p['id']} {esc(p['symbol'])} {p['direction']} {p['lots']:g} · الآن {cur_txt}",
                                    f"u:democlose:{p['id']}")])
         await render(q, "📂 <b>الصفقات المفتوحة</b>\nاضغط على صفقة لإغلاقها بسعر السوق الحالي:",
@@ -989,7 +953,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
     elif action.startswith("democlose:"):
         pid = _safe_int(action.split(":", 1)[1])
         from fysb.engines import demo as demo_engine
-        res = demo_engine.close_position(uid, pid, config.market_api_key())
+        res = await afn.run(demo_engine.close_position, uid, pid, config.market_api_key())
         if not res.get("ok"):
             await render(q, f"⛔ {esc(res.get('error', 'تعذر الإغلاق'))}", kb.user_nav(), bot)
             return
@@ -1004,7 +968,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "demohistory":
         from fysb.engines import demo as demo_engine
-        overview = demo_engine.account_overview(uid)
+        overview = await afn.run(demo_engine.account_overview, uid)
         lines = ["📜 <b>سجل الصفقات التجريبية</b>"]
         if not overview["closed"]:
             lines.append("لا توجد صفقات مغلقة بعد.")
@@ -1015,18 +979,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "demoreset":
         from fysb.engines import demo as demo_engine
-        demo_engine.reset_account(uid)
+        await afn.run(demo_engine.reset_account, uid)
         await render(q, "🔄 <b>تم تصفير الحساب التجريبي</b> وإعادة الرصيد الابتدائي. الصفقات المفتوحة أُغلقت إدارياً.",
                      kb.user_nav([[kb.btn("🧪 التجريبي", "u:demo")]]), bot)
 
     # ---------- Stats / support / help ----------
     elif action == "my_stats":
-        profile = users_service.profile_summary(uid)
-        with db.conn() as c:
-            wins = c.execute("""SELECT COUNT(*) n FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
-                                WHERE d.user_id=? AND s.status='TP3_HIT'""", (uid,)).fetchone()["n"]
-            sls = c.execute("""SELECT COUNT(*) n FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
-                               WHERE d.user_id=? AND s.status='SL_HIT'""", (uid,)).fetchone()["n"]
+        profile = await afn.run(users_service.profile_summary, uid)
+        wins, sls = await afn.run(_my_stats_counts, uid)
         body = (f"📈 <b>إحصائياتي</b>\n\n"
                 f"📡 إشارات استلمتها: <b>{profile['consumed_total']}</b>\n"
                 f"🟢 مكتملة TP3: <b>{wins}</b>\n🔴 ضربت SL: <b>{sls}</b>\n"
@@ -1035,7 +995,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action == "support":
         context.user_data["awaiting_ticket"] = True
-        cfg = support_service.config_row()
+        cfg = await afn.run(support_service.config_row) or {}
         body = ["🎧 <b>الدعم الفني</b>"]
         if any(cfg.get(x) for x in ("username", "phone", "channel", "group_chat")):
             body.append("\n<b>وسائل التواصل:</b>")
@@ -1048,17 +1008,17 @@ async def user_page(q, action: str, uid: int, context) -> None:
             if cfg.get("group_chat"):
                 body.append(f"  👥 {esc(cfg['group_chat'])}")
         body.append("\n<b>لفتح تذكرة:</b> أرسل رسالتك هنا كنص واحد، ويمكن إرفاق صورة بعد الرسالة.")
-        mine = support_service.user_tickets(uid)
+        mine = await afn.run(support_service.user_tickets, uid)
         rows_kb = [[kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")] for t in mine]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     elif action.startswith("ticket:"):
         tid = _safe_int(action.split(":", 1)[1])
-        t = support_service.get_ticket(tid) if tid else None
+        t = (await afn.run(support_service.get_ticket, tid)) if tid else None
         if not t or t["user_id"] != uid:
             await render(q, "التذكرة غير موجودة.", kb.user_nav(), bot)
             return
-        msgs = support_service.ticket_messages(tid)
+        msgs = await afn.run(support_service.ticket_messages, tid)
         lines = [f"🎫 <b>تذكرة #{tid}</b> · {esc(t['subject'])} · <b>{esc(t['status'])}</b>", ""]
         for m in msgs[-8:]:
             who = "🧑 أنت" if m["sender_role"] == "user" else "🎧 الدعم"
@@ -1071,9 +1031,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     elif action.startswith("ticketreopen:"):
         tid = _safe_int(action.split(":", 1)[1])
-        t = support_service.get_ticket(tid) if tid else None
+        t = (await afn.run(support_service.get_ticket, tid)) if tid else None
         if t and t["user_id"] == uid:
-            support_service.set_status(tid, "OPEN")
+            await afn.run(support_service.set_status, tid, "OPEN")
             await _notify_admin_ticket(bot, tid, "أعاد المستخدم فتح التذكرة")
             await render(q, f"✅ أُعيد فتح التذكرة #{tid}.", kb.user_nav(), bot)
         else:
@@ -1137,6 +1097,123 @@ def _safe_int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _plans_for_sale():
+    """(v6.11.0 thread-offload helper) purchasable plans, cheapest first."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans WHERE enabled=1 AND price>0 ORDER BY price").fetchall()
+
+
+def _all_plans():
+    """(v6.11.0 thread-offload helper) every enabled plan."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans WHERE enabled=1 ORDER BY price").fetchall()
+
+
+def _plan_row(code: str):
+    """(v6.11.0 thread-offload helper) one enabled plan row by code."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans WHERE code=? AND enabled=1", (code,)).fetchone()
+
+
+def _plan_title_of(code: str):
+    """(v6.11.0 thread-offload helper) plan title row for payment cards."""
+    with db.conn() as c:
+        return c.execute("SELECT title FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _my_payments(uid: int):
+    """(v6.11.0 thread-offload helper) the user's last 8 payment requests."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM payments WHERE user_id=? ORDER BY id DESC LIMIT 8", (uid,)).fetchall()
+
+
+def _catalog_rows():
+    """(v6.11.0 thread-offload helper) FULL market catalog as dicts."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM market_catalog ORDER BY symbol").fetchall()]
+
+
+def _live_market_rows():
+    """(v6.11.0 thread-offload helper) enabled+verified market rows."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM market_catalog WHERE enabled=1 AND verified=1").fetchall()
+
+
+def _enabled_tf_codes():
+    """(v6.11.0 thread-offload helper) enabled+verified timeframe codes."""
+    with db.conn() as c:
+        return {r["code"] for r in c.execute("SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1")}
+
+
+def _enabled_strategy_codes():
+    """(v6.11.0 thread-offload helper) enabled+verified strategy codes."""
+    with db.conn() as c:
+        return {r["code"] for r in c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1")}
+
+
+def _dashboard_counts(uid: int):
+    """(v6.11.0 thread-offload helper) ONE pooled trip for the 5 dashboard counters."""
+    with db.conn() as c:
+        total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
+        active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
+        wins = c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"]
+        delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
+        anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
+                             (uid, db.day_start_utc())).fetchone()["n"]
+    return total, active, wins, delivered, anl_used
+
+
+def _live_signals_page(markets, timeframes, strategies, min_score):
+    """(v6.11.0 thread-offload helper) live signals with the REAL seq number
+    (same ROW_NUMBER as the admin center — identical # on both sides)."""
+    marks_m = ",".join("?" for _ in markets)
+    marks_t = ",".join("?" for _ in timeframes)
+    marks_s = ",".join("?" for _ in strategies)
+    args = list(markets) + list(timeframes) + list(strategies) + [min_score]
+    with db.conn() as c:
+        return c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                             FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                             AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
+                             AND strategy IN ({marks_s}) AND score>=?
+                             ORDER BY id DESC LIMIT 12""", args).fetchall()
+
+
+def _delivered_set(uid: int, sids: list) -> set:
+    """(v6.11.0 thread-offload helper) ids of signals already delivered to uid.
+    ONE pooled trip instead of one query per row."""
+    if not sids:
+        return set()
+    marks = ",".join("?" for _ in sids)
+    with db.conn() as c:
+        rows = c.execute(f"SELECT signal_id FROM signal_deliveries WHERE user_id=? AND signal_id IN ({marks})",
+                         [uid] + list(sids)).fetchall()
+    return {r["signal_id"] for r in rows}
+
+
+def _signal_row(sid: int):
+    """(v6.11.0 thread-offload helper) one signal row by id."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+
+
+def _open_signals_rows():
+    """(v6.11.0 thread-offload helper) latest open signals for the demo picker."""
+    with db.conn() as c:
+        return c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
+                            FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
+                            ORDER BY id DESC LIMIT 6""").fetchall()
+
+
+def _my_stats_counts(uid: int):
+    """(v6.11.0 thread-offload helper) TP3/SL counters over delivered signals."""
+    with db.conn() as c:
+        wins = c.execute("""SELECT COUNT(*) n FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
+                            WHERE d.user_id=? AND s.status='TP3_HIT'""", (uid,)).fetchone()["n"]
+        sls = c.execute("""SELECT COUNT(*) n FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
+                           WHERE d.user_id=? AND s.status='SL_HIT'""", (uid,)).fetchone()["n"]
+    return wins, sls
 
 
 def _market_row(symbol: str):

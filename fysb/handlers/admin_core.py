@@ -2,7 +2,7 @@
 Payments, Payment Methods — all real-DB, all server-guarded, luxury cards."""
 from telegram.ext import ContextTypes
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.handlers.common import render, safe
 from fysb.handlers.inputs import (PM_CATEGORIES, PM_PRESETS, clear_flows,
                                   plan_persist)
@@ -17,7 +17,7 @@ from fysb.ui import keyboards as kb
 
 
 async def admin_stats(q, uid, context, bot):
-    body = reports_service.dashboard_view()
+    body = await afn.run(reports_service.dashboard_view)
     await render(q, body, kb.admin_nav([[kb.btn("📈 إحصائيات مفصلة", "a:statistics"), kb.btn("🖥 حالة النظام", "a:health")]]), bot)
 
 
@@ -43,10 +43,11 @@ async def admin_statistics(q, uid, context, bot, page: int = 0):
     the render safety net truncates nothing silently."""
     page = max(0, min(int(page or 0), len(STAT_SECTIONS) - 1))
     key = STAT_SECTIONS[page]
+    section_body = await afn.run(_stat_section_body, key)
     body = (f"📈 <b><u>الإحصائيات الملكية — {STAT_TITLES[key]}</u></b>\n"
             f"<blockquote>▎📄 القسم <b>{page + 1}</b> من <b>{len(STAT_SECTIONS)}</b>"
             f" · حدّث لحظياً من قاعدة البيانات الحقيقية</blockquote>\n"
-            + _stat_section_body(key))
+            + section_body)
     pager = []
     if page > 0:
         pager.append(kb.btn("◀️ السابق", f"a:statistics:{page - 1}"))
@@ -58,7 +59,7 @@ async def admin_statistics(q, uid, context, bot, page: int = 0):
 
 # --- Users ---------------------------------------------------------------------
 async def admin_users(q, uid, context, bot, page: int = 0):
-    data = users_service.page_list(page)  # admin excluded inside the service
+    data = await afn.run(users_service.page_list, page)  # admin excluded inside the service
     rows_kb = [[kb.btn(f"{'⛔' if r['is_blocked'] else '🟢'} {(r['full_name'] or r['username'] or 'مستخدم')[:18]} · {r['user_id']}",
                        f"a:userdetail:{r['user_id']}")] for r in data["rows"]]
     nav_row = []
@@ -83,11 +84,11 @@ async def admin_user_detail(q, uid, context, bot, target: int):
     if target == config.ADMIN_ID:
         await render(q, "⛔ حساب المدير خارج قسم المستخدمين — لا يُعرض ولا يُدار من هنا.", kb.admin_nav(), bot)
         return
-    u = users_service.get_user(target)
+    u = await afn.run(users_service.get_user, target)
     if not u:
         await render(q, "المستخدم غير موجود.", kb.admin_nav(), bot)
         return
-    profile = users_service.profile_summary(target)
+    profile = await afn.run(users_service.profile_summary, target)
     rows_kb = [
         [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}"),
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
@@ -104,17 +105,11 @@ async def admin_user_delete_confirm(q, uid, context, bot, target: int):
     if target == config.ADMIN_ID:
         await render(q, "⛔ حساب المدير لا يُحذف أبداً — محمي على مستوى الخدمة نفسها.", kb.admin_nav(), bot)
         return
-    u = users_service.get_user(target)
+    u = await afn.run(users_service.get_user, target)
     if not u:
         await render(q, "المستخدم غير موجود (ربما حُذف سابقاً).", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        n = lambda t: c.execute(f"SELECT COUNT(*) n FROM {t} WHERE user_id=?", (target,)).fetchone()["n"]
-        stats = {"subscriptions": n("subscriptions"), "payments": n("payments"),
-                 "deliveries": n("signal_deliveries"), "demo": n("demo_accounts"),
-                 "positions": n("demo_positions"), "trades": n("demo_trades"),
-                 "analyses": n("analyses"), "tickets": n("tickets"),
-                 "accounts": n("user_accounts")}
+    stats = await afn.run(_user_delete_counts, target)
     name = (u["full_name"] or u["username"] or str(target))
     body = (f"🗑 <b>حذف نهائي للمستخدم</b>\n"
             f"<blockquote>▎👤 <b>{esc(name)}</b> · <code>{target}</code>\n"
@@ -132,7 +127,7 @@ async def admin_user_delete_confirm(q, uid, context, bot, target: int):
 
 
 async def admin_user_delete_go(q, uid, context, bot, target: int):
-    res = users_service.delete_user_forever(target, uid)
+    res = await afn.run(users_service.delete_user_forever, target, uid)
     if not res.get("ok"):
         await render(q, f"⛔ {esc(res.get('error', 'فشل الحذف'))}", kb.admin_nav(), bot)
         return
@@ -154,26 +149,25 @@ async def admin_toggle_user(q, uid, context, bot, target: int):
     if target == config.ADMIN_ID:
         await render(q, "⛔ لا يمكن حظر حساب المدير.", kb.admin_nav(), bot)
         return
-    u = users_service.get_user(target)
+    u = await afn.run(users_service.get_user, target)
     if not u:
         await render(q, "المستخدم غير موجود.", kb.admin_nav(), bot)
         return
-    users_service.set_blocked(target, not u["is_blocked"], uid)
+    await afn.run(users_service.set_blocked, target, not u["is_blocked"], uid)
     await admin_user_detail(q, uid, context, bot, target)
 
 
 async def admin_toggle_notify(q, uid, context, bot, target: int):
-    u = users_service.get_user(target)
+    u = await afn.run(users_service.get_user, target)
     if not u:
         await render(q, "المستخدم غير موجود.", kb.admin_nav(), bot)
         return
-    users_service.set_notifications(target, not u["notifications"])
+    await afn.run(users_service.set_notifications, target, not u["notifications"])
     await admin_user_detail(q, uid, context, bot, target)
 
 
 async def admin_user_payments(q, uid, context, bot, target: int):
-    with db.conn() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM payments WHERE user_id=? ORDER BY id DESC LIMIT 10", (target,)).fetchall()]
+    rows = await afn.run(_user_payments_rows, target)
     rows_kb = [[kb.btn(f"🧾 #{r['id']} · {esc(r['plan_code'])} · {esc(r['status'])}", f"a:paymentdetail:{r['id']}")] for r in rows]
     if not rows_kb:
         rows_kb = [[kb.btn("لا توجد مدفوعات", "a:plannoop")]]
@@ -189,30 +183,13 @@ async def admin_user_deliveries(q, uid, context, bot, target: int):
     from fysb.engines.tracker import seq_of
     from fysb import instruments
     from fysb.theme import dir_badge, status_ar
-    with db.conn() as c:
-        rows = [dict(r) for r in c.execute(
-            """SELECT d.delivered_at, s.* FROM signal_deliveries d
-               JOIN signals s ON s.id=d.signal_id
-               WHERE d.user_id=? ORDER BY d.delivered_at DESC LIMIT 10""", (target,)).fetchall()]
-    lines = [f"📡 <b><u>الإشارات التي استلمها المستخدم {target}</u></b>", ""]
-    for r in rows:
-        seq = seq_of(r["id"])
-        d_emoji = "🟢" if r["direction"] == "BUY" else "🔴"
-        res = ""
-        if r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
-            usd = instruments.usd_move(r["symbol"], float(r["pips_result"] or 0), 0.01)
-            res = f"\n   ▎📈 النتيجة المسجلة: <b>{float(r['pips_result'] or 0):+.1f} pips</b> · <b>{usd:+,.2f} $</b> بـ 0.01 لوت"
-        lines.append(
-            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {status_ar(r['status'])}" + res)
-    if not rows:
-        lines.append("▎لا شيء بعد.")
+    lines = await afn.run(_delivery_lines, target)
     await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("↩️ الملف", f"a:userdetail:{target}")]]), bot)
 
 
 async def admin_sub_edit(q, uid, context, bot, target: int):
-    with db.conn() as c:
-        plans = c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
-    profile = users_service.profile_summary(target)
+    plans = await afn.run(_plan_code_title_rows)
+    profile = await afn.run(users_service.profile_summary, target)
     current = profile.get("plan_code", "FREE")
     rows_kb = []
     for p in plans:
@@ -229,7 +206,7 @@ async def admin_sub_set(q, uid, context, bot, target: int, code: str):
     if target == config.ADMIN_ID:
         await render(q, "⛔ حساب المدير لا يُدار كاشتراك مستخدم.", kb.admin_nav(), bot)
         return
-    res = users_service.admin_edit_subscription(target, code, uid)
+    res = await afn.run(users_service.admin_edit_subscription, target, code, uid)
     if not res.get("ok"):
         await render(q, f"⛔ {esc(res.get('error', 'فشل'))}", kb.admin_nav(), bot)
         return
@@ -244,11 +221,11 @@ async def admin_sub_set(q, uid, context, bot, target: int, code: str):
 
 
 async def admin_sub_extend(q, uid, context, bot, target: int, days: int):
-    profile = users_service.profile_summary(target)
+    profile = await afn.run(users_service.profile_summary, target)
     code = profile.get("plan_code", "FREE")
-    res = subs.grant_subscription(target, code, source="ADMIN_EXTEND", actor=uid, override_days=days)
+    res = await afn.run(subs.grant_subscription, target, code, source="ADMIN_EXTEND", actor=uid, override_days=days)
     if res.get("ok"):
-        audit_log.log(uid, f"subscription_extended:{target}:{days}d")
+        await afn.run(audit_log.log, uid, f"subscription_extended:{target}:{days}d")
         try:
             await bot.send_message(target, f"⏳ تم تمديد اشتراكك {days} يوماً من قبل الإدارة.")
         except Exception:
@@ -259,9 +236,9 @@ async def admin_sub_extend(q, uid, context, bot, target: int, days: int):
 
 
 async def admin_sub_cancel(q, uid, context, bot, target: int):
-    ok = subs.cancel_subscription(target, uid)
+    ok = await afn.run(subs.cancel_subscription, target, uid)
     if ok:
-        audit_log.log(uid, f"subscription_cancelled:{target}")
+        await afn.run(audit_log.log, uid, f"subscription_cancelled:{target}")
         try:
             await bot.send_message(target, "⛔ أوقفت الإدارة اشتراكك. تواصل مع الدعم للاستفسار.")
         except Exception:
@@ -271,10 +248,8 @@ async def admin_sub_cancel(q, uid, context, bot, target: int):
 
 async def admin_demo_acct(q, uid, context, bot, target: int):
     from fysb.engines import demo as demo_engine
-    acc = demo_engine.get_or_create_account(target)
-    with db.conn() as c:
-        open_n = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE account_id=? AND status='OPEN'", (acc["id"],)).fetchone()["n"]
-        closed = c.execute("SELECT COUNT(*) n, COALESCE(SUM(pnl),0) s FROM demo_positions WHERE account_id=? AND status!='OPEN'", (acc["id"],)).fetchone()
+    acc = await afn.run(demo_engine.get_or_create_account, target)
+    open_n, closed = await afn.run(_demo_account_stats, acc["id"])
     body = (f"🧪 <b>الحساب التجريبي للمستخدم {target}</b>\n\n"
             f"💰 الرصيد: <b>{acc['balance']:,.2f}</b> {esc(acc.get('currency', 'USD'))}\n"
             f"📉 أعلى Equity: {acc['peak_equity']:,.2f}\n"
@@ -285,17 +260,14 @@ async def admin_demo_acct(q, uid, context, bot, target: int):
 
 async def admin_demo_reset(q, uid, context, bot, target: int):
     from fysb.engines import demo as demo_engine
-    demo_engine.reset_account(target)
-    audit_log.log(uid, f"demo_reset:{target}")
+    await afn.run(demo_engine.reset_account, target)
+    await afn.run(audit_log.log, uid, f"demo_reset:{target}")
     await render(q, f"✅ تم تصفير الحساب التجريبي للمستخدم {target}.", kb.admin_nav(), bot)
 
 
 # --- Subscriptions -------------------------------------------------------------
 async def admin_subscriptions(q, uid, context, bot):
-    with db.conn() as c:
-        active = c.execute("""SELECT s.*, u.full_name FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id
-                              WHERE s.status='ACTIVE' ORDER BY s.id DESC LIMIT 10""").fetchall()
-        expired = c.execute("SELECT COUNT(*) n FROM subscriptions WHERE status='EXPIRED'").fetchone()["n"]
+    active, expired = await afn.run(_subs_page_rows)
     rows_kb = [[kb.btn(f"💎 #{r['id']} {esc(r['full_name'] or '')} {r['user_id']} · {esc(r['plan_code'])} · {human_dt(r['ends_at'])[:10] if r['ends_at'] else 'دائم'}",
                        f"a:userdetail:{r['user_id']}")] for r in active]
     await render(q, f"💎 <b><u>الاشتراكات النشطة (آخر 10)</u></b>\n▎منتهية/مستبدلة تاريخياً: <b>{expired}</b>\nاضغط للانتقال لملف المستخدم:",
@@ -304,8 +276,7 @@ async def admin_subscriptions(q, uid, context, bot):
 
 # --- Plans (guided creation — no pipe input) -----------------------------------
 async def admin_plans(q, uid, context, bot):
-    with db.conn() as c:
-        rows = c.execute("SELECT * FROM plans ORDER BY price").fetchall()
+    rows = await afn.run(_plans_all_rows)
     rows_kb = []
     for r in rows:
         status = "🟢" if r["enabled"] else "⚪"
@@ -359,9 +330,7 @@ async def _plan_reply_current(q, uid, context, bot, d: dict, note: str):
     elif stage == "markets":
         # v6.10.0 (owner report 4): ONLY the markets the admin actually armed
         # (enabled+verified) in the markets center — never the whole catalog.
-        with db.conn() as c:
-            mkts = [r["symbol"] for r in c.execute(
-                "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+        mkts = await afn.run(_plan_market_choices)
         if not mkts:
             rows = [[kb.btn("⛔ لا توجد أسواق مفعلة — فعّل سوقاً من قسم الأسواق أولاً", "a:plannoop")]]
         else:
@@ -376,13 +345,7 @@ async def _plan_reply_current(q, uid, context, bot, d: dict, note: str):
     elif stage == "strategies":
         # v6.10.0 (owner report 4): ONLY REAL, enabled+verified+IMPLEMENTED
         # engines — in the guaranteed strength order.
-        from fysb.engines.strategies import REGISTRY
-        with db.conn() as c:
-            strat_rows = c.execute(
-                "SELECT code FROM strategy_catalog WHERE verified=1 AND enabled=1").fetchall()
-        from fysb.services import strategy_stats
-        codes = strategy_stats.ordered_codes(
-            [r["code"] for r in strat_rows if REGISTRY.get(r["code"]) is not None])
+        codes = await afn.run(_plan_strategy_choices)
         if not codes:
             rows = [[kb.btn("⛔ لا توجد منهجيات مفعلة — فعّلها من قسم الاستراتيجيات أولاً", "a:plannoop")]]
         else:
@@ -439,8 +402,8 @@ async def admin_plan_cb(q, uid, context, bot, action: str, arg: str):
         d["strategies"] = (d["strategies"] - [s]) if s in d["strategies"] else (d["strategies"] + [s])
         await _plan_reply_current(q, uid, context, bot, d, f"🧠 الاستراتيجيات: <b>{', '.join(d['strategies']) or '—'}</b>")
     elif action == "confirm":
-        plan_persist(d)
-        audit_log.log(uid, f"plan_created:{d['code']}")
+        await afn.run(plan_persist, d)
+        await afn.run(audit_log.log, uid, f"plan_created:{d['code']}")
         code = d["code"]
         context.user_data.pop("plan_draft", None)
         await render(q, f"✅ <b>حُفظت الباقة {esc(code)} بنجاح</b>", kb.admin_nav([[kb.btn("💠 عرض الباقات", "a:plans")]]), bot)
@@ -457,8 +420,7 @@ async def admin_plan_cb(q, uid, context, bot, action: str, arg: str):
 
 
 async def admin_plan_edit(q, uid, context, bot, code: str):
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
+    r = await afn.run(_plan_row_any, code)
     if not r:
         await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
         return
@@ -466,9 +428,7 @@ async def admin_plan_edit(q, uid, context, bot, code: str):
     markets = [x.strip() for x in (p["markets"] or "").split(",") if x.strip()]
     tfs = [x.strip() for x in (p["timeframes"] or "").split(",") if x.strip()]
     strats = [x.strip() for x in (p["strategies"] or "").split(",") if x.strip()]
-    with db.conn() as c:
-        all_mkts = [row["symbol"] for row in c.execute("SELECT symbol FROM market_catalog ORDER BY symbol").fetchall()]
-        all_strats = [row["code"] for row in c.execute("SELECT code FROM strategy_catalog WHERE verified=1 ORDER BY code").fetchall()]
+    all_mkts, all_strats = await afn.run(_plan_edit_catalog)
     all_tfs = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]
     mkt_row = " ".join(("✅" + m) if m in markets else ("▫️" + m) for m in all_mkts)
     tf_row = " ".join(("✅" + t) if t in tfs else ("▫️" + t) for t in all_tfs)
@@ -563,8 +523,7 @@ async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
     v6.8.1 — strategies show the FULL world catalog (not only verified), in the
     guaranteed baseline order; markets group by royal category. The render()
     edit-in-place keeps every toggle on ONE page surface."""
-    with db.conn() as c:
-        r = c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
+    r = await afn.run(_plan_row_any, code)
     if not r:
         await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
         return
@@ -574,8 +533,7 @@ async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
                                     p.get("strategies") or "").split(",") if x.strip()]
     if kind == "markets":
         from fysb.handlers.admin_trading import CATEGORY_ORDER
-        with db.conn() as c:
-            recs = [dict(row) for row in c.execute("SELECT symbol, category FROM market_catalog").fetchall()]
+        recs = await afn.run(_market_category_pairs)
         by_cat: dict[str, list] = {}
         for rec in recs:
             by_cat.setdefault(rec.get("category") or "forex", []).append(rec["symbol"])
@@ -586,10 +544,9 @@ async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
         items = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]
         title, icon = "الأطر الزمنية", "⏱"
     else:
-        with db.conn() as c:
-            recs = [dict(row) for row in c.execute("SELECT code, verified FROM strategy_catalog").fetchall()]
+        recs = await afn.run(_strategy_light_rows)
         from fysb.services import strategy_stats
-        items = strategy_stats.ordered_codes([x["code"] for x in recs])
+        items = await afn.run(strategy_stats.ordered_codes, [x["code"] for x in recs])
         verified = {x["code"] for x in recs if x["verified"]}
         prefix = {c: ("✳️ " if c in verified else "🔒 ") for c in items}
         title, icon = "الاستراتيجيات (الموثقة ✳️ والمغلقة 🔒)", "🧠"
@@ -609,8 +566,7 @@ async def admin_plan_feat_page(q, uid, context, bot, code: str, kind: str):
 
 
 async def admin_plan_feat_toggle(q, uid, context, bot, code: str, kind: str, item: str):
-    with db.conn() as c:
-        r = c.execute("SELECT markets,timeframes,strategies FROM plans WHERE code=?", (code,)).fetchone()
+    r = await afn.run(_plan_feature_cols, code)
     if not r:
         await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
         return
@@ -623,9 +579,8 @@ async def admin_plan_feat_toggle(q, uid, context, bot, code: str, kind: str, ite
         current = [x for x in current if x.upper() != item.upper()]
     else:
         current.append(item)
-    with db.conn() as c:
-        c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (",".join(current), code))
-    audit_log.log(uid, f"plan_feature:{code}:{kind}:{item}:{'on' if item in current else 'off'}")
+    await afn.run(_plan_feature_apply, code, col, ",".join(current))
+    await afn.run(audit_log.log, uid, f"plan_feature:{code}:{kind}:{item}:{'on' if item in current else 'off'}")
     await admin_plan_feat_page(q, uid, context, bot, code, kind)
 
 
@@ -637,28 +592,26 @@ async def admin_plan_adjust(q, uid, context, bot, code: str, field: str, delta: 
         await render(q, "حقل غير صالح.", kb.admin_nav(), bot)
         return
     col, minimum, step = fields[field]
-    with db.conn() as c:
-        r = c.execute(f"SELECT {col} value FROM plans WHERE code=?", (code,)).fetchone()
-        if not r:
-            await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
-            return
-        value = max(minimum, (r["value"] or 0) + delta * step)
-        if field == "score":
-            value = min(100, value)
-        c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (value, code))
-    audit_log.log(uid, f"plan_adjust:{code}:{field}:{value:g}")
+    r = await afn.run(_plan_field_value, code, col)
+    if not r:
+        await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
+        return
+    value = max(minimum, (r["value"] or 0) + delta * step)
+    if field == "score":
+        value = min(100, value)
+    await afn.run(_plan_field_update, code, col, value)
+    await afn.run(audit_log.log, uid, f"plan_adjust:{code}:{field}:{value:g}")
     await admin_plan_edit(q, uid, context, bot, code)
 
 
 async def admin_plan_toggle(q, uid, context, bot, code: str):
-    with db.conn() as c:
-        r = c.execute("SELECT enabled FROM plans WHERE code=?", (code,)).fetchone()
-        if not r:
-            await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
-            return
-        new = 0 if r["enabled"] else 1
-        c.execute("UPDATE plans SET enabled=? WHERE code=?", (new, code))
-    audit_log.log(uid, f"plan_toggle:{code}:{new}")
+    r = await afn.run(_plan_enabled_row, code)
+    if not r:
+        await render(q, "الباقة غير موجودة.", kb.admin_nav(), bot)
+        return
+    new = 0 if r["enabled"] else 1
+    await afn.run(_plan_enabled_set, code, new)
+    await afn.run(audit_log.log, uid, f"plan_toggle:{code}:{new}")
     await admin_plan_edit(q, uid, context, bot, code)
 
 
@@ -666,14 +619,12 @@ async def admin_plan_delete(q, uid, context, bot, code: str):
     if code == "FREE":
         await render(q, "⛔ الباقة المجانية محمية ولا تُحذف.", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        active = c.execute("SELECT COUNT(*) n FROM subscriptions WHERE plan_code=? AND status='ACTIVE'", (code,)).fetchone()["n"]
+    active = await afn.run(_plan_active_subs_count, code)
     if active:
         await render(q, f"⛔ لا يمكن الحذف: <b>{active}</b> اشتراك نشط مرتبط بالباقة. أوقفها بدلاً من حذفها.", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        c.execute("DELETE FROM plans WHERE code=?", (code,))
-    audit_log.log(uid, f"plan_deleted:{code}")
+    await afn.run(_plan_delete_row, code)
+    await afn.run(audit_log.log, uid, f"plan_deleted:{code}")
     await admin_plans(q, uid, context, bot)
 
 
@@ -683,8 +634,8 @@ async def admin_noop(q, uid, context, bot):
 
 # --- Payments ------------------------------------------------------------------
 async def admin_payments(q, uid, context, bot, status: str = "PENDING"):
-    rows = payments_service.list_requests(status if status != "ALL" else None)
-    stats = payments_service.stats()
+    rows = await afn.run(payments_service.list_requests, status if status != "ALL" else None)
+    stats = await afn.run(payments_service.stats)
     rows_kb = []
     for r in rows[:10]:
         rows_kb.append([kb.btn(f"🧾 #{r['id']} · {esc(r['plan_code'])} · {r['amount']:g} · {esc(r['status'])}", f"a:paymentdetail:{r['id']}")])
@@ -698,12 +649,11 @@ async def admin_payments(q, uid, context, bot, status: str = "PENDING"):
 
 
 async def admin_payment_detail(q, uid, context, bot, pid: int):
-    p = payments_service.get_request(pid)
+    p = await afn.run(payments_service.get_request, pid)
     if not p:
         await render(q, "الطلب غير موجود.", kb.admin_nav(), bot)
         return
-    with db.conn() as c:
-        plan = c.execute("SELECT title FROM plans WHERE code=?", (p["plan_code"],)).fetchone()
+    plan = await afn.run(_plan_title_row, p["plan_code"])
     rows_kb = []
     if p["status"] == "PENDING":
         rows_kb.append([kb.btn("✅ قبول الطلب", f"a:approvepay:{pid}"), kb.btn("❌ رفض الطلب", f"a:rejectpay:{pid}")])
@@ -714,12 +664,12 @@ async def admin_payment_detail(q, uid, context, bot, pid: int):
 
 
 async def admin_payment_approve(q, uid, context, bot, pid: int):
-    res = payments_service.approve_request(pid, uid)
+    res = await afn.run(payments_service.approve_request, pid, uid)
     if not res.get("ok"):
         await render(q, f"⛔ {esc(res.get('error', 'فشل'))}", kb.admin_nav(), bot)
         return
     p = res["payment"]
-    audit_log.log(uid, f"payment_approved:{pid}")
+    await afn.run(audit_log.log, uid, f"payment_approved:{pid}")
     try:
         await bot.send_message(p["user_id"],
                                f"✅ تمت الموافقة على طلبك #{pid} وتفعيل باقة <b>{esc(p['plan_code'])}</b>.",
@@ -740,7 +690,7 @@ async def admin_payment_reject(q, uid, context, bot, pid: int):
 
 
 async def admin_view_receipt(q, uid, context, bot, pid: int):
-    p = payments_service.get_request(pid)
+    p = await afn.run(payments_service.get_request, pid)
     if not p or not p["receipt_file_id"]:
         await render(q, "لا يوجد إيصال مرفق.", kb.admin_nav(), bot)
         return
@@ -749,16 +699,15 @@ async def admin_view_receipt(q, uid, context, bot, pid: int):
 
 # --- Payment methods (guided presets incl. Yemeni wallets) ----------------------
 async def admin_paymethods(q, uid, context, bot):
-    methods = payments_service.list_methods()
+    methods = await afn.run(payments_service.list_methods)
     rows_kb = [[kb.btn(f"{'🟢' if m['enabled'] else '⚪'} {esc(m['title'])}{' · ' + esc(m['country']) if m['country'] else ''}",
                        f"a:pmview:{m['id']}")] for m in methods]
-    wallet_row = " · ".join(
-        f"{ch}: {'✅' if payments_service.chain_wallet(ch) else '⚪'}"
-        for ch in ("TRC20", "BEP20", "ERC20", "POLYGON"))
+    wallet_row = await afn.run(_chain_wallet_marks)
+    chains_ready = await afn.run(payments_service.configured_chains)
     body = (f"{ICON['bank']} <b><u>وسائل الدفع</u></b>\n"
             "▎أضف وسيلة دفع بتدفق موجّه: محافظ يمنية، عملات رقمية، حوالات — مع بيانات الحساب والتعليمات وربط الباقات.\n"
             f"▎⛓ محافظ USDT للتحقق البلوكيشن الفوري — {wallet_row}\n"
-            "▎الشبكات الجاهزة: <b>" + (", ".join(payments_service.configured_chains()) or "—") + "</b>")
+            "▎الشبكات الجاهزة: <b>" + (", ".join(chains_ready) or "—") + "</b>")
     await render(q, body, kb.admin_nav(rows_kb + [[kb.btn("➕ إضافة وسيلة دفع", "a:pmadd")],
                                                  [kb.btn("⛓ محافظ USDT — كل الشبكات", "a:usdtwallet")]]), bot)
 
@@ -773,11 +722,12 @@ async def admin_usdt_wallet(q, uid, context, bot, chain: str = "TRC20"):
         chain = "TRC20"
     labels = {"TRC20": "USDT TRC20 (Tron)",
               **{k: v["label"] for k, v in EVM_CHAINS.items()}}
-    wallet = payments_service.chain_wallet(chain)
+    wallet = await afn.run(payments_service.chain_wallet, chain)
     context.user_data["awaiting_usdt_wallet"] = {"chain": chain}
+    wallets = await afn.run(_all_chain_wallets, ALL_CHAINS)
     rows = []
     for ch in ALL_CHAINS:
-        w = payments_service.chain_wallet(ch)
+        w = wallets[ch]
         mark = "🟢" if w else "⚪"
         rows.append([kb.btn(f"{mark} ضبط {labels[ch]}",
                             f"a:usdtwallet:{ch}" if ch != chain else "a:plannoop")])
@@ -786,7 +736,7 @@ async def admin_usdt_wallet(q, uid, context, bot, chain: str = "TRC20"):
                     "▎المستخدم يدفع USDT على الشبكة التي يختارها ← يرسل TXID ← يُفحص البلوكيشن فعلياً\n"
                     "▎(التأكيد + العقد + العنوان الملكي + المبلغ) ← تُفتح الباقة فوراً\n"
                     "▎🔒 ويُحجب الـ TXID نهائياً من أي استخدام آخر\n"
-                    f"▎الشبكات الجاهزة للمستخدمين الآن: <b>{', '.join(payments_service.configured_chains()) or '—'}</b>"
+                    f"▎الشبكات الجاهزة للمستخدمين الآن: <b>{', '.join(await afn.run(payments_service.configured_chains)) or '—'}</b>"
                     "</blockquote>\n\n"
                     f"⛓ <b>الشبكة الحالية: {labels[chain]}</b>\n"
                     + ("أرسل <b>عنوان المحفظة</b> الآن:\n"
@@ -844,8 +794,7 @@ async def admin_pm_toggle_plan(q, uid, context, bot, code: str):
         return
     d["linked"] = (d["linked"] - [code]) if code in d["linked"] else (d["linked"] + [code])
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    with db.conn() as c:
-        plans = c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+    plans = await afn.run(_plan_code_title_rows)
     kb_rows = [[InlineKeyboardButton(("✅ " if p["code"] in d["linked"] else "") + p["title"],
                                      callback_data=f"a:pmplan:{p['code']}")] for p in plans]
     kb_rows.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
@@ -859,10 +808,10 @@ async def admin_pm_save(q, uid, context, bot):
     if not d or not d.get("title"):
         await render(q, "لا توجد وسيلة قيد الإنشاء.", kb.admin_nav(), bot)
         return
-    mid = payments_service.add_method(d["title"], d.get("instructions", ""), d.get("account_ref", ""),
-                                      d.get("country", ""), ",".join(d.get("linked", [])))
+    mid = await afn.run(payments_service.add_method, d["title"], d.get("instructions", ""), d.get("account_ref", ""),
+                        d.get("country", ""), ",".join(d.get("linked", [])))
     context.user_data.pop("pm_draft", None)
-    audit_log.log(uid, f"pm_added:{mid}:{d['title'][:30]}")
+    await afn.run(audit_log.log, uid, f"pm_added:{mid}:{d['title'][:30]}")
     await render(q, f"✅ <b>حُفظت وسيلة الدفع «{esc(d['title'])}»</b> ومتاحة للمستخدمين الآن.",
                  kb.admin_nav([[kb.btn("🏦 وسائل الدفع", "a:paymethods")]]), bot)
 
@@ -873,7 +822,7 @@ async def admin_pm_cancel(q, uid, context, bot):
 
 
 async def admin_pm_view(q, uid, context, bot, mid: int):
-    m = payments_service.get_method(mid)
+    m = await afn.run(payments_service.get_method, mid)
     if not m:
         await render(q, "الوسيلة غير موجودة.", kb.admin_nav(), bot)
         return
@@ -892,16 +841,199 @@ async def admin_pm_view(q, uid, context, bot, mid: int):
 
 
 async def admin_pm_toggle(q, uid, context, bot, mid: int):
-    m = payments_service.get_method(mid)
+    m = await afn.run(payments_service.get_method, mid)
     if not m:
         await render(q, "الوسيلة غير موجودة.", kb.admin_nav(), bot)
         return
-    payments_service.update_method(mid, enabled=0 if m["enabled"] else 1)
-    audit_log.log(uid, f"pm_toggle:{mid}")
+    await afn.run(payments_service.update_method, mid, enabled=0 if m["enabled"] else 1)
+    await afn.run(audit_log.log, uid, f"pm_toggle:{mid}")
     await admin_pm_view(q, uid, context, bot, mid)
 
 
 async def admin_pm_delete(q, uid, context, bot, mid: int):
-    ok = payments_service.delete_method(mid)
-    audit_log.log(uid, f"pm_delete:{mid}:{ok}")
+    ok = await afn.run(payments_service.delete_method, mid)
+    await afn.run(audit_log.log, uid, f"pm_delete:{mid}:{ok}")
     await admin_paymethods(q, uid, context, bot)
+
+
+# --- v6.11.0 thread-offload helpers ---
+def _user_delete_counts(target: int) -> dict:
+    """(v6.11.0 thread-offload helper) per-table wipe counts for one user."""
+    with db.conn() as c:
+        n = lambda t: c.execute(f"SELECT COUNT(*) n FROM {t} WHERE user_id=?", (target,)).fetchone()["n"]
+        return {"subscriptions": n("subscriptions"), "payments": n("payments"),
+                "deliveries": n("signal_deliveries"), "demo": n("demo_accounts"),
+                "positions": n("demo_positions"), "trades": n("demo_trades"),
+                "analyses": n("analyses"), "tickets": n("tickets"),
+                "accounts": n("user_accounts")}
+
+
+def _user_payments_rows(target: int) -> list[dict]:
+    """(v6.11.0 thread-offload helper) last 10 payment requests of one user."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM payments WHERE user_id=? ORDER BY id DESC LIMIT 10", (target,)).fetchall()]
+
+
+def _delivery_lines(target: int) -> list[str]:
+    """(v6.11.0 thread-offload helper) received-signals card lines — rows fetch,
+    real sequential numbering and USD results all off the loop (v6.11.0)."""
+    from fysb.engines.tracker import seq_of
+    from fysb import instruments
+    from fysb.theme import dir_badge, status_ar
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT d.delivered_at, s.* FROM signal_deliveries d
+               JOIN signals s ON s.id=d.signal_id
+               WHERE d.user_id=? ORDER BY d.delivered_at DESC LIMIT 10""", (target,)).fetchall()]
+    lines = [f"📡 <b><u>الإشارات التي استلمها المستخدم {target}</u></b>", ""]
+    for r in rows:
+        seq = seq_of(r["id"])
+        d_emoji = "🟢" if r["direction"] == "BUY" else "🔴"
+        res = ""
+        if r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+            usd = instruments.usd_move(r["symbol"], float(r["pips_result"] or 0), 0.01)
+            res = f"\n   ▎📈 النتيجة المسجلة: <b>{float(r['pips_result'] or 0):+.1f} pips</b> · <b>{usd:+,.2f} $</b> بـ 0.01 لوت"
+        lines.append(
+            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {status_ar(r['status'])}" + res)
+    if not rows:
+        lines.append("▎لا شيء بعد.")
+    return lines
+
+
+def _plan_code_title_rows() -> list:
+    """(v6.11.0 thread-offload helper) plan picker rows ordered by price."""
+    with db.conn() as c:
+        return c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
+
+
+def _demo_account_stats(account_id: int):
+    """(v6.11.0 thread-offload helper) open count + closed count/sum, ONE trip."""
+    with db.conn() as c:
+        open_n = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE account_id=? AND status='OPEN'", (account_id,)).fetchone()["n"]
+        closed = c.execute("SELECT COUNT(*) n, COALESCE(SUM(pnl),0) s FROM demo_positions WHERE account_id=? AND status!='OPEN'", (account_id,)).fetchone()
+    return open_n, closed
+
+
+def _subs_page_rows():
+    """(v6.11.0 thread-offload helper) active subscriptions + expired counter."""
+    with db.conn() as c:
+        active = c.execute("""SELECT s.*, u.full_name FROM subscriptions s LEFT JOIN users u ON u.user_id=s.user_id
+                              WHERE s.status='ACTIVE' ORDER BY s.id DESC LIMIT 10""").fetchall()
+        expired = c.execute("SELECT COUNT(*) n FROM subscriptions WHERE status='EXPIRED'").fetchone()["n"]
+    return active, expired
+
+
+def _plans_all_rows() -> list:
+    """(v6.11.0 thread-offload helper) every plan row ordered by price."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans ORDER BY price").fetchall()
+
+
+def _plan_market_choices() -> list[str]:
+    """(v6.11.0 thread-offload helper) enabled+verified market symbols."""
+    with db.conn() as c:
+        return [r["symbol"] for r in c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+
+
+def _plan_strategy_choices() -> list[str]:
+    """(v6.11.0 thread-offload helper) implemented, enabled+verified strategy codes."""
+    from fysb.engines.strategies import REGISTRY
+    with db.conn() as c:
+        strat_rows = c.execute(
+            "SELECT code FROM strategy_catalog WHERE verified=1 AND enabled=1").fetchall()
+    from fysb.services import strategy_stats
+    return strategy_stats.ordered_codes(
+        [r["code"] for r in strat_rows if REGISTRY.get(r["code"]) is not None])
+
+
+def _plan_row_any(code: str):
+    """(v6.11.0 thread-offload helper) one plan row by code (any state)."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _plan_edit_catalog():
+    """(v6.11.0 thread-offload helper) full market symbols + verified strategy codes."""
+    with db.conn() as c:
+        all_mkts = [row["symbol"] for row in c.execute("SELECT symbol FROM market_catalog ORDER BY symbol").fetchall()]
+        all_strats = [row["code"] for row in c.execute("SELECT code FROM strategy_catalog WHERE verified=1 ORDER BY code").fetchall()]
+    return all_mkts, all_strats
+
+
+def _market_category_pairs() -> list[dict]:
+    """(v6.11.0 thread-offload helper) symbol+category pairs for plan scope."""
+    with db.conn() as c:
+        return [dict(row) for row in c.execute("SELECT symbol, category FROM market_catalog").fetchall()]
+
+
+def _strategy_light_rows() -> list[dict]:
+    """(v6.11.0 thread-offload helper) code+verified pairs for plan scope."""
+    with db.conn() as c:
+        return [dict(row) for row in c.execute("SELECT code, verified FROM strategy_catalog").fetchall()]
+
+
+def _plan_feature_cols(code: str):
+    """(v6.11.0 thread-offload helper) current markets/timeframes/strategies CSVs."""
+    with db.conn() as c:
+        return c.execute("SELECT markets,timeframes,strategies FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _plan_feature_apply(code: str, col: str, joined: str) -> None:
+    """(v6.11.0 thread-offload helper) write one plan feature CSV column."""
+    with db.conn() as c:
+        c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (joined, code))
+
+
+def _plan_field_value(code: str, col: str):
+    """(v6.11.0 thread-offload helper) read one plan column for adjustment."""
+    with db.conn() as c:
+        return c.execute(f"SELECT {col} value FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _plan_field_update(code: str, col: str, value) -> None:
+    """(v6.11.0 thread-offload helper) write one plan column after adjustment."""
+    with db.conn() as c:
+        c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (value, code))
+
+
+def _plan_enabled_row(code: str):
+    """(v6.11.0 thread-offload helper) current enabled flag of one plan."""
+    with db.conn() as c:
+        return c.execute("SELECT enabled FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _plan_enabled_set(code: str, new: int) -> None:
+    """(v6.11.0 thread-offload helper) write the enabled flag of one plan."""
+    with db.conn() as c:
+        c.execute("UPDATE plans SET enabled=? WHERE code=?", (new, code))
+
+
+def _plan_active_subs_count(code: str) -> int:
+    """(v6.11.0 thread-offload helper) active subscriptions bound to one plan."""
+    with db.conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM subscriptions WHERE plan_code=? AND status='ACTIVE'", (code,)).fetchone()["n"]
+
+
+def _plan_delete_row(code: str) -> None:
+    """(v6.11.0 thread-offload helper) erase one plan row."""
+    with db.conn() as c:
+        c.execute("DELETE FROM plans WHERE code=?", (code,))
+
+
+def _plan_title_row(code: str):
+    """(v6.11.0 thread-offload helper) plan title for payment cards."""
+    with db.conn() as c:
+        return c.execute("SELECT title FROM plans WHERE code=?", (code,)).fetchone()
+
+
+def _chain_wallet_marks() -> str:
+    """(v6.11.0 thread-offload helper) per-chain USDT wallet mark row."""
+    return " · ".join(
+        f"{ch}: {'✅' if payments_service.chain_wallet(ch) else '⚪'}"
+        for ch in ("TRC20", "BEP20", "ERC20", "POLYGON"))
+
+
+def _all_chain_wallets(chains) -> dict:
+    """(v6.11.0 thread-offload helper) wallet presence for every chain, ONE trip."""
+    return {ch: payments_service.chain_wallet(ch) for ch in chains}

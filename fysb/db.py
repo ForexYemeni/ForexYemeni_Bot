@@ -455,7 +455,7 @@ DEFAULT_ANALYSES_QUOTA = {"FREE": 3, "PRO": 10, "VIP": 30}
 # Strategy codes implemented + covered by the automated test-suite.
 IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
                           "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU",
-                          "CLASSIC", "SK"]
+                          "CLASSIC", "SK", "WYCKOFF"]
 
 # v6.10.0 — LUXURY PLAN DEFAULTS (owner demand: «اضبط انت اعدادات الباقات بشكل
 # فاخر جداً»). A one-time migration stamps FREE/PRO/VIP with these exact
@@ -632,7 +632,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("ICHIMOKU", "Ichimoku Kinko Hyo", "نظام السحابة الياباني: كسر الكومو + تقاطع تينكان/كيجون + سحابة مستقبلية مؤكدة (منفذة واختبارة آلياً)."),
                 ("CLASSIC", "CLASSIC", "التحليل الكلاسيكي: اتجاه EMA50 + مستوى أفقي حقيقي من القمم والقيعان + تأكيد شمعة ابتلاع/دبوس (منفذة واختبارة آلياً)."),
                 ("SK", "SK", "محرك سكالبينج سريع: مستوى مفتاحي 12 شمعة يُكسر بإغلاق مؤكد + زخم RSI + اتجاه EMA9/21 (منفذة واختبارة آلياً)."),
-                ("WYCKOFF", "Wyckoff", "منهج وايكوف؛ غير معتمد آلياً بعد — مغلق."),
+                ("WYCKOFF", "Wyckoff", "منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً)."),
                 # --- v6.8.1: مجموعات الاستراتيجيات العالمية الكاملة (كل مدرسة، كلها) ---
                 # كل صف يُولد مغلقاً وغير مختبر (حوكمة صادقة) حتى يُنفذ ويُختبر آلياً.
                 ("ELLIOTT_WAVE", "Elliott Waves",
@@ -693,6 +693,12 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             for code in IMPLEMENTED_STRATEGIES:
                 c.execute("UPDATE strategy_catalog SET verified=1, enabled=1, updated_at=? WHERE code=?",
                           (config.now(), code))
+            # v6.11.0 — WYCKOFF graduation: existing databases still carry the old
+            # «غير معتمد آلياً بعد — مغلق» description; refresh it to the honest
+            # implemented+tested text (new databases already seed the new text).
+            c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='WYCKOFF'",
+                      ("منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً).",
+                       config.now()))
             # INFRASTRUCTURE SELF-HEAL (picker-empty bug, seen live 2026-11-22):
             # markets & timeframes were seeded disabled and nothing ever enabled
             # them, so the user analytics flow rendered the header with ZERO

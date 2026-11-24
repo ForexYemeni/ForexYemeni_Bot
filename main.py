@@ -86,8 +86,22 @@ def main() -> int:
                                           menu_command, ping_command, start, update_command)
         from fysb.handlers.dispatcher import buttons
 
+        # v6.11.0 — ZERO-WAIT BUTTONS (owner demand: «أزرار تستجيب بشكل أسرع
+        # دون الانتظار للحظة واحدة»), three structural switches at once:
+        #  1. concurrent_updates: every update runs in its OWN task — a slow
+        #     page for one user can never queue the next user's button behind
+        #     it (previously updates were processed strictly one-by-one).
+        #  2. connection_pool_size(64): PTB's default HTTPX pool serializes
+        #     Telegram API calls (pool_size=1); with parallel handlers the
+        #     pool must fit the parallelism or sends would wait in line.
+        #  3. handlers never block the loop: every DB/service/API call on a
+        #     handler path is shipped to the worker-thread pool via fysb.afn
+        #     — the loop keeps answering buttons while threads wait on WAN.
         app = (Application.builder()
                .token(config.BOT_TOKEN)
+               .concurrent_updates(True)
+               .connection_pool_size(64)
+               .get_updates_connection_pool_size(8)
                .post_init(post_init)
                .post_shutdown(post_shutdown)
                .build())

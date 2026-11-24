@@ -20,7 +20,7 @@ import time
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.config import log
 from fysb.handlers import admin_channels, admin_core, admin_referrals, admin_system, admin_trading, user_pages
 from fysb.handlers.inputs import CLEAR_ON_NAV
@@ -54,7 +54,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             from fysb.handlers.common import render
             await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
-            audit_log.log(uid, "unknown_callback:" + data[:40])
+            await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
     except Exception:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
         try:
@@ -70,11 +70,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _route_user(q, context, uid: int, action: str):
     # ONE pooled round trip: throttled last_seen write + profile read.
     # (was: get_user + touch + is_blocked = 3 sequential WAN queries)
-    u = users_service.touch_and_get(uid)
+    # v6.11.0: every blocking call runs in the worker pool — the loop never
+    # waits on WAN, so buttons stay instant even while Supabase is slow.
+    u = await afn.run(users_service.touch_and_get, uid)
     if u is None:
         try:
-            users_service.ensure_user(q.from_user)
-            u = users_service.touch_and_get(uid)
+            await afn.run(users_service.ensure_user, q.from_user)
+            u = await afn.run(users_service.touch_and_get, uid)
         except PermissionError:
             from fysb.handlers.common import render
             await render(q, "⛔ التسجيل مغلق مؤقتاً.", None, context.bot)
@@ -83,7 +85,7 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "⛔ حسابك موقوف. تواصل مع الدعم الفني.", None, context.bot)
         return
-    if db.maintenance_on() and uid != config.ADMIN_ID:
+    if await afn.run(db.maintenance_on) and uid != config.ADMIN_ID:
         from fysb.handlers.common import render
         await render(q, "🔧 المنصة في وضع الصيانة مؤقتاً. حاول بعد قليل.", None, context.bot)
         return
@@ -93,13 +95,14 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "💬 أرسل رسالتك الآن — ستُسجل في التذكرة.", None, context.bot)
         return
+    # (v6.11.0: user_page performs its own blocking calls through afn.run)
     await user_pages.user_page(q, action, uid, context)
 
 
 # --------------------------------------------------------------- admin routing
 async def _route_admin(q, context, uid: int, action: str):
     if uid != config.ADMIN_ID:
-        audit_log.log(uid, f"admin_probe:{action[:40]}")
+        await afn.run(audit_log.log, uid, f"admin_probe:{action[:40]}")
         from fysb.handlers.common import render
         await render(q, "⛔ غير مصرح لك بالوصول إلى لوحة الإدارة.", kb.user_menu(), context.bot)
         return

@@ -75,7 +75,12 @@ class Row:
 # ---------------------------------------------------------------------------
 _pool: deque = deque()
 _pool_lock = threading.Lock()
-_POOL_MAX = 8
+# v6.11.0 ZERO-WAIT BUTTONS: handler-path DB calls now run in the worker-thread
+# pool (fysb.afn) — several threads may borrow sessions SIMULTANEOUSLY, so the
+# pool ceiling must fit that parallelism or extra sessions would be opened and
+# thrown away under load (borrow → use → pool-full → close). 16 covers the
+# realistic concurrent-button worst case on the hosted runtime.
+_POOL_MAX = 16
 
 
 def _connect():

@@ -18,7 +18,7 @@ import json
 
 from telegram.ext import ContextTypes
 
-from fysb import config, db, instruments
+from fysb import afn, config, db, instruments
 from fysb.config import log
 from fysb.handlers.common import render
 from fysb.handlers.user_pages import _safe_int
@@ -110,7 +110,7 @@ def due_channels() -> list[dict]:
 # Admin UI
 # ============================================================================
 async def admin_channels(q, uid, context, bot):
-    chans = list_channels()
+    chans = await afn.run(list_channels)
     body = [f"📺 <b><u>إدارة القنوات والمجموعات</u></b>",
             "▎اربط قناتك أو مجموعتك ليصلك التحليل والإشارات تلقائياً بتوقيت مكة المكرمة.",
             "▎الشرط الوحيد: أضف البوت مشرفاً (Admin) في القناة/المجموعة أولاً.", ""]
@@ -175,8 +175,8 @@ async def handle_add_input(update, context, uid: int, text: str) -> None:
         return
     kind = "channel" if getattr(chat, "type", "") in ("channel",) else "group"
     title = getattr(chat, "title", None) or chat_ref
-    cid = add_channel(str(chat.id), title, kind)
-    audit_log.log(uid, f"channel_linked:{cid}:{kind}")
+    cid = await afn.run(add_channel, str(chat.id), title, kind)
+    await afn.run(audit_log.log, uid, f"channel_linked:{cid}:{kind}")
     await update.effective_message.reply_text(
         f"✅ <b>تم ربط {esc(title)}</b> بنجاح وتحقق فعلي من صلاحية النشر.\n"
         "⚙️ افتح إعداداتها لاختيار الأسواق والأطر والجدولة:",
@@ -186,7 +186,7 @@ async def handle_add_input(update, context, uid: int, text: str) -> None:
 
 
 async def admin_chan_view(q, uid, context, bot, cid: int):
-    ch = get_channel(cid)
+    ch = await afn.run(get_channel, cid)
     if not ch:
         await render(q, "القناة غير موجودة.", kb.admin_nav([[kb.btn("📺 القنوات", "a:channels")]]), bot)
         return
@@ -224,23 +224,23 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
 
 
 async def admin_chan_toggle(q, uid, context, bot, cid: int):
-    ch = get_channel(cid)
+    ch = await afn.run(get_channel, cid)
     if not ch:
         return await admin_channels(q, uid, context, bot)
-    update_channel(cid, enabled=0 if ch["enabled"] else 1)
-    audit_log.log(uid, f"channel_toggle:{cid}")
+    await afn.run(update_channel, cid, enabled=0 if ch["enabled"] else 1)
+    await afn.run(audit_log.log, uid, f"channel_toggle:{cid}")
     await admin_chan_view(q, uid, context, bot, cid)
 
 
 async def admin_chan_mode(q, uid, context, bot, cid: int, mode: str):
-    ch = get_channel(cid)
+    ch = await afn.run(get_channel, cid)
     if not ch:
         return await admin_channels(q, uid, context, bot)
     if mode == "analysis":
-        update_channel(cid, auto_analysis=0 if ch["auto_analysis"] else 1)
+        await afn.run(update_channel, cid, auto_analysis=0 if ch["auto_analysis"] else 1)
     elif mode == "signals":
-        update_channel(cid, auto_signals=0 if ch["auto_signals"] else 1)
-    audit_log.log(uid, f"channel_mode:{cid}:{mode}")
+        await afn.run(update_channel, cid, auto_signals=0 if ch["auto_signals"] else 1)
+    await afn.run(audit_log.log, uid, f"channel_mode:{cid}:{mode}")
     await admin_chan_view(q, uid, context, bot, cid)
 
 
@@ -251,19 +251,18 @@ async def admin_chan_interval(q, uid, context, bot, cid: int):
 
 
 async def admin_chan_set_interval(q, uid, context, bot, cid: int, minutes: int):
-    update_channel(cid, interval_minutes=max(15, min(1440, minutes)))
-    audit_log.log(uid, f"channel_interval:{cid}:{minutes}")
+    await afn.run(update_channel, cid, interval_minutes=max(15, min(1440, minutes)))
+    await afn.run(audit_log.log, uid, f"channel_interval:{cid}:{minutes}")
     await admin_chan_view(q, uid, context, bot, cid)
 
 
 async def admin_chan_feat(q, uid, context, bot, cid: int, kind: str):
-    ch = get_channel(cid)
+    ch = await afn.run(get_channel, cid)
     if not ch:
         return
     current = [x.strip() for x in (ch.get(kind) or "").split(",") if x.strip()]
     if kind == "markets":
-        with db.conn() as c:
-            items = [r["symbol"] for r in c.execute("SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+        items = await afn.run(_enabled_verified_market_symbols)
         title = "الأسواق"
     elif kind == "timeframes":
         items = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
@@ -282,7 +281,7 @@ async def admin_chan_feat(q, uid, context, bot, cid: int, kind: str):
 
 
 async def admin_chan_feat_set(q, uid, context, bot, cid: int, kind: str, item: str):
-    ch = get_channel(cid)
+    ch = await afn.run(get_channel, cid)
     if not ch:
         return
     current = [x.strip() for x in (ch.get(kind) or "").split(",") if x.strip()]
@@ -290,14 +289,14 @@ async def admin_chan_feat_set(q, uid, context, bot, cid: int, kind: str, item: s
         current = [x for x in current if x.upper() != item.upper()]
     else:
         current.append(item)
-    update_channel(cid, **{kind: ",".join(current)})
-    audit_log.log(uid, f"channel_feat:{cid}:{kind}:{item}")
+    await afn.run(update_channel, cid, **{kind: ",".join(current)})
+    await afn.run(audit_log.log, uid, f"channel_feat:{cid}:{kind}:{item}")
     await admin_chan_feat(q, uid, context, bot, cid, kind)
 
 
 async def admin_chan_delete(q, uid, context, bot, cid: int):
-    delete_channel(cid)
-    audit_log.log(uid, f"channel_deleted:{cid}")
+    await afn.run(delete_channel, cid)
+    await afn.run(audit_log.log, uid, f"channel_deleted:{cid}")
     await admin_channels(q, uid, context, bot)
 
 
@@ -401,7 +400,7 @@ def pin_channel_delivery(ch: dict, signal_id: int, msg) -> None:
 
 async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
     """Compose + send ONE luxury analysis message PER MARKET (never merged)."""
-    ch = ch or get_channel(cid)
+    ch = ch or await afn.run(get_channel, cid)
     if not ch:
         return {"ok": False, "error": "القناة غير موجودة"}
     markets = [m.strip() for m in (ch["markets"] or "XAUUSD").split(",") if m.strip()]
@@ -417,17 +416,13 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
     posted: list[str] = []
     failed: list[str] = []
     for sym in markets[:3]:
-        res = run_analysis(0, sym, tf, "", "", strat, enforce_plan=False)
+        res = await afn.run(run_analysis, 0, sym, tf, "", "", strat, enforce_plan=False)
         if not res.get("ok"):
             failed.append(f"{sym}: {res.get('error', 'تعذر التحليل')}")
             continue
         an = res["analysis"]
         from fysb.ui.cards import render_analysis_card
-        row = None
-        with db.conn() as c:
-            r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
-            if r:
-                row = dict(r)
+        row = await afn.run(_market_row, sym)
         card = render_analysis_card(an, market_row=row)
         text = (f"👑 <b>{config.BRAND}</b> — التحليل الدوري · <b>{esc(sym)}</b> ({tf_name(tf)})\n\n"
                 + card
@@ -439,7 +434,7 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
             failed.append(f"{sym}: {send.get('error', 'فشل الإرسال')}")
     if not posted:
         return {"ok": False, "error": (failed[0] if failed else "تعذر توليد أي تحليل قابل للنشر الآن")}
-    update_channel(cid, last_sent=mecca_now().isoformat())
+    await afn.run(update_channel, cid, last_sent=mecca_now().isoformat())
     out = {"ok": True, "posted": posted}
     if failed:
         out["partial"] = failed
@@ -448,7 +443,7 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
 
 async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
     """Run the real engine once for the channel's markets and post the signal."""
-    ch = ch or get_channel(cid)
+    ch = ch or await afn.run(get_channel, cid)
     if not ch:
         return {"ok": False, "error": "القناة غير موجودة"}
     from fysb.engines.signal_engine import generate_signal
@@ -466,13 +461,10 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
             except Exception:
                 continue
             if res.get("status") == "SIGNAL_CREATED":
-                with db.conn() as c:
-                    sig = c.execute("SELECT * FROM signals WHERE id=?", (res["signal_id"],)).fetchone()
+                sig = await afn.run(_signal_row_by_id, res["signal_id"])
                 if sig:
                     from fysb.ui.cards import render_signal_card
-                    with db.conn() as c:
-                        r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
-                        row = dict(r) if r else None
+                    row = await afn.run(_market_row, sym)
                     text = render_signal_card(dict(sig), user_view=True, row=row) + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
                     send = await _send_html(bot, _chat_ref(ch), text)
                     if send.get("ok"):
@@ -480,8 +472,8 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                         # delivery — recorded so the tracker EDITS this exact post
                         # on every transition and sends it EVERY alert (half-TP1,
                         # TP1/2/3, SL, expiry) until the trade closes.
-                        pin_channel_delivery(ch, res["signal_id"], send.get("message"))
-                        update_channel(cid, last_sent=mecca_now().isoformat())
+                        await afn.run(pin_channel_delivery, ch, res["signal_id"], send.get("message"))
+                        await afn.run(update_channel, cid, last_sent=mecca_now().isoformat())
                         return {"ok": True}
                     return send  # precise diagnosis from the guarded sender
                 break
@@ -492,18 +484,18 @@ async def admin_chan_post(q, uid, context, bot, cid: int, kind: str):
     await render(q, "🚀 جارٍ التوليد على البيانات اللحظية...", None)
     res = await (post_analysis(cid, context.bot) if kind == "analysis" else post_signal(cid, context.bot))
     if res.get("ok") and not res.get("partial"):
-        audit_log.log(uid, f"channel_post:{cid}:{kind}:ok")
+        await afn.run(audit_log.log, uid, f"channel_post:{cid}:{kind}:ok")
         posted = res.get("posted") or []
         extra = ("\n▎🌐 الأسواق المنشورة: <b>" + esc("، ".join(posted)) + "</b>") if len(posted) > 1 else ""
         await render(q, "✅ <b>نُشر بنجاح في القناة.</b>" + extra,
                      kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
     elif res.get("ok"):
-        audit_log.log(uid, f"channel_post:{cid}:{kind}:partial")
+        await afn.run(audit_log.log, uid, f"channel_post:{cid}:{kind}:partial")
         lines = "\n".join("▎⚠️ " + esc(f) for f in res.get("partial", []))
         await render(q, "⚠️ <b>نشر جزئي — بعض الأسواق نُشرت وبعضها فشل:</b>\n" + lines,
                      kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
     else:
-        audit_log.log(uid, f"channel_post:{cid}:{kind}:fail")
+        await afn.run(audit_log.log, uid, f"channel_post:{cid}:{kind}:fail")
         await render(q, f"⛔ {esc(res.get('error', 'تعذر النشر'))}",
                      kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
 
@@ -512,7 +504,7 @@ async def channels_loop(app):
     """Scheduled auto-posts (analysis + signals) per channel, Mecca time."""
     while True:
         try:
-            for ch in due_channels():
+            for ch in await afn.run(due_channels):
                 try:
                     if ch["auto_analysis"]:
                         await post_analysis(ch["id"], app.bot, ch)
@@ -525,3 +517,24 @@ async def channels_loop(app):
         except Exception:
             log.exception("channels loop iteration failed")
         await asyncio.sleep(120)
+
+
+# --- v6.11.0 thread-offload helpers ---
+def _enabled_verified_market_symbols() -> list[str]:
+    """(v6.11.0 thread-offload helper) live market choices for channel scope."""
+    with db.conn() as c:
+        return [r["symbol"] for r in c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+
+
+def _market_row(symbol: str):
+    """(v6.11.0 thread-offload helper) market_catalog row for card rendering."""
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+        return dict(r) if r else None
+
+
+def _signal_row_by_id(signal_id: int):
+    """(v6.11.0 thread-offload helper) one full signal row by id."""
+    with db.conn() as c:
+        return c.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()

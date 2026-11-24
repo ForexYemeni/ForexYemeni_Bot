@@ -23,7 +23,7 @@ from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
 from fysb.config import log
-from fysb.handlers import admin_channels, admin_core, admin_referrals, admin_system, admin_trading, user_pages
+from fysb.handlers import admin_channels, admin_core, admin_partners, admin_referrals, admin_system, admin_trading, user_pages
 from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
@@ -58,6 +58,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _route_user(q, context, uid, data[2:])
         elif data.startswith("a:"):
             await _route_admin(q, context, uid, data[2:])
+        elif data.startswith("p:"):
+            for k in CLEAR_ON_NAV:
+                context.user_data.pop(k, None)
+            await admin_partners.handle_partner_callback(q, uid, context, context.bot, data[2:])
         else:
             from fysb.handlers.common import render
             await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
@@ -254,6 +258,30 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_channels.admin_chan_view(q, uid, context, bot, int(arg))
     elif act == "chanall":
         await admin_channels.admin_chan_enable_all(q, uid, context, bot, int(arg))
+    elif act == "chanvip":
+        await admin_channels.admin_chan_toggle_vip(q, uid, context, bot, int(arg))
+    elif act == "partners":
+        await admin_partners.admin_partners(q, uid, context, bot)
+    elif act == "partadd":
+        await admin_partners.admin_partner_add(q, uid, context, bot)
+    elif act == "partcancel":
+        await admin_partners.admin_partner_cancel(q, uid, context, bot)
+    elif act == "partview":
+        await admin_partners.admin_partner_view(q, uid, context, bot, int(arg))
+    elif act == "parttoggle":
+        await admin_partners.admin_partner_toggle(q, uid, context, bot, int(arg))
+    elif act == "partpct":
+        await admin_partners.admin_partner_pct(q, uid, context, bot, int(arg), int(arg2))
+    elif act == "partmode":
+        await admin_partners.admin_partner_mode(q, uid, context, bot, int(arg), arg2)
+    elif act == "partperm":
+        await admin_partners.admin_partner_perm(q, uid, context, bot, int(arg), arg2)
+    elif act == "partsettle":
+        await admin_partners.admin_partner_settle(q, uid, context, bot, int(arg))
+    elif act == "partdel":
+        await admin_partners.admin_partner_delete(q, uid, context, bot, int(arg))
+    elif act == "vipsweep":
+        await admin_partners.admin_vip_sweep(q, uid, context, bot)
     elif act == "chantoggle":
         await admin_channels.admin_chan_toggle(q, uid, context, bot, int(arg))
     elif act == "chanmode":

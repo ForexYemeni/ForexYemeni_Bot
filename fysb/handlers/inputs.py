@@ -70,7 +70,8 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_broadcast_text", "awaiting_support_config", "awaiting_support_field",
               "awaiting_restore", "awaiting_free_quota", "awaiting_demo_balance",
               "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
-              "awaiting_plan_field", "awaiting_plan_custom")
+              "awaiting_plan_field", "awaiting_plan_custom",
+              "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand")
 
 # v6.10.0 — single-shot text-awaiting flags: a BUTTON PRESS means the admin is
 # navigating, not typing, so any stale one-shot flag left over from a prompt he
@@ -84,7 +85,8 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_demo_balance", "awaiting_expiry_hours", "awaiting_chan_add",
                 "awaiting_usdt_wallet", "awaiting_plan_field", "awaiting_plan_custom",
                 "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
-                "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt")
+                "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt",
+                "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand")
 
 
 def clear_flows(ud: dict) -> None:
@@ -102,6 +104,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid == config.ADMIN_ID:
         handled = await _admin_text(update, context, uid, text)
         if handled:
+            return
+
+    # ---------- Partner private flows (v6.21.0) ----------
+    if ud.get("awaiting_partner_channel"):
+        from fysb.handlers import admin_partners
+        if await admin_partners.handle_partner_channel_input(update, context, uid, text):
+            return
+    if ud.get("awaiting_partner_brand"):
+        from fysb.handlers import admin_partners
+        if await admin_partners.handle_partner_brand_input(update, context, uid, text):
             return
 
     # ---------- User: own demo balance ----------
@@ -184,6 +196,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▎🚀 كل مزايا الباقة تعمل الآن — افتح /menu وابدأ"
             "</blockquote>",
             parse_mode="HTML")
+        try:
+            from fysb.services import partners as partners_svc
+            await partners_svc.notify_commission_and_vip(
+                update.get_bot(), uid, req["plan_code"], appr.get("commission")
+            )
+        except Exception:
+            pass
         if config.ADMIN_ID:
             try:
                 await update.get_bot().send_message(
@@ -549,6 +568,11 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
     if ud.get("awaiting_chan_add"):
         from fysb.handlers import admin_channels
         await admin_channels.handle_add_input(update, context, uid, text)
+        return True
+
+    if ud.get("awaiting_partner_add"):
+        from fysb.handlers import admin_partners
+        await admin_partners.handle_partner_add_input(update, context, uid, text)
         return True
 
     return False

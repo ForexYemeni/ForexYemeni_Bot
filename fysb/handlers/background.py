@@ -419,18 +419,34 @@ async def demo_loop(app):
 
 
 async def channels_loop(app):
-    """Scheduled auto-analysis & auto-signals to linked channels (Mecca time)."""
+    """Scheduled auto-analysis & auto-signals to linked channels (Mecca time)
+    + VIP Gatekeeper periodic expiry sweep (v6.21.0)."""
     from fysb.handlers import admin_channels
+    from fysb.services import partners as partners_svc
+    tick = 0
     while True:
         try:
             for ch in await afn.run(admin_channels.due_channels):
                 try:
-                    if ch["auto_analysis"]:
+                    partner = await afn.run(partners_svc.partner_for_channel, ch)
+                    is_partner_ch = int(ch.get("owner_partner_id") or 0) > 0
+                    if is_partner_ch and (not partner or not partner.get("enabled")):
+                        continue
+                    if ch["auto_analysis"] and (not is_partner_ch or partner.get("perm_auto_analysis")):
                         await admin_channels.post_analysis(ch["id"], app.bot, ch)
-                    if ch["auto_signals"]:
+                    if ch["auto_signals"] and (not is_partner_ch or partner.get("perm_auto_signals")):
                         await admin_channels.post_signal(ch["id"], app.bot, ch)
                 except Exception:
                     log.exception("channel auto-post failed cid=%s", ch["id"])
+            # VIP Gatekeeper expiry sweep every ~10 minutes (every 2 loop ticks)
+            tick += 1
+            if tick % 2 == 1:
+                try:
+                    sw = await partners_svc.sweep_expired_vip_members(app.bot)
+                    if sw.get("removed"):
+                        log.info("VIP gatekeeper sweep removed %s expired member(s)", sw["removed"])
+                except Exception:
+                    log.exception("VIP gatekeeper sweep failed")
         except asyncio.CancelledError:
             raise
         except Exception:

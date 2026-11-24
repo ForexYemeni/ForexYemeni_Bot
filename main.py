@@ -80,7 +80,7 @@ def main() -> int:
             return 1
         from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-        from fysb.handlers import inputs
+        from fysb.handlers import inputs, admin_partners
         from fysb.handlers import common
         from fysb.handlers.common import (admin_command, backup_command, error_handler,
                                           menu_command, ping_command, start, update_command)
@@ -110,6 +110,7 @@ def main() -> int:
         app.add_handler(CommandHandler("ping", ping_command))
         app.add_handler(CommandHandler("update", update_command))
         app.add_handler(CommandHandler("admin", admin_command))
+        app.add_handler(CommandHandler("partner", admin_partners.partner_command))
         app.add_handler(CommandHandler("backup", backup_command))
         app.add_handler(CallbackQueryHandler(buttons))
         app.add_handler(MessageHandler(filters.PHOTO, inputs.on_photo))

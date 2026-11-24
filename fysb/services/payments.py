@@ -151,11 +151,22 @@ def approve_request(pid: int, actor: int) -> dict:
     plan = None
     with db.conn() as c:
         plan = c.execute("SELECT * FROM plans WHERE code=?", (p["plan_code"],)).fetchone()
+    grant_res = {}
     if plan:
-        grant_subscription(p["user_id"], p["plan_code"], source="PAYMENT", actor=actor)
+        p_dict = dict(p)
+        pl_dict = dict(plan)
+        grant_res = grant_subscription(
+            p_dict["user_id"],
+            p_dict["plan_code"],
+            source="PAYMENT",
+            actor=actor,
+            payment_id=pid,
+            amount=float(p_dict.get("amount") or 0),
+            currency=p_dict.get("currency") or pl_dict.get("currency") or "USD",
+        )
     from fysb.services.audit import log as audit_log
     audit_log(actor, f"payment_approved:{pid}")
-    return {"ok": True, "payment": dict(p)}
+    return {"ok": True, "payment": dict(p), "commission": grant_res.get("commission")}
 
 
 def reject_request(pid: int, reason: str, actor: int) -> dict:

@@ -242,6 +242,7 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
          btn("💠 الباقات", "a:plans", style="primary")],
         [btn("🏦 وسائل الدفع", "a:paymethods", style="primary"),
          btn("🤝 نظام الإحالات", "a:refs", style="success")],
+        [btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
         [btn("📈 الإحصائيات", "a:statistics", style="primary"),
          btn("📋 التقارير", "a:reports", style="primary")],
     ])
@@ -250,9 +251,10 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
 def admin_hub_comms() -> InlineKeyboardMarkup:
     return admin_nav([
         [btn("📺 القنوات والمجموعات", "a:channels", style="primary"),
-         btn("📣 الإعلانات", "a:broadcast", style="success")],
-        [btn("🎧 الدعم الفني", "a:support", style="success"),
-         btn("🔔 الإشعارات", "a:notifications", style="primary")],
+         btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
+        [btn("📣 الإعلانات", "a:broadcast", style="success"),
+         btn("🎧 الدعم الفني", "a:support", style="success")],
+        [btn("🔔 الإشعارات", "a:notifications", style="primary")],
     ])
 
 

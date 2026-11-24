@@ -168,11 +168,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await afn.run(audit_log.log, uid, "admin_panel_open")
         return
     from fysb.handlers.user_pages import build_user_home_card
+    from fysb.services import partners as partners_svc
     home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "")
+    menu_mk = kb.user_menu()
+    if await afn.run(partners_svc.is_active_partner, uid):
+        home_text += "\n\n👑 <b>حساب شريك قناة معتمد:</b> أرسل /partner أو اضغط الزر بالأسفل لإدارة قناتك وأرباحك."
+        from telegram import InlineKeyboardMarkup
+        menu_mk = InlineKeyboardMarkup(
+            [[kb.btn("👑 لوحة الشريك الملكي وأرباحي", "p:home", style="success")]]
+            + list(menu_mk.inline_keyboard)
+        )
     await _send_guarded(
         update.effective_message.reply_text,
         home_text,
-        kb.user_menu(),
+        menu_mk,
     )
 
 

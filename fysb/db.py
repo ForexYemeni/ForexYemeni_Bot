@@ -276,6 +276,50 @@ CREATE TABLE IF NOT EXISTS referrals(
   converted INTEGER NOT NULL DEFAULT 0, converted_at TEXT DEFAULT '',
   plan_code TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS channel_partners(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER UNIQUE NOT NULL,
+  title TEXT DEFAULT '',
+  campaign_code TEXT UNIQUE NOT NULL,
+  commission_pct REAL NOT NULL DEFAULT 25.0,
+  post_mode TEXT NOT NULL DEFAULT 'teaser',
+  sample_daily_limit INTEGER NOT NULL DEFAULT 2,
+  perm_auto_signals INTEGER NOT NULL DEFAULT 1,
+  perm_auto_analysis INTEGER NOT NULL DEFAULT 1,
+  perm_manual_post INTEGER NOT NULL DEFAULT 1,
+  perm_choose_markets INTEGER NOT NULL DEFAULT 1,
+  perm_custom_branding INTEGER NOT NULL DEFAULT 1,
+  perm_vip_gatekeeper INTEGER NOT NULL DEFAULT 1,
+  max_channels INTEGER NOT NULL DEFAULT 2,
+  brand_label TEXT DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS partner_commissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  partner_id INTEGER NOT NULL,
+  buyer_user_id INTEGER NOT NULL,
+  plan_code TEXT NOT NULL,
+  payment_id INTEGER DEFAULT 0,
+  gross_amount REAL NOT NULL DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  commission_pct REAL NOT NULL DEFAULT 25.0,
+  commission_amount REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'EARNED',
+  created_at TEXT NOT NULL,
+  paid_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS vip_channel_members(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id INTEGER NOT NULL,
+  chat_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  invite_link TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  granted_at TEXT NOT NULL,
+  removed_at TEXT DEFAULT ''
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -335,9 +379,21 @@ ADD_COLUMNS = {
         "partials_done": "INTEGER DEFAULT 0",
         "initial_lots": "REAL DEFAULT 0",
     },
+    "broadcast_channels": {
+        "owner_partner_id": "INTEGER DEFAULT 0",
+        "post_mode": "TEXT DEFAULT ''",
+        "is_vip_gate": "INTEGER DEFAULT 0",
+        "vip_min_plan": "TEXT DEFAULT ''",
+        "daily_full_date": "TEXT DEFAULT ''",
+        "daily_full_count": "INTEGER DEFAULT 0",
+    },
 }
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_partners_user ON channel_partners(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_partcomm_partner ON partner_commissions(partner_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_vipmem_status ON vip_channel_members(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vipmem_chan ON vip_channel_members(channel_id, user_id)",
     "CREATE INDEX IF NOT EXISTS idx_signals_status_created ON signals(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_signals_source_time ON signals(source, created_at)",

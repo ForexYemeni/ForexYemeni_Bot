@@ -68,7 +68,8 @@ def add_channel(chat_id: str, title: str, kind: str) -> int:
 
 def update_channel(cid: int, **fields) -> None:
     allowed = {"enabled", "auto_analysis", "auto_signals", "markets", "timeframes",
-               "strategies", "interval_minutes", "last_sent", "title"}
+               "strategies", "interval_minutes", "last_sent", "title",
+               "post_mode", "is_vip_gate", "vip_min_plan", "owner_partner_id"}
     sets = ", ".join(f"{k}=?" for k in fields if k in allowed)
     vals = [v for k, v in fields.items() if k in allowed]
     if not sets:
@@ -205,6 +206,7 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
         "<blockquote>"
         f"▎🔬 التحليل التلقائي: <b>{'مفعل' if ch['auto_analysis'] else 'متوقف'}</b>\n"
         f"▎📡 الإشارات التلقائية + التتبع الحي: <b>{'مفعلة' if ch['auto_signals'] else 'متوقفة'}</b>\n"
+        f"▎🔐 حارس قناة VIP (إدخال/طرد تلقائي): <b>{'🟢 مفعل' if ch.get('is_vip_gate') else '⚪ متوقف'}</b>\n"
         f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"
         f"▎⏱ الأطر: <b>{esc(tf_label)}</b>\n"
         f"▎🧠 الاستراتيجيات: <b>{esc(strat_label)}</b>\n"
@@ -214,6 +216,8 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
     ]
     rows = [
         [kb.btn("🌐 تفعيل البث الشامل لكل الأسواق + التتبع الحي", f"a:chanall:{cid}", style="success")],
+        [kb.btn("🔐 إيقاف حارس VIP" if ch.get("is_vip_gate") else "🔐 تفعيل حارس قناة VIP",
+                f"a:chanvip:{cid}", style="danger" if ch.get("is_vip_gate") else "success")],
         [kb.btn(f"{'🟠 ⏹ إيقاف القناة' if ch['enabled'] else '🟢 ▶️ تفعيل القناة'}", f"a:chantoggle:{cid}")],
         [kb.btn(f"{'🟠 🔬 إيقاف التحليل' if ch['auto_analysis'] else '🟢 🔬 تفعيل التحليل'}", f"a:chanmode:{cid}:analysis"),
          kb.btn(f"{'🟠 📡 إيقاف الإشارات' if ch['auto_signals'] else '🟢 📡 تفعيل الإشارات'}", f"a:chanmode:{cid}:signals")],
@@ -234,6 +238,17 @@ async def admin_chan_enable_all(q, uid, context, bot, cid: int):
     await afn.run(update_channel, cid, enabled=1, auto_signals=1,
                   markets="ALL", timeframes="ALL", strategies="ALL")
     await afn.run(audit_log.log, uid, f"channel_enable_all:{cid}")
+    await admin_chan_view(q, uid, context, bot, cid)
+
+
+async def admin_chan_toggle_vip(q, uid, context, bot, cid: int):
+    """v6.21.0 — 1-tap VIP Gatekeeper switch on any linked channel."""
+    ch = await afn.run(get_channel, cid)
+    if not ch:
+        return await admin_channels(q, uid, context, bot)
+    new_v = 0 if ch.get("is_vip_gate") else 1
+    await afn.run(update_channel, cid, is_vip_gate=new_v)
+    await afn.run(audit_log.log, uid, f"channel_vip_gate:{cid}:{new_v}")
     await admin_chan_view(q, uid, context, bot, cid)
 
 
@@ -375,27 +390,30 @@ def _diagnose_send_error(e: Exception) -> str:
     return f"⛔ فشل النشر — ({esc(type(e).__name__)}). تأكد أن البوت مشرفاً بصلاحية «نشر الرسائل» ثم أعد المحاولة."
 
 
-async def _send_html(bot, chat_ref, text: str) -> dict:
+async def _send_html(bot, chat_ref, text: str, reply_markup=None) -> dict:
     """3-level guarded send: HTML → guard-repaired → plain. Never corrupts.
     v6.10.0: returns the sent Message object so the caller can pin the
-    delivery reference (chat_id + message_id) for LIVE channel tracking."""
-    variants = [("html", text, "HTML"),
-                ("repaired", htmlguard.truncate_safe(text, 3900), "HTML"),
-                ("plain", htmlguard.plain_fallback(text), None)]
+    delivery reference (chat_id + message_id) for LIVE channel tracking.
+    v6.21.0: supports optional partner CTA reply_markup with style-strip fallback."""
+    variants = [("html", text, "HTML", reply_markup),
+                ("repaired", htmlguard.truncate_safe(text, 3900), "HTML", kb.strip_button_styles(reply_markup)),
+                ("plain", htmlguard.plain_fallback(text), None, kb.strip_button_styles(reply_markup))]
     last_err: Exception | None = None
-    for mode, body, parse_mode in variants:
+    for mode, body, parse_mode, mk in variants:
         try:
+            kw = {"disable_web_page_preview": True}
             if parse_mode:
-                msg = await bot.send_message(chat_ref, body, parse_mode=parse_mode,
-                                             disable_web_page_preview=True)
-            else:
-                msg = await bot.send_message(chat_ref, body, disable_web_page_preview=True)
+                kw["parse_mode"] = parse_mode
+            if mk is not None:
+                kw["reply_markup"] = mk
+            msg = await bot.send_message(chat_ref, body, **kw)
             return {"ok": True, "mode": mode, "message": msg}
         except Exception as e:
             last_err = e
             s = str(e).lower()
             parse_issue = ("parse entities" in s or "unsupported start tag" in s
-                           or "unclosed" in s or "unexpected end tag" in s)
+                           or "unclosed" in s or "unexpected end tag" in s
+                           or "style" in s or "reply_markup" in s)
             if mode != "plain" and parse_issue:
                 continue  # escalate to the next guard level
             return {"ok": False, "error": _diagnose_send_error(e)}
@@ -462,33 +480,47 @@ def _channel_matches_signal(ch: dict, sig: dict) -> bool:
 async def emit_to_channels(sig: dict, bot) -> dict:
     """Broadcast a generated signal to all matching enabled broadcast_channels.
 
-    Skips any channel that already received this signal_id, pins each posted
+    Skips any channel that already received this signal_id, pins each full posted
     message via pin_channel_delivery (multi-channel safe), and updates last_sent.
+    v6.21.0: Partner channels respect Teaser/Sample/Full broadcast modes, attach
+    the partner's native green affiliate CTA button, and apply custom branding.
     """
     from fysb.ui.cards import render_signal_card
     from fysb.engines.entry_state import birth_pulse_line
+    from fysb.services import partners as partners_svc
 
     stats = {"channels_sent": 0, "channels_failed": 0}
     channels = await afn.run(list_channels)
     if not channels:
         return stats
     row = await afn.run(_market_row, sig["symbol"])
-    card = render_signal_card(dict(sig), user_view=True, row=row)
+    base_card = render_signal_card(dict(sig), user_view=True, row=row)
     pulse = birth_pulse_line(dict(sig), row)
     if pulse:
-        card += "\n\n<blockquote>" + pulse + "</blockquote>"
-    text = card + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
+        base_card += "\n\n<blockquote>" + pulse + "</blockquote>"
 
     for ch in channels:
         if not ch.get("enabled") or not ch.get("auto_signals"):
             continue
+        partner = await afn.run(partners_svc.partner_for_channel, ch)
+        if int(ch.get("owner_partner_id") or 0) > 0:
+            if not partner or not partner.get("enabled") or not partner.get("perm_auto_signals"):
+                continue
         if not _channel_matches_signal(ch, sig):
             continue
         if await afn.run(_channel_already_pinned, ch, sig["id"]):
             continue
-        send = await _send_html(bot, _chat_ref(ch), text)
+        send_full = await afn.run(partners_svc.should_send_full_signal, ch, partner)
+        if send_full:
+            text = base_card + partners_svc.channel_brand_footer(ch, partner=partner)
+        else:
+            text = partners_svc.render_teaser_signal_card(dict(sig), ch=ch, partner=partner)
+        cta_mk = partners_svc.channel_cta_markup(ch, partner=partner)
+        send = await _send_html(bot, _chat_ref(ch), text, reply_markup=cta_mk)
         if send.get("ok"):
-            await afn.run(pin_channel_delivery, ch, sig["id"], send.get("message"))
+            # Only live-edit full signal cards (never overwrite a teaser card with live entry/TPs!)
+            if send_full:
+                await afn.run(pin_channel_delivery, ch, sig["id"], send.get("message"))
             await afn.run(update_channel, ch["id"], last_sent=mecca_now().isoformat())
             stats["channels_sent"] += 1
         else:
@@ -536,12 +568,15 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
             continue
         an = res["analysis"]
         from fysb.ui.cards import render_analysis_card
+        from fysb.services import partners as partners_svc
+        partner = await afn.run(partners_svc.partner_for_channel, ch)
         row = await afn.run(_market_row, sym)
         card = render_analysis_card(an, market_row=row)
         text = (f"👑 <b>{config.BRAND}</b> — التحليل الدوري · <b>{esc(sym)}</b> ({tf_name(tf)})\n\n"
                 + card
-                + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>")
-        send = await _send_html(bot, chat_ref, text)
+                + partners_svc.channel_brand_footer(ch, partner=partner))
+        cta_mk = partners_svc.channel_cta_markup(ch, partner=partner)
+        send = await _send_html(bot, chat_ref, text, reply_markup=cta_mk)
         if send.get("ok"):
             posted.append(sym)
         else:
@@ -580,18 +615,23 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                     from fysb.ui.cards import render_signal_card
                     from fysb.engines.signal_engine import emit_to_users, opposite_close_advisory
                     from fysb.handlers.inputs import bot_sender_from
+                    from fysb.services import partners as partners_svc
                     try:
                         await opposite_close_advisory(dict(sig), bot_sender_from(bot))
                     except Exception:
                         pass
+                    partner = await afn.run(partners_svc.partner_for_channel, ch)
+                    send_full = await afn.run(partners_svc.should_send_full_signal, ch, partner)
                     row = await afn.run(_market_row, sym)
-                    text = render_signal_card(dict(sig), user_view=True, row=row) + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
-                    send = await _send_html(bot, _chat_ref(ch), text)
+                    if send_full:
+                        text = render_signal_card(dict(sig), user_view=True, row=row) + partners_svc.channel_brand_footer(ch, partner=partner)
+                    else:
+                        text = partners_svc.render_teaser_signal_card(dict(sig), ch=ch, partner=partner)
+                    cta_mk = partners_svc.channel_cta_markup(ch, partner=partner)
+                    send = await _send_html(bot, _chat_ref(ch), text, reply_markup=cta_mk)
                     if send.get("ok"):
-                        # Pin this channel post first (multi-channel safe), then
-                        # unify delivery so eligible users + any other matching
-                        # channels receive the same real signal too.
-                        await afn.run(pin_channel_delivery, ch, res["signal_id"], send.get("message"))
+                        if send_full:
+                            await afn.run(pin_channel_delivery, ch, res["signal_id"], send.get("message"))
                         await afn.run(update_channel, cid, last_sent=mecca_now().isoformat())
                         try:
                             await emit_to_users(dict(sig), bot_sender_from(bot), bot=bot, include_channels=True)

@@ -218,6 +218,11 @@ async def admin_sub_set(q, uid, context, bot, target: int, code: str):
         await bot.send_message(target, f"✅ تم تحديث اشتراكك إلى <b>{esc(code)}</b> من قبل الإدارة.", parse_mode="HTML")
     except Exception:
         pass
+    try:
+        from fysb.services import partners as partners_svc
+        await partners_svc.notify_commission_and_vip(bot, target, code, res.get("commission"))
+    except Exception:
+        pass
     await render(q, note, kb.admin_nav([[kb.btn("↩️ الملف", f"a:userdetail:{target}")]]), bot)
 
 
@@ -681,6 +686,11 @@ async def admin_payment_approve(q, uid, context, bot, pid: int):
         await bot.send_message(p["user_id"],
                                f"✅ تمت الموافقة على طلبك #{pid} وتفعيل باقة <b>{esc(p['plan_code'])}</b>.",
                                parse_mode="HTML")
+    except Exception:
+        pass
+    try:
+        from fysb.services import partners as partners_svc
+        await partners_svc.notify_commission_and_vip(bot, p["user_id"], p["plan_code"], res.get("commission"))
     except Exception:
         pass
     await admin_payment_detail(q, uid, context, bot, pid)

@@ -147,7 +147,8 @@ def plans_for_users(uids: list[int]) -> dict[int, dict]:
 
 
 def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", actor: int = 0,
-                       override_days: int | None = None) -> dict:
+                       override_days: int | None = None, payment_id: int = 0,
+                       amount: float | None = None, currency: str = "USD") -> dict:
     """Activate/extend a subscription. Previous ACTIVE subs of the user end now
     (upgrade/downgrade/replace semantics). Returns the new subscription id."""
     with db.conn() as c:
@@ -167,8 +168,6 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
     invalidate_plans_cache(user_id)
     log.info("SUBSCRIPTION %s | user=%s plan=%s source=%s actor=%s", source, user_id, plan_code, source, actor)
     # --- Royal referral conversion (server-side, idempotent) ---------------
-    # The moment a package becomes ACTIVE, the invitee's referral flips to
-    # «مشترك فعلاً» — the royal metric can never be self-reported.
     try:
         from fysb.services import referrals
         conv = referrals.mark_converted(user_id, plan_code)
@@ -178,7 +177,20 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
                      conv.get("target_converted"), conv.get("target_met"))
     except Exception:
         log.exception("referral conversion mark failed (non-fatal)")
-    return {"ok": True, "subscription_id": sub_id, "ends_at": ends, "plan": plan_code}
+    # --- Channel Partner Revenue-Share Commission (v6.21.0) ----------------
+    comm_info = None
+    try:
+        from fysb.services import partners
+        comm_info = partners.credit_commission_on_subscription(
+            user_id, plan_code, payment_id=payment_id, amount=amount, currency=currency,
+        )
+        if comm_info:
+            log.info("PARTNER COMMISSION | partner=%s buyer=%s plan=%s comm=%s %s",
+                     comm_info["partner_id"], user_id, plan_code,
+                     comm_info["commission_amount"], comm_info["currency"])
+    except Exception:
+        log.exception("partner commission credit failed (non-fatal)")
+    return {"ok": True, "subscription_id": sub_id, "ends_at": ends, "plan": plan_code, "commission": comm_info}
 
 
 def cancel_subscription(user_id: int, actor: int = 0) -> bool:

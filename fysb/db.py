@@ -10,6 +10,7 @@ Guarantees (both engines):
     is taken automatically when a structural change is applied.
   * All multi-step writes use explicit transactions.
 """
+import json
 import sqlite3
 import threading
 import time
@@ -354,6 +355,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_ref_campaign ON referrals(campaign_id, converted)",
     "CREATE INDEX IF NOT EXISTS idx_ref_invitee ON referrals(invitee_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchers_due ON signal_watchers(status, next_run)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_txid_uniq ON payments(LOWER(txid)) WHERE txid IS NOT NULL AND txid != ''",
 ]
 
 DEFAULT_SETTINGS = {
@@ -593,7 +595,10 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 c.commit()
             _apply_add_columns(c)
             for idx in INDEXES:
-                c.execute(idx)
+                try:
+                    c.execute(idx)
+                except Exception as idx_err:
+                    log_lines.append(f"index warning: {idx_err}")
             _rename_legacy_elite_plan(c)
             for k, v in DEFAULT_SETTINGS.items():
                 c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -604,28 +609,50 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             # carry an exact birth status; the heuristic never touches them.
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('real_entry_protocol_since',?)",
                       (config.now(),))
+            # v6.12.0: Seed markets/timeframes/strategies WITHOUT wiping admin
+            # enabled toggles across restarts!
+            # Fresh rows get the GOLD-FIRST defaults (XAUUSD enabled=1, others 0;
+            # metal/forex/crypto verified=1); existing rows keep their admin state.
             for sym, title, provider, cat, pip, digits, contract, spread in SEED_MARKETS:
+                init_verified = 1 if cat in SEED_VERIFIED_CATEGORIES else 0
+                init_enabled = 1 if sym == GOLD_DEFAULT_SYMBOL else 0
                 c.execute(
                     """INSERT INTO market_catalog(symbol,title,provider_symbol,enabled,verified,created_at,updated_at,
                        pip_size,digits,contract_size,category,spread_pips)
-                       VALUES(?,?,?,0,0,?,?,?,?,?,?,?)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(symbol) DO NOTHING""",
-                    (sym, title, provider, config.now(), config.now(), pip, digits, contract, cat, spread))
-            # Fill instrument specs for pre-existing catalog rows (additive).
+                    (sym, title, provider, init_enabled, init_verified, config.now(), config.now(),
+                     pip, digits, contract, cat, spread))
+            # Fill instrument specs & verified coverage for pre-existing catalog rows (never clobbers enabled).
             for sym, _t, _p, cat, pip, digits, contract, spread in SEED_MARKETS:
                 c.execute("""UPDATE market_catalog SET pip_size=?,digits=?,contract_size=?,category=?,spread_pips=?
                              WHERE symbol=? AND (pip_size IS NULL OR pip_size=0)""",
                           (pip, digits, contract, cat, spread, sym))
+                if cat in SEED_VERIFIED_CATEGORIES:
+                    c.execute("UPDATE market_catalog SET verified=1, updated_at=? WHERE symbol=? AND verified=0",
+                              (config.now(), sym))
+            # Self-heal only when literally ZERO markets are enabled (never overrides active choices).
+            if (c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1").fetchone()["n"] or 0) == 0:
+                c.execute("UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
+                          (config.now(), GOLD_DEFAULT_SYMBOL))
+
             for code, interval in SEED_TIMEFRAMES:
-                c.execute("INSERT OR IGNORE INTO timeframe_catalog(code,provider_interval,enabled,verified,created_at,updated_at) VALUES(?,?,0,0,?,?)",
+                c.execute("INSERT OR IGNORE INTO timeframe_catalog(code,provider_interval,enabled,verified,created_at,updated_at) VALUES(?,?,1,1,?,?)",
                           (code, interval, config.now(), config.now()))
+            if (c.execute("SELECT COUNT(*) n FROM timeframe_catalog WHERE enabled=1").fetchone()["n"] or 0) == 0:
+                for code, _interval in SEED_TIMEFRAMES:
+                    c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                              (config.now(), code))
+
+            # v6.12.0 — ONLY real implemented & automated-tested strategies exist
+            # in the catalog (all 25 empty/unimplemented placeholders purged).
             for code, title, desc in [
                 ("ICT", "ICT", "Liquidity sweeps, FVG, order blocks, displacement, kill zones."),
                 ("SMC", "Smart Money Concepts", "BOS/CHOCH, HH/HL/LH/LL, supply & demand."),
                 ("PRICE_ACTION", "Price Action", "Engulfing, pin bar, breakout/retest, S/R."),
                 ("CRT", "Candle Range Theory", "مدى الشمعة المرجعية، سحب السيولة، إغلاق داخل المدى، دخول CRT 50%."),
                 ("AMD", "Power of Three", "تراكم · تلاعب · توزيع على نطاق الافتتاح (Judas Swing)."),
-                ("TURTLE_SOUP", "Turtle Soup", "فشل كسر قمة/قمة 20 شمعة وانعكاس مضاد (اصطياد السيولة)."),
+                ("TURTLE_SOUP", "Turtle Soup", "فشل كسر قمة/قاع 20 شمعة وانعكاس مضاد (اصطياد السيولة)."),
                 ("SILVER_BULLET", "Silver Bullet", "نوافذ ICT الزمنية (لندن/نيويورك) + استمرار FVG."),
                 ("FIBONACCI", "Fibonacci Golden Pocket", "مستوى ارتداد 61.8–78.6% من الموجة الدافعية مع بنية سليمة (منفذة واختبارة آلياً)."),
                 ("TREND", "Trend Following", "ترتيب المتوسطات 9/21/50 + ارتداد إلى قيمة EMA21 واستئناف الاتجاه (منفذة واختبارة آلياً)."),
@@ -633,89 +660,47 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("CLASSIC", "CLASSIC", "التحليل الكلاسيكي: اتجاه EMA50 + مستوى أفقي حقيقي من القمم والقيعان + تأكيد شمعة ابتلاع/دبوس (منفذة واختبارة آلياً)."),
                 ("SK", "SK", "محرك سكالبينج سريع: مستوى مفتاحي 12 شمعة يُكسر بإغلاق مؤكد + زخم RSI + اتجاه EMA9/21 (منفذة واختبارة آلياً)."),
                 ("WYCKOFF", "Wyckoff", "منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً)."),
-                # --- v6.8.1: مجموعات الاستراتيجيات العالمية الكاملة (كل مدرسة، كلها) ---
-                # كل صف يُولد مغلقاً وغير مختبر (حوكمة صادقة) حتى يُنفذ ويُختبر آلياً.
-                ("ELLIOTT_WAVE", "Elliott Waves",
-                 "عد موجات إليوت: دافعية 1-2-3-4-5 وتصحيحية A-B-C مع مناطق التماثل وقيادة الموجة الثالثة."),
-                ("HARMONIC", "Harmonic Patterns",
-                 "أنماط توافقية بنِسب فيبوناتشي المضبوطة: جارتفلي · بات · كاب · بترفلاي ومنطقة PRZ."),
-                ("VOLUME_PROFILE", "Volume Profile",
-                 "توزيع الحجم بالسعر: POC وحدود منطقة القيمة VAH/VAL ومناطق القيمة العادلة لكل جلسة."),
-                ("VWAP", "VWAP",
-                 "السعر المتوسط المرجح بالحجم: انحرافات ±1/±2 للانضباط المؤسسي وانعكاسات الانحراف."),
-                ("BREAKOUT_RETEST", "Breakout & Retest",
-                 "كسر مستوى هيكلي بإغلاق مؤكد ثم إعادة اختبار ناجحة ودخول مع الاستمرار — الكلاسيك الصلب."),
-                ("SUPPORT_RESISTANCE", "Support & Resistance",
-                 "مناطق دعم/مقاومة محورية مبنية على القمم والقيعان الملموسة وتقاطع الأطر الكبرى."),
-                ("RSI_DIVERGENCE", "RSI Divergence",
-                 "دايفرجنس RSI بين السعر والزخم مع مناطق تشبع 70/30 وفلتر اتجاه الإطار الأعلى."),
-                ("MACD_STRAT", "MACD Momentum",
-                 "تقاطعات MACD ودايفرجنس الهيستوجرام مع فلتر الترند الأعلى ومراكز الصفر."),
-                ("BOLLINGER", "Bollinger Bands",
-                 "انضغاط بولينجر (Squeeze) قبل الانفجار وارتدادات من الحدود مع وسط 20 كمرجع."),
-                ("DONCHIAN", "Donchian Breakout",
-                 "كسر قناة دونشيان 20/55 — قواعد السلاحف الأصلية مع وقف ATR وجني متدرج."),
-                ("MA_CROSS", "MA Crossover",
-                 "تقاطع المتوسطات السريع/البطيء (الذهبي/المميت) مع فلتر اتجاه الأطر الأعلى."),
-                ("SUPERTREND", "Supertrend",
-                 "خط السوبر تريند ATR: تبديل الاتجاه عند كسر الخط والدخول معه بوقف ديناميكي."),
-                ("KELTNER", "Keltner Channels",
-                 "قنوات كلتنر EMA+ATR: اختراقات الامتداد وأهداف القناة المقابلة."),
-                ("ORB", "Opening Range Breakout",
-                 "كسر مدى الافتتاح (أول 15/30 دقيقة من الجلسة) بأهداف ممددة من حجم المدى."),
-                ("ASIA_RANGE", "Asia Range",
-                 "مدى جلسة آسيا: كسر سيولة آسيا في افتتاح لندن — نمط الجلسات الملكية."),
-                ("LONDON_BREAK", "London Breakout",
-                 "كسر قمة/قاع أول ساعتين من لندن مع فلتر اتجاه اليوم وإدارة بنسبة ثابتة."),
-                ("PIVOT_POINTS", "Pivot Points",
-                 "نقاط المحور اليومية الكلاسيكية PP/R1-R3/S1-S3 للانعكاس والاستمرار المؤسسي."),
-                ("CPR", "Central Pivot Range",
-                 "مدى المحور المركزي TC/PIVOT/BC وتصنيف اليوم الضيق/العريض قبل الافتتاح."),
-                ("MARKET_PROFILE", "Market Profile (TPO)",
-                 "ملف السوق TPO: أشكال اليوم البسيطة/المزدوجة ومناطق قبول ورفض السعر."),
-                ("ORDER_FLOW", "Order Flow & Delta",
-                 "تدفق الأوامر والدلتا التراكمية وامتصاص السيولة عند المستويات الكبرى."),
-                ("MEAN_REVERSION", "Mean Reversion",
-                 "الارتداد للمتوسط: Z-Score على النطاقات الملتزمة والأزواج المرتبطة إحصائياً."),
-                ("GAP_TRADE", "Gap Trading",
-                 "فجوات الافتتاح: ملء الفجوة أو الاستمرار بحسب نوعها وحجمها وموقعها من الاتجاه."),
-                ("HEIKIN_ASHI", "Heikin Ashi",
-                 "شموع هيكين آشي الملساء: تلوين الاتجاه وغياب الهيبات العكسية لتصفية الضجيج."),
-                ("MOMENTUM", "Momentum Breakout",
-                 "اندفاعات الزخم: شموع توسع بحجم استثنائي وامتداد مؤكد فوق مستوى المقاومة."),
-                ("ATR_BREAKOUT", "ATR Volatility Break",
-                 "كسر نطاق N×ATR مع وقف ديناميكي وأهداف ممتدة حسب التقلب اللحظي."),
             ]:
-                c.execute("INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,0,0,?,?,60)",
-                          (code, title, desc, config.now(), config.now()))
-            # Implemented + tested strategies are verified & enabled (honest governance:
-            # verification = implementation + automated tests, not marketing).
+                c.execute(
+                    "INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,1,1,?,?,60)",
+                    (code, title, desc, config.now(), config.now()))
+            # Mark implemented strategies as verified (graduating previously-unverified
+            # strategies once without overwriting an admin's enabled=0 decision on
+            # already-verified strategies!).
             for code in IMPLEMENTED_STRATEGIES:
-                c.execute("UPDATE strategy_catalog SET verified=1, enabled=1, updated_at=? WHERE code=?",
+                c.execute("UPDATE strategy_catalog SET verified=1, enabled=1, updated_at=? WHERE code=? AND verified=0",
                           (config.now(), code))
-            # v6.11.0 — WYCKOFF graduation: existing databases still carry the old
-            # «غير معتمد آلياً بعد — مغلق» description; refresh it to the honest
-            # implemented+tested text (new databases already seed the new text).
+            # Purge any legacy unimplemented placeholder rows from strategy_catalog.
+            placeholders = ",".join("?" for _ in IMPLEMENTED_STRATEGIES)
+            purged = c.execute(
+                f"DELETE FROM strategy_catalog WHERE code NOT IN ({placeholders})",
+                tuple(IMPLEMENTED_STRATEGIES),
+            ).rowcount or 0
+            if purged:
+                log_lines.append(f"purged {purged} unimplemented placeholder strategies")
+            # Clear any user preference pointing at a deleted placeholder strategy.
+            c.execute(
+                f"UPDATE users SET strategy='' WHERE strategy IS NOT NULL AND strategy<>'' AND UPPER(strategy) NOT IN ({placeholders})",
+                tuple(IMPLEMENTED_STRATEGIES),
+            )
+            # v6.11.0 — WYCKOFF graduation description refresh.
             c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='WYCKOFF'",
                       ("منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً).",
                        config.now()))
-            # INFRASTRUCTURE SELF-HEAL (picker-empty bug, seen live 2026-11-22):
-            # markets & timeframes were seeded disabled and nothing ever enabled
-            # them, so the user analytics flow rendered the header with ZERO
-            # timeframe buttons. v6.8.0 GOLD-FIRST POLICY (owner's explicit
-            # instruction): GOLD ships OPEN and every other instrument ships
-            # CLOSED — the heal arms gold only; admins open the rest per-market
-            # from the markets center after verifying each provider. Verified
-            # flags reflect real provider coverage (metal/forex/crypto = the
-            # proven FX-grade chain; indices/stocks require per-symbol verify).
-            for sym, _t, _p, cat, _pip, _dig, _con, _sp in SEED_MARKETS:
-                verified = 1 if cat in SEED_VERIFIED_CATEGORIES else 0
-                enabled = 1 if sym == GOLD_DEFAULT_SYMBOL else 0
-                c.execute("UPDATE market_catalog SET enabled=?, verified=?, updated_at=? WHERE symbol=?",
-                          (enabled, verified, config.now(), sym))
-            for code, _interval in SEED_TIMEFRAMES:
-                c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
-                          (config.now(), code))
+            # Auto-encrypt any legacy plaintext broker_adapters.config_json rows (ENC1).
+            from fysb.services import secrets as secrets_service
+            for brow in c.execute("SELECT id, config_json FROM broker_adapters").fetchall():
+                raw_cfg = brow["config_json"] or ""
+                if raw_cfg and not secrets_service.is_encrypted(raw_cfg):
+                    try:
+                        parsed = json.loads(raw_cfg)
+                        if isinstance(parsed, dict):
+                            c.execute(
+                                "UPDATE broker_adapters SET config_json=?, updated_at=? WHERE id=?",
+                                (secrets_service.encrypt_json(parsed), config.now(), brow["id"]),
+                            )
+                    except Exception:
+                        pass
             # v6.10.0 — RETIRED: the old force-merge of ALL implemented strategies
             # into every plan destroyed the luxury tiering (FREE ended up with 12
             # methodologies). Now: only plans whose strategies are EMPTY get the

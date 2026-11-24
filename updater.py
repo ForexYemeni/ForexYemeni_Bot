@@ -18,6 +18,7 @@
     (يمكن تعطيله بمتغير البيئة AUTO_UPDATE=0).
   * من داخل تلغرام: /update (الإدارة فقط) عبر handlers/common.py.
 """
+import hashlib
 import json
 import os
 import pathlib
@@ -91,6 +92,57 @@ def _download(url: str, dest: pathlib.Path, timeout: int = TIMEOUT_ZIP) -> pathl
     return dest
 
 
+def _get_text(url: str, timeout: int = TIMEOUT_JSON) -> str:
+    req = urllib.request.Request(url, headers={**_headers(), "Accept": "text/plain, */*"})
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+        return resp.read(65536).decode("utf-8", errors="replace")
+
+
+def sha256_file(path) -> str:
+    """Compute lowercase SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(256 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def _parse_sha256_text(text: str, asset_name: str = "") -> str:
+    """Extract a 64-char SHA-256 hex digest from checksum file or release body."""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    # Prefer a line mentioning the exact asset name (e.g. SHA256SUMS.txt)
+    if asset_name:
+        for ln in lines:
+            if asset_name in ln:
+                m = re.search(r"\b([0-9a-fA-F]{64})\b", ln)
+                if m:
+                    return m.group(1).lower()
+    # Explicit sha256:<hex> label (e.g. GitHub asset digest or release notes)
+    m = re.search(r"sha256\s*[:=]\s*([0-9a-fA-F]{64})\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+    # Standalone checksum file ("<64hex>" or "<64hex>  filename")
+    if len(lines) == 1:
+        m = re.match(r"^([0-9a-fA-F]{64})(?:\s+.*)?$", lines[0])
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
+def verify_sha256(zip_path, expected_hex: str) -> bool:
+    """Constant-time comparison of file SHA-256 against expected 64-hex digest."""
+    import hmac
+    exp = (expected_hex or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", exp):
+        return False
+    return hmac.compare_digest(sha256_file(zip_path), exp)
+
+
 # --- مقارنة الإصدارات --------------------------------------------------------
 
 def parse_version(text) -> tuple:
@@ -159,12 +211,25 @@ def latest_release(owner=None, repo=None, asset_name=None):
         data = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases/latest")
         tag = (data.get("tag_name") or "").strip()
         asset_url = ""
+        sha256_hex = ""
+        sha256_url = ""
         for asset in data.get("assets") or []:
-            if asset.get("name") == asset_name:
+            aname = asset.get("name") or ""
+            if aname == asset_name:
                 asset_url = asset.get("browser_download_url") or ""
-                break
+                # GitHub Releases API may include "digest": "sha256:<64hex>"
+                sha256_hex = _parse_sha256_text(asset.get("digest") or "", asset_name)
+            elif aname in (f"{asset_name}.sha256", f"{asset_name}.sha256sum", "SHA256SUMS.txt", "checksums.txt"):
+                sha256_url = asset.get("browser_download_url") or ""
+        if not sha256_hex and data.get("body"):
+            sha256_hex = _parse_sha256_text(data.get("body") or "", asset_name)
         if tag and asset_url:
-            return {"tag": tag, "url": asset_url, "name": asset_name}
+            out = {"tag": tag, "url": asset_url, "name": asset_name}
+            if sha256_hex:
+                out["sha256"] = sha256_hex
+            if sha256_url:
+                out["sha256_url"] = sha256_url
+            return out
     except Exception:
         pass                      # أي فشل API ⇒ المسار الاحتياطي أدناه
     # المسار الاحتياطي (بلا حد طلبات): تغذية Atom + رابط التنزيل المباشر
@@ -183,11 +248,10 @@ def latest_release(owner=None, repo=None, asset_name=None):
 
 def _zip_root_prefix(names) -> str:
     """إن كانت كل الملفات داخل مجلد جذر واحد، تُعاد بادئته للتسطيح."""
-    tops = set()
-    for n in names:
-        if "/" in n:
-            tops.add(n.split("/", 1)[0])
-    if len(tops) == 1 and any("/" in n for n in names):
+    if not names or not all("/" in n for n in names):
+        return ""
+    tops = {n.split("/", 1)[0] for n in names}
+    if len(tops) == 1:
         return tops.pop() + "/"
     return ""
 
@@ -276,6 +340,26 @@ def self_update(dest_root=None) -> dict:
             if tmp_zip.stat().st_size > MAX_ZIP_BYTES:
                 result["detail"] = "حجم الحزمة أكبر من الحد المسموح — أُلغي التثبيت"
                 return result
+            # Integrity verification: check SHA-256 whenever published by the
+            # release (asset digest, release body, or companion .sha256 asset).
+            expected_sha = (rel.get("sha256") or "").strip().lower()
+            if not expected_sha and rel.get("sha256_url"):
+                try:
+                    expected_sha = _parse_sha256_text(
+                        _get_text(rel["sha256_url"], timeout=TIMEOUT_JSON),
+                        rel.get("name") or "",
+                    )
+                except Exception:
+                    expected_sha = ""
+            require_sha = (os.getenv("UPDATE_REQUIRE_SHA256", "0").strip() == "1")
+            if expected_sha:
+                if not verify_sha256(tmp_zip, expected_sha):
+                    result["detail"] = "فشل التحقق من بصمة SHA-256 للحزمة — أُلغي التثبيت لحماية النظام"
+                    return result
+                result["sha256_verified"] = True
+            elif require_sha:
+                result["detail"] = "بصمة SHA-256 مطلوبة (UPDATE_REQUIRE_SHA256=1) ولم تتوفر في الإصدار — أُلغي التثبيت"
+                return result
             if not validate_package(tmp_zip):
                 result["detail"] = "الحزمة ناقصة (main.py أو fysb مفقود) — أُلغي التثبيت"
                 return result
@@ -293,8 +377,49 @@ def self_update(dest_root=None) -> dict:
         return result
 
 
+def _prepare_for_restart() -> None:
+    """Flush DB state and release fysb.lock cleanly before os.execve().
+
+    Critical on Linux: os.execve() keeps the exact same PID and /proc start
+    tick. Releasing fysb.lock + flushing SQLite WAL / closing PG pool prevents
+    lock self-deadlock and ensures zero in-flight DB corruption on /update.
+    """
+    # 1. Flush SQLite WAL or close PostgreSQL connection pool (best-effort)
+    try:
+        if "fysb.db" in sys.modules:
+            from fysb import config as _cfg, db as _db
+            if getattr(_cfg, "USE_PG", False):
+                from fysb import pglayer
+                pglayer.close_pool()
+            else:
+                with _db.conn() as c:
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+    # 2. Release single-instance lock file if held by our PID
+    try:
+        if "fysb.handlers.background" in sys.modules:
+            from fysb.handlers import background as _bg
+            _bg.release_lock_file()
+        else:
+            lf = ROOT / "fysb.lock"
+            if lf.exists():
+                pid_txt = lf.read_text().strip().split(":")[0]
+                if not pid_txt.isdigit() or int(pid_txt) == os.getpid():
+                    lf.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # 3. Flush stdio buffers
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def restart() -> None:
-    """إعادة تشغيل العملية نفسها لتحميل الكود الجديد (استبدال فوري للعملية)."""
+    """إعادة تشغيل العملية نفسها لتحميل الكود الجديد (استبدال فوري آمن للعملية)."""
+    _prepare_for_restart()
     env = os.environ.copy()
     python = sys.executable or "python3"
     os.execve(python, [python, str(ROOT / "main.py")], env)

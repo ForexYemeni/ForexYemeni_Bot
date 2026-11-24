@@ -667,17 +667,27 @@ async def admin_tf_verify(q, uid, context, bot, code: str):
 
 
 # --- Brokers (real adapter registry: add API → test → approve) ----------------------
+def _safe_broker_cfg(raw: str) -> tuple[dict, bool]:
+    from fysb.services import secrets as secrets_service
+    try:
+        return secrets_service.decrypt_json(raw or ""), True
+    except Exception:
+        return {}, False
+
+
 async def admin_brokers(q, uid, context, bot):
     rows = await afn.run(_broker_rows)
     body = [f"🏦 <b><u>إدارة الوسطاء (Broker Adapters)</u></b>",
             "▎سجّل وسيطاً بمفاتيح API حقيقية، افحص الاتصال فعلياً، ثم اعتمده من هنا.",
-            "▎المفاتيح لا تُعرض ولا تُطبع أبداً — تُخزن في قاعدة البيانات فقط.", ""]
+            "▎المفاتيح لا تُعرض ولا تُطبع أبداً — تُخزن مشفرة (ENC1) في قاعدة البيانات فقط.", ""]
     rows_kb = []
     for r in rows:
-        cfg = json.loads(r["config_json"] or "{}")
+        cfg, dec_ok = _safe_broker_cfg(r["config_json"] or "")
         state_icon = {"CONFIGURED": "🔵", "VERIFIED": "🟡", "ACTIVE": "🟢", "DISABLED": "⚪"}.get(r["status"], "🔵")
         body.append(f"▎{state_icon} <b>#{r['id']} {esc(r['title'])}</b> · {esc(r['key'])} · <b>{esc(r['status'])}</b>")
-        if cfg.get("account_id"):
+        if not dec_ok:
+            body.append("   ⚠️ تعذر فك تشفير المفاتيح (تحقق من BROKER_SECRET_KEY أو أعد إدخال الوسيط)")
+        elif cfg.get("account_id"):
             body.append(f"   🆔 حساب: <code>{esc(cfg['account_id'])}</code>")
         row = [kb.btn("🔌 فحص اتصال", f"a:brokertest:{r['id']}")]
         if r["status"] == "VERIFIED":
@@ -722,7 +732,11 @@ async def admin_broker_test(q, uid, context, bot, bid: int):
     if not r:
         await render(q, "الوسيط غير موجود.", kb.admin_nav(), bot)
         return
-    cfg = json.loads(r["config_json"] or "{}")
+    cfg, dec_ok = _safe_broker_cfg(r["config_json"] or "")
+    if not dec_ok:
+        await render(q, "❌ تعذر فك تشفير مفاتيح الوسيط — تحقق من <code>BROKER_SECRET_KEY</code> أو احذف الوسيط وأعد إضافته.",
+                     kb.admin_nav([[kb.btn("↩️ الوسطاء", "a:brokers")]]), bot)
+        return
     await render(q, f"🔌 جارٍ فحص الاتصال الحقيقي مع <b>{esc(r['title'])}</b>...", None)
     ok, detail = await asyncio.to_thread(broker_test_connectivity, cfg, r["key"])
     new_status = "VERIFIED" if ok else ("CONFIGURED" if r["status"] not in ("ACTIVE",) else "ACTIVE")

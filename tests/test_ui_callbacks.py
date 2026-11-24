@@ -311,9 +311,11 @@ class TestRoyalFixesV691(unittest.TestCase):
         if not row["verified"]:
             with db.conn() as c:
                 c.execute("UPDATE strategy_catalog SET verified=1 WHERE code=?", (code,))
-        q, ctx = fire(f"a:strategy_toggle:{code}:2", ADMIN)
+        # Only 13 real implemented strategies remain (2 pages at 10/page):
+        # toggling on page index 1 must re-render page 2 of 2 (never yanked to page 1).
+        q, ctx = fire(f"a:strategy_toggle:{code}:1", ADMIN)
         text = page_for(q, ctx)
-        self.assertIn("الصفحة <b>3</b>", text, "toggle must re-render the SAME page (2 → عرض 3)")
+        self.assertIn("الصفحة <b>2</b>", text, "toggle must re-render the SAME page (1 → عرض 2)")
 
     # --- fix 2: broadcast preview buttons are callbacks, never URLs -------------
     def test_broadcast_buttons_use_callback_data_never_positional_url(self):

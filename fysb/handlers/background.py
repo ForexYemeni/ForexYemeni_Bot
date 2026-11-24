@@ -11,6 +11,34 @@ from fysb import afn, config, db
 from fysb.config import log
 
 LOCK_FILE = config.BASE_DIR / "fysb.lock"
+_held_lock_paths: set[str] = set()
+
+
+def _lock_key() -> str:
+    try:
+        return str(LOCK_FILE.resolve())
+    except Exception:
+        return str(LOCK_FILE)
+
+
+def release_lock_file() -> bool:
+    """Release fysb.lock if owned by the current PID (safe before os.execve).
+
+    Prevents the Linux os.execve self-deadlock during /update where the newly
+    exec'd main.py inherits the exact same PID and /proc start_tick.
+    """
+    _held_lock_paths.discard(_lock_key())
+    try:
+        if not LOCK_FILE.exists():
+            return True
+        text = LOCK_FILE.read_text().strip()
+        pid_text = text.split(":")[0] if text else ""
+        if not pid_text.isdigit() or int(pid_text) == os.getpid():
+            LOCK_FILE.unlink(missing_ok=True)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def _proc_start_tick(pid: int) -> str:
@@ -53,11 +81,16 @@ def _lock_identity_alive(pid: int, boot_tick: str) -> bool:
     Within one boot, /proc start ticks grow monotonically — so a matching tick
     proves the SAME incarnation is alive; any mismatch proves the lock belongs
     to a dead predecessor whose PID slot got reused (the bot-hosting bug).
+
+    For our OWN pid: only alive if THIS Python interpreter actually acquired the
+    lock (blocks accidental double-acquire in the same process, while allowing a
+    freshly os.execve()'d process from /update to cleanly take over a leftover
+    lock even when upgrading from pre-v6.12.0).
     """
     my_tick = _proc_start_tick(os.getpid())
     if boot_tick:
         if pid == os.getpid():
-            return bool(my_tick) and boot_tick == my_tick
+            return (_lock_key() in _held_lock_paths) and bool(my_tick) and boot_tick == my_tick
         return _pid_alive(pid) and _proc_start_tick(pid) == boot_tick
     # Legacy plain-PID lock (pre-6.6.3): the new format always carries a tick,
     # so a tick-less lock naming OUR pid can only be a dead predecessor.
@@ -92,6 +125,7 @@ class SingleInstanceLock:
             os.write(fd, f"{os.getpid()}:{_proc_start_tick(os.getpid())}".encode())
             os.close(fd)
             self.acquired = True
+            _held_lock_paths.add(_lock_key())
             return True
         except FileExistsError:
             return False
@@ -115,6 +149,7 @@ class SingleInstanceLock:
     def release(self):
         try:
             if self.acquired:
+                _held_lock_paths.discard(_lock_key())
                 LOCK_FILE.unlink(missing_ok=True)
         except OSError:
             pass

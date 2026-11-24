@@ -394,7 +394,7 @@ async def admin_backup_full(q, uid, context, bot):
             with open(dest, "rb") as f:
                 await bot.send_document(uid, f, filename=dest.name,
                                         caption=f"📦 نسخة المشروع الكاملة ({dest.stat().st_size // 1024} KB) — التحقق: ✅ {esc(detail)}\n"
-                                                f"🔒 تشمل: الكود + قاعدة البيانات + ملف .env — احفظها في مكان آمن.")
+                                                f"🔒 تشمل: الكود + قاعدة البيانات (تم استثناء .env لحماية التوكن والأسرار).")
             await admin_backup(q, uid, context, bot)
         else:
             await render(q, "❌ فشل التحقق من الأرشيف: " + safe(detail), kb.admin_nav(), bot)

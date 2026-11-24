@@ -97,20 +97,11 @@ def leaderboard_text(limit: int = 8) -> str:
 #           (the registry order below), then the not-yet-implemented last.
 # The result is deterministic for the same data — the same DB always renders
 # the same order, and the order upgrades itself as history accumulates.
-# v6.8.1 — the baseline now covers the FULL world catalog: implemented modules
-# first (their order = documented institutional ranking), then the complete
-# global schools, so the board is ordered for every strategy in the platform.
+# v6.12.0 — ONLY real implemented & automated-tested strategies (13 modules).
+# All 25 empty/unimplemented placeholders have been permanently purged.
 BASELINE_ORDER = [
-    # implemented + tested modules (institutional rank)
-    "ICT", "SMC", "CRT", "PRICE_ACTION", "FIBONACCI", "ICHIMOKU", "TREND",
-    "AMD", "SILVER_BULLET", "TURTLE_SOUP",
-    # documented global schools (closed until implemented + back-tested)
-    "WYCKOFF", "ELLIOTT_WAVE", "HARMONIC", "VOLUME_PROFILE", "ORDER_FLOW",
-    "MARKET_PROFILE", "VWAP", "CPR", "PIVOT_POINTS", "SUPERTREND",
-    "BREAKOUT_RETEST", "SUPPORT_RESISTANCE", "LONDON_BREAK", "ASIA_RANGE",
-    "ORB", "DONCHIAN", "ATR_BREAKOUT", "MOMENTUM", "MA_CROSS", "MACD_STRAT",
-    "RSI_DIVERGENCE", "BOLLINGER", "KELTNER", "MEAN_REVERSION", "GAP_TRADE",
-    "HEIKIN_ASHI",
+    "ICT", "SMC", "CRT", "PRICE_ACTION", "WYCKOFF", "FIBONACCI",
+    "ICHIMOKU", "TREND", "CLASSIC", "SK", "AMD", "SILVER_BULLET", "TURTLE_SOUP",
 ]
 
 

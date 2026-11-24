@@ -145,8 +145,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⛓ لم يُضبَط عنوان محفظة USDT على شبكة {chain} بعد — أرسل صورة الإيصال للمراجعة اليدوية أو تواصل مع الدعم.")
             return
         await update.effective_message.reply_text(f"⛓ جارٍ فحص المعاملة على شبكة {chain} (التأكيد + العنوان + المبلغ)…")
+        # Allow a 5-minute grace window before payment creation for users who transferred
+        # just before tapping the button, while blocking historical TXID replay attacks.
+        min_ts = max(0.0, float(req.get("created_at") or 0) - 300.0)
         res = await asyncio.to_thread(chain_verify.verify_usdt,
-                                      text.strip(), wallet, float(req["amount"] or 0), chain)
+                                      text.strip(), wallet, float(req["amount"] or 0), chain,
+                                      20.0, min_ts)
         if not res.get("ok"):
             ud["awaiting_usdt_txid"] = pid
             ud["usdt_chain"] = chain
@@ -728,10 +732,11 @@ async def _broker_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: 
             "🆔 أرسل <b>معرّف الحساب</b> (Account ID / Login) — أو <code>-</code> للتخطي:", parse_mode="HTML")
     elif step == "account_id":
         d["account_id"] = "" if text == "-" else text[:60]
-        # Save (credentials stored only in config_json; never rendered)
+        # Save encrypted at rest (ENC1 Encrypt-then-MAC; never rendered)
+        from fysb.services import secrets as secrets_service
         cfg = {"base_url": d.get("base_url", ""), "api_key": d["api_key"],
                "api_secret": d["api_secret"], "account_id": d["account_id"]}
-        bid = await afn.run(_insert_broker, d["type"], d["name"], json.dumps(cfg))
+        bid = await afn.run(_insert_broker, d["type"], d["name"], secrets_service.encrypt_json(cfg))
         context.user_data.pop("broker_draft", None)
         await afn.run(audit_log.log, uid, f"broker_added:{d['type']}:{bid}")
         await update.effective_message.reply_text(

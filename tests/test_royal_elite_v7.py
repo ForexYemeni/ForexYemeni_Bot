@@ -94,7 +94,7 @@ class TestProviderChain(unittest.TestCase):
     def test_gold_chain_real(self):
         """Network test (skipped gracefully offline): gold price must be real-ish."""
         try:
-            p = md.fetch_price("XAU/USD", "")
+            p = md.fetch_price("XAU/USD", "", use_cache=False)
         except RuntimeError:
             self.skipTest("network unavailable")
             return

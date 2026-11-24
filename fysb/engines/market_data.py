@@ -85,7 +85,6 @@ TWELVEDATA_MAP = {
 FOREX_ONLY = set(YAHOO_FX_MAP.keys())
 
 _cache: dict[tuple, dict] = {}
-_quote_cache: dict[str, dict] = {}
 _fail_streak: dict[str, tuple[float, int]] = {}
 _last_provider: dict[str, str] = {}
 
@@ -608,10 +607,10 @@ def _store_quote(internal: str, provider: str, payload: dict, use_cache: bool) -
     _mark_success(provider, internal, "quote")
     _last_provider[internal] = provider
     if use_cache:
-        _quote_cache[internal] = {"t": time.time(), "payload": payload}
-        if len(_quote_cache) > 200:
-            for k, _v in sorted(_quote_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
-                _quote_cache.pop(k, None)
+        _cache[("quote", internal)] = {"t": time.time(), "payload": payload}
+        if len(_cache) > 250:
+            for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
+                _cache.pop(k, None)
     return payload
 
 
@@ -619,7 +618,7 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
     """Latest REAL quote — headline prices must match the actual market."""
     internal = _norm(symbol)
     if use_cache:
-        qhit = _quote_cache.get(internal)
+        qhit = _cache.get(("quote", internal))
         if qhit and time.time() - qhit["t"] < QUOTE_CACHE_TTL_SECONDS:
             out = dict(qhit["payload"])
             out["symbol"] = symbol

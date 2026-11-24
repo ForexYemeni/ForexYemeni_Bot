@@ -31,7 +31,6 @@ def _fake_user(uid: int):
 class TestPhase3MarketData(unittest.TestCase):
     def setUp(self):
         md._cache.clear()
-        md._quote_cache.clear()
         md._fail_streak.clear()
 
     def test_bybit_v5_millisecond_timestamps_parse_cleanly(self):

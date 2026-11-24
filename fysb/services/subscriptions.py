@@ -238,13 +238,104 @@ def mark_reminded(sub_id: int, stage: int) -> None:
         c.execute(f"UPDATE subscriptions SET {col}=1 WHERE id=?", (sub_id,))
 
 
-# --- FREE quota ledger -------------------------------------------------------
+# --- FREE trial & quota ledger -----------------------------------------------
+def _parse_iso_utc(raw: str) -> datetime | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def free_trial_status(uid: int, user_row=None, plan_row=None) -> dict:
+    """Compute a user's FREE trial window status (controlled by Admin via
+    `plans.duration_days` for `FREE`: `0` = open forever, `> 0` = N days from
+    the user's `joined_at`). Paid subscribers and ADMIN always return expired=False."""
+    if int(uid) == int(config.ADMIN_ID or 0):
+        return {
+            "is_free": False, "expired": False, "unlimited": True,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    p = plan_row if plan_row is not None else plan_for(uid)
+    if not p or (p.get("code") or "FREE").upper() != "FREE":
+        return {
+            "is_free": False, "expired": False, "unlimited": False,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    trial_days = int(p.get("duration_days") or 0)
+    if trial_days <= 0:
+        return {
+            "is_free": True, "expired": False, "unlimited": True,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    joined_raw = ""
+    if user_row is not None:
+        try:
+            joined_raw = user_row["joined_at"] or ""
+        except Exception:
+            joined_raw = ""
+    else:
+        with db.conn() as c:
+            r = c.execute("SELECT joined_at FROM users WHERE user_id=?", (int(uid),)).fetchone()
+            joined_raw = (r["joined_at"] if r else "") or ""
+    joined_dt = _parse_iso_utc(joined_raw)
+    if joined_dt is None:
+        return {
+            "is_free": True, "expired": False, "unlimited": False,
+            "trial_days": trial_days, "days_left": trial_days,
+            "hours_left": trial_days * 24, "expires_at": "",
+        }
+    expires_dt = joined_dt + timedelta(days=trial_days)
+    now_dt = datetime.now(timezone.utc)
+    if now_dt >= expires_dt:
+        return {
+            "is_free": True, "expired": True, "unlimited": False,
+            "trial_days": trial_days, "days_left": 0, "hours_left": 0,
+            "expires_at": expires_dt.isoformat(),
+        }
+    rem_sec = (expires_dt - now_dt).total_seconds()
+    days_left = max(0, int(rem_sec // 86400))
+    hours_left = max(1, int((rem_sec + 3599) // 3600))
+    return {
+        "is_free": True, "expired": False, "unlimited": False,
+        "trial_days": trial_days, "days_left": days_left,
+        "hours_left": hours_left, "expires_at": expires_dt.isoformat(),
+    }
+
+
+def is_free_trial_expired(uid: int, user_row=None, plan_row=None) -> bool:
+    return bool(free_trial_status(uid, user_row=user_row, plan_row=plan_row).get("expired"))
+
+
+def cheapest_plan_unlocking(kind: str, item: str) -> dict | None:
+    """Return the cheapest enabled paid plan whose `kind` ('markets', 'timeframes',
+    'strategies') includes `item` (or 'ALL'). Used by luxury upgrade cards."""
+    target = (item or "").strip().upper().replace("/", "")
+    if not target or kind not in ("markets", "timeframes", "strategies"):
+        return None
+    pmap = _plans_map()
+    paid = sorted(
+        (p for p in pmap.values() if p.get("enabled") and float(p.get("price") or 0) > 0),
+        key=lambda x: float(x.get("price") or 0),
+    )
+    for p in paid:
+        vals = {x.strip().upper().replace("/", "") for x in str(p.get(kind) or "").split(",") if x.strip()}
+        if "ALL" in vals or target in vals:
+            return p
+    return paid[-1] if paid else None
+
+
 def _quota_for(user_id: int, plan_row=None) -> int:
     if plan_row is None:
         plan_row = plan_for(user_id)
     if plan_row and (plan_row["code"] != "FREE"):
-        return max(int(plan_row["max_signals_per_day"] or 5), 5)
-    return max(1, db.get_setting_int("free_daily_signals", 2))
+        return max(1, int(plan_row["max_signals_per_day"] or 1))
+    return max(1, db.get_setting_int("free_daily_signals", int((plan_row or {}).get("max_signals_per_day") or 1)))
 
 
 def quota_state(user_id: int, plan_row=None) -> dict:

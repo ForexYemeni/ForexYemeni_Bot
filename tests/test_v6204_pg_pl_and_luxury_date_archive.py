@@ -192,11 +192,11 @@ class TestV6204PgPlAndLuxuryDateArchive(unittest.TestCase):
 
     def test_user_previous_signals_never_disappear_and_date_separated(self):
         # Closed winning signal from today + closed signal from yesterday + closed from 4 days ago
-        sid_today_closed = _insert_sig(self.d_today, "XAUUSD", "TP1_HIT", 297.2, closed=True)
-        sid_yest_closed = _insert_sig(self.d_yest, "XAUUSD", "TP3_HIT", 410.0, closed=True)
+        sid_today_closed = _insert_sig(self.d_today, "XAUUSD", "TP1_HIT", 297.2, closed=True, strat="CLASSIC")
+        sid_yest_closed = _insert_sig(self.d_yest, "XAUUSD", "TP3_HIT", 410.0, closed=True, strat="CLASSIC")
         sid_old_delivered = _insert_sig(self.d_old, "EURUSD", "TP2_HIT", 155.0, closed=True, tf="H1", strat="SMC")
         # Private SIGNAL_NOW owned by USER_B must NOT leak to USER_A
-        sid_b_priv = _insert_sig(self.d_today, "XAUUSD", "RUNNING", 0.0, closed=False, source="SIGNAL_NOW", created_by=USER_B)
+        sid_b_priv = _insert_sig(self.d_today, "XAUUSD", "RUNNING", 0.0, closed=False, source="SIGNAL_NOW", created_by=USER_B, strat="CLASSIC")
 
         # Mark old signal as delivered to USER_A (even though plan default is XAUUSD/M15/ICT)
         with db.conn() as c:

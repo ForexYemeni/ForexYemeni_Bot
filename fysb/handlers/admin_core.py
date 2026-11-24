@@ -442,26 +442,59 @@ async def admin_plan_edit(q, uid, context, bot, code: str):
     # v6.10.0 (owner report 4) — DIRECT-ENTRY editor: the old +/- stepper rows
     # are retired («أراه سيء للغاية وليس فاخر»). One tap opens a single-number
     # prompt; any value lands instantly. Blocks stay as fast chip rows.
+    dur_val = int(p["duration_days"] or 0)
+    dur_label = ("♾️ مفتوحة دائماً" if dur_val == 0 else f"{dur_val} يوم") if code == "FREE" else (
+        "دائم" if dur_val == 0 else f"{dur_val} يوم"
+    )
     rows_kb = [
-        [kb.btn(f"💰 السعر: {p['price']:g} {p['currency']}", f"a:planfield:{code}:price"),
-         kb.btn(f"📅 المدة: {'دائم' if not p['duration_days'] else str(p['duration_days']) + ' يوم'}", f"a:planfield:{code}:days")],
-        [kb.btn(f"📡 الإشارات: {p['max_signals_per_day']}/يوم", f"a:planfield:{code}:quota"),
-         kb.btn(f"🔬 التحليلات: {p['max_analyses_per_day'] or 0}/يوم", f"a:planfield:{code}:anal")],
-        [kb.btn(f"⭐ الجودة: {p['min_score']}/100", f"a:planfield:{code}:score")],
+        [kb.btn(f"💰 السعر: {p['price']:g} {p['currency']}", f"a:planfield:{code}:price", style="primary"),
+         kb.btn(f"📅 {'مدة التجربة' if code == 'FREE' else 'المدة'}: {dur_label}", f"a:planfield:{code}:days", style="primary")],
     ]
+    if code == "FREE":
+        # v6.22.0: 1-tap FREE Trial Duration presets right inside Admin -> FREE Plan
+        rows_kb.append([
+            kb.btn(
+                (("✅ " if dur_val == d else "") + ("♾️ مفتوحة" if d == 0 else f"{d} يوم")),
+                f"a:plantrial:FREE:{d}",
+                style="success" if dur_val == d else "primary",
+            )
+            for d in (3, 7, 14, 30, 0)
+        ])
+    rows_kb.extend([
+        [kb.btn(f"📡 الإشارات: {p['max_signals_per_day']}/يوم", f"a:planfield:{code}:quota", style="primary"),
+         kb.btn(f"🔬 التحليلات: {p['max_analyses_per_day'] or 0}/يوم", f"a:planfield:{code}:anal", style="primary")],
+        [kb.btn(f"⭐ الجودة: {p['min_score']}/100", f"a:planfield:{code}:score", style="primary")],
+    ])
     # Feature toggles — what THIS plan may use (markets / timeframes / strategies)
+    free_note = (
+        "\n⏳ <b>ضبط الفترة المجانية لكل مستخدم:</b> اختر مدة جاهزة بالأسفل (3 / 7 / 14 / 30 يوم أو ♾️ مفتوحة دائماً) "
+        "أو اضغط «📅 مدة التجربة» لإدخال أي عدد أيام مخصص — تنتهي تلقائياً لكل مستخدم بعد مضي المدة من انضمامه ويُعرض له عرض ترقية فاخر.\n"
+        if code == "FREE" else "\n"
+    )
     body = (render_plan_card(p) +
             f"\n\n🌐 <b>الأسواق المسموحة:</b>\n<blockquote>{esc(mkt_row)}</blockquote>" +
             f"⏱ <b>الأطر الزمنية المسموحة:</b>\n<blockquote>{esc(tf_row)}</blockquote>" +
             f"🧠 <b>الاستراتيجيات المسموحة:</b>\n<blockquote>{esc(st_row)}</blockquote>" +
-            "\n<i>اضغط أي قيمة بالأسفل لكتابة القيمة الجديدة مباشرة (سعر/مدة/حدود/جودة)، "
+            free_note +
+            "<i>اضغط أي قيمة بالأسفل لكتابة القيمة الجديدة مباشرة (سعر/مدة/حدود/جودة)، "
             "واضغط صفوف الأسواق والأطر والاستراتيجيات للتبديل الفوري — كل شيء سهل جداً وبضغطة واحدة.</i>")
-    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets"),
-                    kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes")])
-    rows_kb.append([kb.btn("🧠 الاستراتيجيات ⬇️", f"a:planfeatpage:{code}:strategies")])
-    rows_kb.append([kb.btn(f"{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'} · تفعيل/تعطيل", f"a:toggleplan:{code}")])
-    rows_kb.append([kb.btn("🗑 حذف الباقة", f"a:plandel:{code}") if code not in ("FREE",) else kb.btn("🔒 الباقة المجانية محمية", "a:plannoop")])
+    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets", style="primary"),
+                    kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes", style="primary")])
+    rows_kb.append([kb.btn("🧠 الاستراتيجيات ⬇️", f"a:planfeatpage:{code}:strategies", style="primary")])
+    rows_kb.append([kb.btn(f"{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'} · تفعيل/تعطيل", f"a:toggleplan:{code}",
+                           style="success" if p["enabled"] else "danger")])
+    rows_kb.append([kb.btn("🗑 حذف الباقة", f"a:plandel:{code}", style="danger") if code not in ("FREE",)
+                    else kb.btn("🔒 الباقة المجانية محمية", "a:plannoop", style="primary")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_plan_days_preset(q, uid, context, bot, code: str, days: int):
+    """v6.22.0: 1-tap duration preset (e.g. FREE trial 3/7/14/30 days or 0=forever)."""
+    n = max(0, min(3650, int(days)))
+    await afn.run(_plan_field_update, code, "duration_days", n)
+    await afn.run(subs.invalidate_plans_cache)
+    await afn.run(audit_log.log, uid, f"plan_days_preset:{code}:{n}")
+    await admin_plan_edit(q, uid, context, bot, code)
 
 
 PLAN_FIELD_LABELS = {"price": "السعر (رقم، مثال 19 أو 19.5)",
@@ -503,6 +536,8 @@ def plan_field_apply(code: str, field: str, raw: str) -> str:
             if not (1 <= n <= 1000):
                 raise ValueError("حد الإشارات بين 1 و 1000")
             c.execute("UPDATE plans SET max_signals_per_day=? WHERE code=?", (n, code))
+            if code.upper() == "FREE":
+                db.set_setting("free_daily_signals", str(n))
             subs.invalidate_plans_cache()
             return f"حُفظ حد إشارات {code}: {n}/يوم"
         if field == "anal":

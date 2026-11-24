@@ -227,7 +227,7 @@ class TestLuxuryPlans(_Base):
         # Other suites legitimately retune the plans (analytics quota tests…).
         # A fresh boot re-stamps exactly once — assert against THAT contract.
         with db.conn() as c:
-            c.execute("DELETE FROM settings WHERE key='plans_luxury_v6100_applied'")
+            c.execute("DELETE FROM settings WHERE key IN ('plans_luxury_v6100_applied', 'plans_4tier_v6220_applied')")
         db._settings_cache.clear()   # the 5s TTL cache must not resurrect the flag
         db.init_db()
 
@@ -236,16 +236,20 @@ class TestLuxuryPlans(_Base):
             free = dict(c.execute("SELECT * FROM plans WHERE code='FREE'").fetchone())
             pro = dict(c.execute("SELECT * FROM plans WHERE code='PRO'").fetchone())
             vip = dict(c.execute("SELECT * FROM plans WHERE code='VIP'").fetchone())
-        self.assertEqual(free["max_signals_per_day"], 2)
-        self.assertEqual(free["max_analyses_per_day"], 3)
-        self.assertEqual(free["timeframes"], "M15")
-        self.assertEqual(free["strategies"], "ICT,PRICE_ACTION")
+            royal = dict(c.execute("SELECT * FROM plans WHERE code='ROYAL'").fetchone())
+        self.assertEqual(free["max_signals_per_day"], 1)
+        self.assertEqual(free["max_analyses_per_day"], 1)
+        self.assertEqual(free["duration_days"], 7)
+        self.assertEqual(free["timeframes"], "M15,H1")
+        self.assertEqual(free["strategies"], "CLASSIC,TREND")
         self.assertLessEqual(len(free["strategies"].split(",")), 2)
         self.assertEqual(pro["price"], 19.0)
         self.assertGreater(pro["max_signals_per_day"], free["max_signals_per_day"])
         self.assertGreater(len(pro["strategies"].split(",")), len(free["strategies"].split(",")))
         self.assertGreater(vip["max_signals_per_day"], pro["max_signals_per_day"])
         self.assertGreater(len(vip["strategies"].split(",")), len(pro["strategies"].split(",")))
+        self.assertGreater(royal["max_signals_per_day"], vip["max_signals_per_day"])
+        self.assertEqual(len(royal["strategies"].split(",")), 13)
 
     def test_force_merge_retired(self):
         """The old boot merge stuffed every implemented strategy into FREE —
@@ -522,8 +526,8 @@ class TestStrategyInfo(_Base):
         self.assertIn("الاستراتيجيات داخل هذه الباقة", text)
         mk = page_markup_for(q, ctx)
         datas = [b.callback_data for row in mk.inline_keyboard for b in row]
-        self.assertIn("u:stratinfo:ICT:PRO", datas)
-        self.assertIn("u:stratinfo:SMC:PRO", datas)
+        self.assertIn("u:stratinfo:PRICE_ACTION:PRO", datas)
+        self.assertIn("u:stratinfo:FIBONACCI:PRO", datas)
 
     def test_identity_page_implemented(self):
         q, ctx = fire("u:stratinfo:ICT:PRO", USER)

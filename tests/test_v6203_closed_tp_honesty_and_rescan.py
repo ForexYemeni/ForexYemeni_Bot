@@ -112,6 +112,7 @@ class TestV6203ClosedTpHonestyAndRescan(unittest.TestCase):
         cand = StrategyResult("ICT", "BUY", last_px, last_px - 13.0, last_px + 26.0, last_px + 39.0, last_px + 58.5, 2.0, 88, ["fresh setup"])
         with patch.object(market_data, "fetch_candles", return_value=payload), \
              patch.object(market_data, "is_stale", return_value=False), \
+             patch.object(market_data, "market_state", return_value=True), \
              patch.object(market_data, "fetch_price", return_value={"price": last_px}), \
              patch.object(signal_engine, "evaluate_all", return_value=[cand]):
             out = signal_engine.generate_signal("XAUUSD", "M15")

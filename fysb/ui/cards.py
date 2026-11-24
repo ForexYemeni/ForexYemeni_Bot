@@ -336,16 +336,185 @@ def render_no_signal_card(
     return "\n".join(lines)
 
 
-def render_plan_card(p) -> str:
-    body = [
-        f"💰 السعر: <b>{p['price']:g} {esc(p['currency'])}</b>",
-        f"📅 المدة: <b>{p['duration_days'] or 'دائم (مجاني)'}</b>",
-        f"📡 حد الإشارات اليومي: <b>{p['max_signals_per_day']}</b>",
-        f"🔬 حد التحليلات اليومي: <b>{p.get('max_analyses_per_day', 0) if isinstance(p, dict) else 0}</b>",
-        f"⭐ الجودة الدنيا: <b>{p['min_score']}/100</b>",
-        f"🌐 الأسواق: <code>{esc(p['markets'])}</code>",
-        f"⏱ الأطر: <code>{esc(p['timeframes'])}</code>",
-        f"🧠 الاستراتيجيات: <code>{esc(p['strategies'])}</code>",
-        f"📌 الحالة: <b>{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'}</b>",
+_PLAN_TIER_META = {
+    "FREE": {
+        "icon": "🆓",
+        "tagline": "بوابة التجربة المجانية — تحقّق من دقة المحرك قبل الترقية",
+        "perks": [],
+    },
+    "PRO": {
+        "icon": "⚡",
+        "tagline": "الاختيار الذكي للمتداول المنضبط — فرص يومية منتقاة بسعر اقتصادي",
+        "perks": ["🛡 تتبع تلقائي كامل للأهداف (TP1 / TP2 / TP3) وتنبيهات الوقف"],
+    },
+    "VIP": {
+        "icon": "👑",
+        "tagline": "الأكثر طلباً 🔥 — مدارس الأموال الذكية (SMC · ICT · Wyckoff · SK)",
+        "perks": [
+            "🔐 دخول فوري تلقائي لقناة VIP الخاصة برابط حصري فور التفعيل",
+            "👁 ميزة مراقبة الفرص التلقائية (Watchers) على أسواقك المختارة",
+        ],
+    },
+    "ROYAL": {
+        "icon": "🏆",
+        "tagline": "القوة المؤسسية الكاملة — أقوى 4 استراتيجيات قنص سيولة حصرية",
+        "perks": [
+            "🎯 حصرياً: CRT · AMD · Silver Bullet · Turtle Soup (كل الـ 13 استراتيجية)",
+            "🔐 دخول تلقائي لقناة VIP الخاصة + أولوية قصوى في الدعم الفني",
+            "📊 وصول كامل لجميع أسواق المنصة والأطر الزمنية والتداول التجريبي الذكي",
+        ],
+    },
+}
+
+
+def plan_tier_icon(code: str) -> str:
+    return _PLAN_TIER_META.get((code or "").upper(), {}).get("icon", "💎")
+
+
+def render_plan_card(p, trial_info: dict | None = None) -> str:
+    code = (p.get("code") or "").upper() if isinstance(p, dict) else (p["code"] or "").upper()
+    meta = _PLAN_TIER_META.get(code, {"icon": "💎", "tagline": "", "perks": []})
+    icon = meta["icon"]
+    price = float(p["price"] or 0)
+    price_txt = "مجاناً (0$)" if price <= 0 else f"{price:g} {esc(p['currency'])}"
+    dur = int(p["duration_days"] or 0)
+    if code == "FREE":
+        dur_txt = f"فترة تجريبية {dur} يوم" if dur > 0 else "دائم (مجاني مفتوح)"
+    else:
+        dur_txt = f"{dur} يوم" if dur > 0 else "دائم"
+
+    mkts = [x.strip() for x in str(p["markets"] or "").split(",") if x.strip()]
+    tfs = [x.strip() for x in str(p["timeframes"] or "").split(",") if x.strip()]
+    strats = [x.strip() for x in str(p["strategies"] or "").split(",") if x.strip()]
+    anl_q = int(p.get("max_analyses_per_day", 0) if isinstance(p, dict) else 0)
+    sig_q = int(p["max_signals_per_day"] or 0)
+
+    core = [
+        f"▎💰 <b>السعر:</b> <b>{price_txt}</b>",
+        f"▎📅 <b>المدة:</b> <b>{dur_txt}</b>",
+        f"▎📡 <b>حد الإشارات اليومي:</b> <b>{sig_q} إشارة / يوم</b>",
+        f"▎🔬 <b>حد التحليلات اليومي:</b> <b>{anl_q} تحليل / يوم</b>",
+        f"▎⭐ <b>الجودة الدنيا:</b> <b>{p['min_score']}/100</b>",
+        f"▎📌 <b>الحالة:</b> <b>{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'}</b>",
     ]
-    return f"{ICON['diamond']} <b><u>{esc(p['title'])}</u></b> ({esc(p['code'])})\n" + card("\n".join(body))
+    if trial_info and code == "FREE" and trial_info.get("is_free") and not trial_info.get("unlimited"):
+        if trial_info.get("expired"):
+            core.append("▎🔒 <b>حالتك الآن:</b> انتهت فترتك المجانية — اختر باقة مدفوعة للاستمرار")
+        else:
+            dl = trial_info.get("days_left") or 0
+            hl = trial_info.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
+            core.append(f"▎⏳ <b>المتبقي من تجربتك:</b> <b>{rem}</b>")
+
+    mkt_preview = " · ".join(mkts[:8]) + (f" (+{len(mkts) - 8} أخرى)" if len(mkts) > 8 else "")
+    scope = [
+        f"▎🌐 <b>الأسواق ({len(mkts)}):</b> <code>{esc(mkt_preview or '—')}</code>",
+        f"▎⏱ <b>الأطر ({len(tfs)}):</b> <code>{esc(' · '.join(tfs) or '—')}</code>",
+        f"▎🧠 <b>الاستراتيجيات ({len(strats)}):</b> <code>{esc(' · '.join(strats) or '—')}</code>",
+    ]
+    for perk in meta["perks"]:
+        scope.append(f"▎{perk}")
+
+    head = f"{icon} <b><u>{esc(p['title'])}</u></b>  <code>[{esc(code)}]</code>"
+    if meta["tagline"]:
+        head += f"\n<i>{meta['tagline']}</i>"
+    return (
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        + card("\n".join(core)) + "\n"
+        + card("\n".join(scope))
+    )
+
+
+def render_plans_showcase_card(plans: list[dict], current_plan: dict, trial_info: dict | None = None) -> str:
+    """Ultra-luxury overview of all enabled plans on `u:plans`."""
+    cur_code = (current_plan.get("code") or "FREE").upper()
+    cur_icon = plan_tier_icon(cur_code)
+    status_lines = [f"▎{cur_icon} باقتك الحالية: <b>{esc(current_plan['title'])}</b>"]
+    if trial_info and trial_info.get("is_free"):
+        if trial_info.get("unlimited"):
+            status_lines.append("▎⏳ الفترة المجانية: <b>♾️ مفتوحة حالياً</b>")
+        elif trial_info.get("expired"):
+            status_lines.append("▎🔒 <b>انتهت فترتك المجانية التجريبية</b> — اختر باقة بالأسفل للاستمرار فوراً")
+        else:
+            dl = trial_info.get("days_left") or 0
+            hl = trial_info.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
+            status_lines.append(f"▎⏳ متبقي من تجربتك المجانية: <b>{rem}</b> (من أصل {trial_info.get('trial_days', 7)} يوم)")
+
+    tier_lines = []
+    for r in plans:
+        code = (r["code"] or "").upper()
+        ic = plan_tier_icon(code)
+        price = float(r["price"] or 0)
+        p_txt = "مجاناً" if price <= 0 else f"{price:g}$/شهر"
+        sig_q = int(r["max_signals_per_day"] or 0)
+        anl_q = int(r.get("max_analyses_per_day") or 0)
+        n_st = len([x for x in str(r["strategies"] or "").split(",") if x.strip()])
+        n_mk = len([x for x in str(r["markets"] or "").split(",") if x.strip()])
+        badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
+        tier_lines.append(
+            f"▎{ic} <b>{esc(code)}</b>{badge} · <b>{p_txt}</b> — "
+            f"<code>{sig_q}</code> إشارة · <code>{anl_q}</code> تحليل · "
+            f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية"
+        )
+
+    return (
+        "💎 <b><u>باقات الاشتراك الملكية — FOREXYEMENI</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + card("\n".join(status_lines)) + "\n"
+        + "<b>مقارنة الباقات المتاحة:</b>\n"
+        + card("\n".join(tier_lines)) + "\n"
+        + "⚡ <i>تفعيل فوري وتلقائي عبر USDT (TRC20 / BEP20) أو التحويلات المحلية — اضغط أي باقة لعرض تفاصيلها الكاملة:</i>"
+    )
+
+
+def render_luxury_upgrade_card(
+    why: str,
+    current_plan: dict,
+    paid_plans: list[dict],
+    recommended_plan: dict | None = None,
+    trial_expired: bool = False,
+) -> str:
+    """Ultra-luxury persuasion card when a user hits a plan gate or trial expiry."""
+    if trial_expired:
+        head = "⏳ <b><u>انتهت فترتك المجانية — حان وقت الترقية الملكية!</u></b>"
+        lead = (
+            f"▎🔒 {esc(why)}\n"
+            "▎✨ لقد جرّبت دقة بياناتنا الحقيقية وبطاقاتنا الفاخرة — انتقل الآن للباقات المدفوعة\n"
+            "▎   لفتح الإشارات اليومية، التحليلات الفورية، والمدارس المؤسسية بلا توقف."
+        )
+    else:
+        head = f"{ICON['crown']} <b><u>ميزة ملكية — ارتقِ بمستوى تداولك الآن</u></b>"
+        lead = (
+            f"▎🔒 <b>السبب:</b> {esc(why)}\n"
+            f"▎💎 باقتك الحالية: <b>{esc(current_plan['title'])}</b>"
+        )
+    if recommended_plan:
+        rec_ic = plan_tier_icon(recommended_plan["code"])
+        lead += (
+            f"\n▎🎯 <b>الترقية المقترحة لك:</b> {rec_ic} <b>{esc(recommended_plan['title'])}</b> "
+            f"(<b>{recommended_plan['price']:g} {esc(recommended_plan['currency'])}</b>)"
+        )
+
+    comp = []
+    for p in paid_plans:
+        code = (p["code"] or "").upper()
+        ic = plan_tier_icon(code)
+        n_st = len([x for x in str(p["strategies"] or "").split(",") if x.strip()])
+        n_mk = len([x for x in str(p["markets"] or "").split(",") if x.strip()])
+        extra = " · 🔐 VIP" if code in ("VIP", "ROYAL") else ""
+        crown = " 🔥 الأكثر طلباً" if code == "VIP" else (" 🏆 الكاملة" if code == "ROYAL" else "")
+        comp.append(
+            f"▎{ic} <b>{esc(code)}</b> ({p['price']:g}$){crown}\n"
+            f"▎   <code>{p['max_signals_per_day']}</code> إشارة · <code>{p.get('max_analyses_per_day', 0)}</code> تحليل · "
+            f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية{extra}"
+        )
+
+    return (
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        + card(lead) + "\n"
+        + "<b>اختر باقتك وافتح المزايا فوراً:</b>\n"
+        + card("\n".join(comp)) + "\n"
+        + "⚡ <i>تفعيل لحظي تلقائي عبر USDT — اضغط الباقة المناسبة بالأسفل:</i>"
+    )
+

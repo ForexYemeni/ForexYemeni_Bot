@@ -167,6 +167,16 @@ def _enabled_timeframes() -> set:
 # Staged flow (callback-driven; the draft lives in context.user_data)
 # ---------------------------------------------------------------------------
 async def open_flow(q, uid: int, context, bot, is_admin: bool) -> None:
+    if not is_admin:
+        trial = await afn.run(subs.free_trial_status, uid)
+        if trial.get("expired"):
+            from fysb.handlers.user_pages import _upsell
+            await _upsell(
+                q, uid, bot,
+                f"انتهت فترتك المجانية ({trial.get('trial_days', 7)} أيام) — قم بالترقية للاستمرار في «إشارة الآن»",
+                trial_expired=True,
+            )
+            return
     context.user_data[DRAFT_KEY] = {"stage": "style", "is_admin": is_admin}
     rows = [[kb.btn(label, f"{'a' if is_admin else 'u'}:signowstyle:{code}")] for code, label in STYLE_STAGES]
     body = ("🚀 <b><u>إشارة الآن — التدفق الملكي بمراحل حقيقية 100%</u></b>\n"

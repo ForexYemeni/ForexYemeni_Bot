@@ -455,7 +455,7 @@ DEFAULT_SETTINGS = {
     "volatility_filter": "1",
     "atr_pct_max": "6.0",
     # FREE quota (server-enforced, anti-bypass)
-    "free_daily_signals": "2",
+    "free_daily_signals": "1",
     # Subscriptions
     "expiry_remind_days": "3",
     "signal_expiry_hours": "72",
@@ -531,40 +531,73 @@ SEED_TIMEFRAMES = [("M1", "1min"), ("M5", "5min"), ("M15", "15min"), ("M30", "30
 SEED_TIMEFRAME_AR = {"M1": "1 دقيقة", "M5": "5 دقائق", "M15": "15 دقيقة", "M30": "30 دقيقة",
                      "H1": "ساعة", "H4": "4 ساعات", "D1": "يومي", "W1": "أسبوعي"}
 
+ROYAL_MARKETS = (
+    "XAUUSD,XAGUSD,XPTUSD,"
+    "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,USDCAD,NZDUSD,"
+    "EURJPY,GBPJPY,EURGBP,"
+    "BTCUSD,ETHUSD,SOLUSD,XRPUSD,"
+    "US30,NAS100,SPX500"
+)
+
 SEED_PLANS = [
-    ("FREE", "Free", 0.0, "USD", 0, 80, 0, 1, "XAUUSD", "M15", "ICT,PRICE_ACTION", 2),
-    ("PRO", "Pro", 19.0, "USD", 30, 70, 1, 1, "XAUUSD,EURUSD", "M5,M15,H1,H4", "ICT,SMC,PRICE_ACTION", 15),
-    ("VIP", "VIP", 49.0, "USD", 30, 60, 3, 0, "XAUUSD,EURUSD,GBPUSD", "M5,M15,M30,H1,H4,D1", "ICT,SMC,PRICE_ACTION", 50),
+    ("FREE", "الباقة المجانية — FREE", 0.0, "USD", 7, 80, 0, 1,
+     "XAUUSD", "M15,H1", "CLASSIC,TREND", 1),
+    ("PRO", "الباقة الاحترافية — PRO", 19.0, "USD", 30, 72, 1, 1,
+     "XAUUSD,EURUSD,GBPUSD,USDJPY", "M15,M30,H1,H4",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU", 4),
+    ("VIP", "باقة كبار الشخصيات — VIP", 39.0, "USD", 30, 65, 2, 1,
+     "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,US30,NAS100,BTCUSD",
+     "M5,M15,M30,H1,H4,D1",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF", 10),
+    ("ROYAL", "الباقة الملكية — ROYAL ELITE", 79.0, "USD", 30, 60, 5, 1,
+     ROYAL_MARKETS, "M1,M5,M15,M30,H1,H4,D1",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP", 25),
 ]
 
 # Daily analyses quota per plan (admin-adjustable; 0 = analytics disabled for the plan)
-DEFAULT_ANALYSES_QUOTA = {"FREE": 3, "PRO": 10, "VIP": 30}
+DEFAULT_ANALYSES_QUOTA = {"FREE": 1, "PRO": 4, "VIP": 10, "ROYAL": 25}
 
 # Strategy codes implemented + covered by the automated test-suite.
 IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
                           "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU",
                           "CLASSIC", "SK", "WYCKOFF"]
 
-# v6.10.0 — LUXURY PLAN DEFAULTS (owner demand: «اضبط انت اعدادات الباقات بشكل
-# فاخر جداً»). A one-time migration stamps FREE/PRO/VIP with these exact
-# values, and the old boot-time force-merge of implemented strategies into
-# every plan is retired — the tiering stays EXACTLY as designed.
-LUXURY_PLANS_V6100 = {
-    "FREE": {"title": "Free", "price": 0.0, "duration_days": 0, "min_score": 80,
-             "max_signals_per_day": 2, "max_analyses_per_day": 3,
-             "markets": "XAUUSD", "timeframes": "M15",
-             "strategies": "ICT,PRICE_ACTION", "enabled": 1},
-    "PRO": {"title": "Pro", "price": 19.0, "duration_days": 30, "min_score": 70,
-            "max_signals_per_day": 5, "max_analyses_per_day": 10,
-            "markets": "XAUUSD,EURUSD,GBPUSD", "timeframes": "M15,M30,H1,H4",
-            "strategies": "ICT,SMC,PRICE_ACTION,CRT,AMD", "enabled": 1},
-    "VIP": {"title": "VIP", "price": 49.0, "duration_days": 30, "min_score": 60,
-            "max_signals_per_day": 12, "max_analyses_per_day": 30,
-            "markets": "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,BTCUSD,ETHUSD",
-            "timeframes": "M5,M15,M30,H1,H4,D1",
-            "strategies": ",".join(IMPLEMENTED_STRATEGIES), "enabled": 1},
+# v6.22.0 — 4-TIER ROYAL PLAN ARCHITECTURE (FREE trial + PRO + VIP + ROYAL ELITE).
+# One-time versioned migration stamps all 4 plans, enables all plan markets and
+# all 13 implemented strategies, and sets FREE's configurable trial duration (7d).
+# Subsequent boots NEVER overwrite Admin's own customizations.
+PLANS_4TIER_V6220 = {
+    "FREE": {
+        "title": "الباقة المجانية — FREE", "price": 0.0, "duration_days": 7, "min_score": 80,
+        "max_signals_per_day": 1, "max_analyses_per_day": 1,
+        "markets": "XAUUSD", "timeframes": "M15,H1",
+        "strategies": "CLASSIC,TREND", "enabled": 1,
+    },
+    "PRO": {
+        "title": "الباقة الاحترافية — PRO", "price": 19.0, "duration_days": 30, "min_score": 72,
+        "max_signals_per_day": 4, "max_analyses_per_day": 4,
+        "markets": "XAUUSD,EURUSD,GBPUSD,USDJPY", "timeframes": "M15,M30,H1,H4",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU", "enabled": 1,
+    },
+    "VIP": {
+        "title": "باقة كبار الشخصيات — VIP", "price": 39.0, "duration_days": 30, "min_score": 65,
+        "max_signals_per_day": 10, "max_analyses_per_day": 10,
+        "markets": "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,US30,NAS100,BTCUSD",
+        "timeframes": "M5,M15,M30,H1,H4,D1",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF", "enabled": 1,
+    },
+    "ROYAL": {
+        "title": "الباقة الملكية — ROYAL ELITE", "price": 79.0, "duration_days": 30, "min_score": 60,
+        "max_signals_per_day": 25, "max_analyses_per_day": 25,
+        "markets": ROYAL_MARKETS, "timeframes": "M1,M5,M15,M30,H1,H4,D1",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP",
+        "enabled": 1,
+    },
 }
+# Legacy alias kept for compatibility with older imports
+LUXURY_PLANS_V6100 = PLANS_4TIER_V6220
 PLANS_LUXURY_FLAG = "plans_luxury_v6100_applied"
+PLANS_4TIER_FLAG = "plans_4tier_v6220_applied"
 
 SEED_MODES = [
     ("A", "SIGNALS ONLY", "تحليل/نشر التوصيات دون تنفيذ صفقات.", 1, 1, "signals"),
@@ -853,24 +886,48 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             c.execute("""INSERT OR IGNORE INTO ref_campaigns(code,title,owner_id,target_invited,target_converted,
                          enabled,created_at,updated_at) VALUES('ROYAL','الحملة الملكية الرئيسية',0,50,5,1,?,?)""",
                       (config.now(), config.now()))
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[0])
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[1])
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[2])
-            c.execute("UPDATE plans SET max_signals_per_day=2 WHERE code='FREE' AND max_signals_per_day IS NOT 2 AND max_signals_per_day>2")
-            # v6.10.0 — one-time LUXURY plan stamping (owner-set tiering). Runs
-            # AFTER the seed inserts (a fresh DB has no plan rows before them)
-            # and exactly ONCE — afterwards the admin's own edits are never
-            # overwritten by boots.
-            if get_setting(PLANS_LUXURY_FLAG, "") != "1":
-                for code, fields in LUXURY_PLANS_V6100.items():
+            for sp in SEED_PLANS:
+                c.execute(
+                    "INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO NOTHING",
+                    sp,
+                )
+            # v6.22.0 — one-time 4-TIER ROYAL PLAN & CATALOG ACTIVATION.
+            # Stamps FREE (7-day configurable trial) + PRO + VIP + ROYAL ELITE,
+            # activates all plan markets/timeframes/strategies once, and syncs
+            # free_daily_signals=1. Subsequent boots NEVER overwrite admin edits.
+            if get_setting(PLANS_4TIER_FLAG, "") != "1":
+                for code, fields in PLANS_4TIER_V6220.items():
                     sets = ", ".join(f"{k}=?" for k in fields)
                     c.execute(f"UPDATE plans SET {sets} WHERE code=?",
                               (*fields.values(), code))
-                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')",
-                          (PLANS_LUXURY_FLAG,))
+                # Activate all markets included in the 4-tier plan catalog
+                for m_sym in [x.strip().upper() for x in ROYAL_MARKETS.split(",") if x.strip()]:
+                    c.execute(
+                        "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
+                        (config.now(), m_sym),
+                    )
+                # Ensure all 13 implemented strategies & M1..D1 timeframes are enabled
+                for s_code in IMPLEMENTED_STRATEGIES:
+                    c.execute(
+                        "UPDATE strategy_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                        (config.now(), s_code),
+                    )
+                for tf_code in ("M1", "M5", "M15", "M30", "H1", "H4", "D1"):
+                    c.execute(
+                        "UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                        (config.now(), tf_code),
+                    )
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES('free_daily_signals','1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')", (PLANS_LUXURY_FLAG,))
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')", (PLANS_4TIER_FLAG,))
+                with _settings_lock:
+                    _settings_cache["free_daily_signals"] = ("1", time.time())
+                    _settings_cache[PLANS_LUXURY_FLAG] = ("1", time.time())
+                    _settings_cache[PLANS_4TIER_FLAG] = ("1", time.time())
             # Analyses quota defaults (additive — only fills unset/zero values)
             for code, quota in DEFAULT_ANALYSES_QUOTA.items():
                 c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=? AND (max_analyses_per_day IS NULL OR max_analyses_per_day=0)",

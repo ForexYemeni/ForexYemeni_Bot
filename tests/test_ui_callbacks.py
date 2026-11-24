@@ -133,7 +133,7 @@ class TestAdminCallbacks(unittest.TestCase):
 
     def test_admin_detail_pages(self):
         pairs = [
-            ("a:planedit:FREE", "محرر" if False else "Free"),
+            ("a:planedit:FREE", "FREE"),
             ("a:paymentsstatus:APPROVED", "المدفوعات"),
             ("a:paymentdetail:999999", "غير موجود"),
             ("a:signalview:999999", "غير موجود"),

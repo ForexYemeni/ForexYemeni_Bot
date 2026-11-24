@@ -229,6 +229,8 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "planfield":
         code, field = arg, arg2
         await admin_core.admin_plan_field(q, uid, context, bot, code, field)
+    elif act == "plantrial":
+        await admin_core.admin_plan_days_preset(q, uid, context, bot, arg, int(arg2 or 0))
     elif act == "planedit":
         await admin_core.admin_plan_edit(q, uid, context, bot, arg)
     elif act == "planadj":

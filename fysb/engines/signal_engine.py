@@ -608,7 +608,7 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
         auto_execute runs offloaded in bounded worker threads afterwards so no
         recipient waits on another user's demo execution or price fetch.
     """
-    from fysb.services.subscriptions import try_consume_signal, release_signal, plans_for_users
+    from fysb.services.subscriptions import try_consume_signal, release_signal, plans_for_users, is_free_trial_expired
     from fysb.services import user_trade
     from fysb.ui.cards import render_signal_card
 
@@ -623,7 +623,7 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     await opposite_close_advisory(sig, bot_send)
     from fysb.services import partners as partners_svc
     with db.conn() as c:
-        users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
+        users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked,joined_at FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
     active_partners = partners_svc.active_partner_user_ids()
 
     # Pre-compute invariant signal payload + batch-load plans & demo accounts ONCE
@@ -650,6 +650,9 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
         plan = plans_map.get(uid)
         if not plan:
             stats["skipped_filters"] += 1
+            continue
+        if is_free_trial_expired(uid, user_row=u, plan_row=plan):
+            stats["skipped_quota"] += 1
             continue
         p_markets = {_norm_sym(x) for x in str(plan["markets"] or "").split(",") if x.strip()}
         p_tfs = {x.strip().upper() for x in str(plan["timeframes"] or "").split(",") if x.strip()}

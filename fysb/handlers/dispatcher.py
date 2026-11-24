@@ -252,6 +252,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_channels.admin_chan_cancel(q, uid, context, bot)
     elif act == "chanview":
         await admin_channels.admin_chan_view(q, uid, context, bot, int(arg))
+    elif act == "chanall":
+        await admin_channels.admin_chan_enable_all(q, uid, context, bot, int(arg))
     elif act == "chantoggle":
         await admin_channels.admin_chan_toggle(q, uid, context, bot, int(arg))
     elif act == "chanmode":

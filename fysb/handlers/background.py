@@ -194,8 +194,17 @@ async def market_engine_loop(app):
                         if result["status"] == "SIGNAL_CREATED":
                             sig = await afn.run(_signal_row_by_id, result["signal_id"])
                             if sig:
-                                from fysb.engines.signal_engine import admin_accepts_market, emit_to_users
-                                stats = await emit_to_users(dict(sig), bot_send)
+                                from fysb.engines.signal_engine import (
+                                    admin_accepts_market,
+                                    emit_to_users,
+                                    opposite_close_advisory,
+                                )
+                                try:
+                                    for adv_target, adv_txt in await afn.run(opposite_close_advisory, dict(sig)):
+                                        await _safe_send(app.bot, adv_target, adv_txt)
+                                except Exception as exc:
+                                    log.warning("engine opposite_close_advisory failed: %s", exc)
+                                stats = await emit_to_users(dict(sig), bot_send, bot=app.bot, include_channels=True)
                                 log.info("auto signal #%s emitted: %s", result["signal_id"], stats)
                                 if await afn.run(admin_accepts_market, m["symbol"]):
                                     try:
@@ -231,18 +240,30 @@ async def market_engine_loop(app):
         await asyncio.sleep(max(60, interval))
 
 
+def _norm_chat_id(chat_id):
+    """Normalize numeric string chat IDs ('-100123...') to int for PTB."""
+    if isinstance(chat_id, str):
+        s = chat_id.strip()
+        if s.lstrip("-").isdigit():
+            return int(s)
+        return s
+    return chat_id
+
+
 async def _safe_send(bot, chat_id, text: str) -> bool:
-    """Send an HTML Telegram message with FloodWait / RetryAfter protection."""
+    """Send an HTML Telegram message (user DM or linked channel) with RetryAfter protection."""
     from telegram.error import RetryAfter
+    cid = _norm_chat_id(chat_id)
     for _ in range(2):
         try:
-            await bot.send_message(chat_id, text, parse_mode="HTML")
+            await bot.send_message(cid, text, parse_mode="HTML")
             await asyncio.sleep(0.05)
             return True
         except RetryAfter as exc:
             wait = min(float(getattr(exc, "retry_after", 2.0) or 2.0) + 0.5, 30.0)
             await asyncio.sleep(wait)
-        except Exception:
+        except Exception as exc:
+            log.warning("_safe_send failed chat_id=%s: %s", chat_id, exc)
             return False
     return False
 
@@ -250,10 +271,7 @@ async def _safe_send(bot, chat_id, text: str) -> bool:
 async def _safe_edit(bot, chat_id, message_id: int, text: str) -> bool:
     """Edit an HTML Telegram message in place with FloodWait / RetryAfter protection."""
     from telegram.error import RetryAfter
-    try:
-        cid = int(chat_id)
-    except (TypeError, ValueError):
-        cid = chat_id
+    cid = _norm_chat_id(chat_id)
     for _ in range(2):
         try:
             await bot.edit_message_text(text, chat_id=cid, message_id=int(message_id), parse_mode="HTML")
@@ -262,7 +280,9 @@ async def _safe_edit(bot, chat_id, message_id: int, text: str) -> bool:
         except RetryAfter as exc:
             wait = min(float(getattr(exc, "retry_after", 2.0) or 2.0) + 0.5, 30.0)
             await asyncio.sleep(wait)
-        except Exception:
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                log.warning("_safe_edit failed chat_id=%s mid=%s: %s", chat_id, message_id, exc)
             return False
     return False
 

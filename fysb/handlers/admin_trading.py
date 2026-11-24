@@ -505,20 +505,40 @@ async def admin_new_signal(q, uid, context, bot):
 
 
 async def admin_track_now(q, uid, context, bot):
-    """Run one tracker pass immediately (admin action) with real provider data."""
+    """Run one tracker pass immediately (admin action) with real provider data,
+    live-editing ALL user + linked channel cards and sending status/expiry alerts."""
     from fysb.engines import tracker
-    await render(q, "🔄 جارٍ فحص الإشارات المفتوحة مقابل بيانات السوق اللحظية...", None)
+    from fysb.handlers.background import _safe_edit, _safe_send
+    await render(q, "🔄 جارٍ فحص الإشارات المفتوحة وتحديث البطاقات الحية (مستخدمون + قنوات)...", None)
     result = await asyncio.to_thread(tracker.check_open_signals, config.market_api_key())
-    for note_uid, text in result["notifications"]:
-        try:
-            await bot.send_message(note_uid, text, parse_mode="HTML")
-        except Exception:
-            pass
-    expired = await afn.run(tracker.expire_stale_signals)
+    edited = 0
+    sent = 0
+    for _uid, chat_id, mid, text in result.get("edits", []):
+        if await _safe_edit(bot, chat_id, mid, text):
+            edited += 1
+    for target, text in result.get("notifications", []):
+        if await _safe_send(bot, target, text):
+            sent += 1
+    expired, exp_edits, exp_notes = await afn.run(tracker.expire_with_alerts)
+    for _uid, chat_id, mid, text in exp_edits:
+        if await _safe_edit(bot, chat_id, mid, text):
+            edited += 1
+    for target, text in exp_notes:
+        if await _safe_send(bot, target, text):
+            sent += 1
     stats = result["stats"]
-    await render(q, f"✅ <b>نتيجة الفحص</b>\nفُحصت: {stats['checked']} · حُدثت: <b>{stats['updated']}</b>\n"
-                    f"تخطيت بسبب قدم البيانات: {stats['skipped_stale']} · أخطاء مزود: {stats['errors']} · انتهت صلاحيتها: {expired}",
-                 kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals")]]), bot)
+    await render(
+        q,
+        f"✅ <b>نتيجة الفحص والتتبع الحي</b>\n"
+        f"<blockquote>"
+        f"▎📊 فُحصت: <b>{stats['checked']}</b> · حُدثت حالتها: <b>{stats['updated']}</b>\n"
+        f"▎🔄 بطاقات حية حُدّثت (مستخدمون + قنوات): <b>{edited}</b>\n"
+        f"▎📨 تنبيهات أُرسلت (مستخدمون + قنوات): <b>{sent}</b>\n"
+        f"▎⏳ انتهت صلاحيتها: <b>{expired}</b> · تخطيت (قدم البيانات): {stats['skipped_stale']} · أخطاء مزود: {stats['errors']}"
+        f"</blockquote>",
+        kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals"), kb.btn("🔄 فحص مجدداً", "a:tracknow")]]),
+        bot,
+    )
 
 
 async def update_message(q, text):
@@ -621,8 +641,16 @@ async def admin_engine_adjust(q, uid, context, bot, key: str, delta: float):
     await admin_engine(q, uid, context, bot)
 
 
+def _signal_by_id(sid: int):
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+    return dict(r) if r else None
+
+
 async def admin_engine_now(q, uid, context, bot):
-    from fysb.engines.signal_engine import generate_signal
+    from fysb.engines.signal_engine import emit_to_users, generate_signal, opposite_close_advisory
+    from fysb.handlers.background import _safe_send
+    from fysb.handlers.inputs import bot_sender_from
     await render(q, "🚀 جارٍ تشغيل دورة فورية للمحرك على الأسواق المفعلة...", None)
     markets = await afn.run(_enabled_verified_market_dicts)
     if not markets:
@@ -631,7 +659,20 @@ async def admin_engine_now(q, uid, context, bot):
     results = []
     for m in markets:
         res = await asyncio.to_thread(generate_signal, m["symbol"])
-        results.append(f"{esc(m['symbol'])}: <b>{esc(res['status'])}</b>" + (f" ({esc(res.get('reason', ''))[:60]})" if res.get("reason") else ""))
+        extra = ""
+        if res.get("status") == "SIGNAL_CREATED" and res.get("signal_id"):
+            sig = await afn.run(_signal_by_id, int(res["signal_id"]))
+            if sig:
+                try:
+                    for target, adv_txt in await afn.run(opposite_close_advisory, sig):
+                        await _safe_send(bot, target, adv_txt)
+                except Exception:
+                    pass
+                stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
+                extra = f" · 📤 مستلمون: {stats.get('sent', 0)} · قنوات: {stats.get('channels_sent', 0)}"
+        elif res.get("reason"):
+            extra = f" ({esc(res.get('reason', ''))[:60]})"
+        results.append(f"{esc(m['symbol'])}: <b>{esc(res['status'])}</b>{extra}")
     await render(q, "🚀 <b>نتيجة الدورة الفورية</b>\n" + "\n".join(results),
                  kb.admin_nav([[kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")]]), bot)
 

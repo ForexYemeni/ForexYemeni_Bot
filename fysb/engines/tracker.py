@@ -543,6 +543,8 @@ def _live_card_text(sig: dict, uid: int, px: float, row=None, acc=None, base_tex
         personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
         if personal:
             text += "\n\n<blockquote>" + personal + "</blockquote>"
+    else:
+        text += f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
     return text
 
 

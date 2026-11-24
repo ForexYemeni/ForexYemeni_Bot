@@ -329,9 +329,14 @@ def format_report(rep: BacktestReport) -> str:
             f"</blockquote>"
         )
     strat_lines = []
-    for code, st in list(rep.by_strategy.items())[:6]:
+    for code, st in rep.by_strategy.items():
         strat_lines.append(
             f"▎• <b>{esc(code)}</b>: {st['trades']} صفقات · فوز <code>{st['win_rate_pct']:.0f}%</code> · صافي <b>{st['net_r']:+.2f}R</b>"
+        )
+    silent_strats = [c for c in rep.strategies_used if c not in rep.by_strategy]
+    if silent_strats:
+        strat_lines.append(
+            f"▎▫️ منهجيات بلا صفقة مطابقة في هذه النافذة ({len(silent_strats)}): <i>{esc('، '.join(silent_strats))}</i>"
         )
     pf_txt = f"{rep.profit_factor:.2f}" if rep.profit_factor < 99 else "∞"
     if rep.filled_trades < 15:
@@ -346,12 +351,13 @@ def format_report(rep: BacktestReport) -> str:
         f"🧪 <b><u>تقرير الاختبار التاريخي المؤسسي — {esc(rep.symbol)}</u></b> ⏱ {tf_name(rep.timeframe)}\n"
         f"<blockquote>"
         f"▎📊 الشموع المفحوصة: <b>{rep.bars_tested}</b> شمعة مغلقة (Walk-Forward + HTF بلا Repainting)\n"
+        f"▎🧠 المنهجيات المفحوصة: <b>{len(rep.strategies_used)}</b> منهجية (نشطت منها: <b>{len(rep.by_strategy)}</b>)\n"
         f"▎🎯 الصفقات المنفّذة: <b>{rep.filled_trades}</b> (فائزة: <b>{rep.wins}</b> · خاسرة: <b>{rep.losses}</b> · غير مفعّلة: {rep.unfilled})\n"
         f"▎🏆 نسبة النجاح: <b>{rep.win_rate_pct:.1f}%</b> · عامل الربح (PF): <b>{pf_txt}</b>\n"
         f"▎📈 صافي العائد: <b>{rep.net_r:+.2f}R</b> · التوقع/صفقة: <b>{rep.expectancy_r:+.3f}R</b>\n"
         f"▎🛡 أقصى تراجع (Max DD): <b>-{rep.max_drawdown_r:.2f}R</b>\n"
         f"▎⚖️ التقييم الإحصائي: <b>{verdict}</b>\n"
         f"</blockquote>\n"
-        + ("<b>أداء المنهجيات:</b>\n<blockquote>" + "\n".join(strat_lines) + "</blockquote>\n" if strat_lines else "")
+        + (f"<b>أداء المنهجيات ({len(rep.by_strategy)}/{len(rep.strategies_used)}):</b>\n<blockquote>" + "\n".join(strat_lines) + "</blockquote>\n" if strat_lines else "")
         + "<i>محاكاة SL-أولاً مع سبريد واقعي + فلتر اتجاه الفريم الأعلى + فلتر التذبذب + تأمين الدخول بعد TP1.</i>"
     )

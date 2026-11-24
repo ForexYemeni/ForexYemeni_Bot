@@ -62,7 +62,7 @@ def add_channel(chat_id: str, title: str, kind: str) -> int:
         cur = c.execute("""INSERT INTO broadcast_channels(chat_id,title,kind,enabled,auto_analysis,auto_signals,
                            markets,timeframes,strategies,interval_minutes,last_sent,created_at,updated_at)
                            VALUES(?,?,?,1,1,1,?,?,?,60,'',?,?)""",
-                        (chat_id, title, kind, "XAUUSD", "M15,H1", "ALL", config.now(), config.now()))
+                        (chat_id, title, kind, "ALL", "ALL", "ALL", config.now(), config.now()))
         return cur.lastrowid
 
 
@@ -193,24 +193,27 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
     markets = [m.strip() for m in (ch["markets"] or "").split(",") if m.strip()]
     tfs = [t.strip() for t in (ch["timeframes"] or "").split(",") if t.strip()]
     strats = [s.strip() for s in (ch["strategies"] or "").split(",") if s.strip()]
-    strat_label = "جميع الاستراتيجيات" if "ALL" in [s.upper() for s in strats] else \
+    mkt_label = "جميع الأسواق (ALL)" if (not markets or "ALL" in [m.upper() for m in markets]) else "، ".join(markets)
+    tf_label = "جميع الأطر (ALL)" if (not tfs or "ALL" in [t.upper() for t in tfs]) else "، ".join(tf_name(t) for t in tfs)
+    strat_label = "جميع الاستراتيجيات" if (not strats or "ALL" in [s.upper() for s in strats]) else \
         "، ".join(strategy_name(s) for s in strats)
     body = [
         f"⚙️ <b><u>إعداد القناة #{ch['id']}</u></b>",
         f"▎📌 الاسم: <b>{esc(ch['title'] or ch['chat_id'])}</b> · النوع: {'قناة' if ch['kind'] == 'channel' else 'مجموعة'}",
-        f"▎{'🟢 مفعلة للنشر التلقائي' if ch['enabled'] else '⚪ متوقفة'}",
+        f"▎{'🟢 مفعلة للنشر التلقائي والتتبع الحي' if ch['enabled'] else '⚪ متوقفة'}",
         "",
         "<blockquote>"
         f"▎🔬 التحليل التلقائي: <b>{'مفعل' if ch['auto_analysis'] else 'متوقف'}</b>\n"
-        f"▎📡 الإشارات التلقائية: <b>{'مفعلة' if ch['auto_signals'] else 'متوقفة'}</b>\n"
-        f"▎🌐 الأسواق: <b>{esc('، '.join(markets))}</b>\n"
-        f"▎⏱ الأطر: <b>{esc('، '.join(tf_name(t) for t in tfs))}</b>\n"
+        f"▎📡 الإشارات التلقائية + التتبع الحي: <b>{'مفعلة' if ch['auto_signals'] else 'متوقفة'}</b>\n"
+        f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"
+        f"▎⏱ الأطر: <b>{esc(tf_label)}</b>\n"
         f"▎🧠 الاستراتيجيات: <b>{esc(strat_label)}</b>\n"
         f"▎⏰ الجدولة: كل <b>{ch['interval_minutes']} دقيقة</b> (توقيت مكة · سكون ليلي 01-07)\n"
         f"▎🕐 آخر إرسال: {esc(ch['last_sent'][:19].replace('T', ' ') or '—')} مكة"
         "</blockquote>",
     ]
     rows = [
+        [kb.btn("🌐 تفعيل البث الشامل لكل الأسواق + التتبع الحي", f"a:chanall:{cid}", style="success")],
         [kb.btn(f"{'🟠 ⏹ إيقاف القناة' if ch['enabled'] else '🟢 ▶️ تفعيل القناة'}", f"a:chantoggle:{cid}")],
         [kb.btn(f"{'🟠 🔬 إيقاف التحليل' if ch['auto_analysis'] else '🟢 🔬 تفعيل التحليل'}", f"a:chanmode:{cid}:analysis"),
          kb.btn(f"{'🟠 📡 إيقاف الإشارات' if ch['auto_signals'] else '🟢 📡 تفعيل الإشارات'}", f"a:chanmode:{cid}:signals")],
@@ -221,6 +224,17 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
         [kb.btn("🔴 إزالة الربط", f"a:chandel:{cid}"), kb.btn("🔵 كل القنوات", "a:channels")],
     ]
     await render(q, "\n".join(body), kb.admin_nav(rows), bot)
+
+
+async def admin_chan_enable_all(q, uid, context, bot, cid: int):
+    """v6.20.7 — 1-tap switch to mirror EVERY bot signal + live tracking into this channel."""
+    ch = await afn.run(get_channel, cid)
+    if not ch:
+        return await admin_channels(q, uid, context, bot)
+    await afn.run(update_channel, cid, enabled=1, auto_signals=1,
+                  markets="ALL", timeframes="ALL", strategies="ALL")
+    await afn.run(audit_log.log, uid, f"channel_enable_all:{cid}")
+    await admin_chan_view(q, uid, context, bot, cid)
 
 
 async def admin_chan_toggle(q, uid, context, bot, cid: int):
@@ -262,21 +276,21 @@ async def admin_chan_feat(q, uid, context, bot, cid: int, kind: str):
         return
     current = [x.strip() for x in (ch.get(kind) or "").split(",") if x.strip()]
     if kind == "markets":
-        items = await afn.run(_enabled_verified_market_symbols)
+        items = ["ALL"] + await afn.run(_enabled_verified_market_symbols)
         title = "الأسواق"
     elif kind == "timeframes":
-        items = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+        items = ["ALL", "M1", "M5", "M15", "M30", "H1", "H4", "D1"]
         title = "الأطر الزمنية"
     else:
         from fysb.engines.strategies import VERIFIABLE
-        items = list(VERIFIABLE) + ["ALL"]
+        items = ["ALL"] + list(VERIFIABLE)
         title = "الاستراتيجيات"
     rows = [[kb.btn(("✅ " if (it.upper() in [x.upper() for x in current]) else "▫️ ") +
-                    (strategy_name(it) if kind == "strategies" else it),
+                    ("الكل (ALL)" if it == "ALL" else (strategy_name(it) if kind == "strategies" else it)),
                     f"a:chanfeatset:{cid}:{kind}:{it}") for it in items[i:i + 3]]
             for i in range(0, len(items), 3)]
     rows.append([kb.btn("↩️ الإعداد", f"a:chanview:{cid}")])
-    await render(q, f"⚙️ <b>تعديل {title} للقناة #{cid}</b>\nاضغط للتبديل (الاستراتيجيات تتحول لجميعها عند اختيار ALL):",
+    await render(q, f"⚙️ <b>تعديل {title} للقناة #{cid}</b>\nاضغط للتبديل (اختر <b>الكل (ALL)</b> لبث جميع الإشارات تلقائياً):",
                  kb.admin_nav(rows), bot)
 
 
@@ -285,10 +299,16 @@ async def admin_chan_feat_set(q, uid, context, bot, cid: int, kind: str, item: s
     if not ch:
         return
     current = [x.strip() for x in (ch.get(kind) or "").split(",") if x.strip()]
-    if item.upper() in [x.upper() for x in current]:
-        current = [x for x in current if x.upper() != item.upper()]
+    if item.upper() == "ALL":
+        current = ["ALL"]
     else:
-        current.append(item)
+        current = [x for x in current if x.upper() != "ALL"]
+        if item.upper() in [x.upper() for x in current]:
+            current = [x for x in current if x.upper() != item.upper()]
+        else:
+            current.append(item)
+        if not current:
+            current = ["ALL"]
     await afn.run(update_channel, cid, **{kind: ",".join(current)})
     await afn.run(audit_log.log, uid, f"channel_feat:{cid}:{kind}:{item}")
     await admin_chan_feat(q, uid, context, bot, cid, kind)
@@ -472,8 +492,24 @@ async def emit_to_channels(sig: dict, bot) -> dict:
             await afn.run(update_channel, ch["id"], last_sent=mecca_now().isoformat())
             stats["channels_sent"] += 1
         else:
+            log.warning("emit_to_channels failed ch=#%s (%s) sig=#%s: %s",
+                        ch.get("id"), ch.get("chat_id"), sig.get("id"), send.get("error"))
             stats["channels_failed"] += 1
     return stats
+
+
+async def _resolve_channel_markets(ch: dict) -> list[str]:
+    raw = [m.strip() for m in (ch.get("markets") or "").split(",") if m.strip()]
+    if not raw or "ALL" in [m.upper() for m in raw]:
+        return await afn.run(_enabled_verified_market_symbols) or ["XAUUSD"]
+    return raw
+
+
+def _resolve_channel_tfs(ch: dict) -> list[str]:
+    raw = [t.strip().upper() for t in (ch.get("timeframes") or "").split(",") if t.strip()]
+    if not raw or "ALL" in raw:
+        return ["M15", "H1"]
+    return raw
 
 
 async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
@@ -481,8 +517,8 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
     ch = ch or await afn.run(get_channel, cid)
     if not ch:
         return {"ok": False, "error": "القناة غير موجودة"}
-    markets = [m.strip() for m in (ch["markets"] or "XAUUSD").split(",") if m.strip()]
-    tfs = [t.strip() for t in (ch["timeframes"] or "M15").split(",") if t.strip()]
+    markets = await _resolve_channel_markets(ch)
+    tfs = _resolve_channel_tfs(ch)
     tf = tfs[0] if tfs else "M15"
     strat = "ALL" if "ALL" in [s.upper() for s in (ch["strategies"] or "").split(",")] else (ch["strategies"] or "ICT").split(",")[0]
 
@@ -530,8 +566,8 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
     if rights:
         return {"ok": False, "error": "⛔ فشل النشر — " + rights}
 
-    markets = [m.strip() for m in (ch["markets"] or "XAUUSD").split(",") if m.strip()]
-    tfs = [t.strip() for t in (ch["timeframes"] or "M15").split(",") if t.strip()]
+    markets = await _resolve_channel_markets(ch)
+    tfs = _resolve_channel_tfs(ch)
     for sym in markets[:3]:
         for tf in tfs[:2]:
             try:

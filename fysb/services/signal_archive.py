@@ -276,28 +276,212 @@ def admin_dates_page(page: int = 0, size: int = 10) -> tuple[int, list[dict]]:
     return total, [dict(r) for r in rows]
 
 
-def admin_pl_rows(period: str = "all") -> list[dict]:
-    """100% PostgreSQL + SQLite portable P/L accounting per instrument.
-    NEVER uses SUM(boolean) or ROUND(double, int)."""
+PL_SECTORS = (
+    ("metal", "🥇", "المعادن والسلع", "المعادن"),
+    ("forex", "💱", "الفوركس والعملات", "الفوركس"),
+    ("crypto", "₿", "العملات الرقمية", "الكريبتو"),
+    ("index", "📈", "المؤشرات والأسهم", "المؤشرات"),
+)
+
+PL_SECTOR_META = {k: (icon, title, short) for k, icon, title, short in PL_SECTORS}
+
+
+def sector_of_symbol(symbol: str, catalog_cats: dict[str, str] | None = None) -> str:
+    """Resolve canonical market sector: metal | forex | crypto | index."""
+    from fysb import instruments
+    sym = instruments.normalize(symbol)
+    raw = ""
+    if catalog_cats and sym in catalog_cats:
+        raw = (catalog_cats[sym] or "").strip().lower()
+    if not raw:
+        raw = (instruments.spec(sym).category or "").strip().lower()
+    if raw in ("metal", "metals", "commodity", "commodities") or sym in ("XAUUSD", "XAGUSD", "USOIL", "UKOIL", "WTI", "BRENT"):
+        return "metal"
+    if raw in ("crypto", "cryptocurrency") or sym.startswith(("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "BNB", "LTC", "TON")):
+        return "crypto"
+    if raw in ("index", "indices", "stock", "stocks", "equity") or sym in ("US30", "NAS100", "USTEC", "SPX500", "US500", "GER40", "UK100"):
+        return "index"
+    return "forex"
+
+
+def format_pf(gross_profit: float, gross_loss: float) -> str:
+    """Format institutional Profit Factor safely."""
+    gp = max(0.0, float(gross_profit or 0.0))
+    gl = abs(float(gross_loss or 0.0))
+    if gp <= 0 and gl <= 0:
+        return "—"
+    if gl <= 1e-9:
+        return "∞ (بلا خسارة)"
+    return f"{gp / gl:.2f}x"
+
+
+def _period_where(period: str) -> tuple[list[str], list]:
     where = ["status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')"]
     args: list = []
-    if period == "today":
+    p = (period or "all").strip().lower()
+    if p == "today":
         lo, hi = date_bounds(today_iso())
         where.append("created_at>=? AND created_at<?")
         args.extend([lo, hi])
-    elif period == "yesterday":
+    elif p == "yesterday":
         lo, hi = date_bounds(yesterday_iso())
         where.append("created_at>=? AND created_at<?")
         args.extend([lo, hi])
-    elif period == "7d":
+    elif p == "7d":
         lo = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
         where.append("created_at>=?")
         args.append(lo)
-    elif is_valid_iso_date(period):
-        lo, hi = date_bounds(period)
+    elif is_valid_iso_date(p):
+        lo, hi = date_bounds(p)
         where.append("created_at>=? AND created_at<?")
         args.extend([lo, hi])
+    return where, args
 
+
+def admin_pl_detailed(period: str = "all", sector: str = "", symbol: str = "") -> dict:
+    """v6.20.5 — Institutional P/L accounting grouped cleanly by Market Sector
+    (Metals / Forex / Crypto / Indices) and per-Instrument trade ledger.
+    Uses ONE DB connection and 100% ANSI SQL (PostgreSQL + SQLite safe)."""
+    from fysb import instruments
+    where, args = _period_where(period)
+    sym_filter = instruments.normalize(symbol) if symbol else ""
+    if sym_filter:
+        where.append("REPLACE(UPPER(symbol),'/','')=?")
+        args.append(sym_filter)
+    w_sql = " AND ".join(where)
+
+    with db.conn() as c:
+        cat_rows = c.execute("SELECT symbol, category, pip_size, digits, contract_size, spread_pips FROM market_catalog").fetchall()
+        catalog_rows = {instruments.normalize(r["symbol"]): dict(r) for r in cat_rows}
+        catalog_cats = {k: str(v.get("category") or "") for k, v in catalog_rows.items()}
+        sig_rows = c.execute(
+            f"""SELECT * FROM (
+                  SELECT id, symbol, timeframe, direction, status, pips_result,
+                         strategy, score, created_at, closed_at,
+                         ROW_NUMBER() OVER (ORDER BY id) AS seq
+                  FROM signals
+                ) s
+                WHERE {w_sql}
+                ORDER BY s.id DESC""",
+            args,
+        ).fetchall()
+
+    def _empty_bucket():
+        return {
+            "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "net_usd": 0.0, "gross_profit_usd": 0.0, "gross_loss_usd": 0.0,
+            "tp1_n": 0, "tp2_n": 0, "tp3_n": 0, "sl_n": 0,
+        }
+
+    grand = _empty_bucket()
+    sectors_map: dict[str, dict] = {}
+    by_symbol: dict[str, dict] = {}
+
+    sec_filter = (sector or "").strip().lower()
+
+    for r in sig_rows:
+        d = dict(r)
+        sym = instruments.normalize(d["symbol"])
+        sec = sector_of_symbol(sym, catalog_cats)
+        if sec_filter and sec != sec_filter:
+            continue
+        pips = float(d.get("pips_result") or 0.0)
+        mrow = catalog_rows.get(sym)
+        usd = float(instruments.usd_move(sym, pips, 0.01, mrow))
+        st = (d.get("status") or "").upper()
+        is_win = pips > 0
+
+        if sym not in by_symbol:
+            b = _empty_bucket()
+            b.update({
+                "symbol": sym,
+                "sector": sec,
+                "net_pips": 0.0,
+                "avg_pips": 0.0,
+                "gross_profit_pips": 0.0,
+                "gross_loss_pips": 0.0,
+                "best_pips": None,
+                "best_usd": None,
+                "worst_pips": None,
+                "worst_usd": None,
+                "trades": [],
+            })
+            by_symbol[sym] = b
+
+        if sec not in sectors_map:
+            sb = _empty_bucket()
+            sb.update({"sector": sec, "symbols": []})
+            sectors_map[sec] = sb
+
+        for bucket in (grand, sectors_map[sec], by_symbol[sym]):
+            bucket["total"] += 1
+            if is_win:
+                bucket["wins"] += 1
+                bucket["gross_profit_usd"] += max(0.0, usd)
+            else:
+                bucket["losses"] += 1
+                bucket["gross_loss_usd"] += min(0.0, usd)
+            bucket["net_usd"] += usd
+            if st == "TP1_HIT":
+                bucket["tp1_n"] += 1
+            elif st == "TP2_HIT":
+                bucket["tp2_n"] += 1
+            elif st == "TP3_HIT":
+                bucket["tp3_n"] += 1
+            elif st == "SL_HIT":
+                bucket["sl_n"] += 1
+
+        sb_sym = by_symbol[sym]
+        sb_sym["net_pips"] += pips
+        if is_win:
+            sb_sym["gross_profit_pips"] += max(0.0, pips)
+        else:
+            sb_sym["gross_loss_pips"] += min(0.0, pips)
+        if sb_sym["best_pips"] is None or pips > sb_sym["best_pips"]:
+            sb_sym["best_pips"] = pips
+            sb_sym["best_usd"] = usd
+        if sb_sym["worst_pips"] is None or pips < sb_sym["worst_pips"]:
+            sb_sym["worst_pips"] = pips
+            sb_sym["worst_usd"] = usd
+        d["usd"] = usd
+        sb_sym["trades"].append(d)
+
+    def _finalize(b: dict):
+        n = max(1, b["total"])
+        b["win_rate"] = (b["wins"] / n) * 100.0
+        b["net_usd"] = round(b["net_usd"], 2)
+        b["gross_profit_usd"] = round(b["gross_profit_usd"], 2)
+        b["gross_loss_usd"] = round(b["gross_loss_usd"], 2)
+        b["pf"] = format_pf(b["gross_profit_usd"], b["gross_loss_usd"])
+
+    _finalize(grand)
+    for sym_b in by_symbol.values():
+        _finalize(sym_b)
+        sym_b["net_pips"] = round(sym_b["net_pips"], 1)
+        sym_b["avg_pips"] = round(sym_b["net_pips"] / max(1, sym_b["total"]), 1)
+        sym_b["gross_profit_pips"] = round(sym_b["gross_profit_pips"], 1)
+        sym_b["gross_loss_pips"] = round(sym_b["gross_loss_pips"], 1)
+        sectors_map[sym_b["sector"]]["symbols"].append(sym_b)
+
+    ordered_sectors = []
+    for sec_key, _icon, _title, _short in PL_SECTORS:
+        if sec_key in sectors_map:
+            sb = sectors_map[sec_key]
+            _finalize(sb)
+            sb["symbols"].sort(key=lambda x: (-x["net_usd"], -x["total"]))
+            ordered_sectors.append(sb)
+
+    return {
+        "grand": grand,
+        "sectors": ordered_sectors,
+        "by_symbol": by_symbol,
+    }
+
+
+def admin_pl_rows(period: str = "all") -> list[dict]:
+    """100% PostgreSQL + SQLite portable P/L accounting per instrument.
+    NEVER uses SUM(boolean) or ROUND(double, int)."""
+    where, args = _period_where(period)
     w_sql = " AND ".join(where)
     with db.conn() as c:
         rows = c.execute(

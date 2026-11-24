@@ -157,66 +157,225 @@ async def admin_signals_dates(q, uid, context, bot, page: int = 0):
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
-async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
-    """v6.20.4 — REAL profit/loss accounting per instrument (PostgreSQL + SQLite
-    100% ANSI SQL safe — fixes UndefinedFunction on SUM(bool)/ROUND(double,int))
-    with luxury Today / Yesterday / 7D / All / Date scope filters."""
-    from fysb import instruments
+def _pl_period_label(period: str) -> str:
     from fysb.services import signal_archive as _sa
-    period = (period or "all").strip().lower()
-    rows = await afn.run(_pl_account_rows, period)
-    period_labels = {
+    p = (period or "all").strip().lower()
+    return {
         "all": "كل الإشارات المغلقة والمحققة",
         "today": _sa.ar_date_label(_sa.today_iso()),
         "yesterday": _sa.ar_date_label(_sa.yesterday_iso()),
         "7d": "آخر 7 أيام",
-    }
-    p_label = period_labels.get(period) or _sa.ar_date_label(period)
-    lines = [
-        f"💰 <b><u>محاسبة الربح والخسارة — {esc(p_label)}</u></b>",
-        "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
-        "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
-        "▎💵 الدولار = نفس مسطرة التنبيهات (0.01 لوت).</blockquote>",
+    }.get(p) or _sa.ar_date_label(p)
+
+
+def _pl_period_row(period: str, cb_prefix: str) -> list:
+    p = (period or "all").strip().lower()
+    return [
+        kb.btn(("◉ " if p == "all" else "") + "🗂 الكل", f"{cb_prefix}:all"),
+        kb.btn(("◉ " if p == "today" else "") + "📅 اليوم", f"{cb_prefix}:today"),
+        kb.btn(("◉ " if p == "yesterday" else "") + "📆 أمس", f"{cb_prefix}:yesterday"),
+        kb.btn(("◉ " if p == "7d" else "") + "🗓 7 أيام", f"{cb_prefix}:7d"),
     ]
-    grand_pips = 0.0
-    grand_wins = grand_losses = 0
-    grand_usd = 0.0
-    for r in rows:
-        net = float(r["net_pips"] or 0)
-        usd = instruments.usd_move(r["symbol"], net, 0.01)
-        wr = (int(r["wins"] or 0) / max(1, int(r["n"]))) * 100.0
-        avg_p = float(r.get("avg_pips") or 0)
-        grand_pips += net
-        grand_wins += int(r["wins"] or 0)
-        grand_losses += int(r["losses"] or 0)
-        grand_usd += usd
-        lines.append(
-            f"▎{esc(r['symbol'])}: <b>{r['n']}</b> صفقة · رابحة <b>{wr:.0f}%</b> "
-            f"({r['wins'] or 0}W/{r['losses'] or 0}L) · صافي <b>{net:+.1f} pips</b> "
-            f"(متوسط {avg_p:+.1f}p) · 💵 <b>{usd:+,.2f} $</b>"
-        )
-    if len(lines) == 2:
-        lines.append("▎لا توجد إشارات مغلقة في هذه الفترة بعد — تُبنى المحاسبة تلقائياً مع كل إغلاق فعلي.")
-    else:
-        total_n = grand_wins + grand_losses
-        lines.append("▎─────────────")
-        lines.append(
-            f"▎👑 <b>الإجمالي العام:</b> {total_n} إشارة · رابحة "
-            f"<b>{(grand_wins / max(1, total_n)) * 100:.0f}%</b> · صافي <b>{grand_pips:+.1f} pips</b> "
-            f"· 💵 <b>{grand_usd:+,.2f} $</b> لكل 0.01 لوت (مجموع الأدوات)"
-        )
-    scope_row = [
-        kb.btn(("◉ " if period == "all" else "") + "🗂 الكل", "a:sigpl:all"),
-        kb.btn(("◉ " if period == "today" else "") + "📅 اليوم", "a:sigpl:today"),
-        kb.btn(("◉ " if period == "yesterday" else "") + "📆 أمس", "a:sigpl:yesterday"),
-        kb.btn(("◉ " if period == "7d" else "") + "🗓 7 أيام", "a:sigpl:7d"),
-    ]
-    await render(
-        q,
-        "\n".join(lines),
-        kb.admin_nav([scope_row, [kb.btn("🗓 أرشيف التواريخ", "a:sigdates:0"), kb.btn("↩️ مركز الإشارات", "a:signals")]]),
-        bot,
+
+
+def _pl_exec_card(b: dict, title: str = "الملخص التنفيذي العام") -> str:
+    from fysb.theme import bar
+    net_usd = float(b["net_usd"] or 0.0)
+    dot = "🟢" if net_usd >= 0 else "🔴"
+    wr_bar = bar(int(b["wins"]), max(1, int(b["total"])), width=10)
+    return (
+        f"<blockquote>👑 <b>{title}</b> (مسطرة 0.01 لوت)\n"
+        f"▎💵 صافي الربح الحقيقي: <b>{net_usd:+,.2f} $</b> {dot}\n"
+        f"▎📊 الصفقات: <b>{b['total']}</b> (🏆 {b['wins']} رابحة · 🛑 {b['losses']} وقف)\n"
+        f"▎🎯 نسبة النجاح: <b>{b['win_rate']:.0f}%</b> {wr_bar}\n"
+        f"▎📈 إجمالي الأرباح: <b>{b['gross_profit_usd']:+,.2f} $</b> · "
+        f"📉 إجمالي الخسائر: <b>{b['gross_loss_usd']:+,.2f} $</b>\n"
+        f"▎⚖️ معامل الربح (Profit Factor): <b>{b['pf']}</b>\n"
+        f"▎🏁 التوزيع: 👑 TP3: <b>{b['tp3_n']}</b> · 🥈 TP2: <b>{b['tp2_n']}</b> · "
+        f"🥇 TP1: <b>{b['tp1_n']}</b> · 🛑 وقف: <b>{b['sl_n']}</b></blockquote>"
     )
+
+
+async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
+    """v6.20.5 — Luxury Institutional P/L Hub grouped cleanly by Market Sector
+    (Metals / Forex / Crypto / Indices) with apples-to-apples USD totals,
+    Profit Factor, Win-Rate bar, and 1-tap drill-down per sector & instrument."""
+    from fysb.services import signal_archive as _sa
+    period = (period or "all").strip().lower()
+    data = await afn.run(_sa.admin_pl_detailed, period)
+    grand = data["grand"]
+    sectors = data["sectors"]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"💰 <b><u>محاسبة الربح والخسارة المؤسسية</u></b>",
+        f"✨ <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, "a:sigpl")]
+
+    if grand["total"] == 0:
+        lines.append(
+            "<blockquote>▎لا توجد إشارات مغلقة أو محققة في هذه الفترة بعد.\n"
+            "▎تُبنى المحاسبة الحقيقية تلقائياً مع كل هدف أو وقف يسجّله المتتبع.</blockquote>"
+        )
+    else:
+        lines.append("")
+        lines.append(_pl_exec_card(grand, "الملخص التنفيذي العام — جميع الأسواق"))
+
+        sec_btns = []
+        sym_btns = []
+        for sb in sectors:
+            sec_key = sb["sector"]
+            icon, sec_title, sec_short = _sa.PL_SECTOR_META[sec_key]
+            sec_dot = "🟢" if sb["net_usd"] >= 0 else "🔴"
+            lines.append("")
+            lines.append(
+                f"{icon} <b><u>سوق {sec_title}</u></b> — صافي <b>{sb['net_usd']:+,.2f} $</b> {sec_dot}"
+            )
+            block = [
+                f"▎📊 <b>{sb['total']}</b> صفقة · نجاح <b>{sb['win_rate']:.0f}%</b> "
+                f"(🏆 {sb['wins']} / 🛑 {sb['losses']}) · PF <b>{sb['pf']}</b>"
+            ]
+            for s in sb["symbols"]:
+                s_dot = "🟢" if s["net_usd"] >= 0 else "🔴"
+                block.append(
+                    f"▎• <b>{esc(s['symbol'])}</b> {s_dot} — {s['total']} صفقة "
+                    f"({s['wins']}W/{s['losses']}L · {s['win_rate']:.0f}%)\n"
+                    f"   └ صافي <b>{s['net_pips']:+.1f} pips</b> (متوسط {s['avg_pips']:+.1f}p) "
+                    f"· 💵 <b>{s['net_usd']:+,.2f} $</b>"
+                )
+                sym_btns.append(
+                    kb.btn(
+                        f"{icon} {s['symbol']} ({s['net_usd']:+,.2f}$)",
+                        f"a:sigplsym:{s['symbol']}:{period}",
+                    )
+                )
+            lines.append("<blockquote>" + "\n".join(block) + "</blockquote>")
+            sec_btns.append(
+                kb.btn(f"{icon} {sec_short} ({sb['total']})", f"a:sigplcat:{sec_key}:{period}")
+            )
+
+        lines.append("")
+        lines.append("<i>💡 اضغط على أي سوق أو أداة أدناه لفتح كشف المحاسبة التفصيلي وصفقة بصفقة.</i>")
+
+        if sec_btns:
+            rows_kb.append(sec_btns)
+        for i in range(0, min(len(sym_btns), 8), 2):
+            rows_kb.append(sym_btns[i:i + 2])
+
+    rows_kb.append([kb.btn("🗓 أرشيف التواريخ", "a:sigdates:0"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_pl_sector(q, uid, context, bot, sector: str, period: str = "all"):
+    """v6.20.5 — Focused Luxury P/L Ledger for ONE Market Sector (Metals/Forex/Crypto/Indices)."""
+    from fysb.services import signal_archive as _sa
+    sec_key = (sector or "metal").strip().lower()
+    if sec_key not in _sa.PL_SECTOR_META:
+        sec_key = "forex"
+    period = (period or "all").strip().lower()
+    icon, sec_title, _short = _sa.PL_SECTOR_META[sec_key]
+    data = await afn.run(_sa.admin_pl_detailed, period, sec_key)
+    grand = data["grand"]
+    sec_list = data["sectors"]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"{icon} <b><u>محاسبة سوق {sec_title}</u></b>",
+        f"✨ <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, f"a:sigplcat:{sec_key}")]
+
+    if grand["total"] == 0 or not sec_list:
+        lines.append("<blockquote>▎لا توجد إشارات مغلقة في هذا السوق خلال الفترة المختارة.</blockquote>")
+    else:
+        lines.append("")
+        lines.append(_pl_exec_card(grand, f"ملخص قطاع {sec_title}"))
+        sym_block = []
+        sym_btns = []
+        for s in sec_list[0]["symbols"]:
+            s_dot = "🟢" if s["net_usd"] >= 0 else "🔴"
+            sym_block.append(
+                f"▎• <b>{esc(s['symbol'])}</b> {s_dot} — <b>{s['total']}</b> صفقة · نجاح <b>{s['win_rate']:.0f}%</b> "
+                f"({s['wins']}W/{s['losses']}L) · PF <b>{s['pf']}</b>\n"
+                f"   └ صافي <b>{s['net_pips']:+.1f} pips</b> · أرباح {s['gross_profit_pips']:+.1f}p / خسائر {s['gross_loss_pips']:+.1f}p\n"
+                f"   └ 💵 <b>{s['net_usd']:+,.2f} $</b> (0.01 لوت) · <b>{s['net_usd'] * 10:+,.2f} $</b> (0.10 لوت)"
+            )
+            sym_btns.append(
+                kb.btn(f"{icon} {s['symbol']} ({s['net_usd']:+,.2f}$)", f"a:sigplsym:{s['symbol']}:{period}")
+            )
+        lines.append("")
+        lines.append(f"📋 <b>تفصيل الأدوات داخل {sec_title}</b>")
+        lines.append("<blockquote>" + "\n".join(sym_block) + "</blockquote>")
+        for i in range(0, min(len(sym_btns), 10), 2):
+            rows_kb.append(sym_btns[i:i + 2])
+
+    rows_kb.append([kb.btn("💰 كل الأسواق", f"a:sigpl:{period}"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_pl_symbol(q, uid, context, bot, symbol: str, period: str = "all"):
+    """v6.20.5 — Deep Institutional P/L Ledger for ONE Instrument with
+    lot-scale preview, best/worst trade, and clickable trade-by-trade history."""
+    from fysb import instruments
+    from fysb.services import signal_archive as _sa
+    from fysb.theme import signal_status_ar
+    sym = instruments.normalize(symbol)
+    period = (period or "all").strip().lower()
+    data = await afn.run(_sa.admin_pl_detailed, period, "", sym)
+    s = data["by_symbol"].get(sym)
+    sec_key = s["sector"] if s else _sa.sector_of_symbol(sym)
+    icon, sec_title, sec_short = _sa.PL_SECTOR_META[sec_key]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"{icon} <b><u>كشف المحاسبة التفصيلي — {esc(sym)}</u></b>",
+        f"✨ سوق {sec_title} · <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, f"a:sigplsym:{sym}")]
+
+    if not s or s["total"] == 0:
+        lines.append("<blockquote>▎لا توجد صفقات مغلقة لهذه الأداة خلال الفترة المختارة.</blockquote>")
+    else:
+        lines.append("")
+        lines.append(_pl_exec_card(s, f"أداء {sym}"))
+        pips_card = [
+            f"▎📐 <b>صافي النقاط:</b> <b>{s['net_pips']:+.1f} pips</b> (متوسط <b>{s['avg_pips']:+.1f}p</b>/صفقة)",
+            f"▎🟢 مجموع نقاط الربح: <b>{s['gross_profit_pips']:+.1f}p</b> · 🔴 مجموع نقاط الوقف: <b>{s['gross_loss_pips']:+.1f}p</b>",
+            f"▎🏆 أفضل صفقة: <b>{float(s['best_pips'] or 0):+.1f}p</b> ({float(s['best_usd'] or 0):+,.2f} $)",
+            f"▎📉 أسوأ صفقة: <b>{float(s['worst_pips'] or 0):+.1f}p</b> ({float(s['worst_usd'] or 0):+,.2f} $)",
+            f"▎💼 <b>مقياس اللوت:</b> 0.01لوت: <b>{s['net_usd']:+,.2f}$</b> · "
+            f"0.10لوت: <b>{s['net_usd'] * 10:+,.2f}$</b> · 1.00لوت: <b>{s['net_usd'] * 100:+,.2f}$</b>",
+        ]
+        lines.append("<blockquote>" + "\n".join(pips_card) + "</blockquote>")
+
+        # Clickable trade-by-trade ledger (up to 8 most recent)
+        trade_lines = []
+        for tr in s["trades"][:8]:
+            d_ico = "🟢" if tr["direction"] == "BUY" else "🔴"
+            pips = float(tr.get("pips_result") or 0.0)
+            usd = float(tr.get("usd") or 0.0)
+            day = (tr.get("created_at") or "")[:10]
+            trade_lines.append(
+                f"▎{d_ico} <b>#{tr['seq']}</b> {tr['direction']} {tr['timeframe']} · "
+                f"{signal_status_ar(tr)} · <b>{pips:+.1f}p</b> ({usd:+,.2f}$) · {day}"
+            )
+            rows_kb.append([
+                kb.btn(
+                    f"{d_ico} #{tr['seq']} {tr['direction']} {tr['timeframe']} · {pips:+.1f}p ({usd:+,.2f}$) · {day}",
+                    f"a:signalview:{tr['id']}",
+                )
+            ])
+        lines.append("")
+        lines.append(f"📜 <b>سجل الصفقات المغلقة ({min(len(s['trades']), 8)} من {s['total']})</b>")
+        lines.append("<blockquote>" + "\n".join(trade_lines) + "</blockquote>")
+
+    rows_kb.append([
+        kb.btn(f"{icon} قطاع {sec_short}", f"a:sigplcat:{sec_key}:{period}"),
+        kb.btn("💰 كل الأسواق", f"a:sigpl:{period}"),
+    ])
+    rows_kb.append([kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
 async def admin_signal_view(q, uid, context, bot, sid: int):

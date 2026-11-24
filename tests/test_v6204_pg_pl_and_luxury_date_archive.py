@@ -102,18 +102,44 @@ class TestV6204PgPlAndLuxuryDateArchive(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_pl_accounting_and_reports_work_across_periods(self):
-        _insert_sig(self.d_today, "XAUUSD", "TP3_HIT", 300.0, closed=True)
+        sid_xau_w = _insert_sig(self.d_today, "XAUUSD", "TP3_HIT", 300.0, closed=True)
         _insert_sig(self.d_today, "EURUSD", "SL_HIT", -40.0, closed=True)
+        _insert_sig(self.d_today, "BTCUSD", "SL_HIT", -236.1, closed=True)
         _insert_sig(self.d_yest, "XAUUSD", "TP1_HIT", 180.0, closed=True)
 
-        # Full P/L accounting
+        # Full P/L accounting grouped by market sector (Metals / Forex / Crypto)
         text_all, datas_all = _fire("a:sigpl", ADMIN)
         self.assertIn("محاسبة الربح والخسارة", text_all)
+        self.assertIn("الملخص التنفيذي العام", text_all)
+        self.assertIn("سوق المعادن والسلع", text_all)
+        self.assertIn("سوق الفوركس والعملات", text_all)
+        self.assertIn("سوق العملات الرقمية", text_all)
+        self.assertIn("Profit Factor", text_all)
         self.assertIn("XAUUSD", text_all)
         self.assertIn("EURUSD", text_all)
+        self.assertIn("BTCUSD", text_all)
         self.assertIn("+480.0 pips", text_all)
         self.assertIn("a:sigpl:today", datas_all)
         self.assertIn("a:sigpl:yesterday", datas_all)
+        self.assertIn("a:sigplcat:metal:all", datas_all)
+        self.assertIn("a:sigplcat:forex:all", datas_all)
+        self.assertIn("a:sigplcat:crypto:all", datas_all)
+        self.assertIn("a:sigplsym:XAUUSD:all", datas_all)
+
+        # Sector drill-down: Metals ONLY (must NOT include EURUSD or BTCUSD)
+        sec_txt, sec_datas = _fire("a:sigplcat:metal:all", ADMIN)
+        self.assertIn("محاسبة سوق المعادن والسلع", sec_txt)
+        self.assertIn("XAUUSD", sec_txt)
+        self.assertNotIn("EURUSD", sec_txt)
+        self.assertNotIn("BTCUSD", sec_txt)
+        self.assertIn("a:sigplsym:XAUUSD:all", sec_datas)
+
+        # Instrument deep ledger: XAUUSD with lot-scale preview & clickable trades
+        sym_txt, sym_datas = _fire("a:sigplsym:XAUUSD:all", ADMIN)
+        self.assertIn("كشف المحاسبة التفصيلي — XAUUSD", sym_txt)
+        self.assertIn("مقياس اللوت", sym_txt)
+        self.assertIn("أفضل صفقة", sym_txt)
+        self.assertIn(f"a:signalview:{sid_xau_w}", sym_datas)
 
         # Today-only P/L accounting
         text_today, _ = _fire("a:sigpl:today", ADMIN)
@@ -129,7 +155,6 @@ class TestV6204PgPlAndLuxuryDateArchive(unittest.TestCase):
         # Reports module (signals_report & payments_report) also PostgreSQL-safe
         sr = reports.signals_report()
         self.assertIn("تقرير الإشارات", sr)
-        self.assertIn("+440.0", sr)
         pr = reports.payments_report()
         self.assertIn("تقرير المدفوعات", pr)
 

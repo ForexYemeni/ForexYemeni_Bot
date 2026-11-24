@@ -326,6 +326,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signals_dates(q, uid, context, bot, int(arg or 0))
     elif act == "sigpl":
         await admin_trading.admin_signal_pl(q, uid, context, bot, arg or "all")
+    elif act == "sigplcat":
+        await admin_trading.admin_signal_pl_sector(q, uid, context, bot, arg or "metal", arg2 or "all")
+    elif act == "sigplsym":
+        await admin_trading.admin_signal_pl_symbol(q, uid, context, bot, arg, arg2 or "all")
     elif act == "signow":
         from fysb.handlers import signal_now
         await signal_now.open_flow(q, uid, context, bot, is_admin=True)

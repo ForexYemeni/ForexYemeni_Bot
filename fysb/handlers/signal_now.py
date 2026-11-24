@@ -397,23 +397,29 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
         rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="success")]]
         await _render(q, note, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
         return
-    if res.get("status") == "NO_SETUP":
-        rows = [[kb.btn(f"⏰ بحث تلقائي كل {p} دقيقة", f"{_prefix(is_admin)}:signowwatch:{p}", style="primary")]
-                for p in WATCH_PERIODS]
-        strat_ar = esc(_strat_label(strategy))
-        body = (f"⛔ <b>لا توجد إشارة مؤهلة الآن — ظروف السوق لم تحقق {strat_ar}</b>\n"
-                "<blockquote>"
-                "▎🚫 المحرك يرفض تصنيع إشارات — هذه أمينة المنصة 100%.\n"
-                "▎🔔 <b>البحث التلقائي الملكي:</b> اختر الفترة بالأسفل وسيبقى المحرك يفحص "
-                f"<b>{esc(symbol)} · {tf_name(tf)} · {strat_ar}</b> كل مرة حتى تصدر إشارة حقيقية، "
-                "ثم يوقف البحث ويرسلها لك مباشرة.\n"
-                "▎⌛ البحث التلقائي يعمل حتى 24 ساعة كحد أقصى ثم يتوقف بأدب، ويمكنك إلغاؤه في أي لحظة."
-                "</blockquote>")
-        await _render(q, body, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
-        return
-    reason = res.get("reason") or res.get("status", "")
-    await _render(q, f"⛔ لم تُولد إشارة: <b>{esc(reason)}</b>\n<i>(سوق مغلق / بيانات غير متاحة / حد وقف محرك المخاطر)</i>",
-                  kb.user_nav() if not is_admin else kb.admin_nav(), bot)
+    from fysb.ui.cards import render_no_signal_card
+    status = res.get("status") or "NO_SETUP"
+    reason = res.get("reason") or ""
+    strat_ar = _strat_label(strategy)
+    style_ar = STYLE_AR.get(style, "")
+    body = render_no_signal_card(
+        symbol=symbol,
+        timeframe=tf,
+        strategy_label=strat_ar,
+        style_label=style_ar,
+        status=status,
+        reason=reason,
+        show_watch_hint=True,
+    )
+    pref = _prefix(is_admin)
+    rows = [
+        [kb.btn(f"⏰ كل {p} د", f"{pref}:signowwatch:{p}", style="success") for p in WATCH_PERIODS],
+        [
+            kb.btn("⚡ سوق / فريم آخر", f"{pref}:signow", style="primary"),
+            kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="primary"),
+        ],
+    ]
+    await _render(q, body, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
 
 
 async def start_watch(q, uid: int, context, bot, minutes: int) -> None:

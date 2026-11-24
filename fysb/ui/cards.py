@@ -216,6 +216,126 @@ def render_user_card(u: dict, profile: dict) -> str:
     return "\n".join(out)
 
 
+def diagnose_no_signal(status: str, reason: str = "") -> tuple[str, str, str, str]:
+    """Translate raw engine status/reason into a luxury institutional protection
+    diagnosis tuple: (icon, title, explanation, recommendation)."""
+    st = (status or "").upper().strip()
+    r = (reason or "").strip()
+    rl = r.lower()
+
+    if "htf" in rl or "الفريم الأعلى" in r or "عكس الاتجاه" in r:
+        return (
+            "🛡",
+            "درع حماية الاتجاه المؤسسي — تم حجب صفقة عكس التيار",
+            "الفريم الأعلى يحمل زخماً قوياً معاكساً للاتجاه المقترح؛ الدخول ضد التيار المؤسسي يرفع احتمالية ضرب الوقف، لذلك تدخّل درع الحماية ومنع الصفقة حفاظاً على رأس المال.",
+            "فعّل <b>البحث التلقائي الملكي</b> بالأسفل ليقتنص المحرك لحظة اصطفاف السعر مع الاتجاه العام، أو جرّب فريم <code>H1 / H4</code> أو سوقاً آخر.",
+        )
+    if "متذبذب" in r or "عرضي" in r or "chop" in rl or "er=" in rl or "كوفمان" in r:
+        return (
+            "🌊",
+            "درع حماية السيولة — السوق في نطاق عرضي متذبذب",
+            "حركة السعر حالياً متقطعة بلا اتجاه مؤسسي واضح؛ التداول داخل مناطق التذبذب يسبّب إشارات كاذبة ويستنزف الرصيد.",
+            "فعّل <b>البحث التلقائي الملكي</b> لالتقاط أول اختراق حقيقي وزخم مؤسسي مؤكد، أو افحص زوجاً آخر.",
+        )
+    if "زخم" in r or "momentum" in rl or "اندفاع" in r:
+        return (
+            "⚡",
+            "درع حماية الزخم — السعر في موجة معاكسة حادة",
+            "الشموع الأخيرة تُظهر اندفاعاً مضاداً قوياً ضد منطقة الدخول؛ الانتظار حتى هدوء الزخم وتأكيد الارتداد يحمي الصفقة.",
+            "فعّل <b>البحث التلقائي</b> لمتابعة السعر لحظة بلحظة وإصدار الإشارة فور استقرار السلوك السعري.",
+        )
+    if st == "DUPLICATE" or "مفتوحة" in r or "تهدئة" in r or "cooldown" in rl or "مكرر" in r:
+        return (
+            "🔁",
+            "حماية التمركز — توجد صفقة نشطة أو فترة تهدئة جارية",
+            "المحرك يمنع تكديس الصفقات المتكررة على نفس الزوج خلال فترة قصيرة حفاظاً على انضباط إدارة رأس المال.",
+            "تابع البطاقة الحية في <b>📡 الإشارات المباشرة</b> أو اختر زوجاً آخر للفحص الآن.",
+        )
+    if "جودة" in r or "score" in rl or "rr" in rl or "مخاطر" in r or "وقف" in r or "حد" in r or "kill" in rl:
+        return (
+            "⚖️",
+            "درع الجودة والمخاطر — الإعداد دون المعيار المؤسسي",
+            "المعطيات الحالية لم تبلغ الحد الصارم للجودة أو نسبة العائد إلى المخاطرة المعتمدة، والمنصة لا تُصدر إلا الفرص النخبوية.",
+            "فعّل <b>البحث التلقائي الملكي</b> لانتظار فرصة بدرجة جودة أعلى، أو جرّب إطاراً زمنياً آخر.",
+        )
+    if (
+        st == "ERROR"
+        or "مغلق" in r
+        or "سيولة" in r
+        or "جلسة" in r
+        or "بيانات" in r
+        or "شموع" in r
+        or "مزوّد" in r
+        or "مزود" in r
+        or "thin" in rl
+        or "stale" in rl
+    ):
+        return (
+            "🌙",
+            "حالة الجلسة والسيولة — السوق غير مهيّأ للتنفيذ حالياً",
+            "السوق مغلق أو يمرّ بساعة سيولة ضعيفة أو لم تتوفر شموع لحظية كافية للتحقق الدقيق؛ السلامة أولاً دائماً.",
+            "أعد المحاولة خلال جلسة لندن أو نيويورك، أو فعّل <b>البحث التلقائي</b> وسيتولى المحرك المراقبة عنك.",
+        )
+    return (
+        "👑",
+        "صمت المحرك أمانة — لا يوجد نموذج مؤسسي مكتمل الآن",
+        "تم فحص الشموع المغلقة بدقة عبر قواعد التحليل المؤسسي ولم تكتمل شروط الدخول بنسبة 100%؛ المنصة ترفض تصنيع إشارات وهمية.",
+        "اختر فترة <b>البحث التلقائي الملكي</b> بالأسفل وسيراقب المحرك السوق عنك حتى اقتناص أول فرصة حقيقية.",
+    )
+
+
+def render_no_signal_card(
+    symbol: str = "",
+    timeframe: str = "",
+    strategy_label: str = "",
+    style_label: str = "",
+    status: str = "NO_SETUP",
+    reason: str = "",
+    show_watch_hint: bool = True,
+) -> str:
+    """Luxury Royal Institutional Protection Card shown whenever a live scan
+    or Signal-Now finds no qualifying setup (v6.20.9)."""
+    icon, title, explanation, recommendation = diagnose_no_signal(status, reason)
+    meta_parts = []
+    if symbol:
+        meta_parts.append(f"🌐 <b>السوق:</b> <code>{esc(symbol)}</code>")
+    if timeframe:
+        meta_parts.append(f"⏱ <b>الفريم:</b> <code>{esc(tf_name(timeframe))}</code>")
+    meta_line_1 = " · ".join(meta_parts)
+
+    meta_parts_2 = []
+    if strategy_label:
+        meta_parts_2.append(f"🧠 <b>المنهجية:</b> {esc(strategy_label)}")
+    if style_label:
+        meta_parts_2.append(f"🎯 <b>الأسلوب:</b> {esc(style_label)}")
+    meta_line_2 = " · ".join(meta_parts_2)
+
+    lines = [
+        f"{icon} <b><u>تقرير الفحص المؤسسي — حماية رأس المال</u></b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "▎👑 <b>قرار المحرك:</b> <b>لا توجد إشارة مؤهلة للدخول حالياً</b>",
+    ]
+    if meta_line_1:
+        lines.append(f"▎{meta_line_1}")
+    if meta_line_2:
+        lines.append(f"▎{meta_line_2}")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
+    quote = [f"{icon} <b>{title}</b>", ""]
+    if reason and reason.upper() not in ("NO_SETUP", "REJECTED"):
+        quote.append(f"▎📌 <b>التشخيص الفني الدقيق:</b>\n<code>{esc(reason)}</code>")
+        quote.append("")
+    quote.append(f"▎💡 <b>لماذا لم تُصدر إشارة؟</b>\n{explanation}")
+    if show_watch_hint:
+        quote.append("")
+        quote.append(f"▎🧭 <b>الخطوة الذكية:</b>\n{recommendation}")
+        quote.append("▎⌛ <i>البحث التلقائي يعمل حتى 24 ساعة ويتوقف تلقائياً فور صدور الإشارة أو عند إلغائك له.</i>")
+
+    lines.append("<blockquote>" + "\n".join(quote) + "</blockquote>")
+    lines.append("<i>👑 في التداول المؤسسي، الامتناع عن صفقة غير مكتملة الشروط هو بحد ذاته صفقة رابحة.</i>")
+    return "\n".join(lines)
+
+
 def render_plan_card(p) -> str:
     body = [
         f"💰 السعر: <b>{p['price']:g} {esc(p['currency'])}</b>",

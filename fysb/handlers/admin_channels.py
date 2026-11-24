@@ -619,8 +619,24 @@ async def admin_chan_post(q, uid, context, bot, cid: int, kind: str):
                      kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
     else:
         await afn.run(audit_log.log, uid, f"channel_post:{cid}:{kind}:fail")
-        await render(q, f"⛔ {esc(res.get('error', 'تعذر النشر'))}",
-                     kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
+        err_msg = res.get("error", "تعذر النشر")
+        if kind == "signal":
+            from fysb.ui.cards import render_no_signal_card
+            ch_row = await afn.run(get_channel, cid)
+            card_txt = render_no_signal_card(
+                symbol=(ch_row.get("markets") if ch_row else "") or "ALL",
+                timeframe="",
+                strategy_label="جميع المنهجيات",
+                status="NO_SETUP",
+                reason=err_msg,
+                show_watch_hint=False,
+            )
+            await render(q, card_txt,
+                         kb.admin_nav([[kb.btn("🔄 إعادة الفحص", f"a:chanpost:{cid}:signal", style="success"),
+                                        kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}", style="primary")]]), bot)
+        else:
+            await render(q, f"⛔ {esc(err_msg)}",
+                         kb.admin_nav([[kb.btn(f"⚙️ إعداد #{cid}", f"a:chanview:{cid}")]]), bot)
 
 
 async def channels_loop(app):

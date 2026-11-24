@@ -651,17 +651,22 @@ async def admin_engine_now(q, uid, context, bot):
     from fysb.engines.signal_engine import emit_to_users, generate_signal, opposite_close_advisory
     from fysb.handlers.background import _safe_send
     from fysb.handlers.inputs import bot_sender_from
+    from fysb.ui.cards import diagnose_no_signal
     await render(q, "🚀 جارٍ تشغيل دورة فورية للمحرك على الأسواق المفعلة...", None)
     markets = await afn.run(_enabled_verified_market_dicts)
     if not markets:
         await render(q, "⛔ لا توجد أسواق مفعلة وموثقة. فعّل سوقاً من قسم الأسواق أولاً (زر التحقق).", kb.admin_nav(), bot)
         return
+    created_cnt = 0
+    guarded_cnt = 0
     results = []
     for m in markets:
         res = await asyncio.to_thread(generate_signal, m["symbol"])
-        extra = ""
-        if res.get("status") == "SIGNAL_CREATED" and res.get("signal_id"):
+        st = (res.get("status") or "").upper()
+        if st == "SIGNAL_CREATED" and res.get("signal_id"):
+            created_cnt += 1
             sig = await afn.run(_signal_by_id, int(res["signal_id"]))
+            extra = ""
             if sig:
                 try:
                     for target, adv_txt in await afn.run(opposite_close_advisory, sig):
@@ -669,12 +674,32 @@ async def admin_engine_now(q, uid, context, bot):
                 except Exception:
                     pass
                 stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
-                extra = f" · 📤 مستلمون: {stats.get('sent', 0)} · قنوات: {stats.get('channels_sent', 0)}"
-        elif res.get("reason"):
-            extra = f" ({esc(res.get('reason', ''))[:60]})"
-        results.append(f"{esc(m['symbol'])}: <b>{esc(res['status'])}</b>{extra}")
-    await render(q, "🚀 <b>نتيجة الدورة الفورية</b>\n" + "\n".join(results),
-                 kb.admin_nav([[kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")]]), bot)
+                extra = f" · 📤 مستلمون: <b>{stats.get('sent', 0)}</b> · قنوات: <b>{stats.get('channels_sent', 0)}</b>"
+            results.append(
+                f"▎🟢 <b>{esc(m['symbol'])}</b> — <b>صدرت إشارة حقيقية ⭐ {res.get('score', 0)}/100</b>{extra}"
+            )
+        else:
+            guarded_cnt += 1
+            icon, title, _exp, _rec = diagnose_no_signal(st, res.get("reason", ""))
+            reason_txt = f"\n   <code>{esc(res['reason'][:90])}</code>" if res.get("reason") else ""
+            results.append(f"▎{icon} <b>{esc(m['symbol'])}</b> — {title}{reason_txt}")
+    header = (
+        "👑 <b><u>تقرير الدورة الفورية للمحرك المؤسسي</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"▎🌐 الأسواق المفحوصة: <b>{len(markets)}</b> · 🟢 إشارات صادرة: <b>{created_cnt}</b> · 🛡 محجوبة لحماية رأس المال: <b>{guarded_cnt}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>" + "\n".join(results) + "</blockquote>\n"
+        "<i>👑 المحرك لا يصنّع إشارات أبداً — الإشارة تصدر فقط عند اكتمال كافة شروط الجودة والاتجاه.</i>"
+    )
+    await render(
+        q,
+        header,
+        kb.admin_nav([
+            [kb.btn("🚀 دورة فورية مجدداً", "a:enginenow", style="success"), kb.btn("⚡ إشارة الآن", "a:signow", style="success")],
+            [kb.btn("🧠 المحرك", "a:engine", style="primary"), kb.btn("📡 الإشارات", "a:signals", style="primary")],
+        ]),
+        bot,
+    )
 
 
 async def admin_engine_clean(q, uid, context, bot):

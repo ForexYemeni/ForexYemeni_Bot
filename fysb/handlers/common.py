@@ -167,21 +167,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await afn.run(audit_log.log, uid, "admin_panel_open")
         return
-    from fysb.handlers.user_pages import build_user_home_card
     from fysb.services import partners as partners_svc
+    active_p = await afn.run(partners_svc.get_partner_by_user, uid)
+    if active_p and active_p.get("enabled"):
+        # v6.21.2 Strict Partner-Only Mode: while registered & active as a
+        # Channel Partner, the regular User account interface is closed and
+        # /start opens ONLY the Partner Command Panel until Admin disables or
+        # removes the partner.
+        from fysb.handlers import admin_partners
+        await admin_partners.render_partner_start(update, active_p)
+        return
+    from fysb.handlers.user_pages import build_user_home_card
     home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "")
-    menu_mk = kb.user_menu()
-    if await afn.run(partners_svc.is_active_partner, uid):
-        home_text += "\n\n👑 <b>حساب شريك قناة معتمد:</b> أرسل /partner أو اضغط الزر بالأسفل لإدارة قناتك وأرباحك."
-        from telegram import InlineKeyboardMarkup
-        menu_mk = InlineKeyboardMarkup(
-            [[kb.btn("👑 لوحة الشريك الملكي وأرباحي", "p:home", style="success")]]
-            + list(menu_mk.inline_keyboard)
-        )
     await _send_guarded(
         update.effective_message.reply_text,
         home_text,
-        menu_mk,
+        kb.user_menu(),
     )
 
 

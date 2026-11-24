@@ -246,3 +246,90 @@ def test_partner_channel_full_auto_controls_strategies_and_schedule():
     assert ch_after["timeframes"] == "ALL"
     assert ch_after["strategies"] == "ALL"
 
+
+def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted():
+    """v6.21.2: Active partner's regular user account is completely closed
+    (no u:* menus, /start opens Partner Panel only, stale u:* callbacks redirect
+    to Partner Panel, private signal broadcasts skip them) until Admin disables
+    or deletes the partner, at which point they revert back to a regular User."""
+    from fysb.handlers import common as common_handler, dispatcher
+    from fysb.engines import signal_engine
+    from fysb.services import subscriptions as subs_svc, users as users_svc
+
+    uid = 78001
+    tg_user = SimpleNamespace(id=uid, username="strict_partner", full_name="شريك حصري")
+    users_svc.ensure_user(tg_user)
+    # Even if they had an active subscription earlier, turning them into an active partner locks user mode
+    subs_svc.grant_subscription(uid, "vip")
+    p = partners_svc.create_partner(uid, title="قناة الحصري", commission_pct=30.0)
+    assert uid in partners_svc.active_partner_user_ids()
+
+    # 1. /start opens ONLY Partner Mode with ZERO u:* buttons
+    replies = []
+    async def _reply(text, **kw):
+        replies.append((text, kw.get("reply_markup")))
+
+    upd = SimpleNamespace(
+        effective_user=SimpleNamespace(id=uid, username="strict_partner", full_name="شريك حصري"),
+        effective_message=SimpleNamespace(reply_text=_reply),
+    )
+    ctx = SimpleNamespace(args=[], user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+    asyncio.run(common_handler.start(upd, ctx))
+    assert replies
+    txt, mk = replies[-1]
+    assert "لوحة الشريك الملكي" in txt
+    assert "حساب شريك قناة حصري" in txt
+    all_cb = [b.callback_data for row in mk.inline_keyboard for b in row if b.callback_data]
+    assert all(not c.startswith("u:") for c in all_cb), f"Leaked user button in partner home: {all_cb}"
+    assert "p:contact" in all_cb
+
+    # 2. Tapping ANY stale u:* callback (e.g. u:signals / u:home / u:markets) redirects straight to p:home
+    q, rep = _mk_q(uid)
+    q.data = "u:signals"
+    q_upd = SimpleNamespace(callback_query=q)
+    asyncio.run(dispatcher.buttons(q_upd, ctx))
+    assert rep
+    r_txt, r_mk = rep[-1]
+    assert "لوحة الشريك الملكي" in r_txt
+    r_cb = [b.callback_data for row in r_mk.inline_keyboard for b in row if b.callback_data]
+    assert all(not c.startswith("u:") for c in r_cb)
+
+    # 3. Private user signal broadcast skips active partners
+    sent_uids = []
+    async def _bot_send(chat_id, text, **kw):
+        sent_uids.append(chat_id)
+    sig_obj = {
+        "id": 99991, "symbol": "XAUUSD", "timeframe": "M15", "direction": "BUY",
+        "entry": 2650.0, "stop": 2640.0, "tp1": 2665.0, "tp2": 2680.0, "tp3": 2695.0,
+        "score": 85, "confidence": 85, "strategy": "ict", "regime": "TREND",
+        "rr": 1.5, "status": "ACTIVE", "tp1_hit": 0, "tp2_hit": 0, "sl_hit": 0,
+        "reason": "Strict partner exclusion test", "created_at": config.now(),
+        "data_time": config.now(), "data_source": "twelvedata",
+        "last_price": 2650.0, "closed_at": "", "pips_result": 0.0,
+    }
+    asyncio.run(signal_engine.emit_to_users(sig_obj, _bot_send, include_channels=False))
+    assert uid not in sent_uids
+
+    # 4. Admin disables partner -> immediately reverts to regular User account!
+    partners_svc.update_partner(p["id"], enabled=0)
+    assert uid not in partners_svc.active_partner_user_ids()
+    replies.clear()
+    asyncio.run(common_handler.start(upd, ctx))
+    txt_u, mk_u = replies[-1]
+    assert "لوحة الشريك الملكي" not in txt_u
+    u_cb = [b.callback_data for row in mk_u.inline_keyboard for b in row if b.callback_data]
+    assert any(c.startswith("u:") for c in u_cb), "Disabled partner must revert to regular User menu!"
+
+    # 5. Re-enable then delete -> also reverts cleanly to regular User account
+    partners_svc.update_partner(p["id"], enabled=1)
+    assert uid in partners_svc.active_partner_user_ids()
+    partners_svc.delete_partner(p["id"])
+    assert uid not in partners_svc.active_partner_user_ids()
+    replies.clear()
+    asyncio.run(common_handler.start(upd, ctx))
+    txt_u2, mk_u2 = replies[-1]
+    assert "لوحة الشريك الملكي" not in txt_u2
+    u_cb2 = [b.callback_data for row in mk_u2.inline_keyboard for b in row if b.callback_data]
+    assert any(c.startswith("u:") for c in u_cb2)
+
+

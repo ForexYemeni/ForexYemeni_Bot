@@ -87,7 +87,13 @@ def touch_and_get(uid: int):
         with db.conn() as c:
             if need_write:
                 c.execute("UPDATE users SET last_seen=? WHERE user_id=?", (config.now(), uid))
-            r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            r = c.execute(
+                """SELECT u.*,
+                          EXISTS(SELECT 1 FROM channel_partners cp
+                                 WHERE cp.user_id = u.user_id AND cp.enabled = 1) AS is_active_partner
+                   FROM users u WHERE u.user_id=?""",
+                (uid,),
+            ).fetchone()
         return dict(r) if r else None
     except Exception:
         return get_user(uid)

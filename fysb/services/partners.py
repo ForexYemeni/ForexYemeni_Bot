@@ -134,6 +134,13 @@ def is_active_partner(uid: int) -> bool:
     return bool(p and p.get("enabled"))
 
 
+def active_partner_user_ids() -> set[int]:
+    """Return user_ids currently locked in Partner-Only Mode (enabled=1)."""
+    with db.conn() as c:
+        rows = c.execute("SELECT user_id FROM channel_partners WHERE enabled=1").fetchall()
+    return {int(r["user_id"]) for r in rows}
+
+
 def list_partners() -> list[dict]:
     with db.conn() as c:
         rows = c.execute("SELECT * FROM channel_partners ORDER BY id DESC").fetchall()

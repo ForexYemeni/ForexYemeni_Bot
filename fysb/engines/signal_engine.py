@@ -621,8 +621,10 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     sig_score = sig["score"]
     sig_strategy = (sig.get("strategy") or "").upper()
     await opposite_close_advisory(sig, bot_send)
+    from fysb.services import partners as partners_svc
     with db.conn() as c:
         users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
+    active_partners = partners_svc.active_partner_user_ids()
 
     # Pre-compute invariant signal payload + batch-load plans & demo accounts ONCE
     row = _market_row(sig_symbol)
@@ -631,15 +633,18 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     if pulse:
         base_card += "\n\n<blockquote>" + pulse + "</blockquote>"
 
-    candidate_uids = [int(u["user_id"]) for u in users if int(u["user_id"]) != config.ADMIN_ID]
+    candidate_uids = [
+        int(u["user_id"]) for u in users
+        if int(u["user_id"]) != config.ADMIN_ID and int(u["user_id"]) not in active_partners
+    ]
     plans_map = plans_for_users(candidate_uids)
     demo_map = _preload_demo_accounts(candidate_uids)
     auto_exec_queue: list[tuple[int, dict | None]] = []
 
     for u in users:
         uid = int(u["user_id"])
-        if uid == config.ADMIN_ID:
-            continue  # the admin is never treated as a signal recipient
+        if uid == config.ADMIN_ID or uid in active_partners:
+            continue  # admin & active partner-mode accounts are not private user recipients
 
         # 1) package entitlement — hard gate (slash-normalized symbol matching)
         plan = plans_map.get(uid)

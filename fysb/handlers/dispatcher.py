@@ -63,8 +63,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop(k, None)
             await admin_partners.handle_partner_callback(q, uid, context, context.bot, data[2:])
         else:
-            from fysb.handlers.common import render
-            await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
+            from fysb.services import partners as partners_svc
+            active_p = (
+                await afn.run(partners_svc.get_partner_by_user, uid)
+                if uid != config.ADMIN_ID else None
+            )
+            if active_p and active_p.get("enabled"):
+                await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
+            else:
+                from fysb.handlers.common import render
+                await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
             await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
     except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
@@ -103,6 +111,13 @@ async def _route_user(q, context, uid: int, action: str):
     if await afn.run(db.maintenance_on) and uid != config.ADMIN_ID:
         from fysb.handlers.common import render
         await render(q, "🔧 المنصة في وضع الصيانة مؤقتاً. حاول بعد قليل.", None, context.bot)
+        return
+    # v6.21.2 Strict Partner-Only Mode: active partners cannot access regular
+    # user menus (`u:*`) — any stale user button redirects straight to their
+    # Partner Command Panel until Admin disables or removes them.
+    # Piggybacks on touch_and_get's EXISTS subquery -> ZERO extra DB round trips!
+    if uid != config.ADMIN_ID and u and u.get("is_active_partner"):
+        await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
         return
     # Ticket replies: route the text flow (handled in inputs module)
     if action.startswith("ticketreply:"):

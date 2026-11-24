@@ -212,8 +212,29 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
 async def admin_partner_toggle(q, uid, context, bot, pid: int):
     p = await afn.run(partners_svc.get_partner, pid)
     if p:
-        await afn.run(partners_svc.update_partner, pid, enabled=0 if p["enabled"] else 1)
-        await afn.run(audit_log.log, uid, f"partner_toggle:{pid}")
+        new_state = 0 if p["enabled"] else 1
+        await afn.run(partners_svc.update_partner, pid, enabled=new_state)
+        await afn.run(audit_log.log, uid, f"partner_toggle:{pid}:{new_state}")
+        if bot:
+            try:
+                if new_state == 0:
+                    await bot.send_message(
+                        p["user_id"],
+                        "ℹ️ <b><u>تم إيقاف وضع الشريك مؤقتاً</u></b>\n"
+                        "<blockquote>عاد حسابك الآن كحساب مستخدم عادي — أرسل /start لفتح القائمة الرئيسية.</blockquote>",
+                        parse_mode="HTML",
+                        reply_markup=kb.user_nav(),
+                    )
+                else:
+                    await bot.send_message(
+                        p["user_id"],
+                        "👑 <b><u>تم إعادة تفعيل حسابك كشريك قناة!</u></b>\n"
+                        "<blockquote>حسابك يعمل الآن في وضع الشريك الحصري — اضغط بالأسفل لفتح لوحة الشريك.</blockquote>",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[kb.btn("👑 فتح لوحة الشريك", "p:home", style="success")]]),
+                    )
+            except Exception:
+                pass
     await admin_partner_view(q, uid, context, bot, pid)
 
 
@@ -273,8 +294,20 @@ async def admin_partner_settle(q, uid, context, bot, pid: int):
 
 
 async def admin_partner_delete(q, uid, context, bot, pid: int):
+    p = await afn.run(partners_svc.get_partner, pid)
     await afn.run(partners_svc.delete_partner, pid)
     await afn.run(audit_log.log, uid, f"partner_delete:{pid}")
+    if p and bot:
+        try:
+            await bot.send_message(
+                p["user_id"],
+                "ℹ️ <b><u>تم إنهاء حساب الشريك</u></b>\n"
+                "<blockquote>عاد حسابك الآن كمستخدم عادي بالكامل — أرسل /start لفتح القائمة الرئيسية للمستخدم.</blockquote>",
+                parse_mode="HTML",
+                reply_markup=kb.user_nav(),
+            )
+        except Exception:
+            pass
     await admin_partners(q, uid, context, bot)
 
 
@@ -301,8 +334,25 @@ async def admin_vip_sweep(q, uid, context, bot):
 
 
 # ============================================================================
-# PARTNER PRIVATE DASHBOARD — `/partner` & `p:*` callbacks
+# PARTNER PRIVATE DASHBOARD — `/partner` & `p:*` callbacks (Partner-Only Mode)
 # ============================================================================
+
+def _partner_nav(extra_rows: list | None = None, include_home: bool = True) -> InlineKeyboardMarkup:
+    """Partner-Only navigation wrapper — NEVER exposes `u:home` or regular user menus."""
+    rows = list(extra_rows or [])
+    if include_home:
+        rows.append([kb.btn("👑 لوحة الشريك الرئيسية", "p:home", style="primary")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def render_partner_start(update: Update, p: dict) -> None:
+    """Called by /start and /menu when the user is an active partner — opens
+    ONLY the Partner Command Panel (regular user account is closed)."""
+    text, markup = await _build_partner_home(p)
+    await update.effective_message.reply_text(
+        text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
+    )
+
 
 async def partner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry command `/partner` — accessible ONLY to active registered partners."""
@@ -317,10 +367,7 @@ async def partner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb.user_nav([[kb.btn("🎧 تواصل للشراكة", "u:support", style="success")]]),
         )
         return
-    text, markup = await _build_partner_home(p)
-    await update.effective_message.reply_text(
-        text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
-    )
+    await render_partner_start(update, p)
 
 
 async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -333,6 +380,7 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         f"👑 <b><u>لوحة الشريك الملكي — {esc(p['title'])}</u></b>",
         "━━━━━━━━━━━━━━━━━━",
         "<blockquote>",
+        f"▎🛡 وضع الحساب: <b>حساب شريك قناة حصري</b>",
         f"▎💰 نسبة عمولتك: <b>{p['commission_pct']:.0f}%</b> من كل اشتراك مدفوع",
         f"▎📣 وضع النشر المعتمد: <b>{mode_ar}</b>",
         f"▎🔗 رابط قناتك الحصري:\n<code>{esc(link)}</code>",
@@ -357,8 +405,11 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         rows_kb.append([kb.btn(f"{dot} إدارة: {c['title'][:24]}{vip}", f"p:ch:{c['id']}", style="primary")])
     if p.get("perm_custom_branding"):
         rows_kb.append([kb.btn("🏷 تعديل توقيع قناتي", "p:brand", style="primary")])
-    rows_kb.append([kb.btn("🔄 تحديث الإحصائيات", "p:home", style="primary")])
-    return "\n".join(body), kb.user_nav(rows_kb)
+    rows_kb.append([
+        kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary"),
+        kb.btn("🔄 تحديث الإحصائيات", "p:home", style="primary"),
+    ])
+    return "\n".join(body), _partner_nav(rows_kb, include_home=False)
 
 
 async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
@@ -376,6 +427,19 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         await render(q, text, markup, bot)
         return
 
+    if act == "contact":
+        from fysb.services import support as support_service
+        from fysb.handlers.user_pages import _support_contact_rows
+        cfg = await afn.run(support_service.config_row) or {}
+        contact_rows = _support_contact_rows(cfg)
+        body = (
+            "🎧 <b><u>التواصل المباشر مع إدارة FOREXYEMENI</u></b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "<blockquote>اختر وسيلة التواصل المناسبة لك بالأسفل للتنسيق حول قناتك أو تسوية أرباحك.</blockquote>"
+        )
+        await render(q, body, _partner_nav(contact_rows, include_home=True), bot)
+        return
+
     if act == "addch":
         context.user_data["awaiting_partner_channel"] = p["id"]
         body = (
@@ -389,19 +453,19 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             "▎🛡 سيتحقق البوت تلقائياً أنك مالك أو مشرف القناة."
             "</blockquote>"
         )
-        await render(q, body, kb.user_nav([[kb.btn("🚫 إلغاء", "p:home", style="danger")]]), bot)
+        await render(q, body, _partner_nav([[kb.btn("🚫 إلغاء", "p:home", style="danger")]], include_home=False), bot)
         return
 
     if act == "brand":
         if not p.get("perm_custom_branding"):
-            await render(q, "⛔ صلاحية التوقيع المخصص غير مفعّلة لحسابك.", kb.user_nav([[kb.btn("↩️ لوحة الشريك", "p:home")]]), bot)
+            await render(q, "⛔ صلاحية التوقيع المخصص غير مفعّلة لحسابك.", _partner_nav(), bot)
             return
         context.user_data["awaiting_partner_brand"] = p["id"]
         await render(
             q,
             "🏷 <b>تخصيص توقيع قناتك</b>\n"
             "<blockquote>أرسل اسم أو معرّف قناتك ليظهر بجانب توقيع البوت أسفل المنشورات (أو أرسل <code>-</code> لإعادة الافتراضي):</blockquote>",
-            kb.user_nav([[kb.btn("🚫 إلغاء", "p:home", style="danger")]]),
+            _partner_nav([[kb.btn("🚫 إلغاء", "p:home", style="danger")]], include_home=False),
             bot,
         )
         return
@@ -413,7 +477,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             await render(
                 q,
                 "💰 <b>طلب سحب الأرباح</b>\n<blockquote>لا يوجد رصيد مستحق للسحب حالياً (<code>0.00 $</code>). شارك رابطك لبدء تحقيق الأرباح!</blockquote>",
-                kb.user_nav([[kb.btn("↩️ لوحة الشريك", "p:home", style="primary")]]),
+                _partner_nav(),
                 bot,
             )
             return
@@ -440,7 +504,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             q,
             f"✅ <b>تم إرسال طلب سحب بقيمة {pending:,.2f} $ إلى الإدارة بنجاح!</b>\n"
             "<blockquote>سيتم مراجعة الطلب وتحويل أرباحك وإشعارك فور الاعتماد.</blockquote>",
-            kb.user_nav([[kb.btn("↩️ لوحة الشريك", "p:home", style="primary")]]),
+            _partner_nav(),
             bot,
         )
         return
@@ -450,7 +514,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
     from fysb.handlers import admin_channels
     ch = await afn.run(admin_channels.get_channel, cid) if cid else None
     if not ch or int(ch.get("owner_partner_id") or 0) != int(p["id"]):
-        await render(q, "⛔ القناة غير موجودة أو لا تتبع حسابك.", kb.user_nav([[kb.btn("↩️ لوحة الشريك", "p:home")]]), bot)
+        await render(q, "⛔ القناة غير موجودة أو لا تتبع حسابك.", _partner_nav(), bot)
         return
 
     if act == "ch":
@@ -483,13 +547,13 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         if which == "analysis":
             if not p.get("perm_auto_analysis"):
                 await render(q, "⛔ صلاحية النشر التلقائي للتحليلات غير مفعّلة لحسابك — تواصل مع الإدارة.",
-                             kb.user_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
+                             _partner_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
                 return
             await afn.run(admin_channels.update_channel, cid, auto_analysis=0 if ch["auto_analysis"] else 1)
         elif which == "signals":
             if not p.get("perm_auto_signals"):
                 await render(q, "⛔ صلاحية النشر التلقائي للإشارات غير مفعّلة لحسابك — تواصل مع الإدارة.",
-                             kb.user_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
+                             _partner_nav([[kb.btn("↩️ إدارة القناة", f"p:ch:{cid}")]]), bot)
                 return
             await afn.run(admin_channels.update_channel, cid, auto_signals=0 if ch["auto_signals"] else 1)
         ch = await afn.run(admin_channels.get_channel, cid)
@@ -522,7 +586,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             f"⏰ <b><u>جدولة النشر التلقائي لقناتك ({esc(ch['title'])})</u></b>\n"
             f"<blockquote>الفاصل الحالي: كل <b>{cur_iv} دقيقة</b> (توقيت مكة · سكون ليلي 01:00–07:00).\n"
             f"اختر الفاصل الزمني المناسب للنشر الدوري للتحليلات والإشارات:</blockquote>",
-            kb.user_nav(rows),
+            _partner_nav(rows),
             bot,
         )
         return
@@ -538,7 +602,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
     if act == "chvip":
         if not p.get("perm_vip_gatekeeper"):
             await render(q, "⛔ صلاحية حارس VIP غير مفعّلة لحسابك — تواصل مع الإدارة لتفعيلها.",
-                         kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
+                         _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
             return
         await afn.run(admin_channels.update_channel, cid, is_vip_gate=0 if ch.get("is_vip_gate") else 1)
         ch = await afn.run(admin_channels.get_channel, cid)
@@ -549,14 +613,14 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         kind = parts[2] if len(parts) > 2 else "analysis"
         if not p.get("perm_manual_post"):
             await render(q, "⛔ صلاحية النشر اليدوي غير مفعّلة لحسابك.",
-                         kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
+                         _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
             return
         ok_q, used = _consume_manual_post_quota(p["id"])
         if not ok_q:
             await render(
                 q,
                 f"⏳ <b>بلغت الحد اليومي للنشر اليدوي ({_PARTNER_POST_CAP} منشورات/يوم)</b> — البث التلقائي مستمر دون توقف.",
-                kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]),
+                _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]),
                 bot,
             )
             return
@@ -571,7 +635,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
                 q,
                 f"✅ <b>تم النشر بنجاح في قناتك ({esc(ch['title'])})!</b>\n"
                 f"<blockquote>استخدام النشر اليدوي اليوم: <b>{used}/{_PARTNER_POST_CAP}</b></blockquote>",
-                kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")]]),
+                _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")]]),
                 bot,
             )
         else:
@@ -587,7 +651,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
                 if kind == "signal"
                 else f"⛔ {esc(res.get('error', 'تعذر النشر'))}"
             )
-            await render(q, txt, kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")]]), bot)
+            await render(q, txt, _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}", style="primary")]]), bot)
         return
 
     if act == "chfeat":
@@ -596,7 +660,7 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             kind = "markets"
         if not p.get("perm_choose_markets"):
             await render(q, "⛔ اختيار الأسواق والأطر والاستراتيجيات مضبوط من قبل الإدارة.",
-                         kb.user_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
+                         _partner_nav([[kb.btn("↩️ إعداد القناة", f"p:ch:{cid}")]]), bot)
             return
         await _render_partner_feat(q, ch, kind, bot)
         return
@@ -731,7 +795,7 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
         kb.btn("🗑 فصل القناة", f"p:chdel:{cid}", style="danger"),
         kb.btn("↩️ لوحة الشريك", "p:home", style="primary"),
     ])
-    await render(q, body, kb.user_nav(rows), bot)
+    await render(q, body, _partner_nav(rows, include_home=False), bot)
 
 
 async def _render_partner_feat(q, ch: dict, kind: str, bot):
@@ -765,7 +829,7 @@ async def _render_partner_feat(q, ch: dict, kind: str, bot):
         q,
         f"⚙️ <b>تعديل {title} لقناتك ({esc(ch['title'])})</b>\n"
         "اضغط للتبديل (اختر <b>الكل (ALL)</b> للبث الشامل تلقائياً):",
-        kb.user_nav(rows),
+        _partner_nav(rows),
         bot,
     )
 
@@ -803,7 +867,7 @@ async def handle_partner_add_input(update: Update, context: ContextTypes.DEFAULT
         f"▎🤝 الاسم: <b>{esc(p['title'])}</b> (<code>{p_uid}</code>)\n"
         f"▎💰 نسبة العمولة: <b>{p['commission_pct']:.0f}%</b> · الوضع: <b>🔒 تشويقي</b>\n"
         f"▎🔗 رابط الشريك الحصري:\n<code>{esc(link)}</code>\n"
-        "▎👑 يستطيع الشريك الآن فتح لوحته الخاصة عبر أمر <code>/partner</code> وربط قناته بضغطة زر."
+        "▎👑 تحوّل حساب الشريك الآن إلى <b>وضع الشريك الحصري</b> — سيفتح له البوت بلوحة الشريك فقط حتى تعطيله أو حذفه."
         "</blockquote>",
         parse_mode="HTML",
         reply_markup=kb.admin_nav([[kb.btn(f"⚙️ إدارة الشريك #{p['id']}", f"a:partview:{p['id']}", style="success")]]),
@@ -812,12 +876,13 @@ async def handle_partner_add_input(update: Update, context: ContextTypes.DEFAULT
     try:
         await update.get_bot().send_message(
             p_uid,
-            "👑 <b><u>مبروك — تم اعتمادك كشريك رسمي في FOREXYEMENI!</u></b>\n"
+            "👑 <b><u>مبروك — تم ترقية حسابك إلى شريك رسمي في FOREXYEMENI!</u></b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "<blockquote>"
+            f"▎🛡 وضع الحساب: <b>حساب شريك قناة حصري</b> (يفتح البوت الآن بلوحة الشريك فقط).\n"
             f"▎💰 عمولتك المعتمدة: <b>{p['commission_pct']:.0f}%</b> من كل اشتراك عبر قناتك.\n"
             f"▎🔗 رابطك الحصري:\n<code>{esc(link)}</code>\n"
-            "▎🚀 اضغط الزر بالأسفل أو أرسل <code>/partner</code> لفتح لوحة الشريك وربط قناتك الآن!"
+            "▎🚀 اضغط الزر بالأسفل أو أرسل <code>/start</code> لفتح لوحة الشريك وربط قناتك الآن!"
             "</blockquote>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[kb.btn("👑 فتح لوحة الشريك الآن", "p:home", style="success")]]),
@@ -902,10 +967,9 @@ async def handle_partner_channel_input(update: Update, context: ContextTypes.DEF
         "▎🔐 يمكنك تفعيل «حارس VIP» أو تعديل الأسواق من إدارة القناة بالأسفل."
         "</blockquote>",
         parse_mode="HTML",
-        reply_markup=kb.user_nav([
+        reply_markup=_partner_nav([
             [kb.btn("⚙️ إدارة قناتي الآن", f"p:ch:{cid}", style="success")],
-            [kb.btn("👑 لوحة الشريك", "p:home", style="primary")],
-        ]),
+        ], include_home=True),
     )
     return True
 
@@ -922,6 +986,6 @@ async def handle_partner_brand_input(update: Update, context: ContextTypes.DEFAU
     await update.effective_message.reply_text(
         f"✅ تم حفظ توقيع قناتك: <b>{esc(val or 'الافتراضي')}</b>",
         parse_mode="HTML",
-        reply_markup=kb.user_nav([[kb.btn("👑 لوحة الشريك", "p:home", style="primary")]]),
+        reply_markup=_partner_nav(),
     )
     return True

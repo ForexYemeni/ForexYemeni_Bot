@@ -1258,24 +1258,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         await render(q, body, kb.user_nav([[kb.btn("🧪 التداول التجريبي", "u:demo"), kb.btn("📡 الإشارات", "u:signals")]]), bot)
 
     elif action == "support":
-        context.user_data["awaiting_ticket"] = True
-        cfg = await afn.run(support_service.config_row) or {}
-        body = ["🎧 <b>الدعم الفني</b>"]
-        if any(cfg.get(x) for x in ("username", "phone", "channel", "group_chat")):
-            body.append("\n<b>وسائل التواصل:</b>")
-            if cfg.get("username"):
-                body.append(f"  ✉️ @{esc(cfg['username'])}")
-            if cfg.get("phone"):
-                body.append(f"  📞 {esc(cfg['phone'])}")
-            if cfg.get("channel"):
-                body.append(f"  📢 {esc(cfg['channel'])}")
-            if cfg.get("group_chat"):
-                body.append(f"  👥 {esc(cfg['group_chat'])}")
-        body.append("\n<b>لفتح تذكرة:</b> أرسل رسالتك هنا كنص واحد، ويمكن إرفاق صورة بعد الرسالة.")
-        mine = await afn.run(support_service.user_tickets, uid)
-        rows_kb = [[kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")] for t in mine]
-        rows_kb.append([kb.btn("❓ مركز المساعدة", "u:help", style="primary")])
-        await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
+        await _handle_support_page(q, uid, context, bot)
 
     elif action.startswith("ticket:"):
         tid = _safe_int(action.split(":", 1)[1])
@@ -1537,3 +1520,94 @@ async def _notify_admin_ticket(bot, tid: int, note: str) -> None:
             await bot.send_message(config.ADMIN_ID, f"🎫 تذكرة #{tid}: {note}")
         except Exception:
             pass
+
+
+def _tg_or_web_url(raw: str) -> str | None:
+    """Convert a Telegram handle (@name), t.me link, or https URL into a safe
+    Telegram InlineKeyboardButton URL; return None if not a valid URL target."""
+    import re
+    s = (raw or "").strip()
+    if not s or any(ch.isspace() for ch in s):
+        return None
+    low = s.lower()
+    if low.startswith("https://") or low.startswith("http://"):
+        return s
+    if low.startswith("t.me/") or low.startswith("telegram.me/"):
+        return "https://" + s
+    handle = s.lstrip("@")
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,63}", handle):
+        return f"https://t.me/{handle}"
+    return None
+
+
+def _support_contact_rows(cfg: dict) -> list[list]:
+    """Build luxury colored 1-tap contact buttons (Telegram / WhatsApp / Copy /
+    Channel / Group) instead of dumping raw usernames & numbers as plain text."""
+    import re
+    rows: list[list] = []
+
+    username = (cfg.get("username") or "").strip()
+    if username:
+        tg_url = _tg_or_web_url(username)
+        if tg_url:
+            rows.append([kb.url_btn("✈️ تواصل مباشر عبر تلغرام", tg_url, style="primary")])
+        else:
+            rows.append([kb.copy_btn("✈️ نسخ معرّف الدعم", f"@{username.lstrip('@')}", style="primary")])
+
+    phone = (cfg.get("phone") or "").strip()
+    if phone:
+        digits = re.sub(r"[^\d]", "", phone)
+        if 7 <= len(digits) <= 15:
+            rows.append([
+                kb.url_btn("💬 تواصل عبر واتساب", f"https://wa.me/{digits}", style="success"),
+                kb.copy_btn("📋 نسخ الرقم", phone, style="primary"),
+            ])
+        else:
+            rows.append([kb.copy_btn("📞 نسخ رقم التواصل", phone, style="primary")])
+
+    comm_row: list = []
+    channel = (cfg.get("channel") or "").strip()
+    if channel:
+        ch_url = _tg_or_web_url(channel)
+        comm_row.append(
+            kb.url_btn("📢 القناة الرسمية", ch_url, style="primary")
+            if ch_url else kb.copy_btn("📢 نسخ القناة", channel, style="primary")
+        )
+    group_chat = (cfg.get("group_chat") or "").strip()
+    if group_chat:
+        gr_url = _tg_or_web_url(group_chat)
+        comm_row.append(
+            kb.url_btn("👥 مجموعة المجتمع", gr_url, style="success")
+            if gr_url else kb.copy_btn("👥 نسخ المجموعة", group_chat, style="success")
+        )
+    if comm_row:
+        rows.append(comm_row)
+
+    return rows
+
+
+async def _handle_support_page(q, uid: int, context, bot):
+    context.user_data["awaiting_ticket"] = True
+    cfg = await afn.run(support_service.config_row) or {}
+    contact_rows = _support_contact_rows(cfg)
+    has_contacts = bool(contact_rows)
+
+    body_lines = [
+        "🎧 <b><u>مركز الدعم الفني والتواصل المباشر</u></b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "<blockquote>",
+    ]
+    if has_contacts:
+        body_lines.append("▎👑 <b>التواصل الفوري:</b>\nاختر وسيلة التواصل المناسبة لك مباشرة من الأزرار بالأسفل بضغطة واحدة.\n")
+    body_lines.append(
+        "▎🎫 <b>فتح تذكرة دعم داخل البوت:</b>\n"
+        "أرسل رسالتك هنا كنص واحد، ويمكنك إرفاق صورة بعدها مباشرة وسيرد عليك فريق الدعم فوراً."
+    )
+    body_lines.append("</blockquote>")
+
+    mine = await afn.run(support_service.user_tickets, uid)
+    rows_kb = list(contact_rows)
+    for t in mine:
+        rows_kb.append([kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")])
+    rows_kb.append([kb.btn("❓ مركز المساعدة", "u:help", style="primary")])
+    await render(q, "\n".join(body_lines), kb.user_nav(rows_kb), bot)

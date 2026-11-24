@@ -286,8 +286,52 @@ async def admin_engine(q, uid, context, bot):
         [kb.btn("➖ فاصل", f"a:engineadj:interval:-60"), kb.btn(f"⏱ {interval}s", "a:plannoop"), kb.btn("➕ فاصل", f"a:engineadj:interval:60")],
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
+        [kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+def _enabled_backtest_markets() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY id LIMIT 12"
+        ).fetchall()
+    return [r["symbol"] for r in rows] or ["XAUUSD", "EURUSD", "BTCUSD"]
+
+
+async def admin_backtest(q, uid, context, bot):
+    mkts = await afn.run(_enabled_backtest_markets)
+    rows_kb = []
+    for sym in mkts[:8]:
+        rows_kb.append([
+            kb.btn(f"🧪 {sym} M15", f"a:btrun:{sym}:M15"),
+            kb.btn(f"🧪 {sym} H1", f"a:btrun:{sym}:H1"),
+        ])
+    rows_kb.append([kb.btn("🧠 العودة للمحرك", "a:engine")])
+    body = (
+        "🧪 <b><u>مختبر الاختبار التاريخي المؤسسي (Walk-Forward Backtest)</u></b>\n"
+        "<blockquote>"
+        "▎📊 يختبر جميع الاستراتيجيات الـ 13 على شموع السوق التاريخية المغلقة (بلا Repainting).\n"
+        "▎🛡 يطبّق فلتر الإجماع الاتجاهي، وقاعدة SL-أولاً، وتأمين نقطة الدخول بعد TP1.\n"
+        "▎📈 يحسب نسبة النجاح، عامل الربح (Profit Factor)، صافي R، وأقصى تراجع (Max DD)."
+        "</blockquote>\n"
+        "اختر السوق والإطار الزمني لبدء الاختبار:"
+    )
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str):
+    from fysb.engines.backtest import format_report, run_backtest
+    sym = (symbol or "XAUUSD").strip().upper()
+    tf_u = (tf or "M15").strip().upper()
+    await render(q, f"🧪 <b>جارٍ تشغيل الاختبار التاريخي لـ {esc(sym)} ({esc(tf_u)})…</b>\n<i>يرجى الانتظار بضع ثوانٍ.</i>", None, bot)
+    rep = await asyncio.to_thread(run_backtest, sym, tf_u, api_key=config.market_api_key())
+    await afn.run(audit_log.log, uid, f"backtest:{sym}:{tf_u}:n={rep.filled_trades}:r={rep.net_r}")
+    rows_kb = [
+        [kb.btn(f"🔄 إعادة {sym} {tf_u}", f"a:btrun:{sym}:{tf_u}"), kb.btn("🧪 سوق آخر", "a:backtest")],
+        [kb.btn("🧠 المحرك", "a:engine")],
+    ]
+    await render(q, format_report(rep), kb.admin_nav(rows_kb), bot)
 
 
 async def admin_engine_toggle(q, uid, context, bot):
@@ -479,6 +523,7 @@ async def admin_risk(q, uid, context, bot):
         ("max_daily_loss_pct", "أقصى خسارة يومية", 0.5, 1.0),
         ("max_open_per_symbol", "أقصى إشارات مفتوحة لكل سوق", 1, 3),
         ("max_open_signals", "أقصى إشارات مفتوحة (الكلي)", 1, 12),
+        ("max_correlated_signals", "أقصى صفقات مترابطة بنفس الاتجاه", 1, 3),
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
     ]
@@ -503,7 +548,7 @@ async def admin_risk(q, uid, context, bot):
 async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
     bounds = {"risk_per_signal_pct": (0.1, 5.0), "max_daily_risk_pct": (1.0, 20.0),
               "max_daily_loss_pct": (1.0, 30.0), "max_open_per_symbol": (1, 10),
-              "max_open_signals": (1, 50),
+              "max_open_signals": (1, 50), "max_correlated_signals": (1, 10),
               "min_rr": (1.0, 10.0), "atr_pct_max": (1.0, 15.0)}
     if key not in bounds:
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)

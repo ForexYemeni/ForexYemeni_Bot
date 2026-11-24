@@ -21,9 +21,9 @@ from datetime import timedelta
 from fysb import config, db
 from fysb.config import log
 from fysb.engines import market_data
-from fysb.engines.analysis import atr_pct, structure_labels
+from fysb.engines.analysis import atr_pct, confirmed_candles, structure_labels
 from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
-from fysb.engines.strategies import evaluate_all
+from fysb.engines.strategies import consensus_filter, evaluate_all
 from fysb.engines.strategies.base import Ctx
 from fysb.engines import risk
 from fysb import instruments
@@ -107,7 +107,10 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         bias_candles = payload["values"]
         bias_note = "bias TF unavailable, used entry TF"
 
-    candles = payload["values"]
+    # 4.5: Non-repainting closed-candle guard (v6.20.0) — strip any still-forming
+    # bar so signals & indicators are computed strictly on confirmed candle closes.
+    candles = confirmed_candles(payload["values"], entry_tf)
+    bias_candles = confirmed_candles(bias_candles, bias_tf)
     if len(candles) < 40:
         _log_run(symbol, entry_tf, "INSUFFICIENT_DATA", f"{len(candles)} candles")
         return {"status": "REJECTED", "signal_id": None, "reason": f"insufficient candles ({len(candles)})", "score": None}
@@ -129,6 +132,15 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     if not results:
         _log_run(symbol, entry_tf, "NO_SETUP", "no strategy conditions met; no signal manufactured")
         return {"status": "NO_SETUP", "signal_id": None, "reason": "no qualifying setup", "score": None}
+
+    # 8.5: Directional consensus guard (v6.20.0) — resolve or reject BUY vs SELL
+    # internal strategy conflicts instead of blindly picking top-1 score.
+    results, conflict_note = consensus_filter(results)
+    if not results:
+        _log_run(symbol, entry_tf, "CONFLICT_REJECTED", conflict_note)
+        return {"status": "NO_SETUP", "signal_id": None, "reason": conflict_note, "score": None}
+    if conflict_note:
+        _log_run(symbol, entry_tf, "CONFLICT_RESOLVED", conflict_note)
 
     # 9: merge & multi-candidate gate evaluation (v6.19.0)
     # Evaluate ranked candidates in score order so if candidate #1 fails
@@ -160,10 +172,12 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     skipped_notes: list[str] = []
 
     for cand in results:
-        # 12-13: RR + risk gate (per-symbol, global cap, ADMIN_SIGNAL_NOW exemption)
-        risk_gate = risk.check_signal(symbol, cand.rr, vol, source=sig_source, created_by=created_by)
+        # 12-13: RR + risk gate (per-symbol, global cap, correlation, daily loss, ADMIN_SIGNAL_NOW exemption)
+        risk_gate = risk.check_signal(symbol, cand.rr, vol, source=sig_source,
+                                      created_by=created_by, direction=cand.direction)
         if not risk_gate.allowed:
             # Cap / volatility blocks apply identically to every candidate -> stop immediately.
+            # Correlation block depends on direction, but consensus_filter already unified direction.
             is_rr_only = ("rr" not in (risk_gate.metrics or {}))
             if not is_rr_only:
                 _log_run(symbol, entry_tf, "RISK_REJECTED", risk_gate.reason)
@@ -246,33 +260,56 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     return {"status": "SIGNAL_CREATED", "signal_id": sid, "reason": best.summary(), "score": best.score}
 
 
-def opposite_close_advisory_targets(symbol: str, direction: str, exclude_sid: int) -> list[dict]:
+def opposite_close_advisory_targets(symbol: str, direction: str, exclude_sid: int,
+                                    source: str = "AUTO", created_by: int = 0) -> list[dict]:
     """Open signals on the SAME symbol in the OPPOSITE direction (the trades a
-    new signal would fight against). Pure DB — unit-testable."""
+    new signal would fight against). Respects private SIGNAL_NOW isolation.
+    Pure DB — unit-testable."""
+    src = (source or "AUTO").upper()
     with db.conn() as c:
-        rows = [dict(r) for r in c.execute(
-            """SELECT * FROM signals
-               WHERE symbol=? AND direction!=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
-               AND id!=? ORDER BY id DESC""",
-            (symbol, direction, exclude_sid)).fetchall()]
+        if src == "SIGNAL_NOW" and int(created_by or 0) > 0:
+            rows = [dict(r) for r in c.execute(
+                """SELECT * FROM signals
+                   WHERE symbol=? AND direction!=? AND source='SIGNAL_NOW' AND created_by=?
+                   AND (closed_at IS NULL OR closed_at='')
+                   AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                   AND id!=? ORDER BY id DESC""",
+                (symbol, direction, int(created_by), exclude_sid)).fetchall()]
+        else:
+            rows = [dict(r) for r in c.execute(
+                """SELECT * FROM signals
+                   WHERE symbol=? AND direction!=?
+                   AND (source IS NULL OR source != 'SIGNAL_NOW')
+                   AND (closed_at IS NULL OR closed_at='')
+                   AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                   AND id!=? ORDER BY id DESC""",
+                (symbol, direction, exclude_sid)).fetchall()]
     return rows
 
 
 async def opposite_close_advisory(sig: dict, bot_send) -> int:
-    """v6.10.0 owner report 6 — the direction-flip protection.
+    """v6.20.0 truthful direction-flip protection (users + broadcast channels).
 
     When a NEW signal is about to publish and an OPEN signal on the same
-    symbol runs in the OPPOSITE direction, every holder of the old trade gets
-    the royal close advisory FIRST: the documented profit so far (real price,
-    signed pips, USD at 0.01 lot), the verdict «the trade is WINNING so far»,
-    and the instruction to close/secure before the new signal arrives.
+    symbol runs in the OPPOSITE direction, every holder (private users AND
+    broadcast channels) gets an honest close/review advisory FIRST:
+      * Winning trade (drift > 0 or TP hit): reports real profit & advises
+        closing/securing profit at breakeven.
+      * Floating loss (drift < 0 & no TP hit): reports honest floating loss
+        (NEVER mislabels a losing trade as winning!) and advises reviewing risk.
+      * Pending unfilled order (ACTIVE): advises cancelling the pending order.
     Returns the number of advisory messages sent."""
     import asyncio as _asyncio
     from fysb import instruments as _inst
     from fysb.engines import market_data as _md
     from fysb.engines.tracker import drift_pips, seq_of
     from fysb.theme import dir_badge, esc, status_ar, tf_name
-    olds = opposite_close_advisory_targets(sig["symbol"], sig["direction"], int(sig.get("id") or 0))
+    sig_src = (sig.get("source") or "AUTO").upper()
+    sig_owner = int(sig.get("created_by") or 0)
+    olds = opposite_close_advisory_targets(
+        sig["symbol"], sig["direction"], int(sig.get("id") or 0),
+        source=sig_src, created_by=sig_owner,
+    )
     if not olds:
         return 0
     live_px = 0.0
@@ -285,38 +322,105 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
     for old in olds:
         try:
             entry = float(old["entry"])
-            drift = drift_pips(old["symbol"], old["direction"], entry, live_px) if live_px else float(old.get("live_px") or 0.0)
-            usd = _inst.usd_move(old["symbol"], drift, 0.01, px=live_px or 0.0) if drift else 0.0
+            ref_px = live_px if live_px > 0 else float(old.get("live_px") or 0.0)
+            drift = drift_pips(old["symbol"], old["direction"], entry, ref_px) if ref_px > 0 else 0.0
+            usd = _inst.usd_move(old["symbol"], drift, 0.01, px=ref_px) if (ref_px > 0 and drift) else 0.0
             hit = int(old.get("hit_tp") or 0)
-            hit_txt = (" · تحقق الهدف الأول ✅" if hit >= 1 else
-                       " · تحقق هدفان ✅✅" if hit >= 2 else
-                       " · الصفقة في صالحك حتى الآن ✅")
+            old_status = (old.get("status") or "").upper()
+            is_pending = (old_status == "ACTIVE" and hit == 0)
+            is_winning = (hit >= 1) or (not is_pending and drift > 0)
+            is_losing = (not is_pending) and (hit == 0) and (drift < 0)
+
+            if is_pending:
+                hit_txt = " · أمر معلق لم يُفعَّل بعد"
+            elif hit >= 2:
+                hit_txt = " · تحقق هدفان ✅✅"
+            elif hit >= 1:
+                hit_txt = " · تحقق الهدف الأول ✅"
+            elif drift > 0:
+                hit_txt = " · الصفقة في صالحك حتى الآن ✅"
+            elif drift < 0:
+                hit_txt = " · الصفقة على تراجع عائم حالياً ⚠️"
+            else:
+                hit_txt = " · عند نقطة الدخول ⚖️"
+
             with db.conn() as c:
-                uids = [r["user_id"] for r in c.execute(
-                    "SELECT user_id FROM signal_deliveries WHERE signal_id=? AND user_id>0", (old["id"],))]
-            if not uids:
+                deliv_rows = c.execute(
+                    "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?",
+                    (old["id"],),
+                ).fetchall()
+            targets: list = []
+            seen_targets: set[str] = set()
+            for dr in deliv_rows:
+                duid = int(dr["user_id"] or 0)
+                if duid > 0:
+                    key = str(duid)
+                    if key not in seen_targets:
+                        seen_targets.add(key)
+                        targets.append(duid)
+                else:
+                    cid_str = str(dr["chat_id"] or "").strip()
+                    if cid_str and cid_str not in seen_targets:
+                        seen_targets.add(cid_str)
+                        try:
+                            targets.append(int(cid_str))
+                        except ValueError:
+                            targets.append(cid_str)
+            if not targets:
                 continue  # nobody actually holds this old trade — nothing to advise
+
+            px_line = (
+                f"▎📍 السعر الآن: <code>{_inst.fmt_price(old['symbol'], ref_px)}</code> · "
+                f"<b>{drift:+.1f} نقطة ({drift:+.0f} pips)</b> من الدخول\n"
+                if ref_px > 0 else ""
+            )
+            if is_pending:
+                body_lines = (
+                    "▎⏳ <b>هذا الأمر المعلق لم يتفعل بعد في السوق.</b>\n"
+                    "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> يُنصح بإلغاء الأمر المعلق "
+                    "حتى لا يتعارض مع الإشارة العكسية الجديدة.\n"
+                )
+            elif is_winning:
+                body_lines = (
+                    f"▎💵 <b>الربح الموثق الآن بـ 0.01 لوت: {usd:+,.2f} $</b>\n"
+                    "▎✅ <b>الصفقة تعتبر رابحة حتى هذه اللحظة وفق بيانات السوق الفعلية.</b>\n"
+                    "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> أغلقها على الربح الحالي، أو أمّنها "
+                    "(انقل الوقف لنقطة الدخول وأغلق 50% على الأقل) — لا تتركها تتعارض مع الاتجاه الجديد.\n"
+                )
+            elif is_losing:
+                body_lines = (
+                    f"▎📉 <b>العائد العائم الآن بـ 0.01 لوت: {usd:+,.2f} $</b>\n"
+                    "▎⚠️ <b>الصفقة حالياً على خسارة عائمة وفق بيانات السوق الفعلية (ليست رابحة).</b>\n"
+                    "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> راجع وقف الخسارة وقلّص المخاطرة "
+                    "أو أغلقها يدوياً لتفادي الاحتفاظ بصفقتين متعاكستين على نفس السوق.\n"
+                )
+            else:
+                body_lines = (
+                    f"▎⚖️ <b>النتيجة العائمة الآن بـ 0.01 لوت: {usd:+,.2f} $ (عند التعادل)</b>\n"
+                    "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> يمكنك الإغلاق عند نقطة التعادل "
+                    "قبل دخول الإشارة العكسية الجديدة.\n"
+                )
+
             text = (
                 f"🔄 <b><u>تنبيه إغلاق صفقة متعاكسة — الإشارة #{seq_of(old['id'])}</u></b> — {esc(old['symbol'])} {dir_badge(old['direction'])} ⏱ {tf_name(old['timeframe'])}\n"
                 "<blockquote>"
                 f"▎📌 الحالة الحالية: <b>{status_ar(old['status'])}</b>{hit_txt}\n"
-                + (f"▎📍 السعر الآن: <code>{_inst.fmt_price(old['symbol'], live_px)}</code> · "
-                   f"<b>{drift:+.1f} نقطة ({drift:+.0f} pips)</b> من الدخول\n" if live_px else "")
-                + f"▎💵 <b>الربح الموثق الآن بـ 0.01 لوت: {usd:+,.2f} $</b>\n"
-                "▎✅ <b>الصفقة تعتبر رابحة حتى هذه اللحظة وفق بيانات السوق الفعلية.</b>\n"
-                "▎🛡 <b>قرارك الآن قبل الإشارة الجديدة:</b> أغلقها على الربح الحالي، أو أمنحه "
-                "(انقل الوقف لنقطة الدخول وأغلق 50% على الأقل) — لا تتركها تتعارض مع الاتجاه الجديد.\n"
-                "▎📡 إشارة جديدة عكسية قادمة مباشرة بعد هذا التنبيه."
+                + px_line
+                + body_lines
+                + "▎📡 إشارة جديدة عكسية قادمة مباشرة بعد هذا التنبيه."
                 "</blockquote>\n"
                 "<i>أرقام موثقة من أسعار السوق — القرار النهائي لك، والتنبيه لا يغلق شيئاً تلقائياً في حسابك.</i>"
             )
-            for uid in uids:
+            for tgt in targets:
                 try:
-                    await bot_send(uid, text)
+                    await bot_send(tgt, text)
                     sent += 1
                 except Exception:
                     pass
-            if config.ADMIN_ID and admin_accepts_market(old["symbol"]):
+            # Admin copy only for non-private signals, and only if Admin wasn't already in targets
+            if (sig_src != "SIGNAL_NOW" and config.ADMIN_ID
+                    and str(config.ADMIN_ID) not in seen_targets
+                    and admin_accepts_market(old["symbol"])):
                 try:
                     await bot_send(config.ADMIN_ID, text)
                     sent += 1

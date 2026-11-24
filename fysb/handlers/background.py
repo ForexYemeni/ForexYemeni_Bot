@@ -231,14 +231,50 @@ async def market_engine_loop(app):
         await asyncio.sleep(max(60, interval))
 
 
+async def _safe_send(bot, chat_id, text: str) -> bool:
+    """Send an HTML Telegram message with FloodWait / RetryAfter protection."""
+    from telegram.error import RetryAfter
+    for _ in range(2):
+        try:
+            await bot.send_message(chat_id, text, parse_mode="HTML")
+            await asyncio.sleep(0.05)
+            return True
+        except RetryAfter as exc:
+            wait = min(float(getattr(exc, "retry_after", 2.0) or 2.0) + 0.5, 30.0)
+            await asyncio.sleep(wait)
+        except Exception:
+            return False
+    return False
+
+
+async def _safe_edit(bot, chat_id, message_id: int, text: str) -> bool:
+    """Edit an HTML Telegram message in place with FloodWait / RetryAfter protection."""
+    from telegram.error import RetryAfter
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        cid = chat_id
+    for _ in range(2):
+        try:
+            await bot.edit_message_text(text, chat_id=cid, message_id=int(message_id), parse_mode="HTML")
+            await asyncio.sleep(0.05)
+            return True
+        except RetryAfter as exc:
+            wait = min(float(getattr(exc, "retry_after", 2.0) or 2.0) + 0.5, 30.0)
+            await asyncio.sleep(wait)
+        except Exception:
+            return False
+    return False
+
+
 async def tracker_loop(app):
     """Signal lifecycle updates from real prices + expiry sweep + half-TP1 alerts
     + LIVE-CARD EDITS: the user's ORIGINAL signal message is re-rendered on
     every transition and meaningful price move — the first card is the board.
 
-    Tracking runs UNCONDITIONALLY: open signals are obligations the platform
-    already issued — the engine toggle governs generating NEW signals only.
-    A paused engine must never leave issued signals unattended.
+    Tracking runs UNCONDITIONALLY (every 60s): open signals are obligations the
+    platform already issued — the engine toggle governs generating NEW signals
+    only. A paused engine must never leave issued signals unattended.
     """
     from fysb.engines import tracker
     while True:
@@ -247,30 +283,21 @@ async def tracker_loop(app):
             if result["stats"]["updated"]:
                 log.info("tracker updated %s signals", result["stats"]["updated"])
             for uid, text in result["notifications"]:
-                try:
-                    await app.bot.send_message(uid, text, parse_mode="HTML")
-                except Exception:
-                    pass
+                await _safe_send(app.bot, uid, text)
             for uid, chat_id, message_id, text in result.get("edits", []):
-                try:
-                    await app.bot.edit_message_text(text, chat_id=int(chat_id),
-                                                    message_id=int(message_id), parse_mode="HTML")
-                except Exception:
-                    pass  # deleted message / identical text / blocked user — never fatal
-            expired, expiry_edits = await afn.run(tracker.expire_with_card_edits)
+                await _safe_edit(app.bot, chat_id, message_id, text)
+            expired, expiry_edits, expiry_notes = await afn.run(tracker.expire_with_alerts)
             for uid, chat_id, message_id, text in expiry_edits:
-                try:
-                    await app.bot.edit_message_text(text, chat_id=int(chat_id),
-                                                    message_id=int(message_id), parse_mode="HTML")
-                except Exception:
-                    pass
+                await _safe_edit(app.bot, chat_id, message_id, text)
+            for uid, text in expiry_notes:
+                await _safe_send(app.bot, uid, text)
             if expired:
                 log.info("expired %s stale signals", expired)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("tracker loop failed")
-        await asyncio.sleep(120)
+        await asyncio.sleep(60)
 
 
 async def subscriptions_loop(app):

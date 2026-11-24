@@ -542,6 +542,12 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                 sig = await afn.run(_signal_row_by_id, res["signal_id"])
                 if sig:
                     from fysb.ui.cards import render_signal_card
+                    from fysb.engines.signal_engine import emit_to_users, opposite_close_advisory
+                    from fysb.handlers.inputs import bot_sender_from
+                    try:
+                        await opposite_close_advisory(dict(sig), bot_sender_from(bot))
+                    except Exception:
+                        pass
                     row = await afn.run(_market_row, sym)
                     text = render_signal_card(dict(sig), user_view=True, row=row) + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
                     send = await _send_html(bot, _chat_ref(ch), text)
@@ -552,8 +558,6 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                         await afn.run(pin_channel_delivery, ch, res["signal_id"], send.get("message"))
                         await afn.run(update_channel, cid, last_sent=mecca_now().isoformat())
                         try:
-                            from fysb.engines.signal_engine import emit_to_users
-                            from fysb.handlers.inputs import bot_sender_from
                             await emit_to_users(dict(sig), bot_sender_from(bot), bot=bot, include_channels=True)
                         except Exception:
                             pass

@@ -354,6 +354,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_engine_now(q, uid, context, bot)
     elif act == "engineclean":
         await admin_trading.admin_engine_clean(q, uid, context, bot)
+    elif act == "backtest":
+        await admin_trading.admin_backtest(q, uid, context, bot)
+    elif act == "btrun":
+        await admin_trading.admin_backtest_run(q, uid, context, bot, arg, arg2)
     elif act == "strategies":
         await admin_trading.admin_strategies(q, uid, context, bot, int(arg or 0))
     elif act == "strategyinfo":

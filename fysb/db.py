@@ -375,6 +375,7 @@ DEFAULT_SETTINGS = {
     "max_daily_loss_pct": "5.0",
     "max_open_per_symbol": "3",
     "max_open_signals": "12",
+    "max_correlated_signals": "3",
     "min_rr": "2.0",
     "volatility_filter": "1",
     "atr_pct_max": "6.0",

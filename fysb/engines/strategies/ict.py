@@ -150,7 +150,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     reasons = [
         f"HTF bias={bias['trend']}",
-        f"liquidity sweep {'BSL' if direction=='BUY' else 'SSL'} @ {sweep['level']:.5g}" if checks["sweep"] else "no matching sweep",
+        f"liquidity sweep {'SSL' if direction=='BUY' else 'BSL'} @ {sweep['level']:.5g}" if checks["sweep"] else "no matching sweep",
         "displacement leg confirmed" if displacement else "no displacement",
         f"entry retraces FVG/OB zone {entry_zone[0]:.5g}-{entry_zone[1]:.5g}" if entry_zone else "entry at market (no zone)",
         f"premium/discount={pd['zone']} (pos={pd['pos']:.2f})",

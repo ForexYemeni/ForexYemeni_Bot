@@ -60,9 +60,17 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     a = atr(candles)
     if a <= 0:
         return None
-    entry = close if direction == "BUY" and close < hi else \
-        close if direction == "SELL" and close > lo else \
-        (hi - 0.25 * a) if direction == "BUY" else (lo + 0.25 * a)
+    # v6.20.0: reject invalidated manipulation breaks and never place entry in drawdown
+    if direction == "BUY":
+        if close < manip_level:
+            return None
+        raw_entry = close if close < hi else (hi - 0.25 * a)
+        entry = min(raw_entry, close)
+    else:
+        if close > manip_level:
+            return None
+        raw_entry = close if close > lo else (lo + 0.25 * a)
+        entry = max(raw_entry, close)
 
     if direction == "BUY":
         stop = min(manip_level, lo) - 0.5 * a

@@ -73,7 +73,6 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     score += 16 if checks["breakout_retest"] else 0
     checks["ema_trend"] = (direction == "BUY" and trend_up) or (direction == "SELL" and trend_down)
     score += 10 if checks["ema_trend"] else 0
-    bias = ctx.bias_candles and (ema(ctx.bias_candles[-50:][0:0] or [c["close"] for c in ctx.bias_candles[-50:]], 21))
     htf_up = ema([c["close"] for c in ctx.bias_candles[-50:]], 21) > ema([c["close"] for c in ctx.bias_candles[-50:]], 50) if len(ctx.bias_candles) >= 50 else trend_up
     checks["htf_bias"] = (direction == "BUY" and htf_up) or (direction == "SELL" and not htf_up)
     score += 10 if checks["htf_bias"] else 0

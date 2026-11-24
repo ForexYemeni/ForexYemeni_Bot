@@ -44,19 +44,28 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not direction:
         return None
 
-    # --- Demand / Supply zone from the last opposite swing before the move ---
+    # --- Demand / Supply zone from the last INTACT opposite swing (v6.20.0) --
+    # Skip broken swings where price already closed beyond the zone boundary.
     highs, lows = swings(candles, 3)
     a = atr(candles)
     if a <= 0:
         return None
     zone = None
     if direction == "BUY" and lows:
-        base = lows[-1]
-        zone = (base["price"], base["price"] + 1.2 * a)
-        entry = min(zone[1], close)  # retrace limit into demand
+        for base in reversed(lows):
+            if close >= base["price"]:
+                zone = (base["price"], base["price"] + 1.2 * a)
+                break
+        if zone is None:
+            return None  # All demand zones violated — structure is broken
+        entry = min(zone[1], close)
     elif direction == "SELL" and highs:
-        base = highs[-1]
-        zone = (base["price"] - 1.2 * a, base["price"])
+        for base in reversed(highs):
+            if close <= base["price"]:
+                zone = (base["price"] - 1.2 * a, base["price"])
+                break
+        if zone is None:
+            return None  # All supply zones violated — structure is broken
         entry = max(zone[0], close)
     else:
         entry = close

@@ -37,7 +37,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     last = candles[-1]
     close = float(last["close"])
     checks: dict = {}
-    score = 40.0
+    score = 32.0
 
     e9 = ema([float(c["close"]) for c in candles], 9)
     e21 = ema([float(c["close"]) for c in candles], 21)
@@ -51,7 +51,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["micro_trend"] = bool(direction)
     if not direction:
         return None
-    score += 20
+    score += 14
 
     # 2) the scalp key + close-confirmed break
     window = candles[-KEY_LOOKBACK - 1:-1]
@@ -64,7 +64,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["key_break"] = broke
     if not broke:
         return None
-    score += 22
+    score += 16
 
     # 3) momentum fuel
     r = rsi([float(c["close"]) for c in candles], 14)
@@ -72,12 +72,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rsi_momentum"] = momentum_ok
     if not momentum_ok:
         return None
-    score += 14
+    score += 10
 
     # 4) break distance bonus (a decisive push, not a scratch)
     travel = abs(close - key)
     checks["decisive"] = travel >= 0.25 * a
-    score += 10 if checks["decisive"] else 0
+    score += 8 if checks["decisive"] else 0
 
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
@@ -101,7 +101,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     tp3 = entry + risk * 4.0 if direction == "BUY" else entry - risk * 4.0
     rr = 2.0
     checks["rr_ok"] = True
-    score += 8
+    score += 5
 
     if score < 55:
         return None

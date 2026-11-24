@@ -23,7 +23,7 @@ def ema(values: list[float], period: int) -> float:
 
 
 def rsi(closes: list[float], period: int = 14) -> float:
-    """Wilder-style RSI over the available closes."""
+    """True Wilder-smoothed RSI (RMA) matching TradingView & MT5."""
     if len(closes) < period + 1:
         return 50.0
     gains, losses = [], []
@@ -31,8 +31,11 @@ def rsi(closes: list[float], period: int = 14) -> float:
         d = closes[i] - closes[i - 1]
         gains.append(max(d, 0.0))
         losses.append(max(-d, 0.0))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -40,14 +43,17 @@ def rsi(closes: list[float], period: int = 14) -> float:
 
 
 def atr(candles: list[dict], period: int = 14) -> float:
-    """Average True Range (True Range uses previous close)."""
+    """True Wilder-smoothed Average True Range (RMA) matching TradingView & MT5."""
     if len(candles) < period + 1:
         return 0.0
     trs = []
     for i in range(1, len(candles)):
         h, l, pc = candles[i]["high"], candles[i]["low"], candles[i - 1]["close"]
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs[-period:]) / period
+    rma = sum(trs[:period]) / period
+    for i in range(period, len(trs)):
+        rma = (rma * (period - 1) + trs[i]) / period
+    return rma
 
 
 def atr_pct(candles: list[dict], period: int = 14) -> float:
@@ -253,29 +259,74 @@ def candle_patterns(candles: list[dict], limit: int = 3) -> list[str]:
 
 
 def breakout_retest(candles: list[dict]) -> dict:
-    """Breakout with optional retest: close beyond N-bar extreme; retest = price
-    returned to the level within the following bars and held."""
+    """Breakout with honest retest: close beyond N-bar extreme; retest requires
+    a bar that touched/probed the broken level AND HELD on the breakout side."""
     n = len(candles)
     if n < 25:
         return {"breakout": None, "retest": False}
     window = candles[-15:-1]
     prior_high = max(k["high"] for k in window)
     prior_low = min(k["low"] for k in window)
+    a = atr(candles)
+    tol = 0.15 * a if a > 0 else 0.0
     last = candles[-1]
     out = {"breakout": None, "retest": False, "level": None}
     if last["close"] > prior_high:
         out.update(breakout="UP", level=prior_high)
-        for k in reversed(candles[-6:-1]):
-            if k["low"] <= prior_high:
+        # Check whether the current or recent breakout bar retested and held above prior_high
+        for k in reversed(candles[-5:]):
+            if k["low"] <= prior_high + tol and k["close"] >= prior_high:
                 out["retest"] = True
                 break
     elif last["close"] < prior_low:
         out.update(breakout="DOWN", level=prior_low)
-        for k in reversed(candles[-6:-1]):
-            if k["high"] >= prior_low:
+        for k in reversed(candles[-5:]):
+            if k["high"] >= prior_low - tol and k["close"] <= prior_low:
                 out["retest"] = True
                 break
     return out
+
+
+_BAR_SECONDS = {
+    "M1": 60, "1MIN": 60,
+    "M5": 300, "5MIN": 300,
+    "M15": 900, "15MIN": 900,
+    "M30": 1800, "30MIN": 1800,
+    "H1": 3600, "1H": 3600,
+    "H4": 14400, "4H": 14400,
+    "D1": 86400, "1DAY": 86400,
+}
+
+
+def confirmed_candles(candles: list[dict], timeframe: str, now_utc: Optional[datetime] = None) -> list[dict]:
+    """v6.20.0 Non-Repainting Guard: strip the trailing candle ONLY when it is
+    genuinely still open/forming (open_time <= now < open_time + bar_duration).
+    Already-closed candles and historical/backtest series are preserved intact."""
+    if not candles or len(candles) < 2:
+        return candles
+    bar_sec = _BAR_SECONDS.get((timeframe or "").strip().upper(), 0)
+    if bar_sec <= 0:
+        return candles
+    raw_dt = str(candles[-1].get("datetime") or "").strip()
+    if not raw_dt:
+        return candles
+    try:
+        from datetime import timezone
+        bar_open = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+        if bar_open.tzinfo is None:
+            bar_open = bar_open.replace(tzinfo=timezone.utc)
+        else:
+            bar_open = bar_open.astimezone(timezone.utc)
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        elapsed = (now - bar_open).total_seconds()
+        # Strictly forming bar: opened in the past, not yet closed (with 2s clock skew grace)
+        if 0.0 <= elapsed < (bar_sec - 2.0):
+            return candles[:-1]
+    except Exception:
+        pass
+    return candles
 
 
 # --- ICT session (kill zones) — only when candle timestamps are usable --------

@@ -351,8 +351,24 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
         if is_admin:
             stats = {"sent": 0, "channels_sent": 0, "skipped_quota": 0, "failed": 0}
             if sig:
+                from fysb.engines.entry_state import birth_pulse_line
+                from fysb.engines.signal_engine import record_delivery_refs
                 from fysb.handlers.inputs import bot_sender_from
+                from fysb.ui.cards import render_signal_card
                 stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
+                # v6.20.0: Always deliver the FULL live signal card to Admin and pin
+                # its (uid, sid, chat_id, message_id) so tracker updates edit it live!
+                if not await afn.run(_delivery_exists, uid, sig["id"]):
+                    try:
+                        row = await afn.run(_fetch_market_row, sig["symbol"])
+                        card = render_signal_card(sig, user_view=True, row=row)
+                        pulse = birth_pulse_line(sig, row)
+                        if pulse:
+                            card += "\n\n<blockquote>" + pulse + "</blockquote>"
+                        msg = await bot.send_message(uid, card, parse_mode="HTML")
+                        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+                    except Exception:
+                        pass
             delivery_line = (
                 f"▎📤 وصلت لـ <b>{stats['sent']}</b> مستلم مؤهل"
                 + (f" · قنوات: <b>{stats.get('channels_sent', 0)}</b>" if stats.get("channels_sent") else "")

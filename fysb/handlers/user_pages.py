@@ -63,7 +63,8 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
         "وعند التوافق تُفتح باقتك فوراً ويُحجب الـ TXID نهائياً.</i>",
     ]
     await render(q, "\n".join(body), kb.user_nav([
-        [kb.btn(f"⛓ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}")],
+        [kb.copy_btn("📋 نسخ عنوان المحفظة بضغطة واحدة", wallet, style="primary")],
+        [kb.btn(f"⚡ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}", style="success")],
         [kb.btn("↩️ وسائل الدفع الأخرى", f"u:planview:{req['plan_code']}")],
         [kb.btn("🧾 مدفوعاتي", "u:payments")],
     ]), bot)
@@ -87,8 +88,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         profile = await afn.run(users_service.profile_summary, uid)
         await render(q, render_user_card(u, profile),
                      kb.user_nav([
-                         [kb.btn("🎛 تخصيص الإشارات", "u:preferences"), kb.btn("💎 الاشتراك", "u:plans")],
-                         [kb.btn("🧾 مدفوعاتي", "u:payments"), kb.btn("🎧 الدعم", "u:support")],
+                         [kb.btn("📈 إحصائياتي", "u:my_stats", style="primary"), kb.btn("🎛 تخصيص الإشارات", "u:preferences")],
+                         [kb.btn("💎 الاشتراك", "u:plans", style="success"), kb.btn("🧾 مدفوعاتي", "u:payments")],
+                         [kb.btn("🎧 الدعم", "u:support")],
                      ]), bot)
 
     elif action == "dashboard":
@@ -600,9 +602,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
             "<i>العدّ آلي وموثوق 100% (لا يحتسب إلا الاشتراك الفعلي)، وتُمنح المكافآت يدوياً من الإدارة عند تحقيق كل مستوى.</i>",
         ]
         rows_kb = [
-            [InlineKeyboardButton("🟢 📤 شارك رابط الدعوة (نص فاخر جاهز)", url=share_link)],
-            [InlineKeyboardButton("🔗 فتح رابط الدعوة", url=st["link"])],
-            [kb.btn("🟡 💎 الباقات", "u:plans")],
+            [kb.copy_btn("📋 نسخ رابط الدعوة بضغطة واحدة", st["link"], style="primary")],
+            [kb.url_btn("📤 شارك رابط الدعوة (نص فاخر جاهز)", share_link, style="success")],
+            [kb.url_btn("🔗 فتح رابط الدعوة", st["link"])],
+            [kb.btn("💎 الباقات", "u:plans", style="primary")],
         ]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
@@ -654,7 +657,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                     "</blockquote>"
                 )
                 for ch in chains:
-                    rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:usdtpay:{code}:{ch}")])
+                    rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:usdtpay:{code}:{ch}", style="success")])
             if methods:
                 for m in methods:
                     rows_kb.append([kb.btn(f"🧾 اشتراك عبر {esc(m['title'])}", f"u:requestplan:{code}:{m['id']}")])
@@ -739,7 +742,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
             rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
         else:
             body.append("\n📸 <b>أرسل صورة الإيصال هنا</b> — يبقى الاشتراك معلقاً حتى مراجعة الإدارة.")
-            rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
+            rows_kb = []
+            if method and method.get("account_ref"):
+                rows_kb.append([kb.copy_btn("📋 نسخ رقم الحساب / المحفظة", method["account_ref"], style="primary")])
+            rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments")])
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     elif action.startswith("paychain:"):

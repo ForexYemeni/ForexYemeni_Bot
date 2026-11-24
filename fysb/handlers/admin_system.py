@@ -453,16 +453,31 @@ async def admin_settings(q, uid, context, bot):
         ("broadcast_rate_per_sec", "📣 معدل الإعلانات/ثانية"),
         ("signal_expiry_hours", "⏳ صلاحية الإشارة (ساعة)"),
     ]
+    ui_edit = (await afn.run(db.get_setting, "ui_edit_in_place", "1")) == "1"
     lines = ["⚙️ <b>الإعدادات العامة</b>", ""]
     rows_kb = []
     for key, title in pairs:
         val = await afn.run(db.get_setting, key, "—")
         lines.append(f"{title}: <b>{esc(val)}</b>")
-    rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance"),
+    lines.append(f"🖼 وضع التنقل بالواجهة: <b>{'تعديل مكاني سلس (edit_text)' if ui_edit else 'رسالة جديدة مع كل ضغطة'}</b>")
+    rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance", style="danger"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
     rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
                     kb.btn("⏳ تعديل صلاحية الإشارة", "a:expiryset")])
+    rows_kb.append([kb.btn(
+        f"🖼 التنقل: {'تبديل إلى رسالة جديدة' if ui_edit else 'تبديل إلى التعديل المكاني'}",
+        "a:toggleuimode",
+        style="primary",
+    )])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_toggle_ui_mode(q, uid, context, bot):
+    cur = (await afn.run(db.get_setting, "ui_edit_in_place", "1")) == "1"
+    new_val = "0" if cur else "1"
+    await afn.run(db.set_setting, "ui_edit_in_place", new_val)
+    await afn.run(audit_log.log, uid, f"ui_edit_in_place:{new_val}")
+    await admin_settings(q, uid, context, bot)
 
 
 async def admin_free_set(q, uid, context, bot):

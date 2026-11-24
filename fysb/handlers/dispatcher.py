@@ -121,7 +121,15 @@ async def _route_admin(q, context, uid: int, action: str):
 
     if act == "home":
         from fysb.handlers.common import render
-        await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر وحدة الإدارة من الأزرار:", kb.admin_menu(), bot)
+        await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
+    elif act == "hub":
+        from fysb.handlers.common import render
+        hub = kb.ADMIN_HUBS.get(arg)
+        if hub:
+            title, builder = hub
+            await render(q, title, builder(), bot)
+        else:
+            await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
     # --- core ---
     elif act == "stats":
         await admin_core.admin_stats(q, uid, context, bot)
@@ -466,6 +474,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_backup_restore(q, uid, context, bot)
     elif act == "settings":
         await admin_system.admin_settings(q, uid, context, bot)
+    elif act == "toggleuimode":
+        await admin_system.admin_toggle_ui_mode(q, uid, context, bot)
     elif act == "freeset":
         await admin_system.admin_free_set(q, uid, context, bot)
     elif act == "demobalset":

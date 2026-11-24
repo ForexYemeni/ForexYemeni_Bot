@@ -90,11 +90,12 @@ async def admin_user_detail(q, uid, context, bot, target: int):
         return
     profile = await afn.run(users_service.profile_summary, target)
     rows_kb = [
-        [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}"),
+        [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}",
+                style="danger" if not u["is_blocked"] else "success"),
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
         [kb.btn("💳 مدفوعاته", f"a:userpayments:{target}"), kb.btn("📡 ما استلمه", f"a:userdeliveries:{target}")],
-        [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
-        [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}")],
+        [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}", style="primary"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
+        [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}", style="danger")],
         [kb.btn("↩️ دليل المستخدمين", "a:users")],
     ]
     await render(q, render_user_card(u, profile), kb.admin_nav(rows_kb), bot)
@@ -656,7 +657,8 @@ async def admin_payment_detail(q, uid, context, bot, pid: int):
     plan = await afn.run(_plan_title_row, p["plan_code"])
     rows_kb = []
     if p["status"] == "PENDING":
-        rows_kb.append([kb.btn("✅ قبول الطلب", f"a:approvepay:{pid}"), kb.btn("❌ رفض الطلب", f"a:rejectpay:{pid}")])
+        rows_kb.append([kb.btn("✅ قبول الطلب", f"a:approvepay:{pid}", style="success"),
+                        kb.btn("❌ رفض الطلب", f"a:rejectpay:{pid}", style="danger")])
     if p["receipt_file_id"]:
         rows_kb.append([kb.btn("🖼 عرض الإيصال", f"a:viewreceipt:{pid}")])
     rows_kb.append([kb.btn("👤 ملف المستخدم", f"a:userdetail:{p['user_id']}"), kb.btn("↩️ المدفوعات", "a:payments")])

@@ -1,92 +1,181 @@
-"""Keyboard builder — interactive-first navigation (buttons over typing).
+"""Keyboard builder — Bot API 9.4 native styled buttons & clean Hub navigation (v6.13.0).
+
+Upgrades over v6.x:
+  * Real Telegram Bot API 9.4 colored buttons via `style="primary"|"success"|"danger"`
+    (supported natively by python-telegram-bot 22.8 — replaces double-emoji dots).
+  * Native one-tap `CopyTextButton` helper (`copy_btn`) for wallet addresses,
+    account numbers, and referral links.
+  * Uncluttered User Home (6 clean rows) and Categorized Admin Command Center
+    (4 clean rows with 5 focused sub-hubs instead of 28 buttons dumped on one screen).
 
 IMPORTANT (root-cause fix preserved): callback tuples already carry their
-prefix (u:/a:) — the builder must NOT add a second prefix. The previous
-double-prefix bug ("u:u:dashboard") made every user section fall into the
-generic "section unavailable" fallback.
+prefix (u:/a:) — the builder NEVER adds a second prefix.
 """
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from fysb.theme import ICON
 
-# --- Luxury button palette ----------------------------------------------------
-# Telegram colors buttons only through markers — the royal language is a
-# colored dot before the icon, semantically consistent everywhere:
-#   Emerald 🟢 = live trading actions      Gold 🟡 = premium / money / invites
-#   Ruby 🔴   = destructive actions        Sapphire 🔵 = navigation & info
-#   Royal 🟣  = elite institutional tools  Amber 🟠 = pending / caution
+# Native Bot API 9.4 button styles:
+#   "primary" -> Blue (main CTAs, analytics, navigation hubs)
+#   "success" -> Green (BUY, approve, live signals, confirm, share)
+#   "danger"  -> Red (SELL, reject, delete, block, kill switch, live lock)
+#   None      -> Neutral (secondary navigation, info, back)
+_LUX_TO_STYLE: dict[str, str | None] = {
+    "emerald": "success",
+    "ruby": "danger",
+    "sapphire": "primary",
+    "royal": "primary",
+    "gold": "primary",
+    "amber": None,
+    "pearl": None,
+    "onyx": None,
+}
+
+# Kept for backward-compat imports; visual styling now uses native Bot API 9.4 `style`.
 LUX = {
     "emerald": "🟢", "gold": "🟡", "ruby": "🔴", "sapphire": "🔵",
     "royal": "🟣", "amber": "🟠", "pearl": "⚪", "onyx": "⚫",
 }
 
 
-def btn(text: str, data: str) -> InlineKeyboardButton:
+def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    """Native callback button with optional Bot API 9.4 color style."""
+    if style:
+        return InlineKeyboardButton(text, callback_data=data, style=style)
     return InlineKeyboardButton(text, callback_data=data)
 
 
+def copy_btn(text: str, copy_value: str, style: str | None = "primary") -> InlineKeyboardButton:
+    """Native one-tap CopyTextButton (copies straight to user clipboard)."""
+    val = str(copy_value or "")
+    if style:
+        return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val), style=style)
+    return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val))
+
+
+def url_btn(text: str, url: str, style: str | None = None) -> InlineKeyboardButton:
+    """Native URL button with optional Bot API 9.4 color style."""
+    if style:
+        return InlineKeyboardButton(text, url=url, style=style)
+    return InlineKeyboardButton(text, url=url)
+
+
 def lux(label: str, data: str, color: str = "sapphire") -> InlineKeyboardButton:
-    """Luxury colored button — dot + label, same callback contract as btn()."""
-    return InlineKeyboardButton(f"{LUX.get(color, '🔵')} {label}", callback_data=data)
+    """Luxury button mapped to native Bot API 9.4 color styles (no dot clutter)."""
+    return btn(label, data, style=_LUX_TO_STYLE.get(color))
 
 
-# --- User menus --------------------------------------------------------------
+# --- User menus (6 clean rows, single icon per button, native colors) --------
 def user_menu() -> InlineKeyboardMarkup:
-    groups = [
-        [("🟢 📊 لوحة التحكم", "u:dashboard"), ("🟢 📡 الإشارات المباشرة", "u:signals")],
-        [("🟣 🔬 التحليلات الاحترافية", "u:analytics"), ("🔵 👤 ملفي الشخصي", "u:profile")],
-        [("🟡 💎 الباقات والاشتراك", "u:plans"), ("🟡 🧾 مدفوعاتي", "u:payments")],
-        [("🟢 🧪 التداول التجريبي", "u:demo"), ("🔵 🎛 تخصيص الإشارات", "u:preferences")],
-        [("🔵 📈 إحصائياتي", "u:my_stats"), ("🔵 🔔 الإشعارات", "u:notifications")],
-        [("🟡 🤝 دعوة صديق", "u:referrals"), ("🔵 🎧 الدعم الفني", "u:support")],
-        [("🔵 ❓ مركز المساعدة", "u:help")],
+    rows = [
+        [btn("📡 الإشارات المباشرة", "u:signals", style="success"),
+         btn("🔬 التحليلات الاحترافية", "u:analytics", style="primary")],
+        [btn("📊 لوحة التحكم", "u:dashboard", style="primary"),
+         btn("🧪 التداول التجريبي", "u:demo", style="success")],
+        [btn("💎 الباقات والاشتراك", "u:plans", style="primary"),
+         btn("🧾 مدفوعاتي", "u:payments")],
+        [btn("🎛 تخصيص الإشارات", "u:preferences"),
+         btn("👤 ملفي وإحصائياتي", "u:profile")],
+        [btn("🔔 الإشعارات", "u:notifications"),
+         btn("🤝 دعوة صديق", "u:referrals", style="success")],
+        [btn("🎧 الدعم الفني", "u:support"),
+         btn("❓ مركز المساعدة", "u:help")],
     ]
-    rows = [[btn(t, a) for t, a in row] for row in groups]
     return InlineKeyboardMarkup(rows)
 
 
 def user_nav(extra_rows: list | None = None) -> InlineKeyboardMarkup:
-    rows = extra_rows or []
+    rows = list(extra_rows or [])
     rows.append([btn(f"{ICON['home']} القائمة الرئيسية", "u:home")])
     return InlineKeyboardMarkup(rows)
 
 
 def user_menu_signal_buttons(rows) -> InlineKeyboardMarkup:
-    kb = [[btn(f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['id']} {r['symbol']} {r['direction']} · {r['score']}/100",
-               f"u:signalview:{r['id']}")] for r in rows]
+    kb = [[btn(
+        f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['id']} {r['symbol']} {r['direction']} · {r['score']}/100",
+        f"u:signalview:{r['id']}",
+        style="success" if r["direction"] == "BUY" else "danger",
+    )] for r in rows]
     return user_nav(kb)
 
 
-# --- Admin menus (28 sections, grouped visually + royal colors) --------------
+# --- Admin Command Center (clean 4-row Home + 5 focused sub-hubs) ------------
 def admin_menu() -> InlineKeyboardMarkup:
-    groups = [
-        # Core operations
-        [("🔵 📊 لوحة المعلومات", "a:stats"), ("🔵 📈 الإحصائيات", "a:statistics")],
-        [("🟡 👥 المستخدمون", "a:users"), ("🟡 💎 الاشتراكات", "a:subscriptions")],
-        [("🟡 💠 الباقات", "a:plans"), ("🟡 💳 المدفوعات", "a:payments")],
-        [("🟡 🏦 وسائل الدفع", "a:paymethods"), ("🟢 📡 الإشارات", "a:signals")],
-        # Trading
-        [("🟣 🧠 محرك السوق", "a:engine"), ("🟣 🧩 الاستراتيجيات", "a:strategies")],
-        [("🟣 ⚙️ أوضاع التشغيل", "a:modes"), ("🟣 🛡 إدارة المخاطر", "a:risk")],
-        [("🟣 🌐 الأسواق", "a:markets"), ("🟣 ⏱ الأطر الزمنية", "a:timeframes")],
-        # Accounts & trading modes
-        [("🟢 🏦 الوسطاء", "a:brokers"), ("🟢 🔗 حسابات التداول", "a:accounts")],
-        [("🟢 🧪 التداول التجريبي", "a:demo"), ("🔴 🔒 التداول الحقيقي", "a:live")],
-        # Analytics governance + royal referrals
-        [("🟣 🔬 إدارة التحليلات", "a:analytics")],
-        [("🟡 🤝 نظام الإحالات", "a:refs")],
-        # Communication
-        [("🔵 📈 التقارير", "a:reports"), ("🔵 🔔 الإشعارات", "a:notifications")],
-        [("🟠 📣 الإعلانات", "a:broadcast"), ("🔵 🎧 الدعم الفني", "a:support")],
-        # Channels & groups (scheduled auto-posts, Mecca time)
-        [("🟣 📺 القنوات والمجموعات", "a:channels")],
-        # System
-        [("🔴 🔐 الأمان", "a:security"), ("🔵 💾 النسخ الاحتياطي", "a:backup")],
-        [("🔵 ⚙️ الإعدادات", "a:settings"), ("🔵 🧾 سجل الإدارة", "a:audit")],
-        [("🟢 🖥 حالة النظام", "a:health")],
+    """Clean, high-speed Admin Command Center — 4 crisp rows instead of 28 dumped buttons."""
+    rows = [
+        [btn("📊 لوحة المعلومات", "a:stats", style="primary"),
+         btn("📡 الإشارات والمحرك", "a:hub:trading", style="success")],
+        [btn("👥 المستخدمون والمالية", "a:hub:finance", style="primary"),
+         btn("📺 القنوات والتواصل", "a:hub:comms", style="primary")],
+        [btn("🏦 الوسطاء والتنفيذ", "a:hub:execution"),
+         btn("🛡 النظام والأمان", "a:hub:system")],
+        [btn("💳 المدفوعات", "a:payments", style="success"),
+         btn("🖥 حالة النظام", "a:health")],
     ]
-    rows = [[btn(t, a) for t, a in row] for row in groups]
     return InlineKeyboardMarkup(rows)
+
+
+def admin_hub_trading() -> InlineKeyboardMarkup:
+    return admin_nav([
+        [btn("📡 إدارة الإشارات", "a:signals", style="success"),
+         btn("🧠 محرك السوق", "a:engine", style="primary")],
+        [btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary"),
+         btn("🛡 إدارة المخاطر", "a:risk", style="danger")],
+        [btn("🌐 الأسواق", "a:markets"),
+         btn("⏱ الأطر الزمنية", "a:timeframes")],
+        [btn("🔬 إدارة التحليلات", "a:analytics"),
+         btn("⚙️ أوضاع التشغيل", "a:modes")],
+    ])
+
+
+def admin_hub_finance() -> InlineKeyboardMarkup:
+    return admin_nav([
+        [btn("👥 المستخدمون", "a:users", style="primary"),
+         btn("💎 الاشتراكات", "a:subscriptions", style="primary")],
+        [btn("💳 المدفوعات", "a:payments", style="success"),
+         btn("💠 الباقات", "a:plans")],
+        [btn("🏦 وسائل الدفع", "a:paymethods"),
+         btn("🤝 نظام الإحالات", "a:refs")],
+        [btn("📈 الإحصائيات", "a:statistics"),
+         btn("📋 التقارير", "a:reports")],
+    ])
+
+
+def admin_hub_comms() -> InlineKeyboardMarkup:
+    return admin_nav([
+        [btn("📺 القنوات والمجموعات", "a:channels", style="primary"),
+         btn("📣 الإعلانات", "a:broadcast", style="primary")],
+        [btn("🎧 الدعم الفني", "a:support", style="success"),
+         btn("🔔 الإشعارات", "a:notifications")],
+    ])
+
+
+def admin_hub_execution() -> InlineKeyboardMarkup:
+    return admin_nav([
+        [btn("🏦 الوسطاء", "a:brokers", style="primary"),
+         btn("🔗 حسابات التداول", "a:accounts")],
+        [btn("🧪 التداول التجريبي", "a:demo", style="success"),
+         btn("🔒 التداول الحقيقي", "a:live", style="danger")],
+    ])
+
+
+def admin_hub_system() -> InlineKeyboardMarkup:
+    return admin_nav([
+        [btn("🔐 الأمان", "a:security", style="danger"),
+         btn("💾 النسخ الاحتياطي", "a:backup", style="primary")],
+        [btn("⚙️ الإعدادات", "a:settings"),
+         btn("🧾 سجل الإدارة", "a:audit")],
+        [btn("🖥 حالة النظام", "a:health", style="success")],
+    ])
+
+
+ADMIN_HUBS = {
+    "trading": ("📡 <b><u>مركز التداول والإشارات</u></b>\n▎إدارة الإشارات، محرك السوق، الـ 13 استراتيجية الحقيقية، الأسواق والمخاطر:", admin_hub_trading),
+    "finance": ("👥 <b><u>مركز المستخدمين والمالية</u></b>\n▎دليل المستخدمين، الاشتراكات، الباقات، المدفوعات، الإحالات والتقارير:", admin_hub_finance),
+    "comms": ("📺 <b><u>مركز القنوات والتواصل</u></b>\n▎القنوات والمجموعات، الإعلانات المجدولة، الإشعارات وتذاكر الدعم:", admin_hub_comms),
+    "execution": ("🏦 <b><u>مركز الوسطاء والتنفيذ</u></b>\n▎إدارة الوسطاء المشفرين، حسابات التداول، التجريبي وقفل التداول الحقيقي:", admin_hub_execution),
+    "system": ("🛡 <b><u>مركز النظام والأمان</u></b>\n▎الأمان، النسخ الاحتياطي، الإعدادات العامة، سجل الإدارة وصحة النظام:", admin_hub_system),
+}
 
 
 def admin_nav(extra_rows: list | None = None) -> InlineKeyboardMarkup:

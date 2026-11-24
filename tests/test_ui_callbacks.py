@@ -207,32 +207,39 @@ class TestRoyalRestore(unittest.TestCase):
         db.init_db()
         common._last_panel.clear()
 
-    def test_tap_on_registered_panel_still_delivers_fresh(self):
-        # v6.8.0 semantics: even a "registered" panel gets a FRESH reply under
-        # the tap — never an in-place edit.
+    def test_tap_on_registered_panel_edits_in_place_by_default(self):
+        # v6.13.0 Phase 7: smooth in-place edit_text when ui_edit_in_place="1"
+        # (no chat spam, never deletes the panel).
+        db.set_setting("ui_edit_in_place", "1")
         q = MockQuery("a:signals", ADMIN)
         common.register_panel(777, q.message.message_id)
         ctx = MockContext()
         asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
         self.assertTrue(q._answered)
         self.assertEqual(ctx.bot.sent, [], "render never uses bot.send_message for touchable panels")
-        self.assertTrue(q.message.replies, "a fresh page must appear under the tapped panel")
-        self.assertFalse(q.message.edits, "v6.8.4 NEVER edits in place — owner demand")
-        self.assertFalse(q.message.deleted, "v6.8.4 NEVER deletes the tapped panel")
-        self.assertIn("مركز إدارة الإشارات", q.message.replies[-1]["text"])
+        self.assertTrue(q.message.edits, "default mode edits the panel in place smoothly")
+        self.assertFalse(q.message.deleted, "never deletes the tapped panel")
+        self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
 
-    def test_tap_on_stale_panel_delivers_fresh(self):
-        # THE OWNER'S CONTRACT: a button on ANY panel produces a FRESH page
-        # right under the tap — visible, always.
+    def test_tap_on_stale_panel_delivers_cleanly_in_both_modes(self):
+        # In-place mode ("1") edits cleanly; fresh-message mode ("0") sends reply_text.
+        db.set_setting("ui_edit_in_place", "1")
         q, ctx = fire("a:home", ADMIN)
-        self.assertTrue(q.message.replies, "stale panel tap must deliver a fresh page")
-        self.assertFalse(q.message.edits)
-        self.assertFalse(q.message.deleted)
+        self.assertTrue(q.message.edits)
         self.assertIn("SUPER ADMIN", page_for(q, ctx))
+
+        db.set_setting("ui_edit_in_place", "0")
+        try:
+            q2, ctx2 = fire("a:home", ADMIN)
+            self.assertTrue(q2.message.replies, "fresh-message mode must deliver via reply_text")
+            self.assertFalse(q2.message.edits)
+            self.assertIn("SUPER ADMIN", page_for(q2, ctx2))
+        finally:
+            db.set_setting("ui_edit_in_place", "1")
 
     def test_inaccessible_panel_still_renders(self):
         # >48h-old panel: PTB v22 gives InaccessibleMessage (chat + message_id
-        # only, no reply_text). Deliver a fresh page via bot.send_message.
+        # only, no edit_text/reply_text). Deliver a fresh page via bot.send_message.
         msg = InaccessibleMock(chat_id=777, message_id=42)
         q, ctx = fire_raw(msg, "a:home", ADMIN)
         self.assertTrue(q._answered)
@@ -240,10 +247,9 @@ class TestRoyalRestore(unittest.TestCase):
         self.assertIn("SUPER ADMIN", page_for(q, ctx))
 
     def test_first_tap_after_restart_always_delivers(self):
-        # Fresh boot, empty registry: every tap delivers — always has, in
-        # v6.8.0, because every tap is a fresh message.
+        # Fresh boot, empty registry: every tap delivers cleanly.
         q, ctx = fire("a:accounts", ADMIN)
-        self.assertTrue(q.message.replies, "post-restart first tap must deliver a page")
+        self.assertTrue(page_for(q, ctx), "post-restart first tap must deliver a page")
 
     def test_rapid_navigation_every_tap_delivers(self):
         # Rapid navigation: EVERY tap delivers its own fresh page — no
@@ -357,7 +363,11 @@ class TestRoyalFixesV691(unittest.TestCase):
         text = page_for(q, ctx)
         self.assertIn("تعليمات الدفع", text)
         self.assertIn("T" + "9" * 33, text, "the documented wallet address must be visible")
-        self.assertIn("أرسل TXID", page_markup_for(q, ctx).inline_keyboard[0][0].text)
+        markup = page_markup_for(q, ctx)
+        # Row 0: native CopyTextButton for wallet address; Row 1: TXID submit button
+        self.assertIsNotNone(markup.inline_keyboard[0][0].copy_text)
+        self.assertEqual(markup.inline_keyboard[0][0].copy_text.text, "T" + "9" * 33)
+        self.assertIn("أرسل TXID", markup.inline_keyboard[1][0].text)
         with db.conn() as c:
             after = c.execute("SELECT COUNT(*) n FROM payments").fetchone()["n"]
             row = c.execute("SELECT * FROM payments ORDER BY id DESC LIMIT 1").fetchone()

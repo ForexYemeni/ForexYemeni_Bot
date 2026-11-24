@@ -19,7 +19,7 @@ BOOT_TS = time.time()   # v6.8.3: /ping reports uptime
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import Conflict
+from telegram.error import BadRequest, Conflict
 from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
@@ -53,21 +53,41 @@ def safe(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
-async def render(q, text: str, markup=None, bot=None) -> None:
-    """Deliver callback pages as FRESH messages — the proven v6.8.0 fix.
+async def render(q, text: str, markup=None, bot=None, force_new: bool = False) -> None:
+    """Deliver callback pages smoothly (v6.13.0 — Smart In-Place Edit + Fallback).
 
-    Restored 100% by owner demand (v6.8.4 ROYAL RESTORE): reply_text under
-    the tapped panel, every tap, no exceptions. Inaccessible >48h panels
-    (no reply_text) deliver via bot.send_message to msg.chat — still a
-    fresh page, never an edit, never silent.
+    When `ui_edit_in_place` is enabled (default "1") and `not force_new`:
+      1. Edits the current panel in place via `q.message.edit_text(...)` for a
+         clean, clutter-free chat experience (ignoring "message is not modified").
+      2. If editing is impossible (photo message, >48h panel, deleted message,
+         or BadRequest), automatically falls back to `reply_text` or
+         `bot.send_message` — NEVER silent, NEVER a dead button!
+    When `ui_edit_in_place` is "0" (configurable live in Admin Settings) or
+    `force_new=True`, delivers a fresh message via `reply_text`.
     """
     t0 = time.monotonic()
-    # v6.8.4 ROYAL RESTORE — the EXACT v6.8.0 button experience, restored 100%.
-    # EVERY tap delivers a FRESH message right under the tapped panel
-    # (q.message.reply_text). Nothing is ever edited in place, nothing is
-    # ever deleted, nothing can silently mutate high up in the chat history —
-    # the page ALWAYS visibly appears where the user is looking. That is
-    # precisely why v6.8.0 «كانت تعمل بشكل حقيقي وفاخر جداً».
+    edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "1") == "1")
+
+    if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
+        try:
+            await q.message.edit_text(
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
+                     q.from_user.id, (time.monotonic() - t0) * 1000)
+            return
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
+                         q.from_user.id, (time.monotonic() - t0) * 1000)
+                return
+            log.debug("edit_text fallback (%s) -> sending fresh page", e)
+        except Exception as e:
+            log.debug("edit_text fallback (%s) -> sending fresh page", type(e).__name__)
+
     if q.message is not None and hasattr(q.message, "reply_text"):
         await q.message.reply_text(
             text=text,
@@ -75,11 +95,10 @@ async def render(q, text: str, markup=None, bot=None) -> None:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        log.info("PAGE RENDERED | user=%s | method=new_message", q.from_user.id)
+        log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
+                 q.from_user.id, (time.monotonic() - t0) * 1000)
         return
-    # Fallback (hardened, never an edit): panels older than 48h arrive as
-    # InaccessibleMessage with no reply_text — deliver a fresh page through
-    # bot.send_message to msg.chat. Still a fresh visible page, never silent.
+
     chat = getattr(q.message, "chat", None) if q.message is not None \
         else getattr(q, "message_chat", None)
     if chat is None or bot is None:

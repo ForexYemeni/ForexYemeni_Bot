@@ -40,6 +40,9 @@ def _fire(data: str, uid: int):
 
 
 def _page_text(q) -> str:
+    edits = getattr(q.message, "edits", None) or []
+    if edits:
+        return edits[-1]["text"]
     reps = getattr(q.message, "replies", None) or []
     if reps:
         return reps[-1]["text"]

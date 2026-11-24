@@ -491,7 +491,8 @@ async def admin_risk(q, uid, context, bot):
         val = await afn.run(db.get_setting_float, key, 0)
         lines.append(f"  {title}: <b>{val:g}</b>")
         rows_kb.append([kb.btn("➖", f"a:riskadj:{key}:-{step}"), kb.btn(f"{title} {val:g}", "a:plannoop"), kb.btn("➕", f"a:riskadj:{key}:{step}")])
-    rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch"), kb.btn(f"🌊 فلتر التقلب", "a:volfilter")])
+    rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch", style="danger"),
+                    kb.btn("🌊 فلتر التقلب", "a:volfilter", style="primary")])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 

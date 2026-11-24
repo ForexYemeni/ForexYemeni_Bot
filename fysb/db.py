@@ -395,6 +395,9 @@ DEFAULT_SETTINGS = {
     "analytics_enabled": "1",
     # Auto channel posts (Mecca-time scheduler)
     "channels_quiet_hours": "1-7",
+    # UI navigation mode (v6.13.0): "1" = smooth edit_message_text in place
+    # with automatic fallback; "0" = send a fresh message on every button tap.
+    "ui_edit_in_place": "1",
 }
 
 SEED_MARKETS = [

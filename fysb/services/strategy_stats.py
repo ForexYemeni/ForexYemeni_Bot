@@ -13,11 +13,29 @@ Honesty contract:
     «لا بيانات كافية بعد» — never invented numbers;
   * realized R uses the SAME pips the tracker banked (no optimistic rounding).
 """
+import threading
+import time
+
 from fysb import db
+
+_LB_TTL = 30.0
+_lb_lock = threading.Lock()
+_lb_cache: tuple[list[dict], float] | None = None
+
+
+def invalidate_leaderboard_cache() -> None:
+    global _lb_cache
+    with _lb_lock:
+        _lb_cache = None
 
 
 def leaderboard() -> list[dict]:
-    """Ranked strength list over closed signals, best first."""
+    """Ranked strength list over closed signals, best first (30s TTL cache)."""
+    global _lb_cache
+    now_m = time.monotonic()
+    with _lb_lock:
+        if _lb_cache is not None and (now_m - _lb_cache[1]) < _LB_TTL:
+            return [dict(d) for d in _lb_cache[0]]
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             """SELECT strategy, symbol, entry, stop, hit_tp, pips_result
@@ -62,6 +80,8 @@ def leaderboard() -> list[dict]:
     out.sort(key=lambda d: (d["strength"], d["win_rate"], d["n"]), reverse=True)
     for i, d in enumerate(out, start=1):
         d["rank"] = i
+    with _lb_lock:
+        _lb_cache = ([dict(d) for d in out], time.monotonic())
     return out
 
 

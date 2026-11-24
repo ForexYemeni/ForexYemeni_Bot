@@ -135,9 +135,21 @@ def _acquire():
     return _connect()
 
 
+def _is_idle(c) -> bool:
+    info = getattr(c, "info", None)
+    if info is None:
+        return False
+    return getattr(info, "transaction_status", None) == psycopg.pq.TransactionStatus.IDLE
+
+
 def _release(c):
     try:
-        c.rollback()          # never hand a dirty session to the next borrower
+        # v6.20.1 performance: skip network ROLLBACK when the session is already
+        # IDLE (autocommit reads/writes leave the connection IDLE with 0 extra RT).
+        if not _is_idle(c):
+            c.rollback()
+        if hasattr(c, "autocommit") and not c.autocommit:
+            c.autocommit = True
     except Exception:
         return
     with _pool_lock:
@@ -321,12 +333,27 @@ class Cursor:
 class Conn:
     """Borrowed pooled connection with sqlite3-style semantics.
 
-    `with conn() as c:` commits on success / rolls back on error and returns
-    the session to the pool. close() discards the session instead.
+    v6.20.1 latency upgrade:
+      * db.conn() (transactional=False): uses PostgreSQL autocommit=True so
+        every SELECT or single-statement write completes in ONE WAN round trip
+        instead of BEGIN + query + COMMIT + ROLLBACK (50%+ faster on Supabase).
+      * db.tx() (transactional=True): uses autocommit=False with explicit
+        COMMIT on success and ROLLBACK on error for multi-step atomicity.
     """
 
-    def __init__(self):
+    def __init__(self, transactional: bool = False):
+        self._transactional = transactional
         self._c = _acquire()
+        self._configure_mode()
+
+    def _configure_mode(self):
+        if not hasattr(self._c, "autocommit"):
+            return
+        want_auto = not self._transactional
+        if self._c.autocommit != want_auto:
+            if not _is_idle(self._c):
+                self._c.rollback()
+            self._c.autocommit = want_auto
 
     # -- internal -----------------------------------------------------------
     def _exec(self, sql, params):
@@ -352,17 +379,21 @@ class Conn:
             except Exception:
                 pass
             self._c = _acquire()
+            self._configure_mode()
             return self._exec(sql, params)
 
     def commit(self):
-        self._c.commit()
+        if not getattr(self._c, "autocommit", False):
+            self._c.commit()
 
     def rollback(self):
-        self._c.rollback()
+        if not getattr(self._c, "autocommit", False):
+            self._c.rollback()
 
     def close(self):
         try:
-            self._c.rollback()
+            if not _is_idle(self._c):
+                self._c.rollback()
             self._c.close()
         except Exception:
             pass
@@ -372,23 +403,24 @@ class Conn:
 
     def __exit__(self, et, ev, tb):
         try:
-            if et is None:
-                self._c.commit()
-            else:
-                self._c.rollback()
+            if self._transactional and not getattr(self._c, "autocommit", False):
+                if et is None:
+                    self._c.commit()
+                else:
+                    self._c.rollback()
         finally:
             _release(self._c)
         return False
 
 
 def conn() -> Conn:
-    return Conn()
+    return Conn(transactional=False)
 
 
 @contextmanager
 def tx(immediate: bool = False):
     """Transaction context identical to the SQLite one (BEGIN is implicit)."""
-    with conn() as c:
+    with Conn(transactional=True) as c:
         yield c
 
 

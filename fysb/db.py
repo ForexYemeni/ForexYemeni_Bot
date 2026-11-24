@@ -28,6 +28,8 @@ IntegrityError = pglayer.IntegrityError if config.USE_PG else sqlite3.IntegrityE
 
 _local = threading.local()
 _migration_lock = threading.Lock()
+_wal_ready_paths: set[str] = set()
+_wal_lock = threading.Lock()
 
 
 def now() -> str:
@@ -39,12 +41,16 @@ def day_start_utc() -> str:
 
 
 def conn():
-    """Engine-appropriate connection (PG: pooled session; SQLite: fresh)."""
+    """Engine-appropriate connection (PG: pooled autocommit session; SQLite: fast WAL)."""
     if config.USE_PG:
         return pglayer.conn()
-    c = sqlite3.connect(str(config.DB_FILE), timeout=30)
+    db_path = str(config.DB_FILE)
+    c = sqlite3.connect(db_path, timeout=30)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    if db_path not in _wal_ready_paths:
+        c.execute("PRAGMA journal_mode=WAL")
+        with _wal_lock:
+            _wal_ready_paths.add(db_path)
     c.execute("PRAGMA foreign_keys=ON")
     c.execute("PRAGMA busy_timeout=15000")
     c.execute("PRAGMA synchronous=NORMAL")
@@ -560,6 +566,26 @@ def _normalize_strategy_preference(c) -> bool:
     return changed > 0
 
 
+def _clear_all_caches() -> None:
+    """Reset all process-local TTL caches (called on init_db / DB switches)."""
+    global _settings_bulk_at
+    with _settings_lock:
+        _settings_cache.clear()
+        _settings_bulk_at = 0.0
+    with _wal_lock:
+        _wal_ready_paths.clear()
+    try:
+        from fysb.services import subscriptions as _subs
+        _subs.invalidate_plans_cache()
+    except Exception:
+        pass
+    try:
+        from fysb.services import strategy_stats as _ss
+        _ss.invalidate_leaderboard_cache()
+    except Exception:
+        pass
+
+
 def init_db(snapshot_before_structural: bool = True) -> list[str]:
     """Initialize schema and run additive migrations. Returns log lines.
 
@@ -569,7 +595,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
     """
     log_lines: list[str] = []
     with _migration_lock:
-        _settings_cache.clear()
+        _clear_all_caches()
         c = conn()
         try:
             if config.USE_PG:
@@ -810,24 +836,50 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             c.commit()
         finally:
             c.close()
+        # Reset bulk-preload timestamp after commit so the first read warms all
+        # committed DEFAULT_SETTINGS cleanly in 1 query.
+        with _settings_lock:
+            _settings_cache.clear()
+            globals()["_settings_bulk_at"] = 0.0
     return log_lines
 
 
-# --- Settings fast-path cache (v6.8.1 button-latency fix) --------------------
-# get_setting() runs on EVERY button press (maintenance gate, kill-switch,
-# quotas, push flag...). Over WAN PostgreSQL each call is a network round trip;
-# a tiny process-local cache with a short TTL removes most of them. Correctness:
-# the only writer is this process, and set_setting()/set_settings_bulk() update
-# the cache write-through, so a toggle is visible on the very next read.
-_SETTINGS_TTL = 5.0
+# --- Settings fast-path cache (v6.20.1 bulk preload, 0ms hot reads) ----------
+# get_setting() runs on EVERY button press (maintenance gate, ui_edit_in_place,
+# kill-switch, quotas, trading_mode...). Over WAN PostgreSQL each uncached call
+# costs 150-400ms; a single bulk SELECT preloads ALL ~45 settings for 30s and
+# set_setting()/set_settings_bulk() update write-through immediately.
+_SETTINGS_TTL = 30.0
 _settings_cache: dict[str, tuple[str, float]] = {}
+_settings_bulk_at: float = 0.0
 _settings_lock = threading.Lock()
 
 
+def _preload_settings() -> None:
+    global _settings_bulk_at
+    now_ts = time.time()
+    try:
+        with conn() as c:
+            rows = c.execute("SELECT key, value FROM settings").fetchall()
+        if rows:
+            with _settings_lock:
+                for r in rows:
+                    _settings_cache[r["key"]] = (r["value"], now_ts)
+                _settings_bulk_at = now_ts
+    except Exception:
+        pass
+
+
 def get_setting(key: str, default: str = "") -> str:
+    now_ts = time.time()
     ent = _settings_cache.get(key)
-    if ent is not None and (time.time() - ent[1]) < _SETTINGS_TTL:
+    if ent is not None and (now_ts - ent[1]) < _SETTINGS_TTL:
         return ent[0]
+    if (now_ts - _settings_bulk_at) >= _SETTINGS_TTL:
+        _preload_settings()
+        ent = _settings_cache.get(key)
+        if ent is not None and (time.time() - ent[1]) < _SETTINGS_TTL:
+            return ent[0]
     with conn() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     if r is None:

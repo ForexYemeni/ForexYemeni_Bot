@@ -691,6 +691,12 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
                    live_px, filled_at or sig.get("filled_at") or "", half_done, sig["id"], sig["status"]))
     _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{new_status}",
          f"signal #{sig['id']} pips={pips_result:.1f} filled_at={filled_at or sig.get('filled_at') or '-'}")
+    if status in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+        try:
+            from fysb.services import strategy_stats
+            strategy_stats.invalidate_leaderboard_cache()
+        except Exception:
+            pass
 
     # The card the user holds is re-rendered with the NEW status immediately —
     # «بانتظار التنفيذ» never outlives the candle that ended it.

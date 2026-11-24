@@ -484,30 +484,35 @@ def plan_field_apply(code: str, field: str, raw: str) -> str:
             if not (0 <= val <= 100000):
                 raise ValueError("السعر بين 0 و 100000")
             c.execute("UPDATE plans SET price=? WHERE code=?", (val, code))
+            subs.invalidate_plans_cache()
             return f"حُفظ سعر {code}: {val:g} {c.execute('SELECT currency FROM plans WHERE code=?', (code,)).fetchone()['currency']}"
         if field == "days":
             n = int(val)
             if not (0 <= n <= 3650):
                 raise ValueError("المدة بين 0 و 3650 يوماً (0 = دائم)")
             c.execute("UPDATE plans SET duration_days=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظت مدة {code}: {'دائم' if n == 0 else f'{n} يوم'}"
         if field == "quota":
             n = int(val)
             if not (1 <= n <= 1000):
                 raise ValueError("حد الإشارات بين 1 و 1000")
             c.execute("UPDATE plans SET max_signals_per_day=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظ حد إشارات {code}: {n}/يوم"
         if field == "anal":
             n = int(val)
             if not (0 <= n <= 1000):
                 raise ValueError("حد التحليلات بين 0 و 1000")
             c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظ حد تحليلات {code}: {n}/يوم" + (" (بدون تحليلات)" if n == 0 else "")
         if field == "score":
             n = int(val)
             if not (40 <= n <= 100):
                 raise ValueError("الجودة الدنيا بين 40 و 100")
             c.execute("UPDATE plans SET min_score=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظت الجودة الدنيا لـ {code}: {n}/100"
     raise ValueError("حقل غير معروف")
 
@@ -985,6 +990,7 @@ def _plan_feature_apply(code: str, col: str, joined: str) -> None:
     """(v6.11.0 thread-offload helper) write one plan feature CSV column."""
     with db.conn() as c:
         c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (joined, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_field_value(code: str, col: str):
@@ -997,6 +1003,7 @@ def _plan_field_update(code: str, col: str, value) -> None:
     """(v6.11.0 thread-offload helper) write one plan column after adjustment."""
     with db.conn() as c:
         c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (value, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_enabled_row(code: str):
@@ -1009,6 +1016,7 @@ def _plan_enabled_set(code: str, new: int) -> None:
     """(v6.11.0 thread-offload helper) write the enabled flag of one plan."""
     with db.conn() as c:
         c.execute("UPDATE plans SET enabled=? WHERE code=?", (new, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_active_subs_count(code: str) -> int:
@@ -1021,6 +1029,7 @@ def _plan_delete_row(code: str) -> None:
     """(v6.11.0 thread-offload helper) erase one plan row."""
     with db.conn() as c:
         c.execute("DELETE FROM plans WHERE code=?", (code,))
+    subs.invalidate_plans_cache()
 
 
 def _plan_title_row(code: str):

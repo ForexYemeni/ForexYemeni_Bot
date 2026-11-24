@@ -146,22 +146,57 @@ def page_list(page: int = 0, size: int = 8) -> dict:
             "pages": max(1, (total + size - 1) // size)}
 
 
-def profile_summary(uid: int) -> dict:
-    u = get_user(uid)
-    if not u:
-        return {}
-    plan = subs.active_plan(uid)
-    state = subs.quota_state(uid)
+def profile_summary(uid: int, preloaded_u=None) -> dict:
+    """Single-connection user profile summary (v6.20.1 — 1 checkout instead of 6)."""
+    day = db.day_start_utc()
     with db.conn() as c:
-        consumed_total = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
-        payments = c.execute("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN status='APPROVED' THEN amount ELSE 0 END),0) s FROM payments WHERE user_id=?", (uid,)).fetchone()
+        if preloaded_u is not None:
+            u = dict(preloaded_u)
+        else:
+            ur = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            if not ur:
+                return {}
+            u = dict(ur)
+        sub_r = c.execute(
+            "SELECT plan_code, ends_at FROM subscriptions "
+            "WHERE user_id=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+            (uid,),
+        ).fetchone()
+        plan_row = subs.plan_for(uid, conn_obj=c)
+        valid_sub = bool(sub_r and (not sub_r["ends_at"] or sub_r["ends_at"] > config.now()))
+        quota_cap = (max(int(plan_row["max_signals_per_day"] or 5), 5)
+                     if (plan_row and plan_row["code"] != "FREE")
+                     else max(1, db.get_setting_int("free_daily_signals", 2)))
+        deliv = c.execute(
+            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
+            "FROM signal_deliveries WHERE user_id=?",
+            (day, uid),
+        ).fetchone()
+        payments = c.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN status='APPROVED' THEN amount ELSE 0 END),0) s "
+            "FROM payments WHERE user_id=?",
+            (uid,),
+        ).fetchone()
         demo = c.execute("SELECT balance FROM demo_accounts WHERE user_id=?", (uid,)).fetchone()
-    return {"user": u, "plan_code": plan["plan_code"] if plan else "FREE",
-            "plan_title": plan["title"] if plan else "Free",
-            "plan_ends": plan["ends_at"] if plan else None,
-            "quota": state, "consumed_total": consumed_total,
-            "payments_count": payments["n"], "payments_total": payments["s"],
-            "demo_balance": demo["balance"] if demo else None}
+    used_today = int(deliv["today"] or 0) if deliv else 0
+    state = {
+        "plan": plan_row["code"] if plan_row else "FREE",
+        "quota": quota_cap,
+        "used": used_today,
+        "remaining": max(0, quota_cap - used_today),
+        "day": day,
+    }
+    return {
+        "user": u,
+        "plan_code": plan_row["code"] if plan_row else "FREE",
+        "plan_title": plan_row["title"] if plan_row else "Free",
+        "plan_ends": sub_r["ends_at"] if valid_sub else None,
+        "quota": state,
+        "consumed_total": int(deliv["total"] or 0) if deliv else 0,
+        "payments_count": int(payments["n"] or 0) if payments else 0,
+        "payments_total": float(payments["s"] or 0) if payments else 0.0,
+        "demo_balance": demo["balance"] if demo else None,
+    }
 
 
 def admin_edit_subscription(uid: int, plan_code: str, actor: int, days: int | None = None) -> dict:

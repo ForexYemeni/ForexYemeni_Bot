@@ -5,10 +5,53 @@ inside IMMEDIATE transactions (atomic). Restart / re-tap / parallel sessions /
 direct callback replay all re-enter the same server check — there is no client
 state to trick. Viewing a signal card or receiving a push consumes quota.
 """
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from fysb import config, db
 from fysb.config import log
+
+# v6.20.1 performance: tiny plans table (3-5 rows) + per-user active plan code
+# cached in memory with short TTL and write-through invalidation on any grant/
+# cancel/expiry. Cuts plan_for() from 2 WAN round trips down to 0-1.
+_PLANS_TTL = 60.0
+_USER_PLAN_TTL = 15.0
+_cache_lock = threading.Lock()
+_plans_cache: dict[str, dict] = {}
+_plans_loaded_at: float = 0.0
+_user_plan_cache: dict[int, tuple[str, float]] = {}  # uid -> (plan_code, expires_mono)
+
+
+def invalidate_plans_cache(user_id: int | None = None) -> None:
+    """Clear plans and/or a specific user's active plan cache."""
+    global _plans_loaded_at
+    with _cache_lock:
+        if user_id is None:
+            _plans_cache.clear()
+            _plans_loaded_at = 0.0
+            _user_plan_cache.clear()
+        else:
+            _user_plan_cache.pop(int(user_id), None)
+
+
+def _plans_map(conn_obj=None) -> dict[str, dict]:
+    global _plans_loaded_at
+    now_m = time.monotonic()
+    with _cache_lock:
+        if _plans_cache and (now_m - _plans_loaded_at) < _PLANS_TTL:
+            return dict(_plans_cache)
+    if conn_obj is not None:
+        rows = conn_obj.execute("SELECT * FROM plans").fetchall()
+    else:
+        with db.conn() as c:
+            rows = c.execute("SELECT * FROM plans").fetchall()
+    fresh = {r["code"]: dict(r) for r in rows}
+    with _cache_lock:
+        _plans_cache.clear()
+        _plans_cache.update(fresh)
+        _plans_loaded_at = time.monotonic()
+    return fresh
 
 
 def active_plan(uid: int):
@@ -24,13 +67,49 @@ def active_plan(uid: int):
     return None
 
 
-def plan_for(uid: int):
-    """Plan row for the user (FREE fallback, always a valid row)."""
-    p = active_plan(uid)
-    code = p["plan_code"] if p else "FREE"
-    with db.conn() as c:
-        row = c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
-    return row
+def plan_for(uid: int, conn_obj=None):
+    """Plan row for the user (FREE fallback, always a valid row).
+
+    v6.20.1: uses cached plans table + single lightweight subscription lookup
+    (15s per-user cache, invalidated immediately on grant/cancel/expiry),
+    eliminating 2-4 sequential WAN queries on every user button tap.
+    """
+    uid_i = int(uid)
+    now_m = time.monotonic()
+    cached_code: str | None = None
+    with _cache_lock:
+        ent = _user_plan_cache.get(uid_i)
+        if ent is not None and now_m < ent[1]:
+            cached_code = ent[0]
+    if cached_code is not None:
+        pmap = _plans_map(conn_obj)
+        row = pmap.get(cached_code) or pmap.get("FREE")
+        if row is not None:
+            return row
+
+    def _query(c):
+        return c.execute(
+            "SELECT plan_code, ends_at FROM subscriptions "
+            "WHERE user_id=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+            (uid_i,),
+        ).fetchone()
+
+    if conn_obj is not None:
+        sub = _query(conn_obj)
+        pmap = _plans_map(conn_obj)
+    else:
+        with db.conn() as c:
+            sub = _query(c)
+            pmap = _plans_map(c)
+
+    code = "FREE"
+    if sub and (not sub["ends_at"] or sub["ends_at"] > config.now()):
+        code = sub["plan_code"]
+    with _cache_lock:
+        if len(_user_plan_cache) > 5000:
+            _user_plan_cache.clear()
+        _user_plan_cache[uid_i] = (code, time.monotonic() + _USER_PLAN_TTL)
+    return pmap.get(code) or pmap.get("FREE")
 
 
 def plans_for_users(uids: list[int]) -> dict[int, dict]:
@@ -85,6 +164,7 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
                            VALUES(?,?,?,?,?,?,?)""",
                         (user_id, plan_code, start.isoformat(), ends, "ACTIVE", config.now(), source))
         sub_id = cur.lastrowid
+    invalidate_plans_cache(user_id)
     log.info("SUBSCRIPTION %s | user=%s plan=%s source=%s actor=%s", source, user_id, plan_code, source, actor)
     # --- Royal referral conversion (server-side, idempotent) ---------------
     # The moment a package becomes ACTIVE, the invitee's referral flips to
@@ -105,7 +185,9 @@ def cancel_subscription(user_id: int, actor: int = 0) -> bool:
     with db.tx() as c:
         cur = c.execute("UPDATE subscriptions SET status='CANCELLED', ends_at=? WHERE user_id=? AND status='ACTIVE'",
                         (config.now(), user_id))
-        return cur.rowcount > 0
+        ok = cur.rowcount > 0
+    invalidate_plans_cache(user_id)
+    return ok
 
 
 def expired_but_unmarked() -> list[dict]:
@@ -118,6 +200,7 @@ def expired_but_unmarked() -> list[dict]:
 def mark_expired(sub_id: int) -> None:
     with db.conn() as c:
         c.execute("UPDATE subscriptions SET status='EXPIRED' WHERE id=?", (sub_id,))
+    invalidate_plans_cache()
 
 
 def due_reminders() -> list[dict]:

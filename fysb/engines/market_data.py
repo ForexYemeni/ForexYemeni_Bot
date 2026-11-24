@@ -614,6 +614,18 @@ def _store_quote(internal: str, provider: str, payload: dict, use_cache: bool) -
     return payload
 
 
+def cached_price(symbol: str, max_age_seconds: float = 120.0) -> float:
+    """Return a cached live price in 0ms without hitting any external API (0.0 if absent/stale)."""
+    internal = _norm(symbol)
+    hit = _cache.get(("quote", internal))
+    if hit and (time.time() - hit["t"]) <= max_age_seconds:
+        try:
+            return float((hit.get("payload") or {}).get("price") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
     """Latest REAL quote — headline prices must match the actual market."""
     internal = _norm(symbol)

@@ -144,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "⛔ التسجيل مغلق مؤقتاً. تواصل مع الدعم إذا كان لديك حساب قائم.")
         return
-    await afn.run(users_service.touch, uid)
+    # ensure_user already updated last_seen — no redundant touch() round trip.
     # --- Royal referral capture (first link wins, server-side only) ---------
     # /start ref<CODE> — e.g. https://t.me/<bot>?start=refROYAL
     payload = (context.args or [""])[0] if context.args else ""

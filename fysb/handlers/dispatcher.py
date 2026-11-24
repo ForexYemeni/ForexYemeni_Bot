@@ -15,6 +15,7 @@ Added hardening:
   * v6.8.2: every button logs its total handling time (BUTTON DONE) so the
     owner can prove latency from the log alone
 """
+import asyncio
 import time
 
 from telegram import Update
@@ -31,6 +32,13 @@ from fysb.ui import keyboards as kb
 BOT_REF = None  # set in post_init for background tasks
 
 
+async def _quiet_answer(q) -> None:
+    try:
+        await q.answer()
+    except Exception:
+        pass  # stale/timeout answers must not block the action
+
+
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_REF
     q = update.callback_query
@@ -41,10 +49,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     t0 = time.monotonic()
     log.info("BUTTON RECEIVED | user_id=%s | data=%s", uid, data[:64])
-    try:
-        await q.answer()  # immediate visual acknowledgement — always first
-    except Exception:
-        pass  # stale/timeout answers must not block the action
+    # v6.20.1 latency upgrade: acknowledge callback IN PARALLEL with DB/render
+    # instead of stalling 150-400ms before even starting work!
+    ans_task = asyncio.create_task(_quiet_answer(q))
 
     try:
         if data.startswith("u:"):
@@ -63,6 +70,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     finally:
+        try:
+            await ans_task
+        except Exception:
+            pass
         log.info("BUTTON DONE | %.0fms | data=%s",
                  (time.monotonic() - t0) * 1000, data[:32])
 
@@ -70,9 +81,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------- user routing
 async def _route_user(q, context, uid: int, action: str):
     # ONE pooled round trip: throttled last_seen write + profile read.
-    # (was: get_user + touch + is_blocked = 3 sequential WAN queries)
-    # v6.11.0: every blocking call runs in the worker pool — the loop never
-    # waits on WAN, so buttons stay instant even while Supabase is slow.
+    # v6.20.1: pass preloaded_u straight into user_page() so the user row is
+    # NEVER fetched twice on a single button tap!
     u = await afn.run(users_service.touch_and_get, uid)
     if u is None:
         try:
@@ -96,8 +106,7 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "💬 أرسل رسالتك الآن — ستُسجل في التذكرة.", None, context.bot)
         return
-    # (v6.11.0: user_page performs its own blocking calls through afn.run)
-    await user_pages.user_page(q, action, uid, context)
+    await user_pages.user_page(q, action, uid, context, preloaded_u=u)
 
 
 # --------------------------------------------------------------- admin routing

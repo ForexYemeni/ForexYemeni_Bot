@@ -84,11 +84,30 @@ def _format_user_markets(raw: str) -> str:
     return "الكل (حسب باقتك)" if not syms else " · ".join(syms)
 
 
-async def build_user_home_card(uid: int, tg_name: str = "") -> str:
-    """v6.17.0: Luxury executive user home banner shared by /start and u:home."""
-    u = await afn.run(users_service.get_user, uid)
-    plan = await afn.run(subs.plan_for, uid)
-    state = await afn.run(subs.quota_state, uid)
+def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None, dict]:
+    """Single-connection snapshot for /start & u:home (v6.20.1 — 1 checkout instead of 9)."""
+    day = db.day_start_utc()
+    with db.conn() as c:
+        u = dict(preloaded_u) if preloaded_u is not None else None
+        if u is None:
+            r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            u = dict(r) if r else None
+        plan = subs.plan_for(uid, conn_obj=c)
+        used = c.execute(
+            "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
+            (uid, day),
+        ).fetchone()["n"]
+    quota = (max(int(plan["max_signals_per_day"] or 5), 5)
+             if (plan and plan["code"] != "FREE")
+             else max(1, db.get_setting_int("free_daily_signals", 2)))
+    state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
+             "used": used, "remaining": max(0, quota - used), "day": day}
+    return u, plan, state
+
+
+async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) -> str:
+    """v6.20.1: Luxury executive user home banner shared by /start and u:home (single DB checkout)."""
+    u, plan, state = await afn.run(_home_snapshot, uid, preloaded_u)
     plan_title = esc(plan["title"] if plan else "Free")
     mkts_txt = esc(_format_user_markets((u["market"] if u else "") or ""))
     notif_txt = "🟢 مفعّلة" if (u and u["notifications"]) else "🔕 متوقفة"
@@ -151,23 +170,22 @@ async def _render_user_markets(q, uid: int, u, bot, notice: str = ""):
     await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
 
 
-async def user_page(q, action: str, uid: int, context) -> None:
+async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None:
     bot = context.bot
-    # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
-    # v6.11.0: every blocking call below runs in the worker pool — the loop
-    # never waits on WAN, so buttons stay instant even while Supabase is slow.
-    u = await afn.run(users_service.touch_and_get, uid)
+    # v6.20.1: reuse preloaded user row from dispatcher._route_user so we NEVER
+    # hit the database twice for the exact same user row on one button tap!
+    u = preloaded_u if preloaded_u is not None else await afn.run(users_service.touch_and_get, uid)
     if not u:
         await render(q, "لم يتم العثور على حسابك. أرسل /start أولاً.", kb.user_menu(), bot)
         return
 
     # ---------- Home / profile ----------
     if action == "home":
-        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip())
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
         await render(q, home_text, kb.user_menu(), bot)
 
     elif action == "profile":
-        profile = await afn.run(users_service.profile_summary, uid)
+        profile = await afn.run(users_service.profile_summary, uid, u)
         await render(q, render_user_card(u, profile),
                      kb.user_nav([
                          [kb.btn("📈 إحصائياتي", "u:my_stats", style="primary"), kb.btn("🎛 تخصيص الإشارات", "u:preferences")],
@@ -176,13 +194,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
                      ]), bot)
 
     elif action == "dashboard":
-        p = await afn.run(subs.plan_for, uid)
-        state = await afn.run(subs.quota_state, uid)
-        total, active, wins, delivered, anl_used = await afn.run(_dashboard_counts, uid)
+        first_mkt = (_parse_user_markets(u["market"] or "") or ["XAUUSD"])[0]
+        snap = await afn.run(_dashboard_snapshot, uid, first_mkt)
+        p = snap["plan"]
+        state = snap["state"]
+        total, active, wins, delivered, anl_used = snap["counts"]
         plan_title = esc(p["title"] if p else "Free")
         anl_quota = int(p["max_analyses_per_day"] or 0) if p else 0
-        first_mkt = (_parse_user_markets(u["market"] or "") or ["XAUUSD"])[0]
-        mrow = await afn.run(_market_row, first_mkt)
+        mrow = snap["market_row"]
         mcat = (mrow or {}).get("category") if mrow else instruments.spec(first_mkt).category
         from fysb.engines.market_data import market_state
         mstate = market_state(mcat)
@@ -193,7 +212,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 f"▎🧾 إجمالي ما وصلتك: <b>{delivered}</b>\n\n"
                 f"🔬 <b>التحليلات:</b>\n"
                 f"▎استهلاك اليوم: <b>{anl_used}/{anl_quota}</b>\n\n"
-                f"🛡 وضع المنصة: <b>{esc(await afn.run(db.get_setting, 'trading_mode', 'SIGNALS_ONLY'))}</b>\n"
+                f"🛡 وضع المنصة: <b>{esc(snap['trading_mode'])}</b>\n"
                 f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
         await render(q, body, kb.user_nav([
@@ -436,16 +455,12 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     # ---------- Signals (quota enforced server-side) ----------
     elif action == "signals":
-        state = await afn.run(subs.quota_state, uid)
         plan = await afn.run(subs.plan_for, uid)
+        state = await afn.run(subs.quota_state, uid, plan)
         markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
         timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
         strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
         min_score = int(plan["min_score"] or 60)
-        marks_m = ",".join("?" for _ in markets)
-        marks_t = ",".join("?" for _ in timeframes)
-        marks_s = ",".join("?" for _ in strategies)
-        args = markets + timeframes + strategies + [min_score]
         rows = await afn.run(_live_signals_page, markets, timeframes, strategies, min_score)
         # Which of these are still viewable under the remaining quota?
         delivered_ids = await afn.run(_delivered_set, uid, [r["id"] for r in rows])
@@ -488,23 +503,34 @@ async def user_page(q, action: str, uid: int, context) -> None:
             return
         row = await afn.run(_market_row, sig["symbol"])
         card_text = render_signal_card(dict(sig), user_view=True, row=row)
-        # Live market pulse for open trades — the card is alive, not a snapshot.
+        # Live market pulse for open trades — v6.20.1: instant 0ms cached/tracker
+        # price first, with strict 1.5s timeout fallback so opening a signal card
+        # NEVER hangs 5-12 seconds waiting on an external HTTP provider!
         if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
             try:
                 from fysb.engines import market_data
                 from fysb.engines.tracker import drift_pips
-                quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
-                price = float(quote["price"])
-                entry = float(sig["entry"])
-                drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
-                side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
-                card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
-                              f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"
-                              f" · {side} · <b>{drift:+.1f} pips</b> من الدخول</blockquote>")
+                sig_d = dict(sig)
+                price = market_data.cached_price(sig["symbol"], max_age_seconds=120.0)
+                if price <= 0:
+                    price = float(sig_d.get("live_px") or 0.0)
+                if price <= 0:
+                    quote = await asyncio.wait_for(
+                        asyncio.to_thread(market_data.fetch_price, sig["symbol"]),
+                        timeout=1.5,
+                    )
+                    price = float((quote or {}).get("price") or 0.0)
+                if price > 0:
+                    entry = float(sig["entry"])
+                    drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
+                    side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
+                    card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
+                                  f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"
+                                  f" · {side} · <b>{drift:+.1f} pips</b> من الدخول</blockquote>")
             except Exception:
                 pass
         from fysb.services import user_trade
-        personal = await afn.run(user_trade.personal_block, dict(sig), uid)
+        personal = await afn.run(user_trade.personal_block, dict(sig), uid, row)
         if personal:
             card_text += "\n\n<blockquote>" + personal + "</blockquote>"
         # v6.14.0: deliver signal card as its own dedicated message AND pin
@@ -1273,15 +1299,52 @@ def _enabled_strategy_codes():
 
 
 def _dashboard_counts(uid: int):
-    """(v6.11.0 thread-offload helper) ONE pooled trip for the 5 dashboard counters."""
+    """(v6.20.1) Consolidated single-pass dashboard counters (3 queries instead of 5)."""
+    day = db.day_start_utc()
     with db.conn() as c:
-        total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-        active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
-        wins = c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"]
+        srow = c.execute(
+            "SELECT COUNT(*) total, "
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' THEN 1 ELSE 0 END),0) wins FROM signals"
+        ).fetchone()
         delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
         anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
-                             (uid, db.day_start_utc())).fetchone()["n"]
-    return total, active, wins, delivered, anl_used
+                             (uid, day)).fetchone()["n"]
+    return int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used
+
+
+def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
+    """(v6.20.1) Full user dashboard data on ONE single DB connection (replaces 14 sequential RTs!)."""
+    day = db.day_start_utc()
+    with db.conn() as c:
+        plan = subs.plan_for(uid, conn_obj=c)
+        srow = c.execute(
+            "SELECT COUNT(*) total, "
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' THEN 1 ELSE 0 END),0) wins FROM signals"
+        ).fetchone()
+        drow = c.execute(
+            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
+            "FROM signal_deliveries WHERE user_id=?",
+            (day, uid),
+        ).fetchone()
+        anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
+                             (uid, day)).fetchone()["n"]
+        mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (first_mkt,)).fetchone()
+    used_today = int(drow["today"] or 0) if drow else 0
+    delivered = int(drow["total"] or 0) if drow else 0
+    quota = (max(int(plan["max_signals_per_day"] or 5), 5)
+             if (plan and plan["code"] != "FREE")
+             else max(1, db.get_setting_int("free_daily_signals", 2)))
+    state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
+             "used": used_today, "remaining": max(0, quota - used_today), "day": day}
+    return {
+        "plan": plan,
+        "state": state,
+        "counts": (int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used),
+        "market_row": dict(mrow) if mrow else None,
+        "trading_mode": db.get_setting("trading_mode", "SIGNALS_ONLY"),
+    }
 
 
 def _live_signals_page(markets, timeframes, strategies, min_score):

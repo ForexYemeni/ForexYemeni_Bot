@@ -404,19 +404,32 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
             }
     floating = 0.0
     stale = False
+    px_by_sym: dict[str, float | None] = {}
     for pos in open_pos:
-        try:
-            row = catalog_map.get(pos["symbol"])
-            if not row:
-                pos["current"] = None
-                stale = True
-                continue
-            quote = market_data.fetch_price(row["provider_symbol"], api_key)
-            floating += instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], quote["price"], row)
-            pos["current"] = quote["price"]
-        except RuntimeError:
+        sym = pos["symbol"]
+        row = catalog_map.get(sym)
+        if not row:
             pos["current"] = None
             stale = True
+            continue
+        if sym not in px_by_sym:
+            # Prefer hot in-memory quote cache first; fetch once per unique symbol
+            c_px = market_data.cached_price(sym, max_age_seconds=90.0)
+            if c_px > 0:
+                px_by_sym[sym] = c_px
+            else:
+                try:
+                    quote = market_data.fetch_price(row["provider_symbol"], api_key)
+                    px_by_sym[sym] = float(quote["price"])
+                except RuntimeError:
+                    px_by_sym[sym] = None
+        px = px_by_sym[sym]
+        if px is None:
+            pos["current"] = None
+            stale = True
+            continue
+        floating += instruments.pnl(sym, pos["direction"], pos["lots"], pos["entry"], px, row)
+        pos["current"] = px
     equity = acc["balance"] + floating
     peak = max(acc["peak_equity"], equity)
     if equity > acc["peak_equity"]:
@@ -425,8 +438,15 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
     drawdown = (peak - equity) / peak * 100 if peak > 0 else 0.0
     total_closed = int(agg["total"] or 0) if agg else 0
     total_wins = int(agg["wins"] or 0) if agg else 0
+    settings_dict = {
+        "balance": float(acc.get("balance") or DEMO_DEFAULT_BALANCE),
+        "risk_pct": float(acc.get("risk_pct") or 1.0),
+        "lot_mode": (acc.get("lot_mode") or "auto"),
+        "fixed_lot": float(acc.get("fixed_lot") or 0.01),
+        "auto_trade": bool(acc.get("auto_trade") or 0),
+    }
     return {"balance": acc["balance"], "equity": equity, "floating": floating,
             "drawdown_pct": drawdown, "open": open_pos, "closed": closed_pos,
             "win_rate": (total_wins / total_closed * 100) if total_closed else None,
             "data_stale": stale, "currency": acc.get("currency", "USD"),
-            "settings": demo_settings(user_id)}
+            "settings": settings_dict}

@@ -395,9 +395,10 @@ DEFAULT_SETTINGS = {
     "analytics_enabled": "1",
     # Auto channel posts (Mecca-time scheduler)
     "channels_quiet_hours": "1-7",
-    # UI navigation mode (v6.13.0): "1" = smooth edit_message_text in place
-    # with automatic fallback; "0" = send a fresh message on every button tap.
-    "ui_edit_in_place": "1",
+    # UI navigation mode (v6.14.1): "0" = proven FRESH reply_text message on
+    # every button tap (guarantees every page opens visibly right below the
+    # tap); "1" = opt-in in-place edit_text (toggleable live in Admin Settings).
+    "ui_edit_in_place": "0",
 }
 
 SEED_MARKETS = [
@@ -605,6 +606,18 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             _rename_legacy_elite_plan(c)
             for k, v in DEFAULT_SETTINGS.items():
                 c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+            # v6.14.1 one-time hotfix: databases upgraded through v6.13.0/v6.14.0
+            # got ui_edit_in_place='1' which hid pages on scrolled chats. Reset
+            # once to '0' (proven fresh-page delivery); admin can still opt in via Settings.
+            if get_setting("ui_render_reset_v6141", "") != "1":
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES('ui_edit_in_place','0') "
+                    "ON CONFLICT(key) DO UPDATE SET value='0'"
+                )
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('ui_render_reset_v6141','1')")
+                with _settings_lock:
+                    _settings_cache["ui_edit_in_place"] = ("0", time.time())
+                    _settings_cache["ui_render_reset_v6141"] = ("1", time.time())
             # Real-Entry protocol epoch (v6.6.4): signals CREATED before this
             # instant were born under the old pipeline that never recorded the
             # birth quote — the tracker may prove their at-birth fill from the

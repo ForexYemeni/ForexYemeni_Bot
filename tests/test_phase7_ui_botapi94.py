@@ -135,14 +135,34 @@ def test_signal_buttons_colored_buy_green_sell_red():
     assert mk.inline_keyboard[1][0].to_dict()["style"] == "danger"
 
 
-def test_smart_edit_in_place_fallbacks_and_live_settings_toggle(ui_env):
-    # 1. Default edit-in-place works cleanly
-    assert db.get_setting("ui_edit_in_place", "1") == "1"
+def test_smart_render_fresh_by_default_edit_opt_in_and_badrequest_fallback(ui_env):
+    # 1. Default mode is "0" (proven fresh reply_text page under every tap — never hidden!)
+    assert db.get_setting("ui_edit_in_place", "0") == "0"
     q, ctx = _fire("a:settings", ADMIN)
-    assert q.message.edits and not q.message.replies
-    assert "تعديل مكاني سلس" in page_for(q, ctx)
+    assert q.message.replies and not q.message.edits
+    assert "رسالة جديدة" in page_for(q, ctx)
 
-    # 2. BadRequest("Message is not modified") is silently absorbed (no duplicate reply)
+    # 2. If Telegram ever rejects styled buttons with BadRequest, _send_guarded
+    # automatically strips styles and retries cleanly so NO button can ever die!
+    class StyleRejectMsg(MockMessage):
+        async def reply_text(self, text, reply_markup=None, parse_mode=None, **kw):
+            if reply_markup and any(
+                b.to_dict().get("style") for row in reply_markup.inline_keyboard for b in row
+            ):
+                raise BadRequest("Unsupported button style")
+            return await super().reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kw)
+
+    sr_msg = StyleRejectMsg()
+    q_sr, ctx_sr = _fire("a:home", ADMIN, msg=sr_msg)
+    assert sr_msg.replies, "style rejection must automatically fall back to plain buttons"
+    assert "SUPER ADMIN" in sr_msg.replies[-1]["text"]
+
+    # 3. Admin live toggle a:toggleuimode enables edit_text mode ("1") and back to "0"
+    q_t1, ctx_t1 = _fire("a:toggleuimode", ADMIN)
+    assert db.get_setting("ui_edit_in_place") == "1"
+    assert q_t1.message.edits and not q_t1.message.replies
+
+    # 4. In edit_text mode: BadRequest("Message is not modified") is silently absorbed
     class NotModifiedMsg(MockMessage):
         async def edit_text(self, *a, **kw):
             raise BadRequest("Message is not modified")
@@ -150,23 +170,18 @@ def test_smart_edit_in_place_fallbacks_and_live_settings_toggle(ui_env):
     nm_msg = NotModifiedMsg()
     q_nm, ctx_nm = _fire("a:home", ADMIN, msg=nm_msg)
     assert q_nm._answered
-    assert not nm_msg.replies, "Message is not modified must NOT spam a duplicate reply"
+    assert not nm_msg.replies
 
-    # 3. BadRequest("Message can't be edited") falls back seamlessly to reply_text
+    # 5. In edit_text mode: BadRequest("Message can't be edited") falls back to reply_text
     class UneditableMsg(MockMessage):
         async def edit_text(self, *a, **kw):
             raise BadRequest("Message can't be edited")
 
     ue_msg = UneditableMsg()
     q_ue, ctx_ue = _fire("a:home", ADMIN, msg=ue_msg)
-    assert ue_msg.replies, "uneditable message must fall back cleanly to reply_text"
-    assert "SUPER ADMIN" in ue_msg.replies[-1]["text"]
+    assert ue_msg.replies and "SUPER ADMIN" in ue_msg.replies[-1]["text"]
 
-    # 4. Admin live toggle a:toggleuimode switches to fresh-message mode and back
-    q_t1, ctx_t1 = _fire("a:toggleuimode", ADMIN)
-    assert db.get_setting("ui_edit_in_place") == "0"
-    assert q_t1.message.replies and not q_t1.message.edits
-
+    # Toggle back to "0"
     q_t2, ctx_t2 = _fire("a:toggleuimode", ADMIN)
-    assert db.get_setting("ui_edit_in_place") == "1"
-    assert q_t2.message.edits
+    assert db.get_setting("ui_edit_in_place") == "0"
+    assert q_t2.message.replies

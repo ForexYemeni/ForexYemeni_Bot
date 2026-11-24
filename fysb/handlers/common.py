@@ -53,14 +53,46 @@ def safe(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
+async def _send_guarded(send_fn, text: str, markup=None):
+    """Bulletproof Telegram sender: tries full HTML + styled buttons first,
+    then automatically degrades (strip Bot API 9.4 styles -> repaired HTML ->
+    plain text) on BadRequest so NO button press can EVER die silently."""
+    from fysb.ui import htmlguard
+    try:
+        return await send_fn(
+            text=text,
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except BadRequest as first_err:
+        log.warning("render BadRequest (%s) -> retrying with style-stripped fallback", first_err)
+        plain_mk = kb.strip_button_styles(markup)
+        for body, pmode in (
+            (text, ParseMode.HTML),
+            (htmlguard.truncate_safe(text, 3900), ParseMode.HTML),
+            (htmlguard.plain_fallback(text)[:3900], None),
+        ):
+            try:
+                kw = {"text": body, "reply_markup": plain_mk, "disable_web_page_preview": True}
+                if pmode is not None:
+                    kw["parse_mode"] = pmode
+                return await send_fn(**kw)
+            except BadRequest:
+                continue
+        raise first_err
+
+
 async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
-    """Deliver callback pages smoothly (v6.13.0 — Smart In-Place Edit + Fallback).
+    """Deliver callback pages reliably (v6.14.1 — Proven Fresh Page by default,
+    optional In-Place Edit toggle in Admin Settings, + automatic BadRequest
+    fallback stripping button styles / repairing HTML so buttons NEVER fail).
 
     Returns the delivered/edited Message object so callers (like u:signalview)
     can pin message_id/chat_id for live tracker edits.
     """
     t0 = time.monotonic()
-    edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "1") == "1")
+    edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "0") == "1")
 
     if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
         try:
@@ -83,12 +115,7 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
             log.debug("edit_text fallback (%s) -> sending fresh page", type(e).__name__)
 
     if q.message is not None and hasattr(q.message, "reply_text"):
-        msg = await q.message.reply_text(
-            text=text,
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        msg = await _send_guarded(q.message.reply_text, text, markup)
         log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
                  q.from_user.id, (time.monotonic() - t0) * 1000)
         return msg
@@ -97,8 +124,12 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
         else getattr(q, "message_chat", None)
     if chat is None or bot is None:
         raise RuntimeError("callback message is no longer available")
-    msg = await bot.send_message(chat.id, text, reply_markup=markup,
-                                 parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    async def _chat_send(**kw):
+        t = kw.pop("text")
+        return await bot.send_message(chat.id, t, **kw)
+
+    msg = await _send_guarded(_chat_send, text, markup)
     log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
     return msg
@@ -127,21 +158,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("referral capture failed")
     if uid == config.ADMIN_ID:
-        await update.effective_message.reply_text(
+        await _send_guarded(
+            update.effective_message.reply_text,
             f"👑 <b>{config.BRAND}</b>\n"
             f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
             f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
-            parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
+            kb.admin_menu(),
+        )
         await afn.run(audit_log.log, uid, "admin_panel_open")
         return
     from fysb.theme import header
-    sent = await update.effective_message.reply_text(
+    await _send_guarded(
+        update.effective_message.reply_text,
         header("منصة التداول", "اختر وجهتك من لوحة الأزرار التفاعلية") +
         "\n\n<b>الوحدات المتاحة:</b>\n"
         "📊 لوحة الأداء · 📡 الإشارات المباشرة\n"
         "💎 الباقات · 🧪 التداول التجريبي\n"
         "🎧 الدعم الفني · ⚙️ التفضيلات",
-        parse_mode=ParseMode.HTML, reply_markup=kb.user_menu())
+        kb.user_menu(),
+    )
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,11 +202,14 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     up = max(0, int(time.time() - BOOT_TS))
     up_txt = f"{up // 3600} ساعة {up % 3600 // 60} د" if up >= 3600 else f"{up // 60} دقيقة {up % 60} ث"
     db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
+    import telegram as _tg
+    ui_mode = "تعديل مكاني" if (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1" else "رسالة جديدة (فورية)"
     await update.effective_message.reply_text(
         f"🩺 <b>فحص سريع — {config.BRAND}</b>\n"
         f"<blockquote>◆ الإصدار: <b>v{config.VERSION}</b>\n"
         f"◆ المحرك: {engine}\n"
         f"◆ قاعدة البيانات: {db_state}\n"
+        f"◆ وضع الأزرار: {ui_mode} · PTB v{getattr(_tg, '__version__', '?')}\n"
         f"◆ مدة التشغيل: {up_txt}</blockquote>\n"
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
@@ -233,10 +271,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await afn.run(audit_log.log, uid, "security:admin_command_denied")
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
-    sent = await update.effective_message.reply_text(
-        f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر وحدة الإدارة من الأزرار:",
-        parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
-    register_panel(sent.chat_id, sent.message_id)
+    sent = await _send_guarded(
+        update.effective_message.reply_text,
+        f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
+        kb.admin_menu(),
+    )
+    if sent is not None:
+        register_panel(getattr(sent, "chat_id", None), getattr(sent, "message_id", None))
 
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

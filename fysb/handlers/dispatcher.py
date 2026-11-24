@@ -55,10 +55,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from fysb.handlers.common import render
             await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
             await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
-    except Exception:
+    except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
         try:
-            await q.message.reply_text("⚠️ حدث خطأ أثناء تنفيذ الزر. أعد المحاولة أو راجع سجل الإدارة.")
+            detail = f" ({type(exc).__name__})" if uid == config.ADMIN_ID else ""
+            await q.message.reply_text(f"⚠️ حدث خطأ أثناء تنفيذ الزر{detail}. أعد المحاولة أو راجع سجل الإدارة.")
         except Exception:
             pass
     finally:

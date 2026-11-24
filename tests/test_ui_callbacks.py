@@ -207,19 +207,22 @@ class TestRoyalRestore(unittest.TestCase):
         db.init_db()
         common._last_panel.clear()
 
-    def test_tap_on_registered_panel_edits_in_place_by_default(self):
-        # v6.13.0 Phase 7: smooth in-place edit_text when ui_edit_in_place="1"
-        # (no chat spam, never deletes the panel).
+    def test_tap_on_registered_panel_edits_in_place_when_enabled(self):
+        # When ui_edit_in_place="1" is enabled, edits the panel in place;
+        # default ("0") delivers a fresh reply_text page right under the tap.
         db.set_setting("ui_edit_in_place", "1")
-        q = MockQuery("a:signals", ADMIN)
-        common.register_panel(777, q.message.message_id)
-        ctx = MockContext()
-        asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
-        self.assertTrue(q._answered)
-        self.assertEqual(ctx.bot.sent, [], "render never uses bot.send_message for touchable panels")
-        self.assertTrue(q.message.edits, "default mode edits the panel in place smoothly")
-        self.assertFalse(q.message.deleted, "never deletes the tapped panel")
-        self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
+        try:
+            q = MockQuery("a:signals", ADMIN)
+            common.register_panel(777, q.message.message_id)
+            ctx = MockContext()
+            asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
+            self.assertTrue(q._answered)
+            self.assertEqual(ctx.bot.sent, [], "render never uses bot.send_message for touchable panels")
+            self.assertTrue(q.message.edits, "edit mode edits the panel in place smoothly")
+            self.assertFalse(q.message.deleted, "never deletes the tapped panel")
+            self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
+        finally:
+            db.set_setting("ui_edit_in_place", "0")
 
     def test_tap_on_stale_panel_delivers_cleanly_in_both_modes(self):
         # In-place mode ("1") edits cleanly; fresh-message mode ("0") sends reply_text.
@@ -235,7 +238,7 @@ class TestRoyalRestore(unittest.TestCase):
             self.assertFalse(q2.message.edits)
             self.assertIn("SUPER ADMIN", page_for(q2, ctx2))
         finally:
-            db.set_setting("ui_edit_in_place", "1")
+            db.set_setting("ui_edit_in_place", "0")
 
     def test_inaccessible_panel_still_renders(self):
         # >48h-old panel: PTB v22 gives InaccessibleMessage (chat + message_id

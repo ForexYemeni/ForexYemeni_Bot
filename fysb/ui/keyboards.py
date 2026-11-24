@@ -11,9 +11,21 @@ Upgrades over v6.x:
 IMPORTANT (root-cause fix preserved): callback tuples already carry their
 prefix (u:/a:) — the builder NEVER adds a second prefix.
 """
-from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+import inspect
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+try:
+    from telegram import CopyTextButton
+except ImportError:  # pragma: no cover — PTB < 21.6 compatibility
+    CopyTextButton = None
 
 from fysb.theme import ICON
+
+# Runtime capability detection so the bot NEVER crashes with TypeError if a
+# host still runs python-telegram-bot < 22.7 (which predates Bot API 9.4 `style`).
+_BTN_PARAMS = inspect.signature(InlineKeyboardButton.__init__).parameters
+_HAS_STYLE = "style" in _BTN_PARAMS
+_HAS_COPY_TEXT = (CopyTextButton is not None) and ("copy_text" in _BTN_PARAMS)
 
 # Native Bot API 9.4 button styles:
 #   "primary" -> Blue (main CTAs, analytics, navigation hubs)
@@ -39,25 +51,48 @@ LUX = {
 
 
 def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
-    """Native callback button with optional Bot API 9.4 color style."""
-    if style:
+    """Native callback button with optional Bot API 9.4 color style (PTB-safe)."""
+    if style and _HAS_STYLE:
         return InlineKeyboardButton(text, callback_data=data, style=style)
     return InlineKeyboardButton(text, callback_data=data)
 
 
 def copy_btn(text: str, copy_value: str, style: str | None = "primary") -> InlineKeyboardButton:
-    """Native one-tap CopyTextButton (copies straight to user clipboard)."""
+    """Native one-tap CopyTextButton (falls back safely on older PTB)."""
     val = str(copy_value or "")
-    if style:
-        return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val), style=style)
-    return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val))
+    if _HAS_COPY_TEXT:
+        if style and _HAS_STYLE:
+            return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val), style=style)
+        return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val))
+    return InlineKeyboardButton(text, callback_data="a:plannoop")
 
 
 def url_btn(text: str, url: str, style: str | None = None) -> InlineKeyboardButton:
-    """Native URL button with optional Bot API 9.4 color style."""
-    if style:
+    """Native URL button with optional Bot API 9.4 color style (PTB-safe)."""
+    if style and _HAS_STYLE:
         return InlineKeyboardButton(text, url=url, style=style)
     return InlineKeyboardButton(text, url=url)
+
+
+def strip_button_styles(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    """Return an equivalent keyboard with Bot API 9.4 `style` removed (fallback
+    if any Telegram server/client rejects styled buttons with BadRequest)."""
+    if markup is None or not hasattr(markup, "inline_keyboard"):
+        return markup
+    new_rows = []
+    for row in markup.inline_keyboard:
+        new_row = []
+        for b in row:
+            if getattr(b, "callback_data", None) is not None:
+                new_row.append(InlineKeyboardButton(b.text, callback_data=b.callback_data))
+            elif getattr(b, "url", None) is not None:
+                new_row.append(InlineKeyboardButton(b.text, url=b.url))
+            elif getattr(b, "copy_text", None) is not None and _HAS_COPY_TEXT:
+                new_row.append(InlineKeyboardButton(b.text, copy_text=b.copy_text))
+            else:
+                new_row.append(InlineKeyboardButton(b.text, callback_data="u:home"))
+        new_rows.append(new_row)
+    return InlineKeyboardMarkup(new_rows)
 
 
 def lux(label: str, data: str, color: str = "sapphire") -> InlineKeyboardButton:

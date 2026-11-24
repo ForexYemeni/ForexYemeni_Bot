@@ -453,7 +453,7 @@ async def admin_settings(q, uid, context, bot):
         ("broadcast_rate_per_sec", "📣 معدل الإعلانات/ثانية"),
         ("signal_expiry_hours", "⏳ صلاحية الإشارة (ساعة)"),
     ]
-    ui_edit = (await afn.run(db.get_setting, "ui_edit_in_place", "1")) == "1"
+    ui_edit = (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1"
     lines = ["⚙️ <b>الإعدادات العامة</b>", ""]
     rows_kb = []
     for key, title in pairs:
@@ -473,7 +473,7 @@ async def admin_settings(q, uid, context, bot):
 
 
 async def admin_toggle_ui_mode(q, uid, context, bot):
-    cur = (await afn.run(db.get_setting, "ui_edit_in_place", "1")) == "1"
+    cur = (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1"
     new_val = "0" if cur else "1"
     await afn.run(db.set_setting, "ui_edit_in_place", new_val)
     await afn.run(audit_log.log, uid, f"ui_edit_in_place:{new_val}")

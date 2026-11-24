@@ -474,8 +474,14 @@ def render_luxury_upgrade_card(
     paid_plans: list[dict],
     recommended_plan: dict | None = None,
     trial_expired: bool = False,
+    quota_exhausted: bool = False,
 ) -> str:
-    """Ultra-luxury persuasion card when a user hits a plan gate or trial expiry."""
+    """Ultra-luxury persuasion card when a user hits a plan gate, daily quota limit, or trial expiry."""
+    cur_sig = int(current_plan.get("max_signals_per_day") or 0)
+    cur_anl = int(current_plan.get("max_analyses_per_day") or 0)
+    cur_strats = len([x for x in str(current_plan.get("strategies") or "").split(",") if x.strip()])
+    cur_mkts = len([x for x in str(current_plan.get("markets") or "").split(",") if x.strip()])
+
     if trial_expired:
         head = "⏳ <b><u>انتهت فترتك المجانية — حان وقت الترقية الملكية!</u></b>"
         lead = (
@@ -483,21 +489,51 @@ def render_luxury_upgrade_card(
             "▎✨ لقد جرّبت دقة بياناتنا الحقيقية وبطاقاتنا الفاخرة — انتقل الآن للباقات المدفوعة\n"
             "▎   لفتح الإشارات اليومية، التحليلات الفورية، والمدارس المؤسسية بلا توقف."
         )
+    elif quota_exhausted:
+        head = "🚀 <b><u>وصلت للحد اليومي لباقتك — ارتقِ للخطة التالية الآن!</u></b>"
+        lead = (
+            f"▎⛔ <b>{esc(why)}</b>\n"
+            f"▎💎 باقتك الحالية: <b>{esc(current_plan['title'])}</b> "
+            f"(<code>{cur_sig}</code> إشارة · <code>{cur_anl}</code> تحليل/يوم)"
+        )
     else:
         head = f"{ICON['crown']} <b><u>ميزة ملكية — ارتقِ بمستوى تداولك الآن</u></b>"
         lead = (
             f"▎🔒 <b>السبب:</b> {esc(why)}\n"
             f"▎💎 باقتك الحالية: <b>{esc(current_plan['title'])}</b>"
         )
-    if recommended_plan:
-        rec_ic = plan_tier_icon(recommended_plan["code"])
-        lead += (
-            f"\n▎🎯 <b>الترقية المقترحة لك:</b> {rec_ic} <b>{esc(recommended_plan['title'])}</b> "
-            f"(<b>{recommended_plan['price']:g} {esc(recommended_plan['currency'])}</b>)"
-        )
 
+    jump_block = ""
+    if recommended_plan:
+        rec_code = (recommended_plan["code"] or "").upper()
+        rec_ic = plan_tier_icon(rec_code)
+        rec_sig = int(recommended_plan.get("max_signals_per_day") or 0)
+        rec_anl = int(recommended_plan.get("max_analyses_per_day") or 0)
+        rec_strats = len([x for x in str(recommended_plan.get("strategies") or "").split(",") if x.strip()])
+        rec_mkts = len([x for x in str(recommended_plan.get("markets") or "").split(",") if x.strip()])
+        rec_perk = (
+            "\n▎🔐 + <b>دخول فوري تلقائي لقناة VIP الخاصة</b>"
+            if rec_code in ("VIP", "ROYAL") else ""
+        )
+        rec_elite = (
+            "\n▎🎯 + <b>حصرياً: CRT · AMD · Silver Bullet · Turtle Soup</b>"
+            if rec_code == "ROYAL" else ""
+        )
+        jump_lines = [
+            f"▎🌟 <b>خطتك التالية المقترحة:</b> {rec_ic} <b>{esc(recommended_plan['title'])}</b> — "
+            f"<b>{recommended_plan['price']:g} {esc(recommended_plan['currency'])}</b> / {int(recommended_plan.get('duration_days') or 30)} يوم",
+            f"▎📈 الإشارات: <code>{cur_sig}</code> ⬅️ <b>{rec_sig} يومياً</b> · "
+            f"التحليلات: <code>{cur_anl}</code> ⬅️ <b>{rec_anl} يومياً</b>",
+            f"▎🌍 الأسواق: <code>{cur_mkts}</code> ⬅️ <b>{rec_mkts} سوق</b> · "
+            f"الاستراتيجيات: <code>{cur_strats}</code> ⬅️ <b>{rec_strats} استراتيجية</b>"
+            + rec_perk + rec_elite,
+        ]
+        jump_block = "\n✨ <b>ماذا تفتح فوراً عند الترقية؟</b>\n" + card("\n".join(jump_lines))
+
+    cur_price = float(current_plan.get("price") or 0.0)
+    shown_plans = [p for p in paid_plans if float(p.get("price") or 0) > cur_price] or paid_plans
     comp = []
-    for p in paid_plans:
+    for p in shown_plans:
         code = (p["code"] or "").upper()
         ic = plan_tier_icon(code)
         n_st = len([x for x in str(p["strategies"] or "").split(",") if x.strip()])
@@ -512,9 +548,10 @@ def render_luxury_upgrade_card(
 
     return (
         head + "\n━━━━━━━━━━━━━━━━━━\n"
-        + card(lead) + "\n"
-        + "<b>اختر باقتك وافتح المزايا فوراً:</b>\n"
+        + card(lead)
+        + jump_block + "\n"
+        + "<b>الخطط المتاحة للترقية الفورية:</b>\n"
         + card("\n".join(comp)) + "\n"
-        + "⚡ <i>تفعيل لحظي تلقائي عبر USDT — اضغط الباقة المناسبة بالأسفل:</i>"
+        + "⚡ <i>تفعيل لحظي تلقائي عبر USDT (TRC20 / BEP20) أو التحويل المحلي — اضغط خطتك بالأسفل:</i>"
     )
 

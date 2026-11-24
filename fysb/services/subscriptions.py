@@ -312,6 +312,19 @@ def is_free_trial_expired(uid: int, user_row=None, plan_row=None) -> bool:
     return bool(free_trial_status(uid, user_row=user_row, plan_row=plan_row).get("expired"))
 
 
+def next_higher_plan(current_code: str) -> dict | None:
+    """Return the exact next enabled paid tier strictly above `current_code`
+    (e.g. FREE -> PRO -> VIP -> ROYAL) based on ascending price."""
+    pmap = _plans_map()
+    cur = pmap.get((current_code or "FREE").upper())
+    cur_price = float((cur or {}).get("price") or 0.0)
+    paid = sorted(
+        (p for p in pmap.values() if p.get("enabled") and float(p.get("price") or 0) > cur_price),
+        key=lambda x: float(x.get("price") or 0),
+    )
+    return paid[0] if paid else None
+
+
 def cheapest_plan_unlocking(kind: str, item: str) -> dict | None:
     """Return the cheapest enabled paid plan whose `kind` ('markets', 'timeframes',
     'strategies') includes `item` (or 'ALL'). Used by luxury upgrade cards."""

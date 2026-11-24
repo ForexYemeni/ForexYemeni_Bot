@@ -30,33 +30,37 @@ async def _upsell(
     unlock_kind: str | None = None,
     unlock_item: str | None = None,
     trial_expired: bool = False,
+    quota_exhausted: bool = False,
 ) -> None:
-    """v6.22.0 Ultra-luxury locked-content & trial-expiry upgrade card."""
-    plan = await afn.run(subs.plan_for, uid)
+    """v6.22.1 Ultra-luxury locked-content, daily-quota & trial-expiry upgrade card."""
+    plan = dict(await afn.run(subs.plan_for, uid))
     plans = [dict(r) for r in await afn.run(_plans_for_sale)]
     rec = (
         await afn.run(subs.cheapest_plan_unlocking, unlock_kind, unlock_item)
         if (unlock_kind and unlock_item)
-        else None
+        else await afn.run(subs.next_higher_plan, plan.get("code", "FREE"))
     )
     body = render_luxury_upgrade_card(
         why=why,
-        current_plan=dict(plan),
+        current_plan=plan,
         paid_plans=plans,
         recommended_plan=rec,
         trial_expired=trial_expired,
+        quota_exhausted=quota_exhausted,
     )
+    cur_price = float(plan.get("price") or 0.0)
+    target_plans = [p for p in plans if float(p.get("price") or 0) > cur_price] or plans
     rows_kb = []
-    for p in plans:
+    for p in target_plans:
         code = (p["code"] or "").upper()
         ic = plan_tier_icon(code)
-        tag = " 🔥" if code == "VIP" else (" 🏆" if code == "ROYAL" else "")
-        is_hi = (rec and rec["code"] == p["code"]) or code in ("VIP", "ROYAL")
+        is_rec = bool(rec and (rec["code"] or "").upper() == code)
+        tag = " ⭐ المقترحة لك" if is_rec else (" 🔥" if code == "VIP" else (" 🏆" if code == "ROYAL" else ""))
         rows_kb.append([
             kb.btn(
                 f"{ic} الترقية إلى {esc(p['code'])}{tag} · {p['price']:g} {p['currency']}",
                 f"u:planview:{p['code']}",
-                style="success" if is_hi else "primary",
+                style="success" if (is_rec or code in ("VIP", "ROYAL")) else "primary",
             )
         ])
     rows_kb.append([kb.btn("💎 مقارنة جميع الباقات", "u:plans", style="primary")])
@@ -286,6 +290,14 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         state = await afn.run(anl.quota_state, uid)
         plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
+        if not is_admin and (state["quota"] <= 0 or state["remaining"] <= 0):
+            why_txt = (
+                "التحليلات الفورية غير مفعّلة في باقتك الحالية"
+                if state["quota"] <= 0
+                else f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"
+            )
+            await _upsell(q, uid, bot, why_txt, quota_exhausted=True)
+            return
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         rows = await afn.run(_catalog_rows)
         if not rows:
@@ -495,8 +507,12 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                                       enforce_plan=not is_admin)
         context.user_data.pop("anl_draft", None)
         if not res.get("ok"):
-            await render(q, f"⛔ {esc(res.get('error', 'تعذر التوليد'))}",
-                         kb.user_nav([[kb.btn("↩️ التحليلات", "u:analytics")]]), bot)
+            err_msg = res.get("error", "تعذر التوليد")
+            if res.get("quota_exhausted") or "حصة التحليلات" in err_msg:
+                await _upsell(q, uid, bot, err_msg, quota_exhausted=True)
+                return
+            await render(q, f"⛔ {esc(err_msg)}",
+                         kb.user_nav([[kb.btn("↩️ التحليلات", "u:analytics", style="primary")]]), bot)
             return
         an = res["analysis"]
         q_state = res.get("quota") or (await afn.run(anl.quota_state, uid))
@@ -663,7 +679,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         if not consumption["ok"] and not consumption.get("already"):
             await _upsell(
                 q, uid, bot,
-                f"استهلكت حد الإشارات اليومي ({consumption['used']}/{consumption['quota']} اليوم) — رقّ باقتك لفتح إشارات أكثر فوراً",
+                f"انتهت حصة الإشارات اليومية ({consumption['used']}/{consumption['quota']}) — تتجدد يومياً",
+                quota_exhausted=True,
             )
             return
         row = await afn.run(_market_row, sig["symbol"])

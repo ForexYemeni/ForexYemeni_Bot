@@ -166,4 +166,110 @@ def test_luxury_plans_showcase_and_smart_tier_recommender():
     asyncio.run(dispatcher.buttons(SimpleNamespace(callback_query=q2), ctx))
     txt2, mk2 = rep2[-1]
     assert "ROYAL" in txt2
-    assert "الترقية المقترحة" in txt2
+    assert "خطتك التالية المقترحة" in txt2
+
+
+def test_receipt_photo_sends_admin_approve_reject_buttons_and_approves():
+    """v6.22.1: When a user sends a payment receipt photo, Super Admin receives
+    a luxury HTML card attached to the photo with 1-tap Approve & Reject buttons."""
+    from fysb.handlers import inputs as inputs_handler
+    from fysb.services import payments as payments_svc
+
+    _reset_plans_v6220()
+    uid = 81301
+    users_svc.ensure_user(SimpleNamespace(id=uid, username="payer1", full_name="عميل VIP"))
+    pid = payments_svc.create_request(uid, "VIP", 39.0, "USDT")
+
+    sent_photos = []
+    async def _send_photo(chat_id, photo_id, **kw):
+        sent_photos.append((chat_id, photo_id, kw))
+
+    user_replies = []
+    async def _user_reply(text, **kw):
+        user_replies.append(text)
+
+    bot = SimpleNamespace(send_photo=_send_photo, send_message=AsyncMock())
+    ctx = SimpleNamespace(user_data={"awaiting_receipt": pid}, bot=bot)
+    upd = SimpleNamespace(
+        effective_user=SimpleNamespace(id=uid, username="payer1", full_name="عميل VIP"),
+        effective_message=SimpleNamespace(
+            photo=[SimpleNamespace(file_id="FILE_RECEIPT_123")],
+            caption="",
+            reply_text=_user_reply,
+        ),
+    )
+    orig_admin = config.ADMIN_ID
+    config.ADMIN_ID = 999999
+    try:
+        asyncio.run(inputs_handler.on_photo(upd, ctx))
+    finally:
+        config.ADMIN_ID = orig_admin
+
+    assert user_replies and f"#{pid}" in user_replies[-1]
+    assert sent_photos, "Admin must receive receipt photo notification"
+    chat_id, fid, kw = sent_photos[-1]
+    assert chat_id == 999999 and fid == "FILE_RECEIPT_123"
+    assert kw.get("parse_mode") == "HTML"
+    assert f"#{pid}" in kw.get("caption", "")
+    assert "VIP" in kw.get("caption", "")
+    mk = kw.get("reply_markup")
+    assert mk is not None
+    btns = [b for row in mk.inline_keyboard for b in row]
+    cbs = [b.callback_data for b in btns]
+    assert f"a:approvepay:{pid}" in cbs
+    assert f"a:rejectpay:{pid}" in cbs
+    assert f"a:paymentdetail:{pid}" in cbs
+    assert f"a:userdetail:{uid}" in cbs
+    assert all(b.to_dict().get("style") in ("primary", "success", "danger") for b in btns)
+
+
+def test_quota_exhausted_shows_luxury_next_tier_upgrade_card():
+    """v6.22.1: Exhausting daily Analysis or Signal quota immediately shows the
+    Ultra-Luxury Next-Tier Upgrade Card recommending PRO for FREE, VIP for PRO,
+    and ROYAL for VIP with colored 1-tap upgrade buttons."""
+    _reset_plans_v6220()
+    assert subs.next_higher_plan("FREE")["code"] == "PRO"
+    assert subs.next_higher_plan("PRO")["code"] == "VIP"
+    assert subs.next_higher_plan("VIP")["code"] == "ROYAL"
+    assert subs.next_higher_plan("ROYAL") is None
+
+    uid = 81302
+    users_svc.ensure_user(SimpleNamespace(id=uid, username="quota_u", full_name="عميل تحليل"))
+    # Exhaust FREE's 1/1 daily analysis quota
+    with db.conn() as c:
+        c.execute(
+            """INSERT INTO analyses(user_id,symbol,timeframe,tool,analysis_type,strategy,
+               price,direction,quality,summary,detail,created_at)
+               VALUES(?, 'XAUUSD', 'M15', '', 'يومي', 'CLASSIC', 2650, 'BUY', 80, 'ok', '{}', ?)""",
+            (uid, config.now()),
+        )
+        # Also exhaust FREE's 1/1 daily signal quota
+        c.execute(
+            "INSERT OR IGNORE INTO signal_deliveries(user_id,signal_id,delivered_at) VALUES(?, 77777, ?)",
+            (uid, config.now()),
+        )
+
+    bot = SimpleNamespace(send_message=AsyncMock())
+    ctx = SimpleNamespace(user_data={}, bot=bot)
+
+    # 1. u:analytics -> Luxury Next-Tier Upgrade Card recommending PRO!
+    q_an, rep_an = _mk_q(uid, data="u:analytics")
+    asyncio.run(dispatcher.buttons(SimpleNamespace(callback_query=q_an), ctx))
+    txt_an, mk_an = rep_an[-1]
+    assert "وصلت للحد اليومي لباقتك" in txt_an
+    assert "انتهت حصة التحليلات اليومية" in txt_an
+    assert "خطتك التالية المقترحة" in txt_an
+    assert "PRO" in txt_an
+    btns_an = [b for row in mk_an.inline_keyboard for b in row]
+    assert any(b.callback_data == "u:planview:PRO" for b in btns_an)
+    assert all(b.to_dict().get("style") in ("primary", "success", "danger") for b in btns_an)
+
+    # 2. u:signow -> Luxury Next-Tier Upgrade Card recommending PRO!
+    q_sn, rep_sn = _mk_q(uid, data="u:signow")
+    asyncio.run(dispatcher.buttons(SimpleNamespace(callback_query=q_sn), ctx))
+    txt_sn, mk_sn = rep_sn[-1]
+    assert "وصلت للحد اليومي لباقتك" in txt_sn
+    assert "انتهت حصة الإشارات اليومية" in txt_sn
+    assert "PRO" in txt_sn
+    assert any(b.callback_data == "u:planview:PRO" for row in mk_sn.inline_keyboard for b in row)
+

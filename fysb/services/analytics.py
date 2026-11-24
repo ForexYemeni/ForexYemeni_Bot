@@ -147,9 +147,11 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         # Real-user path: server-side package gate + atomic daily quota.
         state = quota_state(user_id)
         if state["quota"] <= 0:
-            return {"ok": False, "error": "التحليلات غير مفعلة لباقتك — تواصل مع الإدارة أو رقّ باقتك"}
+            return {"ok": False, "quota_exhausted": True, "quota": state,
+                    "error": "التحليلات غير مفعلة لباقتك — تواصل مع الإدارة أو رقّ باقتك"}
         if state["remaining"] <= 0:
-            return {"ok": False, "error": f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"}
+            return {"ok": False, "quota_exhausted": True, "quota": state,
+                    "error": f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"}
         from fysb.services.subscriptions import plan_for
         plan = plan_for(user_id)
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
@@ -325,7 +327,8 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
                                  (user_id, db.day_start_utc())).fetchone()["n"]
                 plan_quota = quota_state(user_id)["quota"]
                 if plan_quota <= 0 or used >= plan_quota:
-                    return {"ok": False, "error": f"انتهت حصة التحليلات اليومية ({used}/{plan_quota})"}
+                    return {"ok": False, "quota_exhausted": True,
+                            "error": f"انتهت حصة التحليلات اليومية ({used}/{plan_quota}) — تتجدد يومياً"}
                 c.execute("""INSERT INTO analyses(user_id,symbol,timeframe,tool,analysis_type,strategy,
                              price,direction,quality,summary,detail,created_at)
                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",

@@ -942,15 +942,70 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pid:
         ok = await afn.run(payments_service.attach_receipt, int(pid), uid, photo.file_id)
         if ok:
-            await update.effective_message.reply_text(f"✅ استلمنا إيصال الطلب #{pid}. سيظهر للإدارة للمراجعة.")
+            preq = await afn.run(payments_service.get_request, int(pid))
+            plan_code = (preq["plan_code"] if preq else "") or "—"
+            plan_row = await afn.run(_fetch_plan_row, plan_code) if plan_code != "—" else None
+            plan_title = esc(plan_row["title"]) if plan_row else esc(plan_code)
+            plan_cur = esc(plan_row["currency"]) if plan_row else "USD"
+            amt = float(preq["amount"] or 0) if preq else 0.0
+            method_txt = esc((preq["method"] if preq else "") or "MANUAL")
+            tg_u = update.effective_user
+            u_name = esc((tg_u.full_name or tg_u.username or f"User {uid}") if tg_u else f"User {uid}")
+            u_handle = f" (@{esc(tg_u.username)})" if (tg_u and tg_u.username) else ""
+
+            await update.effective_message.reply_text(
+                f"✅ <b><u>تم استلام إيصال الطلب #{pid} بنجاح!</u></b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "<blockquote>"
+                f"▎💎 الباقة: <b>{plan_title}</b>\n"
+                f"▎💰 المبلغ: <b>{amt:g} {plan_cur}</b> · الوسيلة: <b>{method_txt}</b>\n"
+                "▎⏳ تم إرسال الإيصال فوراً إلى الإدارة للمراجعة — سيصلك إشعار لحظي فور الاعتماد والتفعيل."
+                "</blockquote>",
+                parse_mode="HTML",
+            )
             if config.ADMIN_ID:
+                from telegram import InlineKeyboardMarkup
+                from fysb.ui import keyboards as kb_ui
+                adm_caption = (
+                    f"🧾 <b><u>إيصال دفع جديد بانتظار الاعتماد — طلب #{pid}</u></b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "<blockquote>"
+                    f"▎👤 المستخدم: <b>{u_name}</b>{u_handle}\n"
+                    f"▎🆔 المعرّف: <code>{uid}</code>\n"
+                    f"▎💎 الباقة: <b>{plan_title}</b> (<code>{esc(plan_code)}</code>)\n"
+                    f"▎💰 المبلغ: <b>{amt:g} {plan_cur}</b> · الوسيلة: <b>{method_txt}</b>\n"
+                    "▎📌 الحالة: <b>⏳ بانتظار قرارك الفوري</b>"
+                    "</blockquote>"
+                )
+                adm_markup = InlineKeyboardMarkup([
+                    [
+                        kb_ui.btn("✅ قبول وتفعيل الباقة فوراً", f"a:approvepay:{pid}", style="success"),
+                        kb_ui.btn("❌ رفض الطلب", f"a:rejectpay:{pid}", style="danger"),
+                    ],
+                    [
+                        kb_ui.btn(f"🧾 تفاصيل الطلب #{pid}", f"a:paymentdetail:{pid}", style="primary"),
+                        kb_ui.btn("👤 ملف المستخدم", f"a:userdetail:{uid}", style="primary"),
+                    ],
+                ])
                 try:
-                    preq = await afn.run(payments_service.get_request, pid)
-                    await context.bot.send_photo(config.ADMIN_ID, photo.file_id,
-                                                 caption=f"🧾 إيصال دفع جديد #{pid}\nالمستخدم: {uid}\n"
-                                                         f"الباقة: {preq['plan_code']}")
+                    await context.bot.send_photo(
+                        config.ADMIN_ID,
+                        photo.file_id,
+                        caption=adm_caption,
+                        parse_mode="HTML",
+                        reply_markup=adm_markup,
+                    )
                 except Exception:
-                    pass
+                    try:
+                        await context.bot.send_photo(
+                            config.ADMIN_ID,
+                            photo.file_id,
+                            caption=adm_caption,
+                            parse_mode="HTML",
+                            reply_markup=kb_ui.strip_button_styles(adm_markup),
+                        )
+                    except Exception:
+                        pass
         else:
             await update.effective_message.reply_text("⚠️ الطلب غير موجود أو تمت مراجعته مسبقاً.")
         return

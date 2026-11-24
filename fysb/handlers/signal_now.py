@@ -177,6 +177,15 @@ async def open_flow(q, uid: int, context, bot, is_admin: bool) -> None:
                 trial_expired=True,
             )
             return
+        qst = await afn.run(subs.quota_state, uid)
+        if qst.get("remaining", 0) <= 0:
+            from fysb.handlers.user_pages import _upsell
+            await _upsell(
+                q, uid, bot,
+                f"انتهت حصة الإشارات اليومية ({qst['used']}/{qst['quota']}) — تتجدد يومياً",
+                quota_exhausted=True,
+            )
+            return
     context.user_data[DRAFT_KEY] = {"stage": "style", "is_admin": is_admin}
     rows = [[kb.btn(label, f"{'a' if is_admin else 'u'}:signowstyle:{code}")] for code, label in STYLE_STAGES]
     body = ("🚀 <b><u>إشارة الآن — التدفق الملكي بمراحل حقيقية 100%</u></b>\n"
@@ -405,6 +414,8 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
                 "▎📡 التتبع اللحظي بدأ من الآن حتى الأهداف أو الوقف — أول بطاقة وصلتك تُحدَّث حية"
                 "</blockquote>")
         rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="success")]]
+        if not is_admin and not delivered:
+            rows.insert(0, [kb.btn("🚀 الترقية للخطة التالية الآن", "u:plans", style="success")])
         await _render(q, note, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
         return
     from fysb.ui.cards import render_no_signal_card

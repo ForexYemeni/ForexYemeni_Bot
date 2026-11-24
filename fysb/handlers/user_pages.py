@@ -503,14 +503,22 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             return
         row = await afn.run(_market_row, sig["symbol"])
         card_text = render_signal_card(dict(sig), user_view=True, row=row)
-        # Live market pulse for open trades — v6.20.1: instant 0ms cached/tracker
-        # price first, with strict 1.5s timeout fallback so opening a signal card
-        # NEVER hangs 5-12 seconds waiting on an external HTTP provider!
-        if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+        # Live market pulse ONLY for still-OPEN trades — v6.20.3: CLOSED signals
+        # (including TP1/TP2 closed at Breakeven) NEVER show a drifting market price.
+        from fysb.theme import is_signal_closed
+        sig_d = dict(sig)
+        if is_signal_closed(sig_d):
+            if (sig_d.get("status") or "").upper() in ("TP1_HIT", "TP2_HIT"):
+                banked = float(sig_d.get("pips_result") or 0.0)
+                card_text += (
+                    f"\n\n<blockquote>🔒 <b>الصفقة مغلقة نهائياً على ربح محقق ({banked:+.1f} pips)</b> — "
+                    f"أُغلق الجزء المتبقي عند نقطة التأمين (الدخول) وانتهت متابعة هذه الإشارة؛ "
+                    f"المحرك يبحث الآن عن الفرص الجديدة.</blockquote>"
+                )
+        elif sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
             try:
                 from fysb.engines import market_data
                 from fysb.engines.tracker import drift_pips
-                sig_d = dict(sig)
                 price = market_data.cached_price(sig["symbol"], max_age_seconds=120.0)
                 if price <= 0:
                     price = float(sig_d.get("live_px") or 0.0)
@@ -1304,8 +1312,8 @@ def _dashboard_counts(uid: int):
     with db.conn() as c:
         srow = c.execute(
             "SELECT COUNT(*) total, "
-            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') THEN 1 ELSE 0 END),0) active, "
-            "COALESCE(SUM(CASE WHEN status='TP3_HIT' THEN 1 ELSE 0 END),0) wins FROM signals"
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END),0) wins FROM signals"
         ).fetchone()
         delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
         anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
@@ -1320,8 +1328,8 @@ def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
         plan = subs.plan_for(uid, conn_obj=c)
         srow = c.execute(
             "SELECT COUNT(*) total, "
-            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') THEN 1 ELSE 0 END),0) active, "
-            "COALESCE(SUM(CASE WHEN status='TP3_HIT' THEN 1 ELSE 0 END),0) wins FROM signals"
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END),0) wins FROM signals"
         ).fetchone()
         drow = c.execute(
             "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
@@ -1357,6 +1365,7 @@ def _live_signals_page(markets, timeframes, strategies, min_score):
     with db.conn() as c:
         return c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
                              FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                             AND (closed_at IS NULL OR closed_at='')
                              AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
                              AND strategy IN ({marks_s}) AND score>=?
                              ORDER BY id DESC LIMIT 12""", args).fetchall()
@@ -1385,6 +1394,7 @@ def _open_signals_rows():
     with db.conn() as c:
         return c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
                             FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
+                            AND (closed_at IS NULL OR closed_at='')
                             ORDER BY id DESC LIMIT 6""").fetchall()
 
 

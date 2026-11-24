@@ -126,11 +126,13 @@ def check_signal(symbol: str, rr: float, atr_pct_value: float,
                 open_sym = c.execute(
                     "SELECT COUNT(*) n FROM signals WHERE source='SIGNAL_NOW' AND created_by=? "
                     "AND REPLACE(UPPER(symbol),'/','')=? "
+                    "AND (closed_at IS NULL OR closed_at='') "
                     "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
                     (int(created_by), sym_norm),
                 ).fetchone()["n"]
                 open_count = c.execute(
                     "SELECT COUNT(*) n FROM signals WHERE source='SIGNAL_NOW' AND created_by=? "
+                    "AND (closed_at IS NULL OR closed_at='') "
                     "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
                     (int(created_by),),
                 ).fetchone()["n"]

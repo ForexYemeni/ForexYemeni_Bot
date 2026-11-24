@@ -219,21 +219,38 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         _log_run(symbol, entry_tf, "CANDIDATE_FALLBACK",
                  f"selected {best.code} ({best.score}) after skipping {'; '.join(skipped_notes[:4])}")
 
-    # 14: duplicate check — same symbol+direction+TF within freshness window
+    # 14: duplicate check — same symbol+direction+TF within freshness window.
+    # v6.20.3: full freshness window applies ONLY to still-OPEN signals; once a
+    # trade is CLOSED (including TP1/TP2 Breakeven close!), only a brief 15-min
+    # cooldown applies so the engine immediately starts searching for new setups!
     hours = max(1, min(db.get_setting_int("signal_expiry_hours", 72) // 2, 36))
-    cutoff = (config_now() - timedelta(hours=hours)).isoformat()
+    open_cutoff = (config_now() - timedelta(hours=hours)).isoformat()
+    closed_cutoff = (config_now() - timedelta(minutes=15)).isoformat()
     with db.conn() as c:
         if sig_source == "SIGNAL_NOW" and int(created_by or 0) > 0:
             dup = c.execute(
                 """SELECT id FROM signals WHERE source='SIGNAL_NOW' AND created_by=? AND symbol=?
-                   AND direction=? AND timeframe=? AND created_at>=? LIMIT 1""",
-                (int(created_by), symbol, best.direction, entry_tf, cutoff),
+                   AND direction=? AND timeframe=?
+                   AND (
+                       ((closed_at IS NULL OR closed_at='')
+                        AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                        AND created_at>=?)
+                       OR
+                       (closed_at!='' AND closed_at>=?)
+                   ) LIMIT 1""",
+                (int(created_by), symbol, best.direction, entry_tf, open_cutoff, closed_cutoff),
             ).fetchone()
         else:
             dup = c.execute(
                 """SELECT id FROM signals WHERE source IN ('AUTO','ADMIN_SIGNAL_NOW') AND symbol=? AND direction=? AND timeframe=?
-                   AND created_at>=? LIMIT 1""",
-                (symbol, best.direction, entry_tf, cutoff),
+                   AND (
+                       ((closed_at IS NULL OR closed_at='')
+                        AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                        AND created_at>=?)
+                       OR
+                       (closed_at!='' AND closed_at>=?)
+                   ) LIMIT 1""",
+                (symbol, best.direction, entry_tf, open_cutoff, closed_cutoff),
             ).fetchone()
         if dup and not force:
             _log_run(symbol, entry_tf, "DUPLICATE_SKIPPED", f"recent signal #{dup['id']}")

@@ -8,3 +8,4 @@ backups/*
 !backups/.gitkeep
 database/*.db
 database/spot_calibration.json
+.venv/

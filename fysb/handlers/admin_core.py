@@ -886,7 +886,7 @@ def _delivery_lines(target: int) -> list[str]:
     real sequential numbering and USD results all off the loop (v6.11.0)."""
     from fysb.engines.tracker import seq_of
     from fysb import instruments
-    from fysb.theme import dir_badge, status_ar
+    from fysb.theme import dir_badge, signal_status_ar
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             """SELECT d.delivered_at, s.* FROM signal_deliveries d
@@ -901,7 +901,7 @@ def _delivery_lines(target: int) -> list[str]:
             usd = instruments.usd_move(r["symbol"], float(r["pips_result"] or 0), 0.01)
             res = f"\n   ▎📈 النتيجة المسجلة: <b>{float(r['pips_result'] or 0):+.1f} pips</b> · <b>{usd:+,.2f} $</b> بـ 0.01 لوت"
         lines.append(
-            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {status_ar(r['status'])}" + res)
+            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {signal_status_ar(r)}" + res)
     if not rows:
         lines.append("▎لا شيء بعد.")
     return lines

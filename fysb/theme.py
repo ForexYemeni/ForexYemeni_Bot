@@ -157,6 +157,42 @@ def status_ar(status: str) -> str:
     return STATUS_AR.get((status or "").upper(), esc(status) if status else "—")
 
 
+def is_signal_closed(sig) -> bool:
+    """True when a signal is finished (terminal status OR closed_at stamped, e.g. TP1/TP2 Breakeven)."""
+    if sig is None:
+        return True
+    try:
+        st = (sig["status"] or "").upper()
+    except Exception:
+        st = ""
+    if st in ("TP3_HIT", "SL_HIT", "EXPIRED", "CANCELLED"):
+        return True
+    try:
+        closed_at = sig["closed_at"]
+    except (KeyError, IndexError, TypeError):
+        closed_at = ""
+    return bool((closed_at or "").strip())
+
+
+def signal_status_ar(sig) -> str:
+    """Honest lifecycle label that distinguishes OPEN TP1/TP2 runners from CLOSED profit trades."""
+    st = (sig["status"] or "").upper()
+    if is_signal_closed(sig):
+        if st == "TP1_HIT":
+            return "مغلقة على ربح — تحقق الهدف الأول وأُغلقت عند التأمين"
+        if st == "TP2_HIT":
+            return "مغلقة على ربح — تحقق الهدف الثاني وأُغلقت عند التأمين"
+    return status_ar(st)
+
+
+def signal_status_badge(sig) -> str:
+    """Rich emoji + bold status line for signal cards (distinguishes closed TP1/TP2 from active)."""
+    st = (sig["status"] or "").upper()
+    if is_signal_closed(sig) and st in ("TP1_HIT", "TP2_HIT"):
+        return f"🏁 <b>{signal_status_ar(sig)} ✅</b>"
+    return status_badge(st)
+
+
 def market_state_ar(open_now) -> str:
     if open_now is True:
         return "🟢 مفتوح"

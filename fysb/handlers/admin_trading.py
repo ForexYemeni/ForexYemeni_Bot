@@ -127,9 +127,11 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
+    from fysb.theme import is_signal_closed
     sig = dict(r)
     live_note = ""
-    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+    sig_open = (not is_signal_closed(sig)) and sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT")
+    if sig_open:
         try:
             quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
             price = float(quote["price"])
@@ -146,8 +148,10 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
                 live_note += "\n⚠️ السعر تجاوز وقف الخسارة — اضغط «فحص مفتوحة الآن» لتحصيل الحالة فوراً."
         except Exception:
             live_note = "\n⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
+    elif sig["status"] in ("TP1_HIT", "TP2_HIT"):
+        live_note = f"\n🔒 <b>صفقة مغلقة على ربح محقق ({float(sig.get('pips_result') or 0):+.1f} pips)</b> — أُغلقت عند التأمين."
     rows_kb = []
-    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+    if sig_open:
         rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
     rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
@@ -161,11 +165,11 @@ async def admin_delete_signal_confirm(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
         return
-    from fysb.theme import status_ar
+    from fysb.theme import signal_status_ar
     sig = dict(r)
     body = (f"🗑 <b>حذف نهائي للإشارة #{sid}</b>\n"
             f"<blockquote>▎🌐 {esc(sig['symbol'])} · {esc(sig['direction'])} · {esc(sig['timeframe'])}\n"
-            f"▎📌 الحالة: <b>{status_ar(sig['status'])}</b> · الجودة {sig['score']}/100\n"
+            f"▎📌 الحالة: <b>{signal_status_ar(sig)}</b> · الجودة {sig['score']}/100\n"
             f"▎📬 مستلمون مسجلون: <b>{deliveries}</b>\n"
             f"▎⚠️ سيُمحى السجل <b>بأكمله نهائياً</b> — الإشارة، التسليمات، كل شيء. لا أرشيف ولا رجوع.</blockquote>")
     rows_kb = [
@@ -1042,7 +1046,7 @@ def _signal_purge_tx():
 def _cancel_signal_tx(sid: int) -> int:
     """(v6.11.0 thread-offload helper) cancel an open signal (tx) — rowcount."""
     with db.tx() as c:
-        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
+        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')",
                         (config.now(), sid))
         return cur.rowcount
 

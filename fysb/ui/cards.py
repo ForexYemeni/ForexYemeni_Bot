@@ -10,7 +10,8 @@ neutral "بيانات السوق اللحظية" (provider names are never expos
 """
 from fysb import instruments
 from fysb.theme import (DIRECTION_EMOJI, ICON, bar, card, dir_badge, esc,
-                        expandable, footer, human_dt, rich, status_ar, status_badge,
+                        expandable, footer, human_dt, is_signal_closed, rich,
+                        signal_status_ar, signal_status_badge, status_ar, status_badge,
                         strategy_name, tf_name)
 
 
@@ -36,7 +37,7 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
     symbol = sig["symbol"]
     direction = sig["direction"]
     d_emoji = DIRECTION_EMOJI.get(direction, "")
-    status_line = status_badge(sig["status"])
+    status_line = signal_status_badge(sig)
     spec = instruments.spec(symbol, row)
 
     # Prices card — each level with its pip distance from entry
@@ -76,6 +77,12 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
         dt = human_dt(sig["data_time"]) if sig["data_time"] else "—"
         data_lines.append(f"🕐 <b>آخر شمعة سوق فعلية:</b> {dt}")
         data_lines.append(f"🕐 <b>وقت الإصدار:</b> {human_dt(sig['created_at'])}")
+        try:
+            closed_at = sig["closed_at"]
+        except (KeyError, IndexError, TypeError):
+            closed_at = ""
+        if closed_at:
+            data_lines.append(f"🔒 <b>وقت الإغلاق:</b> {human_dt(closed_at)}")
         if sig["pips_result"]:
             emoji = "📈" if sig["pips_result"] > 0 else "📉"
             data_lines.append(f"{emoji} <b>النتيجة المسجلة:</b> {sig['pips_result']:+.1f} pips")
@@ -153,7 +160,7 @@ def render_signal_compact(sig) -> str:
                   "SL_HIT": "🔴", "CANCELLED": "⚪", "EXPIRED": "⚪"}
     shown_no = sig.get("seq") or sig["id"]
     return (f"{status_map.get(sig['status'], '🔵')} #{shown_no} · {sig['symbol']} {d_emoji} "
-            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {status_ar(sig['status'])}")
+            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {signal_status_ar(sig)}")
 
 
 def render_payment_card(p, plan_title: str = "") -> str:

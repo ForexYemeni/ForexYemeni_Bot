@@ -278,7 +278,7 @@ def check_open_signals(api_key: str) -> dict:
             continue
 
         # ---- FILLED signals: full lifecycle from the fill candle onward ----
-        transition = _evaluate_signal(sig, candles)
+        transition = _evaluate_signal(sig, candles, live_px=live_px)
         if transition:
             stats["updated"] += 1
             notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
@@ -500,11 +500,28 @@ def _load_demo_accounts_map(uids: list[int]) -> dict[int, dict]:
 
 
 def _base_live_card_text(sig: dict, px: float, row=None) -> str:
-    """Build the invariant portion of the live signal card ONCE per signal."""
+    """Build the invariant portion of the live signal card ONCE per signal.
+
+    v6.20.3 honesty: once a signal is CLOSED (including TP1_HIT / TP2_HIT closed
+    at breakeven with closed_at stamped), NEVER append a live drifting market
+    price below entry — instead display the final secured-profit close summary.
+    """
+    from fysb.theme import is_signal_closed
     from fysb.ui.cards import render_signal_card
     if row is None:
         row = _market_row(sig["symbol"])
     text = render_signal_card(sig, user_view=True, row=row)
+    closed = is_signal_closed(sig)
+    if closed:
+        st = (sig.get("status") or "").upper()
+        if st in ("TP1_HIT", "TP2_HIT"):
+            banked = float(sig.get("pips_result") or 0.0)
+            text += (
+                f"\n\n<blockquote>🔒 <b>الصفقة مغلقة نهائياً على ربح محقق ({banked:+.1f} pips)</b> — "
+                f"أُغلق الجزء المتبقي عند نقطة التأمين (الدخول) وانتهت متابعة هذه الإشارة؛ "
+                f"المحرك يبحث الآن عن الفرص الجديدة.</blockquote>"
+            )
+        return text
     if px:
         entry = float(sig["entry"])
         side = "أعلى الدخول" if px > entry else ("عند الدخول" if px == entry else "أدنى الدخول")
@@ -543,7 +560,7 @@ def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict], market_row=
             for r in refs]
 
 
-def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | None:
+def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0) -> str | None:
     """Return the next status if price data justifies it, else None.
 
     Only candles AT/AFTER the fill anchor are walked — `cutoff` (or the
@@ -630,6 +647,12 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
         if progress_tp == 3:
             return "TP3_HIT"
         return {1: "TP1_HIT", 2: "TP2_HIT", 3: "TP3_HIT"}[progress_tp]
+    # Fallback live-quote breakeven check for already-banked TP1/TP2 runners:
+    # if the current live price is already back at/past entry on the adverse side,
+    # close immediately at breakeven so the trade NEVER hangs open.
+    if not be_stopped and hit_tp in (1, 2) and live_px > 0:
+        if (direction == "BUY" and live_px <= entry) or (direction == "SELL" and live_px >= entry):
+            be_stopped = True
     if be_stopped and hit_tp in (1, 2):
         return f"TP{hit_tp}_BE"
     return None

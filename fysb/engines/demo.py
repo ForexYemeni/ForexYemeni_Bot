@@ -100,8 +100,7 @@ def compute_lots(user_id: int, symbol: str, entry: float, sl: float, row=None) -
     balance = max(1.0, float(acc["balance"] or DEMO_DEFAULT_BALANCE))
     if (acc.get("lot_mode") or "auto") == "fixed":
         lots = float(acc.get("fixed_lot") or 0.01)
-        dist = abs(entry - sl) if sl else 0
-        risk_money = dist * lots * instruments.spec(symbol, row).contract_size
+        risk_money = abs(instruments.pnl(symbol, "BUY", lots, entry, sl, row)) if sl else 0.0
         return round(lots, 2), risk_money, risk_pct
     lots = instruments.position_size(balance, risk_pct, entry, sl, symbol, row)
     lots = max(0.01, min(lots, 10.0))
@@ -127,10 +126,14 @@ def open_position(user_id: int, symbol: str, direction: str, lots: float,
         return {"ok": False, "error": "invalid direction"}
     if lots <= 0 or lots > 10:
         return {"ok": False, "error": "lot size out of allowed range (0.01-10)"}
-    from fysb.engines import risk
-    gate = risk.check_demo_trade(user_id, 0.5)
-    if not gate.allowed:
-        return {"ok": False, "error": gate.reason}
+    if int(signal_id or 0) > 0:
+        with db.conn() as c:
+            dup = c.execute(
+                "SELECT id FROM demo_positions WHERE account_id=? AND signal_id=?",
+                (acc["id"], int(signal_id)),
+            ).fetchone()
+            if dup:
+                return {"ok": False, "error": "position already opened for this signal"}
     with db.conn() as c:
         row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
         if not row or not (row["enabled"] and row["verified"]):
@@ -152,8 +155,18 @@ def open_position(user_id: int, symbol: str, direction: str, lots: float,
             return {"ok": False, "error": "TP must be above entry for BUY"}
         if direction == "SELL" and tp >= entry:
             return {"ok": False, "error": "TP must be below entry for SELL"}
-    notional = entry * lots * instruments.spec(symbol, row).contract_size
-    if notional > acc["balance"] * 50:
+    from fysb.engines import risk
+    bal = max(1.0, float(acc["balance"] or DEMO_DEFAULT_BALANCE))
+    if sl:
+        est_loss = abs(instruments.pnl(symbol, direction, lots, entry, sl, row))
+        actual_risk_pct = max(0.01, (est_loss / bal) * 100.0)
+    else:
+        actual_risk_pct = 0.5
+    gate = risk.check_demo_trade(user_id, actual_risk_pct)
+    if not gate.allowed:
+        return {"ok": False, "error": gate.reason}
+    notional = instruments.notional_usd(symbol, lots, entry, row)
+    if notional > bal * 50:
         return {"ok": False, "error": "notional exceeds demo leverage cap"}
     with db.tx() as c:
         cur = c.execute("""INSERT INTO demo_positions(account_id,user_id,symbol,direction,lots,initial_lots,entry,sl,tp,
@@ -182,11 +195,12 @@ def open_from_signal(user_id: int, sig: dict, api_key: str = "") -> dict:
                         sl=sl, tp=float(sig["tp3"] or sig["tp1"] or 0), api_key=api_key, signal_id=int(sig["id"]))
     if not res.get("ok"):
         return res
-    spec = instruments.spec(symbol, row)
     plan = {}
     for i, tp in enumerate((sig["tp1"], sig["tp2"], sig["tp3"]), start=1):
-        dist = abs(float(tp) - entry_ref)
-        plan[f"tp{i}"] = dist * lots * spec.contract_size
+        if tp:
+            plan[f"tp{i}"] = abs(instruments.pnl(symbol, sig["direction"], lots, entry_ref, float(tp), row))
+        else:
+            plan[f"tp{i}"] = 0.0
     res.update({"lots": lots, "risk_money": risk_money, "risk_pct": risk_pct,
                 "plan": plan, "symbol": symbol, "direction": sig["direction"],
                 "entry_ref": entry_ref, "tp1": sig["tp1"], "tp2": sig["tp2"], "tp3": sig["tp3"]})
@@ -200,6 +214,7 @@ def _partial_close(user_id: int, position_id: int, fraction: float, exit_price: 
     with db.conn() as c:
         pos = c.execute("SELECT * FROM demo_positions WHERE id=? AND user_id=? AND status='OPEN'",
                         (position_id, user_id)).fetchone()
+        row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone() if pos else None
     if not pos:
         return {"ok": False, "error": "position not found"}
     pos = dict(pos)
@@ -207,7 +222,7 @@ def _partial_close(user_id: int, position_id: int, fraction: float, exit_price: 
     if close_lots < 0.01 or pos["lots"] - close_lots < 0.01:
         # too small to split — close the whole position instead
         return close_at_price(user_id, position_id, exit_price, reason)
-    pnl = instruments.pnl(pos["symbol"], pos["direction"], close_lots, pos["entry"], exit_price)
+    pnl = instruments.pnl(pos["symbol"], pos["direction"], close_lots, pos["entry"], exit_price, row)
     with db.tx(immediate=True) as c:
         again = c.execute("SELECT status, lots FROM demo_positions WHERE id=?", (position_id,)).fetchone()
         if not again or again["status"] != "OPEN":
@@ -226,10 +241,11 @@ def close_at_price(user_id: int, position_id: int, exit_price: float, reason: st
     with db.conn() as c:
         pos = c.execute("SELECT * FROM demo_positions WHERE id=? AND user_id=? AND status='OPEN'",
                         (position_id, user_id)).fetchone()
+        row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone() if pos else None
     if not pos:
         return {"ok": False, "error": "position not found or already closed"}
     pos = dict(pos)
-    pnl = instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], exit_price)
+    pnl = instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], exit_price, row)
     with db.tx(immediate=True) as c:
         again = c.execute("SELECT status FROM demo_positions WHERE id=?", (position_id,)).fetchone()
         if not again or again["status"] != "OPEN":
@@ -319,12 +335,23 @@ def sync_positions_with_real_prices(user_id: int, api_key: str = "") -> list[dic
 
         # 2) half-TP1 secure-profit for auto-traded signal positions
         if pos["signal_id"] and not pos["partials_done"] and tp:
-            # progress measured on the position's live profit vs its own TP
+            # Resolve the signal's true TP1 (open_from_signal stores TP3 in pos.tp)
+            # so HALF_TP1 triggers at 50% of entry->TP1, falling back to pos.tp.
+            tp1_target = tp
+            with db.conn() as c:
+                sr = c.execute("SELECT tp1 FROM signals WHERE id=?", (pos["signal_id"],)).fetchone()
+            if sr and sr["tp1"]:
+                try:
+                    cand_tp1 = float(sr["tp1"])
+                    if (d == "BUY" and cand_tp1 > pos["entry"]) or (d == "SELL" and cand_tp1 < pos["entry"]):
+                        tp1_target = cand_tp1
+                except (TypeError, ValueError):
+                    pass
             progress = 0.0
             if d == "BUY" and price > pos["entry"]:
-                progress = (price - pos["entry"]) / max(1e-12, (tp - pos["entry"]))
+                progress = (price - pos["entry"]) / max(1e-12, (tp1_target - pos["entry"]))
             elif d == "SELL" and price < pos["entry"]:
-                progress = (pos["entry"] - price) / max(1e-12, (pos["entry"] - tp))
+                progress = (pos["entry"] - price) / max(1e-12, (pos["entry"] - tp1_target))
             if progress >= HALF_TP1_TRIGGER:
                 res = _partial_close(user_id, pos["id"], PARTIAL_FRACTION, price, "HALF_TP1_SECURE")
                 if res.get("ok") and res.get("closed_lots"):
@@ -353,14 +380,17 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
             "SELECT * FROM demo_positions WHERE account_id=? AND status='OPEN' ORDER BY opened_at DESC LIMIT 20", (acc["id"],)).fetchall()]
         closed_pos = [dict(r) for r in c.execute(
             "SELECT * FROM demo_positions WHERE account_id=? AND status!='OPEN' ORDER BY closed_at DESC LIMIT 10", (acc["id"],)).fetchall()]
+        agg = c.execute(
+            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN pnl>=0 THEN 1 ELSE 0 END),0) wins "
+            "FROM demo_positions WHERE account_id=? AND status!='OPEN'", (acc["id"],)).fetchone()
     floating = 0.0
     stale = False
     for pos in open_pos:
         try:
             with db.conn() as c:
-                row = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone()
+                row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone()
             quote = market_data.fetch_price(row["provider_symbol"], api_key)
-            floating += instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], quote["price"])
+            floating += instruments.pnl(pos["symbol"], pos["direction"], pos["lots"], pos["entry"], quote["price"], row)
             pos["current"] = quote["price"]
         except RuntimeError:
             pos["current"] = None
@@ -371,9 +401,10 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
         with db.conn() as c:
             c.execute("UPDATE demo_accounts SET peak_equity=? WHERE id=?", (equity, acc["id"]))
     drawdown = (peak - equity) / peak * 100 if peak > 0 else 0.0
-    wins = sum(1 for p in closed_pos if (p["pnl"] or 0) >= 0)
+    total_closed = int(agg["total"] or 0) if agg else 0
+    total_wins = int(agg["wins"] or 0) if agg else 0
     return {"balance": acc["balance"], "equity": equity, "floating": floating,
             "drawdown_pct": drawdown, "open": open_pos, "closed": closed_pos,
-            "win_rate": (wins / len(closed_pos) * 100) if closed_pos else None,
+            "win_rate": (total_wins / total_closed * 100) if total_closed else None,
             "data_stale": stale, "currency": acc.get("currency", "USD"),
             "settings": demo_settings(user_id)}

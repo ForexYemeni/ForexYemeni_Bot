@@ -65,15 +65,37 @@ def _provider_symbol(symbol: str) -> str:
     return r["provider_symbol"] if r else symbol
 
 
-def _tracking_payload(provider_symbol: str, api_key: str) -> dict:
+def _tracking_intervals_for(since_iso: str) -> tuple[tuple[str, int], ...]:
+    """Pick the finest candle interval whose window covers `since_iso`.
+
+    5min x 200 covers ~16.6h; 15min x 120 covers ~30h; 1h x 100 covers ~100h.
+    Always retains all three intervals as a failover chain.
+    """
+    if not since_iso:
+        return (("5min", 200), ("15min", 120), ("1h", 100))
+    try:
+        from datetime import datetime, timezone
+        cut = _utc_cutoff(since_iso)
+        dt = datetime.strptime(cut, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+        if age_hours > 28.0:
+            return (("1h", 100), ("15min", 120), ("5min", 200))
+        if age_hours > 14.0:
+            return (("15min", 120), ("1h", 100), ("5min", 200))
+    except Exception:
+        pass
+    return (("5min", 200), ("15min", 120), ("1h", 100))
+
+
+def _tracking_payload(provider_symbol: str, api_key: str, since_iso: str = "") -> dict:
     """Fetch a candle window LONG ENOUGH to cover the signal's whole lifetime.
 
-    A young signal needs fine granularity; an old one needs history. The chain
-    walks 5min -> 15min -> 1h and returns the first FRESH payload (each covers
-    16h / 30h / 100h respectively). Raises RuntimeError when everything fails.
+    A young signal needs fine granularity (5min); an older one needs deeper
+    history (15min -> 1h) so fills/TPs beyond 16h are never missed. Raises
+    RuntimeError when everything fails.
     """
     last_err: Exception | None = None
-    for interval, size in (("5min", 200), ("15min", 120), ("1h", 100)):
+    for interval, size in _tracking_intervals_for(since_iso):
         try:
             payload = market_data.fetch_candles(provider_symbol, interval, api_key, outputsize=size)
         except RuntimeError as e:
@@ -169,12 +191,14 @@ def check_open_signals(api_key: str) -> dict:
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id").fetchall()]
+            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') "
+            "AND (closed_at IS NULL OR closed_at='') ORDER BY id").fetchall()]
     for sig in rows:
         stats["checked"] += 1
         symbol = sig["symbol"]
         try:
-            payload = _tracking_payload(_provider_symbol(symbol), api_key)
+            since = sig.get("filled_at") or sig.get("created_at") or ""
+            payload = _tracking_payload(_provider_symbol(symbol), api_key, since_iso=since)
         except RuntimeError as e:
             stats["errors"] += 1
             _log(symbol, sig["timeframe"], "TRACK_ERROR", str(e)[:200])
@@ -326,9 +350,11 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
                               if instruments.pips(symbol, entry, tp1) > 0 else 0.0))
     remaining = instruments.pips(symbol, entry, tp1) - max(0.0, drift)
     usd_now = instruments.usd_move(symbol, drift, 0.01, px=px) if px else 0.0
-    usd_tp1 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp1), 0.01)
-    usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp2"] or tp1)), 0.01)
-    usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp3"] or tp1)), 0.01)
+    usd_tp1 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp1), 0.01, px=tp1)
+    tp2_val = float(sig["tp2"] or tp1)
+    tp3_val = float(sig["tp3"] or tp1)
+    usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp2_val), 0.01, px=tp2_val)
+    usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp3_val), 0.01, px=tp3_val)
     text = (
         f"💧 <b>إدارة الصفقة الملكية</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
@@ -504,8 +530,11 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
                 new_tp = max(new_tp, 2)
             if progress_tp <= 2 and lo <= tp3 - buf:
                 new_tp = max(new_tp, 3)
-        if sl_now and progress_tp == hit_tp and new_tp == 0:
-            return "SL_HIT"                       # stopped out before any gain
+        if sl_now and progress_tp == 0:
+            # Conservative SL-first rule: if a candle hits SL before any target
+            # was banked (including gap candles spanning both SL and TP), record
+            # SL_HIT — never optimistically credit a target on a gap candle.
+            return "SL_HIT"
         if new_tp > progress_tp:
             progress_tp = new_tp                  # target banked; keep running
     if progress_tp > hit_tp:
@@ -601,15 +630,16 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
                   "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
         result_line = ""
     if status.startswith("TP"):
-        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>"
-                  f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01):+,.2f} $</b> لكل 0.01 لوت\n")
+        tp_px = float(tp_map[hit_tp])
+        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_px)}</code>"
+                  f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01, px=tp_px):+,.2f} $</b> لكل 0.01 لوت\n")
         if hit_tp == 1:
             detail += ("▎🛡 <b>إدارة الصفقة:</b> انقل وقف الخسارة إلى نقطة الدخول (حماية كاملة) "
                        "واُترك الجزء المتبقي يعمل نحو الهدفين التاليين.\n")
         if status == "TP3_HIT":
             detail += "▎👑 <b>صفقة مكتملة بكل الأهداف — أداء ممتاز.</b>\n"
     if status == "SL_HIT":
-        usd_sl = instruments.usd_move(sig["symbol"], pips_result, 0.01)
+        usd_sl = instruments.usd_move(sig["symbol"], pips_result, 0.01, px=float(sig["stop"]))
         detail = (f"▎🛡 الخسارة محدودة بمقدار وقف الخسارة المخطط"
                   + (f" · 💵 <b>{usd_sl:+,.2f} $</b> لكل 0.01 لوت" if usd_sl else "")
                   + " — التزم بإدارة المخاطر في الفكرة القادمة.\n")
@@ -642,7 +672,8 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
 
 
 def expire_stale_signals() -> int:
-    """Mark ACTIVE signals past their expiry window as EXPIRED (no price claims).
+    """Mark unbanked signals past their expiry window as EXPIRED, and close
+    expired TP1_HIT/TP2_HIT trades while preserving their banked winning status.
 
     Two sweeps, both honest (no fabricated outcomes):
       * expires_at set and already passed;
@@ -652,38 +683,55 @@ def expire_stale_signals() -> int:
     from datetime import datetime, timedelta, timezone
     hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
     legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    now_iso = config.now()
     with db.conn() as c:
+        # Preserve banked TP1/TP2 winners: stamp closed_at so tracking stops,
+        # without erasing their winning status to EXPIRED.
+        c.execute("""UPDATE signals SET closed_at=?
+                     WHERE status IN ('TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')
+                     AND ((expires_at!='' AND expires_at<=?)
+                          OR (expires_at='' AND created_at<=?))""",
+                  (now_iso, now_iso, legacy_cutoff))
         cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
-                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                           WHERE status IN ('ACTIVE','RUNNING')
                            AND ((expires_at!='' AND expires_at<=?)
                                 OR (expires_at='' AND created_at<=?))""",
-                        (config.now(), config.now(), legacy_cutoff))
+                        (now_iso, now_iso, legacy_cutoff))
         return cur.rowcount
 
 
 def expire_with_card_edits() -> tuple[int, list]:
     """The expiry sweep PLUS live-card edits: a retired signal's own message
     must stop claiming «بانتظار التنفيذ» — the card is re-rendered with the
-    EXPIRED badge in place (no price line; expiry makes no price claims)."""
+    EXPIRED badge in place (no price line; expiry makes no price claims).
+    Banked TP1_HIT/TP2_HIT winners keep their winning status and are closed."""
     from datetime import datetime, timedelta, timezone
     hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
     legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    now_iso = config.now()
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING')
                AND ((expires_at!='' AND expires_at<=?)
                     OR (expires_at='' AND created_at<=?))""",
-            (config.now(), legacy_cutoff)).fetchall()]
+            (now_iso, legacy_cutoff)).fetchall()]
     edits: list = []
     for sig in rows:
         sig["status"] = "EXPIRED"
         edits.extend(_card_refresh_edits(sig, 0.0, _delivery_refs(sig["id"])))
     with db.conn() as c:
+        c.execute("""UPDATE signals SET closed_at=?
+                     WHERE status IN ('TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')
+                     AND ((expires_at!='' AND expires_at<=?)
+                          OR (expires_at='' AND created_at<=?))""",
+                  (now_iso, now_iso, legacy_cutoff))
         cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
-                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                           WHERE status IN ('ACTIVE','RUNNING')
                            AND ((expires_at!='' AND expires_at<=?)
                                 OR (expires_at='' AND created_at<=?))""",
-                        (config.now(), config.now(), legacy_cutoff))
+                        (now_iso, now_iso, legacy_cutoff))
     return max(cur.rowcount, 0), edits
 
 

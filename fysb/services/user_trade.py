@@ -27,9 +27,8 @@ def personal_block(sig: dict, user_id: int) -> str:
         entry = float(sig["entry"])
         sl = float(sig["stop"] or 0)
         lots, risk_money, risk_pct = demo_engine.compute_lots(user_id, symbol, entry, sl, row)
-        spec = instruments.spec(symbol, row)
-        dist_sl = abs(entry - sl) if sl else 0.0
-        risk_money = dist_sl * lots * spec.contract_size if dist_sl else risk_money
+        if sl:
+            risk_money = abs(instruments.pnl(symbol, "BUY", lots, entry, sl, row))
         lines = [
             f"💼 <b>خطتك الشخصية على حسابك التجريبي:</b>",
             f"▎💰 الرصيد المستخدم: <b>{acc['balance']:,.2f} USD</b>",
@@ -39,8 +38,7 @@ def personal_block(sig: dict, user_id: int) -> str:
         for i, tp in enumerate((sig["tp1"], sig["tp2"], sig["tp3"]), start=1):
             if not tp:
                 continue
-            dist = abs(float(tp) - entry)
-            profit = dist * lots * spec.contract_size
+            profit = abs(instruments.pnl(symbol, sig["direction"], lots, entry, float(tp), row))
             lines.append(f"▎🏁 ربح متوقع عند TP{i}: <b>{profit:+,.2f} $</b>")
         lines.append(f"▎🤖 التنفيذ التلقائي: <b>{'مفعّل — تُفتح الصفقة في حسابك تلقائياً' if acc.get('auto_trade') else 'متوقف — فعّله من إعدادات التجريبي'}</b>")
         return "\n".join(lines)

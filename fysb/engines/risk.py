@@ -74,8 +74,9 @@ def check_demo_trade(user_id: int, risk_pct: float) -> RiskDecision:
     daily_loss_limit = -abs(acc["balance"]) * _s("max_daily_loss_pct", 5.0) / 100.0
     if closed <= daily_loss_limit:
         return RiskDecision(False, f"daily demo loss {closed:.2f} breached limit {daily_loss_limit:.2f}", metrics)
-    if not (0.0 < risk_pct <= _s("risk_per_trade_pct", 1.0) * 3):
-        return RiskDecision(False, f"risk per trade {risk_pct}% outside allowed band", metrics)
+    max_risk_band = max(_s("risk_per_trade_pct", 1.0) * 3.0, 5.0)
+    if not (0.0 < risk_pct <= max_risk_band):
+        return RiskDecision(False, f"risk per trade {risk_pct:.2f}% outside allowed band (<= {max_risk_band:.1f}%)", metrics)
     return RiskDecision(True, "ok", metrics)
 
 

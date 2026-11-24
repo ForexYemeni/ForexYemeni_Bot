@@ -100,21 +100,23 @@ def lux(label: str, data: str, color: str = "sapphire") -> InlineKeyboardButton:
     return btn(label, data, style=_LUX_TO_STYLE.get(color))
 
 
-# --- User menus (6 clean rows, single icon per button, native colors) --------
+# --- User menus (6 luxury rows, single icon per button, native colors) -------
 def user_menu() -> InlineKeyboardMarkup:
+    """Luxury 6-row user menu (Bot API 9.4 native styled buttons, v6.17.0):
+    Row 1 puts Signal Now & Analysis Now front and center for instant 1-tap access."""
     rows = [
-        [btn("📡 الإشارات المباشرة", "u:signals", style="success"),
-         btn("🔬 التحليلات الاحترافية", "u:analytics", style="primary")],
-        [btn("📊 لوحة التحكم", "u:dashboard", style="primary"),
+        [btn("⚡ إشارة الآن", "u:signow", style="success"),
+         btn("🔬 تحليل الآن", "u:analytics", style="primary")],
+        [btn("📡 الإشارات المباشرة", "u:signals", style="primary"),
          btn("🧪 التداول التجريبي", "u:demo", style="success")],
+        [btn("📊 لوحة التحكم", "u:dashboard"),
+         btn("🌐 أسواقي وتخصيصي", "u:preferences")],
         [btn("💎 الباقات والاشتراك", "u:plans", style="primary"),
          btn("🧾 مدفوعاتي", "u:payments")],
-        [btn("🎛 تخصيص الإشارات", "u:preferences"),
-         btn("👤 ملفي وإحصائياتي", "u:profile")],
-        [btn("🔔 الإشعارات", "u:notifications"),
+        [btn("👤 ملفي وإحصائياتي", "u:profile"),
          btn("🤝 دعوة صديق", "u:referrals", style="success")],
-        [btn("🎧 الدعم الفني", "u:support"),
-         btn("❓ مركز المساعدة", "u:help")],
+        [btn("🔔 الإشعارات", "u:notifications"),
+         btn("🎧 الدعم والمساعدة", "u:support")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -154,6 +156,8 @@ def admin_hub_trading() -> InlineKeyboardMarkup:
     return admin_nav([
         [btn("📡 إدارة الإشارات", "a:signals", style="success"),
          btn("🧠 محرك السوق", "a:engine", style="primary")],
+        [btn("⚡ إشارة الآن", "a:signow", style="success"),
+         btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")],
         [btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary"),
          btn("🛡 إدارة المخاطر", "a:risk", style="danger")],
         [btn("🌐 الأسواق", "a:markets"),

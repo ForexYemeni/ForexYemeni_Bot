@@ -167,14 +167,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await afn.run(audit_log.log, uid, "admin_panel_open")
         return
-    from fysb.theme import header
+    from fysb.handlers.user_pages import build_user_home_card
+    home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "")
     await _send_guarded(
         update.effective_message.reply_text,
-        header("منصة التداول", "اختر وجهتك من لوحة الأزرار التفاعلية") +
-        "\n\n<b>الوحدات المتاحة:</b>\n"
-        "📊 لوحة الأداء · 📡 الإشارات المباشرة\n"
-        "💎 الباقات · 🧪 التداول التجريبي\n"
-        "🎧 الدعم الفني · ⚙️ التفضيلات",
+        home_text,
         kb.user_menu(),
     )
 

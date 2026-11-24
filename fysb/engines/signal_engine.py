@@ -286,7 +286,7 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
                     sent += 1
                 except Exception:
                     pass
-            if config.ADMIN_ID:
+            if config.ADMIN_ID and admin_accepts_market(old["symbol"]):
                 try:
                     await bot_send(config.ADMIN_ID, text)
                     sent += 1
@@ -323,6 +323,17 @@ def _market_row(symbol: str):
 def _norm_sym(s: str) -> str:
     """Canonical symbol key: uppercase, whitespace & '/' stripped ('XAU/USD' -> 'XAUUSD')."""
     return (s or "").strip().upper().replace("/", "")
+
+
+def admin_accepts_market(symbol: str) -> bool:
+    """v6.17.0: whether ADMIN_ID personally wants to receive signal/tracker
+    alerts for `symbol`. Empty/'ALL' = receive all enabled markets. Never
+    restricts users or broadcast channels."""
+    raw = (db.get_setting("admin_signal_markets", "") or "").strip()
+    if not raw or raw.upper() == "ALL":
+        return True
+    allowed = {_norm_sym(x) for x in raw.split(",") if x.strip()}
+    return (not allowed) or (_norm_sym(symbol) in allowed)
 
 
 def passes_personal_filters(u, sig_symbol: str, sig_tf: str, sig_strategy: str, sig_score) -> bool:

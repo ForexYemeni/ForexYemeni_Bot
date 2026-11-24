@@ -399,6 +399,11 @@ DEFAULT_SETTINGS = {
     # every button tap (guarantees every page opens visibly right below the
     # tap); "1" = opt-in in-place edit_text (toggleable live in Admin Settings).
     "ui_edit_in_place": "0",
+    # Admin personal signal-receive filter (v6.17.0): "" = receive ALL enabled
+    # markets; comma-separated symbols (e.g. "XAUUSD") = Admin receives personal
+    # signal/tracker alerts ONLY for those symbols while users & channels keep
+    # receiving every enabled market allowed by their plan/channel filters.
+    "admin_signal_markets": "",
 }
 
 SEED_MARKETS = [
@@ -562,6 +567,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
     """
     log_lines: list[str] = []
     with _migration_lock:
+        _settings_cache.clear()
         c = conn()
         try:
             if config.USE_PG:

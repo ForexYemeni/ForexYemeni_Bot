@@ -70,6 +70,87 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
     ]), bot)
 
 
+def _parse_user_markets(raw: str) -> list[str]:
+    out = []
+    for x in (raw or "").split(","):
+        s = x.strip().upper().replace("/", "")
+        if s and s != "ALL" and s not in out:
+            out.append(s)
+    return out
+
+
+def _format_user_markets(raw: str) -> str:
+    syms = _parse_user_markets(raw)
+    return "الكل (حسب باقتك)" if not syms else " · ".join(syms)
+
+
+async def build_user_home_card(uid: int, tg_name: str = "") -> str:
+    """v6.17.0: Luxury executive user home banner shared by /start and u:home."""
+    u = await afn.run(users_service.get_user, uid)
+    plan = await afn.run(subs.plan_for, uid)
+    state = await afn.run(subs.quota_state, uid)
+    plan_title = esc(plan["title"] if plan else "Free")
+    mkts_txt = esc(_format_user_markets((u["market"] if u else "") or ""))
+    notif_txt = "🟢 مفعّلة" if (u and u["notifications"]) else "🔕 متوقفة"
+    greet = f"أهلاً بك يا <b>{esc(tg_name)}</b>" if tg_name else "مرحباً بك في منصتك المؤسسية"
+    return (
+        f"👑 <b><u>{esc(config.BRAND)}</u></b>\n"
+        f"{greet}\n\n"
+        "<blockquote>"
+        f"▎💎 باقتك الحالية: <b>{plan_title}</b>\n"
+        f"▎📡 رصيد الإشارات اليومي: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+        f"▎🌐 أسواق إشاراتك: <b>{mkts_txt}</b>\n"
+        f"▎🔔 الإشعارات: <b>{notif_txt}</b>"
+        "</blockquote>\n"
+        "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول بالأسفل، "
+        "وخصّص أسواقك المفضلة بحرية من <b>🌐 أسواقي وتخصيصي</b>.</i>"
+    )
+
+
+async def _render_user_markets(q, uid: int, u, bot, notice: str = ""):
+    """v6.17.0: Multi-toggle user market subscriptions within their plan."""
+    plan = await afn.run(subs.plan_for, uid)
+    allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
+    rows = await afn.run(_live_market_rows)
+    available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+    selected = _parse_user_markets(u["market"] or "")
+    all_mode = (not selected)
+    active_set = set(available) if all_mode else (set(selected) & set(available))
+    if not all_mode and not active_set and available:
+        all_mode = True
+        active_set = set(available)
+
+    summary = "🌍 كل أسواق باقتك" if all_mode else " · ".join(sorted(active_set))
+    lines = [
+        "🌐 <b><u>أسواق إشاراتي</u></b>",
+        "<blockquote>"
+        f"▎💎 باقتك: <b>{esc(plan['title'])}</b> ({len(available)} سوق متاح)\n"
+        f"▎📌 الأسواق النشطة حالياً: <b>{esc(summary)}</b>\n"
+        "▎✨ اضغط أي سوق لتشغيله ✅ أو إيقافه ⚪ — مثلاً أغلق الذهب وأبقِ البيتكوين حسب باقتك."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>{esc(notice)}</i>")
+
+    rows_kb = [[kb.btn(
+        ("✅ " if all_mode else "🌍 ") + "تفعيل كل أسواق باقتي",
+        "u:setmarket:ALL",
+        style="success" if all_mode else "primary",
+    )]]
+    for i in range(0, len(available), 3):
+        rows_kb.append([
+            kb.btn(
+                ("✅ " if s in active_set else "⚪ ") + s,
+                f"u:togmarket:{s}",
+                style="success" if s in active_set else "",
+            )
+            for s in available[i:i + 3]
+        ])
+    rows_kb.append([kb.btn("💎 ترقية الباقة لمزيد من الأسواق", "u:plans", style="primary")])
+    rows_kb.append([kb.btn("↩️ التخصيص", "u:preferences")])
+    await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+
+
 async def user_page(q, action: str, uid: int, context) -> None:
     bot = context.bot
     # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
@@ -82,7 +163,8 @@ async def user_page(q, action: str, uid: int, context) -> None:
 
     # ---------- Home / profile ----------
     if action == "home":
-        await render(q, f"👑 <b>{config.BRAND}</b>\nالقائمة الرئيسية:", kb.user_menu(), bot)
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip())
+        await render(q, home_text, kb.user_menu(), bot)
 
     elif action == "profile":
         profile = await afn.run(users_service.profile_summary, uid)
@@ -99,8 +181,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         total, active, wins, delivered, anl_used = await afn.run(_dashboard_counts, uid)
         plan_title = esc(p["title"] if p else "Free")
         anl_quota = int(p["max_analyses_per_day"] or 0) if p else 0
-        mrow = await afn.run(_market_row, u["market"])
-        mcat = (mrow or {}).get("category") if mrow else instruments.spec(u["market"]).category
+        first_mkt = (_parse_user_markets(u["market"] or "") or ["XAUUSD"])[0]
+        mrow = await afn.run(_market_row, first_mkt)
+        mcat = (mrow or {}).get("category") if mrow else instruments.spec(first_mkt).category
         from fysb.engines.market_data import market_state
         mstate = market_state(mcat)
         mstate_txt = "🟢 مفتوح" if mstate else ("🔴 مغلق" if mstate is False else "🟡 غير محدد")
@@ -111,7 +194,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 f"🔬 <b>التحليلات:</b>\n"
                 f"▎استهلاك اليوم: <b>{anl_used}/{anl_quota}</b>\n\n"
                 f"🛡 وضع المنصة: <b>{esc(await afn.run(db.get_setting, 'trading_mode', 'SIGNALS_ONLY'))}</b>\n"
-                f"🌍 أفضلك ({esc(u['market'])}): <b>{mstate_txt}</b>\n"
+                f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
         await render(q, body, kb.user_nav([
             [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
@@ -440,48 +523,68 @@ async def user_page(q, action: str, uid: int, context) -> None:
     # ---------- Preferences ----------
     elif action == "preferences":
         plan = await afn.run(subs.plan_for, uid)
-        mkt_pref = "الكل (حسب باقتك)" if not (u["market"] or "").strip() else esc(u["market"])
+        mkt_pref = esc(_format_user_markets(u["market"] or ""))
         tf_pref = "الكل (حسب باقتك)" if not (u["timeframe"] or "").strip() else tf_name(u["timeframe"])
-        body = (f"🎛 <b>تخصيص الإشارات</b>\n\n"
+        body = (f"🎛 <b><u>أسواقي وتخصيص الإشارات</u></b>\n\n"
                 f"<blockquote>"
-                f"▎🌐 السوق المفضل: <b>{mkt_pref}</b>\n"
+                f"▎🌐 أسواق الإشارات: <b>{mkt_pref}</b>\n"
                 f"▎⏱ الإطار المفضل: <b>{tf_pref}</b>\n"
                 f"▎🧠 الاستراتيجية المفضلة: <b>{esc(strategy_name(u['strategy']))}</b>\n"
                 f"▎⭐ الجودة الدنيا: <b>{u['min_score']}/100</b>\n"
                 f"▎🔔 الإشعارات: <b>{'مفعلة' if u['notifications'] else 'متوقفة'}</b>\n"
                 f"</blockquote>\n"
-                f"<i>الخيارات مقيدة بمزايا باقتك ({esc(plan['title'])}) — والخيار «الكل» يعني استلام كل ما تسمح به باقتك.</i>")
+                f"<i>الخيارات مقيدة بمزايا باقتك ({esc(plan['title'])}) — ويمكنك تفعيل أو إيقاف أي سوق فردياً من «🌐 أسواق إشاراتي».</i>")
         await render(q, body, kb.user_nav([
-            [kb.btn("🌐 السوق", "u:markets"), kb.btn("⏱ الإطار", "u:timeframes")],
+            [kb.btn("🌐 أسواق إشاراتي", "u:markets", style="primary"), kb.btn("⏱ الإطار", "u:timeframes")],
             [kb.btn("🧠 الاستراتيجية", "u:strategies"), kb.btn("⭐ الجودة", "u:quality")],
             [kb.btn("🔔 الإشعارات", "u:notifications")],
         ]), bot)
 
     elif action == "markets":
+        await _render_user_markets(q, uid, u, bot)
+
+    elif action.startswith("togmarket:"):
+        symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
         plan = await afn.run(subs.plan_for, uid)
-        allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
+        allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
+        if symbol not in allowed:
+            await _upsell(q, uid, bot, "هذا السوق غير متاح في باقتك")
+            return
         rows = await afn.run(_live_market_rows)
-        available = [r["symbol"] for r in rows if r["symbol"].upper() in allowed] or allowed
-        rows_kb = [[kb.btn("🌍 الكل (حسب باقتك)", "u:setmarket:ALL")]]
-        rows_kb += [[kb.btn(("✅ " if s == u["market"] else "") + s, f"u:setmarket:{s}") for s in available[i:i + 3]]
-                    for i in range(0, len(available), 3)]
-        rows_kb.append([kb.btn("↩️ التفضيلات", "u:preferences")])
-        await render(q, "🌐 <b>اختر السوق المفضل</b>\nمقيد بالأسواق المتاحة في باقتك والموثقة لدى المزود:",
-                     kb.user_nav(rows_kb), bot)
+        available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+        selected = _parse_user_markets(u["market"] or "")
+        cur = list(available) if not selected else [s for s in selected if s in available]
+        if not cur:
+            cur = list(available)
+        notice = ""
+        if symbol in cur:
+            if len(cur) <= 1:
+                notice = "يجب إبقاء سوق واحد على الأقل نشطاً (ولإيقاف الإشارات مؤقتاً استخدم 🔔 الإشعارات)."
+            else:
+                cur = [s for s in cur if s != symbol]
+                notice = f"تم إيقاف إشارات {symbol} على حسابك."
+        else:
+            cur.append(symbol)
+            notice = f"تم تفعيل إشارات {symbol} على حسابك."
+        new_val = "" if set(cur) >= set(available) else ",".join(sorted(set(cur)))
+        await afn.run(users_service.set_preference, uid, "market", new_val, {"market"})
+        u2 = await afn.run(users_service.get_user, uid)
+        await _render_user_markets(q, uid, u2 or u, bot, notice=notice)
 
     elif action.startswith("setmarket:"):
-        symbol = action.split(":", 1)[1]
+        symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
         plan = await afn.run(subs.plan_for, uid)
-        allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
+        allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
         if symbol == "ALL":
             await afn.run(users_service.set_preference, uid, "market", "", {"market"})
-            await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من الأسواق مباشرة.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
+            u2 = await afn.run(users_service.get_user, uid)
+            await _render_user_markets(q, uid, u2 or u, bot, notice="✅ تم تفعيل جميع أسواق باقتك بنجاح.")
             return
-        if symbol.upper() not in allowed:
+        if symbol not in allowed:
             await _upsell(q, uid, bot, "هذا السوق غير متاح في باقتك")
             return
         await afn.run(users_service.set_preference, uid, "market", symbol, {"market"})
-        await render(q, f"✅ تم حفظ السوق المفضل: <b>{esc(symbol)}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
+        await render(q, f"✅ تم حفظ السوق المفضل: <b>{esc(symbol)}</b>", kb.user_nav([[kb.btn("🌐 أسواق إشاراتي", "u:markets")], [kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "timeframes":
         plan = await afn.run(subs.plan_for, uid)
@@ -1025,6 +1128,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         body.append("\n<b>لفتح تذكرة:</b> أرسل رسالتك هنا كنص واحد، ويمكن إرفاق صورة بعد الرسالة.")
         mine = await afn.run(support_service.user_tickets, uid)
         rows_kb = [[kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")] for t in mine]
+        rows_kb.append([kb.btn("❓ مركز المساعدة", "u:help", style="primary")])
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     elif action.startswith("ticket:"):

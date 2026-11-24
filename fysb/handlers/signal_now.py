@@ -190,6 +190,12 @@ def _prefix(is_admin: bool) -> str:
     return "a" if is_admin else "u"
 
 
+def _strat_label(code: str) -> str:
+    """v6.17.0: luxury Arabic label for strategy code, including 'ALL'."""
+    c = (code or "").strip().upper()
+    return "جميع المنهجيات (أقوى فرصة)" if c == "ALL" else c
+
+
 async def pick_style(q, uid: int, context, bot, style: str) -> None:
     d = context.user_data.get(DRAFT_KEY) or {}
     if not d:
@@ -254,10 +260,19 @@ async def pick_tf(q, uid: int, context, bot, tf: str) -> None:
         return
     d["strategies"] = strategies
     context.user_data[DRAFT_KEY] = d
-    rows = [[kb.btn(f"🧠 {s}", f"{_prefix(d['is_admin'])}:signowstrat:{s}") for s in strategies[i:i + 3]]
-            for i in range(0, len(strategies), 3)]
-    body = (f"✅ {esc(d.get('symbol', ''))} · ⏱ {tf_name(tf)} · {STYLE_AR.get(d.get('style', ''), '')}\n"
-            f"🧠 <b>المرحلة 4/4 — اختر المنهجية (المفعلة والمختبرة فعلاً):</b>")
+    rows = [[kb.btn(
+        f"✨ جميع المنهجيات — أقوى فرصة تلقائياً ({len(strategies)})",
+        f"{_prefix(d['is_admin'])}:signowstrat:ALL",
+        style="success",
+    )]]
+    rows += [[kb.btn(f"🧠 {s}", f"{_prefix(d['is_admin'])}:signowstrat:{s}") for s in strategies[i:i + 3]]
+             for i in range(0, len(strategies), 3)]
+    body = (f"✅ <b>{esc(d.get('symbol', ''))}</b> · ⏱ <b>{tf_name(tf)}</b> · <b>{STYLE_AR.get(d.get('style', ''), '')}</b>\n"
+            "🧠 <b><u>المرحلة 4/4 — اختر المنهجية (المفعلة والمختبرة فعلاً):</u></b>\n"
+            "<blockquote>"
+            "▎✨ <b>جميع المنهجيات:</b> يفحص المحرك كل المنهجيات المفعّلة والمسموحة في باقتك معاً ويختار أقوى فرصة بأعلى جودة تلقائياً.\n"
+            "▎🎯 أو اختر منهجية محددة من الأسفل للفحص الدقيق عليها فقط."
+            "</blockquote>")
     await _render(q, body, kb.user_nav(rows) if not d.get("is_admin") else kb.admin_nav(rows), bot)
 
 
@@ -297,23 +312,32 @@ async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
 
 async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     d = context.user_data.get(DRAFT_KEY) or {}
-    if not d or d.get("stage") != "strategy" or strategy.upper() not in (d.get("strategies") or []):
+    allowed_strats = list(d.get("strategies") or [])
+    strat_u = (strategy or "").strip().upper()
+    if not d or d.get("stage") != "strategy" or (strat_u != "ALL" and strat_u not in allowed_strats):
         return await open_flow(q, uid, context, bot, uid == config.ADMIN_ID)
-    strategy = strategy.upper()
+    strategy = strat_u
     is_admin = bool(d.get("is_admin"))
     symbol, tf = d["symbol"], d["tf"]
     style = d.get("style", "")
+    # v6.17.0: 'ALL' scans ALL enabled+verified methodologies allowed by the
+    # user's plan (or all enabled+verified for admin) and picks the strongest.
+    only_strats = allowed_strats if strategy == "ALL" else [strategy]
     # v6.14.0 FIX: preserve DRAFT_KEY with the chosen strategy so that when
     # NO_SETUP occurs, tapping «بحث تلقائي» immediately creates the watcher!
     d["strategy"] = strategy
     d["stage"] = "ready_watch"
     context.user_data[DRAFT_KEY] = d
-    await _render(q, "🚀 <b>جارٍ تشغيل المحرك الحقيقي على اختيارك…</b>\n"
+    scan_desc = (
+        f"جميع المنهجيات ({len(only_strats)} منهجية) لاختيار أقوى فرصة…"
+        if strategy == "ALL" else f"منهجية {esc(strategy)}…"
+    )
+    await _render(q, f"🚀 <b>جارٍ تشغيل المحرك الحقيقي على {scan_desc}</b>\n"
                      "<i>السوق والمنهجية والإطار تُفحص فعلياً — لا إشارات مصطنعة أبداً.</i>", None, bot)
     sig_source = "AUTO" if is_admin else "SIGNAL_NOW"
     try:
         res = await asyncio.to_thread(
-            generate_signal, symbol, tf, False, [strategy], sig_source, uid
+            generate_signal, symbol, tf, False, only_strats, sig_source, uid
         )
     except Exception as e:
         log.warning("signow generate failed: %s", type(e).__name__)
@@ -342,9 +366,14 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
                 if delivered else
                 "▎⚠️ تعذر تسليم الإشارة (تأكد من توفر رصيد في حدك اليومي)"
             )
+        win_strat = sig.get("strategy") or strategy
+        strat_disp = (
+            f"جميع المنهجيات ← الفائزة: {esc(win_strat)}"
+            if strategy == "ALL" else esc(win_strat)
+        )
         note = (f"✅ <b><u>ولدت إشارة حقيقية 100% — الإشارة #{seq_of(sig['id'])}</u></b>\n"
                 "<blockquote>"
-                f"▎🌐 {esc(symbol)} · ⏱ {tf_name(tf)} · 🧠 {esc(strategy)} · {STYLE_AR.get(style, '')}\n"
+                f"▎🌐 {esc(symbol)} · ⏱ {tf_name(tf)} · 🧠 {strat_disp} · {STYLE_AR.get(style, '')}\n"
                 f"▎⭐ الجودة: <b>{res.get('score', 0)}/100</b>\n"
                 f"{delivery_line}\n"
                 "▎📡 التتبع اللحظي بدأ من الآن حتى الأهداف أو الوقف — أول بطاقة وصلتك تُحدَّث حية"
@@ -355,11 +384,12 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     if res.get("status") == "NO_SETUP":
         rows = [[kb.btn(f"⏰ بحث تلقائي كل {p} دقيقة", f"{_prefix(is_admin)}:signowwatch:{p}", style="primary")]
                 for p in WATCH_PERIODS]
-        body = ("⛔ <b>لا توجد إشارة مؤهلة الآن — ظروف السوق لم تحقق " + esc(strategy) + "</b>\n"
+        strat_ar = esc(_strat_label(strategy))
+        body = (f"⛔ <b>لا توجد إشارة مؤهلة الآن — ظروف السوق لم تحقق {strat_ar}</b>\n"
                 "<blockquote>"
                 "▎🚫 المحرك يرفض تصنيع إشارات — هذه أمينة المنصة 100%.\n"
                 "▎🔔 <b>البحث التلقائي الملكي:</b> اختر الفترة بالأسفل وسيبقى المحرك يفحص "
-                f"<b>{esc(symbol)} · {tf_name(tf)} · {esc(strategy)}</b> كل مرة حتى تصدر إشارة حقيقية، "
+                f"<b>{esc(symbol)} · {tf_name(tf)} · {strat_ar}</b> كل مرة حتى تصدر إشارة حقيقية، "
                 "ثم يوقف البحث ويرسلها لك مباشرة.\n"
                 "▎⌛ البحث التلقائي يعمل حتى 24 ساعة كحد أقصى ثم يتوقف بأدب، ويمكنك إلغاؤه في أي لحظة."
                 "</blockquote>")
@@ -383,7 +413,7 @@ async def start_watch(q, uid: int, context, bot, minutes: int) -> None:
     w = await afn.run(active_watcher, uid)
     body = ("⏰ <b><u>البحث التلقائي الملكي مفعّل</u></b>\n"
             "<blockquote>"
-            f"▎🎯 الهدف: إشارة حقيقية على <b>{esc(symbol)} · {tf_name(tf)} · {esc(strategy)}</b>\n"
+            f"▎🎯 الهدف: إشارة حقيقية على <b>{esc(symbol)} · {tf_name(tf)} · {esc(_strat_label(strategy))}</b>\n"
             f"▎⏲ الفترة: كل <b>{minutes} دقيقة</b> يفحص المحرك السوق فعلياً\n"
             f"▎⌛ يتوقف تلقائياً بعد {WATCH_MAX_HOURS} ساعة أو فور صدور الإشارة\n"
             f"▎🚫 لا تصنيع — إن لم تتحقق الشروط يبقى الصمت أمانة"
@@ -416,9 +446,17 @@ async def run_due_watchers(app) -> None:
             continue
         is_admin_w = (uid == config.ADMIN_ID)
         sig_source = "AUTO" if is_admin_w else "SIGNAL_NOW"
+        w_strat = (w["strategy"] or "").strip().upper()
+        if w_strat == "ALL":
+            only_strats = (await afn.run(choices_for, uid, is_admin_w))["strategies"]
+            if not only_strats:
+                await afn.run(reschedule_watcher, w["id"], w["interval_minutes"])
+                continue
+        else:
+            only_strats = [w_strat]
         try:
             res = await asyncio.to_thread(
-                generate_signal, w["symbol"], w["timeframe"], False, [w["strategy"]], sig_source, uid
+                generate_signal, w["symbol"], w["timeframe"], False, only_strats, sig_source, uid
             )
         except Exception as e:
             log.warning("watcher %s generation failed: %s", w["id"], type(e).__name__)

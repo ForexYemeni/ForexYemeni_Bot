@@ -194,31 +194,32 @@ async def market_engine_loop(app):
                         if result["status"] == "SIGNAL_CREATED":
                             sig = await afn.run(_signal_row_by_id, result["signal_id"])
                             if sig:
-                                from fysb.engines.signal_engine import emit_to_users
+                                from fysb.engines.signal_engine import admin_accepts_market, emit_to_users
                                 stats = await emit_to_users(dict(sig), bot_send)
                                 log.info("auto signal #%s emitted: %s", result["signal_id"], stats)
-                                try:
-                                    # v6.8.0: the admin receives the REAL full card —
-                                    # the same royal board the users received, plus
-                                    # delivery counters. v6.8.1: the number shown is
-                                    # the REAL sequential number (same as the
-                                    # signals center), never the internal id.
-                                    from fysb.engines.tracker import seq_of
-                                    from fysb.ui.cards import render_signal_card
-                                    mrow = await afn.run(_market_row, m["symbol"])
-                                    seq = await afn.run(seq_of, result["signal_id"])
-                                    card = render_signal_card(
-                                        dict(sig), user_view=False,
-                                        row=dict(mrow) if mrow else None)
-                                    card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
-                                             f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
-                                             f"▎📤 التسليم: {stats['sent']} مستلم"
-                                             f" · قنوات: {stats.get('channels_sent', 0)}"
-                                             f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
-                                             f" · فشل: {stats.get('failed', 0)}</blockquote>")
-                                    await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
-                                except Exception:
-                                    pass
+                                if await afn.run(admin_accepts_market, m["symbol"]):
+                                    try:
+                                        # v6.8.0: the admin receives the REAL full card —
+                                        # the same royal board the users received, plus
+                                        # delivery counters. v6.8.1: the number shown is
+                                        # the REAL sequential number (same as the
+                                        # signals center), never the internal id.
+                                        from fysb.engines.tracker import seq_of
+                                        from fysb.ui.cards import render_signal_card
+                                        mrow = await afn.run(_market_row, m["symbol"])
+                                        seq = await afn.run(seq_of, result["signal_id"])
+                                        card = render_signal_card(
+                                            dict(sig), user_view=False,
+                                            row=dict(mrow) if mrow else None)
+                                        card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
+                                                 f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
+                                                 f"▎📤 التسليم: {stats['sent']} مستلم"
+                                                 f" · قنوات: {stats.get('channels_sent', 0)}"
+                                                 f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
+                                                 f" · فشل: {stats.get('failed', 0)}</blockquote>")
+                                        await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
+                                    except Exception:
+                                        pass
                     except Exception as e:
                         log.warning("engine scan failed for %s: %s", m["symbol"], type(e).__name__)
                     await asyncio.sleep(config.MARKET_SYMBOL_DELAY_SECONDS)

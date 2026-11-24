@@ -379,12 +379,13 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
         + f"</blockquote>\n"
         + f"<i>أرقام موثقة من أسعار السوق الفعلية — إدارة صفقتك بيدك، والتنبيه لا ينفذ في حسابك تلقائياً إلا إذا فعّلت التنفيذ الآلي في حسابك التجريبي.</i>"
     )
+    from fysb.engines.signal_engine import admin_accepts_market
     with db.conn() as c:
         refs = [dict(r) for r in c.execute(
             "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
     notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
              for r in refs]
-    if cfg.ADMIN_ID:
+    if cfg.ADMIN_ID and admin_accepts_market(symbol):
         notes.append((cfg.ADMIN_ID, text))
     edits = _card_refresh_edits(sig, live_px, _delivery_refs(sig["id"]))
     return notes, edits
@@ -702,9 +703,10 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     # v6.10.0 — CHANNELS too: a channel delivery row (user_id=0, chat_id=-100…)
     # routes to its chat — the owner demanded FULL channel alerting from birth
     # to the final close, not just the first card.
+    from fysb.engines.signal_engine import admin_accepts_market
     notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
              for r in refs]
-    if config.ADMIN_ID:
+    if config.ADMIN_ID and admin_accepts_market(sig["symbol"]):
         notes.append((config.ADMIN_ID, text))
     return notes, pips_result, edits
 

@@ -70,8 +70,9 @@ async def _render_signals_center(q, bot, cat: str = "all", page: int = 0):
     rows_kb.insert(0, cat_row)
     rows_kb.insert(1, cat_row2)
     rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
-    rows_kb.append([kb.btn("🚀 إشارة الآن (بمراحل)", "a:signow"), kb.btn("➕ نشر إشارة يدوية", "a:newsignal")])
-    rows_kb.append([kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow"), kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
+    rows_kb.append([kb.btn("⚡ إشارة الآن (بمراحل)", "a:signow", style="success"), kb.btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")])
+    rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
+    rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
     await render(q, f"📡 <b><u>مركز إدارة الإشارات</u></b> — {title}\n"
                     f"<blockquote>▎الإجمالي في هذا التصنيف: <b>{total}</b> · صفحة {page + 1}\n"
                     "▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات</blockquote>",
@@ -580,7 +581,122 @@ async def admin_markets(q, uid, context, bot):
             pair, unverified = unverified[:2], unverified[2:]
             rows_kb.append([kb.btn(f"✅ تحقق {r['symbol']} من المزود", f"a:market_verify:{r['symbol']}") for r in pair])
     rows_kb.append([kb.btn("➕ إضافة سوق جديد", "a:market_add")])
+    rows_kb.append([kb.btn("🎯 أسواق إشارات حساب الإدارة", "a:adminmkts", style="primary")])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+# --- Admin personal signal-receive market filter (v6.17.0) ----------------------
+def _parse_csv_syms(raw: str) -> list[str]:
+    out = []
+    for x in (raw or "").split(","):
+        s = x.strip().upper().replace("/", "")
+        if s and s != "ALL" and s not in out:
+            out.append(s)
+    return out
+
+
+async def admin_signal_markets(q, uid, context, bot, notice: str = ""):
+    """v6.17.0: multi-toggle market filter for ADMIN_ID's own personal signal &
+    tracker alerts — NEVER disables any market for users or channels."""
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    raw = (await afn.run(db.get_setting, "admin_signal_markets", "") or "").strip()
+    selected = _parse_csv_syms(raw)
+    all_mode = (not selected)
+    active_set = set(live) if all_mode else (set(selected) & set(live))
+    if not all_mode and not active_set and live:
+        # fallback cleanly if previously-selected markets were disabled
+        all_mode = True
+        active_set = set(live)
+
+    summary = "🌍 جميع الأسواق المفعّلة" if all_mode else " · ".join(sorted(active_set))
+    lines = [
+        "🎯 <b><u>أسواق إشارات حساب الإدارة</u></b>",
+        "<blockquote>"
+        f"▎📌 ما يصلك حالياً على حسابك: <b>{esc(summary)}</b>\n"
+        f"▎🌐 إجمالي الأسواق المفعّلة على المنصة: <b>{len(live)}</b>\n"
+        "▎✨ هذا الإعداد يتحكم بما يصلك <b>أنت شخصياً</b> من الإشارات وتحديثات التتبع فقط — "
+        "ولا يغلق أي سوق على المستخدمين أو القنوات."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>{esc(notice)}</i>")
+    if not live:
+        lines.append("⚠️ لا توجد أسواق مفعّلة وموثّقة حالياً — فعّل الأسواق من قسم 🌐 الأسواق أولاً.")
+    else:
+        lines.append("<b>اضغط أي سوق لتشغيله ✅ أو إيقافه ⚪ على حساب الإدارة:</b>")
+
+    rows_kb = []
+    rows_kb.append([kb.btn(
+        ("✅ " if all_mode else "🌍 ") + "استلام جميع الأسواق المفعّلة",
+        "a:adminmktsall",
+        style="success" if all_mode else "primary",
+    )])
+    if "XAUUSD" in live:
+        gold_only = (not all_mode and active_set == {"XAUUSD"})
+        rows_kb.append([kb.btn(
+            ("⭐ " if gold_only else "🥇 ") + "تحديد الذهب فقط (XAUUSD)",
+            "a:adminmktsonly:XAUUSD",
+            style="success" if gold_only else "primary",
+        )])
+    for i in range(0, len(live), 3):
+        rows_kb.append([
+            kb.btn(
+                ("✅ " if s in active_set else "⚪ ") + s,
+                f"a:adminmktstog:{s}",
+                style="success" if s in active_set else "",
+            )
+            for s in live[i:i + 3]
+        ])
+    rows_kb.append([kb.btn("📡 مركز الإشارات", "a:signals"), kb.btn("🌐 إدارة الأسواق", "a:markets")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_markets_toggle(q, uid, context, bot, symbol: str):
+    symbol = (symbol or "").strip().upper().replace("/", "")
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    if symbol not in live:
+        await admin_signal_markets(q, uid, context, bot, notice=f"السوق {symbol} غير مفعّل حالياً.")
+        return
+    raw = (await afn.run(db.get_setting, "admin_signal_markets", "") or "").strip()
+    selected = _parse_csv_syms(raw)
+    cur = list(live) if not selected else [s for s in selected if s in live]
+    if not cur:
+        cur = list(live)
+    notice = ""
+    if symbol in cur:
+        if len(cur) <= 1:
+            notice = "يجب إبقاء سوق واحد على الأقل نشطاً (أو أوقف دفع الإشارات من الإشعارات)."
+        else:
+            cur = [s for s in cur if s != symbol]
+            notice = f"تم إيقاف استلام إشارات {symbol} على حساب الإدارة (تبقى مفعّلة للمستخدمين)."
+    else:
+        cur.append(symbol)
+        notice = f"تم تفعيل استلام إشارات {symbol} على حساب الإدارة."
+    new_val = "" if set(cur) >= set(live) else ",".join(sorted(set(cur)))
+    await afn.run(db.set_setting, "admin_signal_markets", new_val)
+    await afn.run(audit_log.log, uid, f"admin_signal_markets:{new_val or 'ALL'}")
+    await admin_signal_markets(q, uid, context, bot, notice=notice)
+
+
+async def admin_signal_markets_only(q, uid, context, bot, symbol: str):
+    symbol = (symbol or "").strip().upper().replace("/", "")
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    if symbol not in live:
+        await admin_signal_markets(q, uid, context, bot, notice=f"السوق {symbol} غير مفعّل حالياً.")
+        return
+    new_val = "" if live == [symbol] else symbol
+    await afn.run(db.set_setting, "admin_signal_markets", new_val)
+    await afn.run(audit_log.log, uid, f"admin_signal_markets:only:{symbol}")
+    await admin_signal_markets(
+        q, uid, context, bot,
+        notice=f"تم ضبط حساب الإدارة لاستلام إشارات {symbol} فقط (بينما باقي الأسواق تعمل للمستخدمين والقنوات).",
+    )
+
+
+async def admin_signal_markets_all(q, uid, context, bot):
+    await afn.run(db.set_setting, "admin_signal_markets", "")
+    await afn.run(audit_log.log, uid, "admin_signal_markets:ALL")
+    await admin_signal_markets(q, uid, context, bot, notice="تم تفعيل استلام جميع الأسواق المفعّلة على حساب الإدارة.")
 
 
 async def admin_market_toggle(q, uid, context, bot, symbol: str):

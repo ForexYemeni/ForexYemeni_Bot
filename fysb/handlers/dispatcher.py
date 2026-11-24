@@ -380,6 +380,14 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_market_toggle(q, uid, context, bot, arg)
     elif act == "market_verify":
         await admin_trading.admin_market_verify(q, uid, context, bot, arg)
+    elif act == "adminmkts":
+        await admin_trading.admin_signal_markets(q, uid, context, bot)
+    elif act == "adminmktstog":
+        await admin_trading.admin_signal_markets_toggle(q, uid, context, bot, arg)
+    elif act == "adminmktsonly":
+        await admin_trading.admin_signal_markets_only(q, uid, context, bot, arg)
+    elif act == "adminmktsall":
+        await admin_trading.admin_signal_markets_all(q, uid, context, bot)
     elif act == "market_add":
         await admin_trading.admin_market_add(q, uid, context, bot)
     elif act == "timeframes":

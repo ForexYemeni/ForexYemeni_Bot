@@ -312,8 +312,20 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signals(q, uid, context, bot, int(arg or 0))
     elif act == "sigcat":
         await admin_trading.admin_signals_cat(q, uid, context, bot, arg, int(arg2 or 0))
+    elif act == "sigday":
+        # a:sigday:<scope>:<cat>:<page>
+        day_cat = "all"
+        day_page = 0
+        if arg2:
+            sub = arg2.split(":", 1)
+            day_cat = sub[0] or "all"
+            if len(sub) > 1 and sub[1].isdigit():
+                day_page = int(sub[1])
+        await admin_trading.admin_signals_day(q, uid, context, bot, arg or "today", day_cat, day_page)
+    elif act == "sigdates":
+        await admin_trading.admin_signals_dates(q, uid, context, bot, int(arg or 0))
     elif act == "sigpl":
-        await admin_trading.admin_signal_pl(q, uid, context, bot)
+        await admin_trading.admin_signal_pl(q, uid, context, bot, arg or "all")
     elif act == "signow":
         from fysb.handlers import signal_now
         await signal_now.open_flow(q, uid, context, bot, is_admin=True)

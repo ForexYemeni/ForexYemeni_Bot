@@ -34,69 +34,150 @@ SIG_CATS = {
 }
 
 
-def _signals_page_body(statuses: tuple, page: int, size: int = 8) -> tuple[str, list, int]:
-    with db.conn() as c:
-        if statuses:
-            marks = ",".join("?" for _ in statuses)
-            total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE status IN ({marks})", statuses).fetchone()["n"]
-            rows = c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                 FROM signals WHERE status IN ({marks})
-                                 ORDER BY id DESC LIMIT ? OFFSET ?""",
-                             (*statuses, size, page * size)).fetchall()
-        else:
-            total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-            rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                 FROM signals ORDER BY id DESC LIMIT ? OFFSET ?""",
-                             (size, page * size)).fetchall()
-    rows_kb = [[kb.btn(render_signal_compact(dict(r)), f"a:signalview:{r['id']}")] for r in rows]
-    return total, rows_kb, len(rows)
+def _signals_page_body(statuses: tuple, page: int, size: int = 8, scope: str = "all") -> tuple[int, list, int, dict]:
+    from fysb.services import signal_archive as _sa
+    total, rows, summary = _sa.admin_signals_page(scope=scope, statuses=statuses, page=page, size=size)
+    rows_kb = [[kb.btn(render_signal_compact(r), f"a:signalview:{r['id']}")] for r in rows]
+    return total, rows_kb, len(rows), summary
 
 
-async def _render_signals_center(q, bot, cat: str = "all", page: int = 0):
-    title, st_csv, tab = SIG_CATS.get(cat, SIG_CATS["all"])
+async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope: str = "today"):
+    from fysb.services import signal_archive as _sa
+    title, st_csv, _tab = SIG_CATS.get(cat, SIG_CATS["all"])
     statuses = tuple(s for s in st_csv.split(",") if s)
-    total, rows_kb, shown = await afn.run(_signals_page_body, statuses, page)
+    size = 8
+    counts = await afn.run(_sa.admin_scope_counts)
+    total, rows_kb, shown, summary = await afn.run(_signals_page_body, statuses, page, size, scope)
+    total_pages = max(1, (total + size - 1) // size)
+
+    # Pagination row
     nav_row = []
     if page > 0:
-        nav_row.append(kb.btn("◀️", f"a:sigcat:{cat}:{page - 1}"))
-    if shown == 8:
-        nav_row.append(kb.btn("▶️", f"a:sigcat:{cat}:{page + 1}"))
+        nav_row.append(kb.btn("◀️ السابق", f"a:sigday:{scope}:{cat}:{page - 1}"))
+    if (page + 1) * size < total:
+        nav_row.append(kb.btn("التالي ▶️", f"a:sigday:{scope}:{cat}:{page + 1}"))
     if nav_row:
         rows_kb.append(nav_row)
-    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+
+    # Row 0: Royal Date Scope Tabs (Today / Yesterday / By Date / All)
+    day_iso = _sa.resolve_scope_date(scope)
+    is_today = scope == "today"
+    is_yest = scope == "yesterday"
+    is_custom_date = bool(day_iso) and not is_today and not is_yest
+    is_all = scope == "all"
+    date_row = [
+        kb.btn(("◉ " if is_today else "") + f"📅 اليوم ({counts['today']})", f"a:sigday:today:{cat}:0",
+               style="primary" if is_today else None),
+        kb.btn(("◉ " if is_yest else "") + f"📆 أمس ({counts['yesterday']})", f"a:sigday:yesterday:{cat}:0",
+               style="primary" if is_yest else None),
+        kb.btn(("◉ " if is_custom_date else "") + f"🗓 بالتاريخ ({counts['days']})", "a:sigdates:0",
+               style="primary" if is_custom_date else None),
+        kb.btn(("◉ " if is_all else "") + f"🗂 الكل ({counts['total']})", f"a:sigday:all:{cat}:0",
+               style="primary" if is_all else None),
+    ]
+    # Category pills bound to active date scope
+    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
                for key in list(SIG_CATS)[:4]]
-    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
                 for key in list(SIG_CATS)[4:]]
-    rows_kb.insert(0, cat_row)
-    rows_kb.insert(1, cat_row2)
-    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
-    rows_kb.append([kb.btn("⚡ إشارة الآن (بمراحل)", "a:signow", style="success"), kb.btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")])
+    rows_kb.insert(0, date_row)
+    rows_kb.insert(1, cat_row)
+    rows_kb.insert(2, cat_row2)
+
+    pl_cb = f"a:sigpl:{day_iso}" if is_custom_date else ("a:sigpl" if is_all else f"a:sigpl:{scope}")
+    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl"),
+                    kb.btn("📊 محاسبة هذا اليوم", pl_cb)] if not is_all
+                   else [kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
+    rows_kb.append([kb.btn("⚡ إشارة الآن (بمراحل)", "a:signow", style="success"),
+                    kb.btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")])
     rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
     rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
-    await render(q, f"📡 <b><u>مركز إدارة الإشارات</u></b> — {title}\n"
-                    f"<blockquote>▎الإجمالي في هذا التصنيف: <b>{total}</b> · صفحة {page + 1}\n"
-                    "▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات</blockquote>",
-                 kb.admin_nav(rows_kb), bot)
+
+    if is_today:
+        scope_label = f"{_sa.ar_date_label(_sa.today_iso())} · {title}"
+    elif is_yest:
+        scope_label = f"{_sa.ar_date_label(_sa.yesterday_iso())} · {title}"
+    elif is_custom_date:
+        scope_label = f"{_sa.ar_date_label(day_iso)} · {title}"
+    else:
+        scope_label = f"🗂 جميع التواريخ · {title}"
+
+    extra = ["▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات."]
+    if shown == 0:
+        if is_today:
+            extra.append("▎✨ لا توجد إشارات مطابقة اليوم حتى الآن — جرّب «📆 أمس» أو «🗓 بالتاريخ» أو «🗂 الكل».")
+        else:
+            extra.append("▎لا توجد إشارات في هذا النطاق.")
+
+    body = _sa.luxury_day_header("مركز إدارة الإشارات", scope_label, summary, page, total_pages, extra)
+    await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
 async def admin_signals(q, uid, context, bot, page: int = 0):
-    await _render_signals_center(q, bot, "all", page)
+    await _render_signals_center(q, bot, "all", page, scope="today")
 
 
 async def admin_signals_cat(q, uid, context, bot, cat: str, page: int = 0):
-    await _render_signals_center(q, bot, cat, page)
+    await _render_signals_center(q, bot, cat, page, scope="all")
 
 
-async def admin_signal_pl(q, uid, context, bot):
-    """v6.10.0 (owner report 5) — REAL profit/loss accounting per instrument,
-    from the banked pips of closed signals only (TP1/TP2/TP3/SL rows). Every
-    USD figure uses the same 0.01-lot ruler the alerts use — no invented wins."""
+async def admin_signals_day(q, uid, context, bot, scope: str = "today", cat: str = "all", page: int = 0):
+    await _render_signals_center(q, bot, cat, page, scope=scope or "today")
+
+
+async def admin_signals_dates(q, uid, context, bot, page: int = 0):
+    """v6.20.4 — Luxury Trading Journal Calendar for Admin Signals."""
+    from fysb.services import signal_archive as _sa
+    size = 10
+    total_days, rows = await afn.run(_sa.admin_dates_page, page, size)
+    total_pages = max(1, (total_days + size - 1) // size)
+    rows_kb = [
+        [kb.btn(_sa.format_date_journal_button(r), f"a:sigday:{r['day']}:all:0")]
+        for r in rows
+    ]
+    nav_row = []
+    if page > 0:
+        nav_row.append(kb.btn("◀️ أحدث", f"a:sigdates:{page - 1}"))
+    if (page + 1) * size < total_days:
+        nav_row.append(kb.btn("أقدم ▶️", f"a:sigdates:{page + 1}"))
+    if nav_row:
+        rows_kb.append(nav_row)
+    rows_kb.append([
+        kb.btn("📅 إشارات اليوم", "a:sigday:today:all:0", style="primary"),
+        kb.btn("📆 إشارات أمس", "a:sigday:yesterday:all:0"),
+    ])
+    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة", "a:sigpl"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    body = (
+        f"🗓 <b><u>أرشيف الإشارات حسب التاريخ — سجل الإدارة</u></b>\n"
+        f"<blockquote>▎📚 إجمالي الأيام المسجلة: <b>{total_days}</b> · صفحة <b>{page + 1}/{total_pages}</b>\n"
+        f"▎اختر أي تاريخ أدناه لاستعراض إشاراته الكاملة مع عدّادات الربح والخسارة والوقف.</blockquote>"
+    )
+    if not rows:
+        body += "\n\n<i>لا توجد إشارات مسجلة في الأرشيف بعد.</i>"
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
+    """v6.20.4 — REAL profit/loss accounting per instrument (PostgreSQL + SQLite
+    100% ANSI SQL safe — fixes UndefinedFunction on SUM(bool)/ROUND(double,int))
+    with luxury Today / Yesterday / 7D / All / Date scope filters."""
     from fysb import instruments
-    rows = await afn.run(_pl_account_rows)
-    lines = ["💰 <b><u>محاسبة الربح والخسارة — من كل التوصيات المغلقة</u></b>",
-             "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
-             "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
-             "▎💵 الدولار = نفس مسطرة التنبيهات (0.01 لوت).</blockquote>"]
+    from fysb.services import signal_archive as _sa
+    period = (period or "all").strip().lower()
+    rows = await afn.run(_pl_account_rows, period)
+    period_labels = {
+        "all": "كل الإشارات المغلقة والمحققة",
+        "today": _sa.ar_date_label(_sa.today_iso()),
+        "yesterday": _sa.ar_date_label(_sa.yesterday_iso()),
+        "7d": "آخر 7 أيام",
+    }
+    p_label = period_labels.get(period) or _sa.ar_date_label(period)
+    lines = [
+        f"💰 <b><u>محاسبة الربح والخسارة — {esc(p_label)}</u></b>",
+        "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
+        "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
+        "▎💵 الدولار = نفس مسطرة التنبيهات (0.01 لوت).</blockquote>",
+    ]
     grand_pips = 0.0
     grand_wins = grand_losses = 0
     grand_usd = 0.0
@@ -104,22 +185,38 @@ async def admin_signal_pl(q, uid, context, bot):
         net = float(r["net_pips"] or 0)
         usd = instruments.usd_move(r["symbol"], net, 0.01)
         wr = (int(r["wins"] or 0) / max(1, int(r["n"]))) * 100.0
+        avg_p = float(r.get("avg_pips") or 0)
         grand_pips += net
         grand_wins += int(r["wins"] or 0)
         grand_losses += int(r["losses"] or 0)
         grand_usd += usd
-        lines.append(f"▎{esc(r['symbol'])}: <b>{r['n']}</b> مغلقة · رابحة <b>{wr:.0f}%</b> "
-                     f"({r['wins'] or 0}W/{r['losses'] or 0}L) · صافي <b>{net:+.1f} pips</b> · 💵 <b>{usd:+,.2f} $</b>")
-    if len(lines) == 3:
-        lines.append("▎لا توجد إشارات مغلقة بعد — تُبنى المحاسبة تلقائياً مع كل إغلاق فعلي.")
+        lines.append(
+            f"▎{esc(r['symbol'])}: <b>{r['n']}</b> صفقة · رابحة <b>{wr:.0f}%</b> "
+            f"({r['wins'] or 0}W/{r['losses'] or 0}L) · صافي <b>{net:+.1f} pips</b> "
+            f"(متوسط {avg_p:+.1f}p) · 💵 <b>{usd:+,.2f} $</b>"
+        )
+    if len(lines) == 2:
+        lines.append("▎لا توجد إشارات مغلقة في هذه الفترة بعد — تُبنى المحاسبة تلقائياً مع كل إغلاق فعلي.")
     else:
         total_n = grand_wins + grand_losses
         lines.append("▎─────────────")
-        lines.append(f"▎👑 <b>الإجمالي العام:</b> {total_n} إشارة مغلقة · رابحة "
-                     f"<b>{(grand_wins / max(1, total_n)) * 100:.0f}%</b> · صافي <b>{grand_pips:+.1f} pips</b> "
-                     f"· 💵 <b>{grand_usd:+,.2f} $</b> لكل 0.01 لوت (مجموع الأدوات)")
-    await render(q, "\n".join(lines),
-                 kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
+        lines.append(
+            f"▎👑 <b>الإجمالي العام:</b> {total_n} إشارة · رابحة "
+            f"<b>{(grand_wins / max(1, total_n)) * 100:.0f}%</b> · صافي <b>{grand_pips:+.1f} pips</b> "
+            f"· 💵 <b>{grand_usd:+,.2f} $</b> لكل 0.01 لوت (مجموع الأدوات)"
+        )
+    scope_row = [
+        kb.btn(("◉ " if period == "all" else "") + "🗂 الكل", "a:sigpl:all"),
+        kb.btn(("◉ " if period == "today" else "") + "📅 اليوم", "a:sigpl:today"),
+        kb.btn(("◉ " if period == "yesterday" else "") + "📆 أمس", "a:sigpl:yesterday"),
+        kb.btn(("◉ " if period == "7d" else "") + "🗓 7 أيام", "a:sigpl:7d"),
+    ]
+    await render(
+        q,
+        "\n".join(lines),
+        kb.admin_nav([scope_row, [kb.btn("🗓 أرشيف التواريخ", "a:sigdates:0"), kb.btn("↩️ مركز الإشارات", "a:signals")]]),
+        bot,
+    )
 
 
 async def admin_signal_view(q, uid, context, bot, sid: int):
@@ -981,14 +1078,10 @@ async def admin_live(q, uid, context, bot):
 
 
 # --- v6.11.0 thread-offload helpers ---
-def _pl_account_rows() -> list[dict]:
-    """(v6.11.0 thread-offload helper) closed-signals P/L accounting per symbol."""
-    with db.conn() as c:
-        return [dict(r) for r in c.execute(
-            """SELECT symbol, COUNT(*) n, SUM(pips_result>0) wins, SUM(pips_result<=0) losses,
-                      SUM(pips_result) net_pips, ROUND(AVG(pips_result),1) avg_pips
-               FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-               GROUP BY symbol ORDER BY net_pips DESC""").fetchall()]
+def _pl_account_rows(period: str = "all") -> list[dict]:
+    """(v6.20.4 PostgreSQL + SQLite safe) closed-signals P/L accounting per symbol."""
+    from fysb.services import signal_archive as _sa
+    return _sa.admin_pl_rows(period)
 
 
 def _signal_with_deliveries(sid: int):

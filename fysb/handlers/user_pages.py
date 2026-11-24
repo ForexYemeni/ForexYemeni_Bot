@@ -453,34 +453,141 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                      kb.user_nav([[kb.btn("🔬 تحليل جديد", "u:analytics"),
                                    kb.btn("📡 الإشارات", "u:signals")]]), bot)
 
-    # ---------- Signals (quota enforced server-side) ----------
-    elif action == "signals":
+    # ---------- Signals (v6.20.4 luxury date-grouped archive: Today / Yesterday / By Date) ----------
+    elif action == "signals" or action.startswith("sigday:"):
+        from fysb.services import signal_archive as _sa
+        from fysb.ui.cards import render_signal_compact
+        scope = "today"
+        page = 0
+        if action.startswith("sigday:"):
+            parts = action.split(":")
+            scope = (parts[1] if len(parts) > 1 else "today") or "today"
+            page = _safe_int(parts[2]) if len(parts) > 2 else 0
+            page = max(0, page or 0)
+
         plan = await afn.run(subs.plan_for, uid)
         state = await afn.run(subs.quota_state, uid, plan)
         markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
         timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
         strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
         min_score = int(plan["min_score"] or 60)
-        rows = await afn.run(_live_signals_page, markets, timeframes, strategies, min_score)
-        # Which of these are still viewable under the remaining quota?
-        delivered_ids = await afn.run(_delivered_set, uid, [r["id"] for r in rows])
-        fresh = [r for r in rows if r["id"] in delivered_ids or state["remaining"] > 0]
-        lines = [f"💎 <b>الباقة:</b> {esc(plan['title'])}",
-                 f"📊 الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
-                 "اختر إشارة لعرض بطاقة الدخول الكاملة:"]
-        rows_kb = [[kb.btn(f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['seq']} {esc(r['symbol'])} {r['direction']} · {r['score']}/100",
-                           f"u:signalview:{r['id']}")] for r in fresh[:8]]
-        if not rows_kb:
-            rows_kb = [[kb.btn("🔄 تحديث الإشارات", "u:signals")]]
+
+        size = 8
+        counts = await afn.run(_sa.user_scope_counts, uid, markets, timeframes, strategies, min_score)
+        total, rows, summary, delivered_ids = await afn.run(
+            _sa.user_signals_page, uid, markets, timeframes, strategies, min_score, scope, page, size
+        )
+        total_pages = max(1, (total + size - 1) // size)
+
+        day_iso = _sa.resolve_scope_date(scope)
+        is_today = scope == "today"
+        is_yest = scope == "yesterday"
+        is_open = scope == "open"
+        is_all = scope == "all"
+        is_custom_date = bool(day_iso) and not is_today and not is_yest
+
+        rows_kb = [
+            [
+                kb.btn(("◉ " if is_today else "") + f"📅 اليوم ({counts['today']})", "u:sigday:today:0",
+                       style="primary" if is_today else None),
+                kb.btn(("◉ " if is_yest else "") + f"📆 أمس ({counts['yesterday']})", "u:sigday:yesterday:0",
+                       style="primary" if is_yest else None),
+                kb.btn(("◉ " if is_custom_date else "") + f"🗓 بالتاريخ ({counts['days']})", "u:sigdates:0",
+                       style="primary" if is_custom_date else None),
+            ],
+            [
+                kb.btn(("◉ " if is_open else "") + f"🟢 المفتوحة الآن ({counts['open']})", "u:sigday:open:0",
+                       style="success" if is_open else None),
+                kb.btn(("◉ " if is_all else "") + f"🗂 كل الإشارات ({counts['total']})", "u:sigday:all:0"),
+            ],
+        ]
+
+        for r in rows:
+            is_deliv = int(r["id"]) in delivered_ids
+            prefix = "" if (is_deliv or state["remaining"] > 0) else "🔒 "
+            rows_kb.append([kb.btn(prefix + render_signal_compact(r), f"u:signalview:{r['id']}")])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(kb.btn("◀️ السابق", f"u:sigday:{scope}:{page - 1}"))
+        if (page + 1) * size < total:
+            nav_row.append(kb.btn("التالي ▶️", f"u:sigday:{scope}:{page + 1}"))
+        if nav_row:
+            rows_kb.append(nav_row)
+
+        if not rows:
+            rows_kb.append([kb.btn("🔄 تحديث الإشارات", f"u:sigday:{scope}:0")])
+
+        extra = [
+            f"▎💎 الباقة: <b>{esc(plan['title'])}</b> · الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
+            "▎📌 الإشارات التي استلمتها محفوظة في أرشيفك ولا تختفي أبداً بعد الإغلاق.",
+        ]
         # v6.10.0 (owner report 7) — «إشارة الآن» right inside the user's
         # signals hub + the watcher status line (honest auto-search).
         from fysb.handlers import signal_now as _sn
         w = await afn.run(_sn.active_watcher, uid)
         if w:
-            lines.append(f"⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
+            extra.append(f"▎⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
             rows_kb.append([kb.btn("🔴 إلغاء البحث التلقائي", f"u:watchoff:{w['id']}")])
-        rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow")])
-        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        if not rows:
+            if is_today:
+                extra.append("▎✨ لا توجد إشارات اليوم حتى الآن — استعرض «📆 أمس» أو «🗓 بالتاريخ» أو اضغط «🚀 إشارة الآن».")
+            elif is_open:
+                extra.append("▎✨ لا توجد صفقات مفتوحة حالياً — تصفّح «📅 اليوم» أو «📆 أمس» أو «🗓 بالتاريخ».")
+            else:
+                extra.append("▎لا توجد إشارات مسجلة في هذا التاريخ.")
+
+        rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow", style="success")])
+
+        if is_today:
+            scope_label = _sa.ar_date_label(_sa.today_iso())
+        elif is_yest:
+            scope_label = _sa.ar_date_label(_sa.yesterday_iso())
+        elif is_custom_date:
+            scope_label = _sa.ar_date_label(day_iso)
+        elif is_open:
+            scope_label = "🟢 الصفقات المفتوحة الآن"
+        else:
+            scope_label = "🗂 سجل جميع الإشارات"
+
+        body = _sa.luxury_day_header("مركز الإشارات والأرشيف", scope_label, summary, page, total_pages, extra)
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("sigdates:"):
+        from fysb.services import signal_archive as _sa
+        page = max(0, _safe_int(action.split(":", 1)[1]) or 0)
+        plan = await afn.run(subs.plan_for, uid)
+        markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
+        timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
+        strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
+        min_score = int(plan["min_score"] or 60)
+        size = 10
+        total_days, rows = await afn.run(_sa.user_dates_page, uid, markets, timeframes, strategies, min_score, page, size)
+        total_pages = max(1, (total_days + size - 1) // size)
+        rows_kb = [
+            [kb.btn(_sa.format_date_journal_button(r), f"u:sigday:{r['day']}:0")]
+            for r in rows
+        ]
+        nav_row = []
+        if page > 0:
+            nav_row.append(kb.btn("◀️ أحدث", f"u:sigdates:{page - 1}"))
+        if (page + 1) * size < total_days:
+            nav_row.append(kb.btn("أقدم ▶️", f"u:sigdates:{page + 1}"))
+        if nav_row:
+            rows_kb.append(nav_row)
+        rows_kb.append([
+            kb.btn("📅 إشارات اليوم", "u:sigday:today:0", style="primary"),
+            kb.btn("📆 إشارات أمس", "u:sigday:yesterday:0"),
+        ])
+        rows_kb.append([kb.btn("🟢 المفتوحة الآن", "u:sigday:open:0"), kb.btn("↩️ الإشارات", "u:signals")])
+        body = (
+            f"🗓 <b><u>أرشيف إشاراتك حسب التاريخ</u></b>\n"
+            f"<blockquote>▎📚 إجمالي الأيام المسجلة في حسابك: <b>{total_days}</b> · صفحة <b>{page + 1}/{total_pages}</b>\n"
+            f"▎اختر أي تاريخ لاستعراض جميع إشاراته المفتوحة والمغلقة مع نتائجها الحقيقية.</blockquote>"
+        )
+        if not rows:
+            body += "\n\n<i>لا توجد إشارات مسجلة في أرشيفك بعد.</i>"
+        await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("signalview:"):
         sid = _safe_int(action.split(":", 1)[1])
@@ -544,10 +651,15 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         # v6.14.0: deliver signal card as its own dedicated message AND pin
         # chat_id/message_id in signal_deliveries so the tracker updates this
         # card live on TP1/TP2/TP3/SL/price moves!
+        nav_btns = (
+            [[kb.btn("📅 إشارات اليوم", "u:sigday:today:0"), kb.btn("🗓 أرشيف التواريخ", "u:sigdates:0")]]
+            if is_signal_closed(sig_d)
+            else [[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}", style="success"),
+                   kb.btn("↩️ كل الإشارات", "u:signals")]]
+        )
         sent_msg = await render(
             q, card_text,
-            kb.user_nav([[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}", style="success"),
-                          kb.btn("↩️ كل الإشارات", "u:signals")]]),
+            kb.user_nav(nav_btns),
             bot, force_new=True,
         )
         if sent_msg is not None:

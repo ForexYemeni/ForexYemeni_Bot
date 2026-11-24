@@ -36,29 +36,36 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if len(candles) < 45:
         return None
 
-    # 1) Reference range = previous candle (the CRT candle)
-    ref = candles[-2]
-    r_hi, r_lo = ref["high"], ref["low"]
-    if r_hi <= r_lo:
+    # 1+2+3) True chronological CRT: the LATEST closed candle (`last = candles[-1]`)
+    # MUST sweep beyond a PRIOR reference range candle (`ref` in candles[-5:-1])
+    # and CLOSE back inside `ref`'s range (v6.20.6 fixes old backwards lookback
+    # where older bars were compared against a newer reference bar).
+    a = atr(candles)
+    if a <= 0:
         return None
-    mid = (r_hi + r_lo) / 2
     last = candles[-1]
     close = last["close"]
 
-    # 2+3) Sweep & close-back-inside within the last few candles
+    ref = None
     sweep_side, sweep_level = "", 0.0
-    confirmed = False
-    for c in candles[-6:-1]:
-        if c["high"] > r_hi and c["close"] < r_hi:
-            sweep_side, sweep_level = "high", r_hi
-            confirmed = True
+    for cand_ref in reversed(candles[-5:-1]):
+        rh, rl = float(cand_ref["high"]), float(cand_ref["low"])
+        if (rh - rl) < 0.55 * a:
+            continue  # ignore tiny doji micro-ranges
+        if float(last["high"]) > rh and close < rh and close > rl:
+            ref = cand_ref
+            sweep_side, sweep_level = "high", float(last["high"])
             break
-        if c["low"] < r_lo and c["close"] > r_lo:
-            sweep_side, sweep_level = "low", r_lo
-            confirmed = True
+        if float(last["low"]) < rl and close > rl and close < rh:
+            ref = cand_ref
+            sweep_side, sweep_level = "low", float(last["low"])
             break
-    if not confirmed:
+    if ref is None:
         return None
+
+    r_hi, r_lo = float(ref["high"]), float(ref["low"])
+    mid = (r_hi + r_lo) / 2.0
+    confirmed = True
 
     direction = "SELL" if sweep_side == "high" else "BUY"
     bias = structure_labels(ctx.bias_candles)
@@ -67,11 +74,16 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
               (bias["trend"] == "down" and direction == "SELL") or \
               (mss["choch"] and mss["bos_dir"] == ("up" if direction == "BUY" else "down"))
 
+    # Require confirmation candle to close with momentum in the trade direction
+    # (bullish close after low sweep, bearish close after high sweep) — eliminates
+    # weak false CRT sweeps in choppy Gold ranges.
+    if direction == "BUY" and close <= float(last["open"]):
+        return None
+    if direction == "SELL" and close >= float(last["open"]):
+        return None
+
     # 4) Entry: CRT mid (50% of range) — v6.19.0: reject invalidated range
     # breakouts and never place a BUY limit above close or SELL limit below close.
-    a = atr(candles)
-    if a <= 0:
-        return None
     if direction == "BUY":
         if close < r_lo:
             return None
@@ -81,13 +93,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             return None
         entry = mid if close <= mid else close
 
-    # 5) Invalidation = swept extreme + buffer
+    # 5) Invalidation = swept extreme + realistic ATR buffer (0.85 ATR survives Gold wicks)
     if direction == "BUY":
-        stop = min(sweep_level, r_lo) - 0.5 * a if sweep_side == "low" else r_lo - 0.5 * a
-        stop = min(stop, entry - 0.8 * a)
+        stop = min(sweep_level, r_lo) - 0.85 * a
+        stop = min(stop, entry - 1.15 * a)
     else:
-        stop = max(sweep_level, r_hi) + 0.5 * a if sweep_side == "high" else r_hi + 0.5 * a
-        stop = max(stop, entry + 0.8 * a)
+        stop = max(sweep_level, r_hi) + 0.85 * a
+        stop = max(stop, entry + 1.15 * a)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
@@ -102,15 +114,16 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         tp2, tp3 = entry - ext * 1.0 - risk, entry - ext * 2.0 - risk * 1.5
     rr = abs(tp1 - entry) / risk
 
-    # --- Deterministic score ---
-    score = 40.0
+    # --- Deterministic score (v6.20.6 calibrated: trigger alone = 62, must earn
+    # real institutional confluence — HTF bias / displacement / FVG — to pass 72) ---
+    score = 36.0
     checks = {}
     checks["range"] = (r_hi - r_lo) > 0
-    score += 6
+    score += 4
     checks["sweep"] = True
-    score += 16
+    score += 12
     checks["confirm_close"] = confirmed
-    score += 16
+    score += 10
     checks["htf_bias"] = bias_ok
     score += 12 if bias_ok else 0
     disp = abs(close - ref["close"]) > a
@@ -123,7 +136,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     score += 10 if fvg_in else 0
     at_mid = abs(entry - mid) <= 0.25 * a
     checks["crt_mid"] = at_mid
-    score += 8 if at_mid else 0
+    score += 6 if at_mid else 0
     kz = ctx.kill_zone or (kill_zone(candles[-1]["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
     score += 6 if kz else 0
@@ -131,9 +144,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["vol_ok"] = 0.05 < vol < 6.0
     score += 4 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 8 if rr >= 2.0 else 0
+    score += 6 if rr >= 2.0 else 0
 
-    if score < 55:
+    if not bias_ok:
+        return None
+    if score < 68:
         return None
 
     reasons = [

@@ -375,6 +375,7 @@ DEFAULT_SETTINGS = {
     "default_market": "XAUUSD",
     "engine_interval_seconds": "300",
     "engine_min_score": "80",
+    "min_signal_score": "72",
     # Risk engine (policy enforced server-side)
     "risk_per_trade_pct": "1.0",
     "max_daily_risk_pct": "3.0",

@@ -90,19 +90,33 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         entry = close
 
+    # v6.20.6: True ICT trigger guard — never fire blindly on every bar merely
+    # because HTF bias is up/down. Require EITHER a matching liquidity sweep
+    # (SSL for BUY / BSL for SELL) OR an intact FVG/OB zone backed by
+    # displacement + matching structure. Also require the trigger candle not
+    # to close strongly against our entry direction without a sweep.
+    has_matching_sweep = (sweep["sell_side"] and direction == "BUY") or (sweep["buy_side"] and direction == "SELL")
+    has_zone_trigger = (entry_zone is not None) and displacement and (
+        (direction == "BUY" and mss["trend"] != "down" and close >= float(last["open"]))
+        or (direction == "SELL" and mss["trend"] != "up" and close <= float(last["open"]))
+    )
+    if not (has_matching_sweep or has_zone_trigger):
+        return None
+
     # --- Stop: beyond the swept liquidity level / recent extreme -----------
     a = atr(candles)
     if a <= 0:
         return None
     if direction == "BUY":
         swing_low = min(c["low"] for c in candles[-8:])
-        stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.5 * a
-        if stop >= entry:
-            stop = entry - 1.5 * a
+        stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.85 * a
+        if stop >= entry or (entry - stop) < 1.15 * a:
+            stop = entry - 1.6 * a
     else:
         swing_high = max(c["high"] for c in candles[-8:])
-        stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.5 * a
-        if stop <= entry:
+        stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.85 * a
+        if stop <= entry or (stop - entry) < 1.15 * a:
+            stop = entry + 1.6 * a
             stop = entry + 1.5 * a
 
     risk = abs(entry - stop)

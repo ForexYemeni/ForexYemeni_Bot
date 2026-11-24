@@ -100,17 +100,19 @@ class TestV6203ClosedTpHonestyAndRescan(unittest.TestCase):
                 (old_created, old_created, old_closed),
             )
 
-        base = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
+        base = datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc)
         vals = [
             {"datetime": (base + timedelta(minutes=15 * i)).strftime("%Y-%m-%d %H:%M:%S"),
-             "open": 3580.0, "high": 3585.0, "low": 3575.0, "close": 3583.0, "volume": 100.0}
+             "open": 3559.0 + 0.4 * i, "high": 3562.0 + 0.4 * i,
+             "low": 3558.0 + 0.4 * i, "close": 3560.0 + 0.4 * i, "volume": 100.0}
             for i in range(60)
         ]
+        last_px = vals[-1]["close"]
         payload = {"values": vals, "last_candle_iso": "2026-11-24T15:20:00+00:00", "age_seconds": 30}
-        cand = StrategyResult("ICT", "BUY", 3583.0, 3570.0, 3609.0, 3622.0, 3641.5, 2.0, 88, ["fresh setup"])
+        cand = StrategyResult("ICT", "BUY", last_px, last_px - 13.0, last_px + 26.0, last_px + 39.0, last_px + 58.5, 2.0, 88, ["fresh setup"])
         with patch.object(market_data, "fetch_candles", return_value=payload), \
              patch.object(market_data, "is_stale", return_value=False), \
-             patch.object(market_data, "fetch_price", return_value={"price": 3583.0}), \
+             patch.object(market_data, "fetch_price", return_value={"price": last_px}), \
              patch.object(signal_engine, "evaluate_all", return_value=[cand]):
             out = signal_engine.generate_signal("XAUUSD", "M15")
 

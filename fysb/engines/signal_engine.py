@@ -171,7 +171,26 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     first_reject_score = results[0].score
     skipped_notes: list[str] = []
 
+    from fysb.engines.quality_gate import DEFAULT_MIN_SCORE, evaluate_quality_gate
+    min_sig_score = db.get_setting_int("min_signal_score", DEFAULT_MIN_SCORE)
+
     for cand in results:
+        # 11.5: Institutional Quality + HTF Bias + Chop + Session Gate (v6.20.6)
+        # Matches backtest.py 100% identically. Admin manual force=True bypasses
+        # only the soft regime filter if explicitly forced.
+        if not force:
+            ok_q, q_reason = evaluate_quality_gate(
+                symbol, entry_tf, candles, bias_candles, cand,
+                min_score=min_sig_score,
+            )
+            if not ok_q:
+                if not first_reject_reason:
+                    first_reject_tag = "QUALITY_REJECTED"
+                    first_reject_reason = q_reason
+                    first_reject_score = cand.score
+                skipped_notes.append(f"{cand.code}:quality({q_reason[:36]})")
+                continue
+
         # 12-13: RR + risk gate (per-symbol, global cap, correlation, daily loss, ADMIN_SIGNAL_NOW exemption)
         risk_gate = risk.check_signal(symbol, cand.rr, vol, source=sig_source,
                                       created_by=created_by, direction=cand.direction)

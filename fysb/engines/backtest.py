@@ -178,11 +178,22 @@ def run_backtest(
     warmup: int = 60,
     max_hold_bars: int = 48,
     min_rr: float = 2.0,
+    min_score: int = 72,
     spread_pips: float = 0.5,
     api_key: str = "",
-    outputsize: int = 260,
+    outputsize: int = 800,
+    strict_htf: bool = True,
+    strict_chop: bool = True,
+    strict_session: bool = True,
 ) -> BacktestReport:
-    """Run a non-repainting walk-forward backtest on historical candles."""
+    """Run a non-repainting walk-forward backtest matching the LIVE engine:
+      * Strictly causal HTF resampling (`resample_htf`) — zero lookahead.
+      * Exact same `consensus_filter` + `evaluate_quality_gate` (min_score,
+        HTF alignment, Kaufman ER chop filter, thin-session guard) + RR gate.
+      * Conservative SL-first execution with realistic spread & BE trailing.
+    """
+    from fysb.engines.quality_gate import evaluate_quality_gate, htf_factor_for, resample_htf
+
     sym = (symbol or "XAUUSD").strip().upper()
     tf = (timeframe or "M15").strip().upper()
     allowed = [s.strip().upper() for s in (strategies or list(REGISTRY.keys())) if s.strip().upper() in REGISTRY]
@@ -206,11 +217,13 @@ def run_backtest(
                               strategies_used=allowed,
                               error=f"بيانات تاريخية غير كافية ({n} شمعة، المطلوب {warmup + 10}+)")
 
+    htf_factor = htf_factor_for(tf)
     trades: list[BacktestTrade] = []
     i = warmup
     while i < n - 3:
         window = candles[:i + 1]
-        ctx = Ctx(symbol=sym, timeframe=tf, candles=window, bias_candles=window)
+        htf_window = resample_htf(window, htf_factor)
+        ctx = Ctx(symbol=sym, timeframe=tf, candles=window, bias_candles=htf_window)
         raw = evaluate_all(ctx, allowed)
         if not raw:
             i += 1
@@ -219,7 +232,20 @@ def run_backtest(
         if not filtered:
             i += 1
             continue
-        cand = next((r for r in filtered if r.rr >= min_rr), None)
+        cand = None
+        for r in filtered:
+            if r.rr < min_rr:
+                continue
+            ok_q, _q_reason = evaluate_quality_gate(
+                sym, tf, window, htf_window, r,
+                min_score=min_score,
+                strict_htf=strict_htf,
+                strict_chop=strict_chop,
+                strict_session=strict_session,
+            )
+            if ok_q:
+                cand = r
+                break
         if cand is None:
             i += 1
             continue
@@ -308,15 +334,24 @@ def format_report(rep: BacktestReport) -> str:
             f"▎• <b>{esc(code)}</b>: {st['trades']} صفقات · فوز <code>{st['win_rate_pct']:.0f}%</code> · صافي <b>{st['net_r']:+.2f}R</b>"
         )
     pf_txt = f"{rep.profit_factor:.2f}" if rep.profit_factor < 99 else "∞"
+    if rep.filled_trades < 15:
+        verdict = "🟡 عينة صغيرة — لا تكفي للحكم الإحصائي النهائي (يُفضّل 30+ صفقة أو فريم H1/H4)"
+    elif rep.profit_factor >= 1.5 and rep.net_r > 0:
+        verdict = "✅ أداء مؤسسي مؤهّل (معامل ربح ≥ 1.5 وعائد إيجابي)"
+    elif rep.profit_factor >= 1.05 and rep.net_r > 0:
+        verdict = "🟢 أداء إيجابي معتدل — يمكن تحسينه بتعطيل المنهجيات الأضعف أدناه"
+    else:
+        verdict = "🔴 أداء ضعيف على هذا الفريم — راجع تفعيل المنهجيات الرابحة فقط"
     return (
         f"🧪 <b><u>تقرير الاختبار التاريخي المؤسسي — {esc(rep.symbol)}</u></b> ⏱ {tf_name(rep.timeframe)}\n"
         f"<blockquote>"
-        f"▎📊 الشموع المفحوصة: <b>{rep.bars_tested}</b> شمعة مغلقة (Walk-Forward بلا Repainting)\n"
+        f"▎📊 الشموع المفحوصة: <b>{rep.bars_tested}</b> شمعة مغلقة (Walk-Forward + HTF بلا Repainting)\n"
         f"▎🎯 الصفقات المنفّذة: <b>{rep.filled_trades}</b> (فائزة: <b>{rep.wins}</b> · خاسرة: <b>{rep.losses}</b> · غير مفعّلة: {rep.unfilled})\n"
         f"▎🏆 نسبة النجاح: <b>{rep.win_rate_pct:.1f}%</b> · عامل الربح (PF): <b>{pf_txt}</b>\n"
         f"▎📈 صافي العائد: <b>{rep.net_r:+.2f}R</b> · التوقع/صفقة: <b>{rep.expectancy_r:+.3f}R</b>\n"
         f"▎🛡 أقصى تراجع (Max DD): <b>-{rep.max_drawdown_r:.2f}R</b>\n"
+        f"▎⚖️ التقييم الإحصائي: <b>{verdict}</b>\n"
         f"</blockquote>\n"
         + ("<b>أداء المنهجيات:</b>\n<blockquote>" + "\n".join(strat_lines) + "</blockquote>\n" if strat_lines else "")
-        + "<i>محاكاة SL-أولاً مع سبريد واقعي وتأمين نقطة الدخول بعد الهدف الأول.</i>"
+        + "<i>محاكاة SL-أولاً مع سبريد واقعي + فلتر اتجاه الفريم الأعلى + فلتر التذبذب + تأمين الدخول بعد TP1.</i>"
     )

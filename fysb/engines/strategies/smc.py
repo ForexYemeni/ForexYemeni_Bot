@@ -70,14 +70,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         entry = close
 
-    # --- Stop beyond the protective swing ----------------------------------
+    # --- Stop beyond the protective swing (v6.20.6: 0.85 ATR breathing room) --
     if direction == "BUY":
-        stop = (zone[0] - 0.6 * a) if zone else entry - 1.8 * a
-        if stop >= entry:
+        stop = (zone[0] - 0.85 * a) if zone else entry - 1.8 * a
+        if stop >= entry or (entry - stop) < 1.15 * a:
             stop = entry - 1.8 * a
     else:
-        stop = (zone[1] + 0.6 * a) if zone else entry + 1.8 * a
-        if stop <= entry:
+        stop = (zone[1] + 0.85 * a) if zone else entry + 1.8 * a
+        if stop <= entry or (stop - entry) < 1.15 * a:
             stop = entry + 1.8 * a
 
     risk = abs(entry - stop)

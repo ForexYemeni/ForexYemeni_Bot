@@ -582,14 +582,21 @@ async def admin_backtest(q, uid, context, bot):
 
 async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str):
     from fysb.engines.backtest import format_report, run_backtest
+    from fysb.engines.quality_gate import DEFAULT_MIN_SCORE
     sym = (symbol or "XAUUSD").strip().upper()
     tf_u = (tf or "M15").strip().upper()
-    await render(q, f"🧪 <b>جارٍ تشغيل الاختبار التاريخي لـ {esc(sym)} ({esc(tf_u)})…</b>\n<i>يرجى الانتظار بضع ثوانٍ.</i>", None, bot)
-    rep = await asyncio.to_thread(run_backtest, sym, tf_u, api_key=config.market_api_key())
+    min_sc = await afn.run(db.get_setting_int, "min_signal_score", DEFAULT_MIN_SCORE)
+    await render(q, f"🧪 <b>جارٍ تشغيل الاختبار التاريخي المؤسسي لـ {esc(sym)} ({esc(tf_u)})…</b>\n<i>يُفحص حتى 800 شمعة مغلقة مع فلتر الفريم الأعلى والتذبذب — يرجى الانتظار بضع ثوانٍ.</i>", None, bot)
+    rep = await asyncio.to_thread(run_backtest, sym, tf_u, min_score=min_sc, api_key=config.market_api_key())
     await afn.run(audit_log.log, uid, f"backtest:{sym}:{tf_u}:n={rep.filled_trades}:r={rep.net_r}")
     rows_kb = [
+        [
+            kb.btn(("◉ " if tf_u == "M15" else "") + "⏱ M15", f"a:btrun:{sym}:M15"),
+            kb.btn(("◉ " if tf_u == "H1" else "") + "⏱ H1", f"a:btrun:{sym}:H1"),
+            kb.btn(("◉ " if tf_u == "H4" else "") + "⏱ H4", f"a:btrun:{sym}:H4"),
+        ],
         [kb.btn(f"🔄 إعادة {sym} {tf_u}", f"a:btrun:{sym}:{tf_u}"), kb.btn("🧪 سوق آخر", "a:backtest")],
-        [kb.btn("🧠 المحرك", "a:engine")],
+        [kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")],
     ]
     await render(q, format_report(rep), kb.admin_nav(rows_kb), bot)
 

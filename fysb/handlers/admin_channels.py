@@ -382,20 +382,98 @@ async def _send_html(bot, chat_ref, text: str) -> dict:
     return {"ok": False, "error": _diagnose_send_error(last_err or RuntimeError("send failed"))}
 
 
+def _channel_delivery_uid(ch: dict) -> int:
+    """Unique negative user_id key per channel so UNIQUE(user_id, signal_id)
+    supports UNLIMITED linked channels simultaneously (tracker treats user_id<=0
+    as channel posts and routes edits/alerts to chat_id). Synthetic test dicts
+    without 'id' gracefully fall back to 0."""
+    try:
+        cid = int(ch.get("id") or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    return -cid if cid > 0 else 0
+
+
 def pin_channel_delivery(ch: dict, signal_id: int, msg) -> None:
-    """v6.10.0 — record the channel post as a LIVE delivery (user_id=0,
-    chat_id=channel, message_id=post). The tracker then edits this exact post
-    on every transition and sends it EVERY alert until the trade closes —
-    full channel alerting, exactly like a user's card."""
+    """v6.14.0 — record the channel post as a LIVE delivery (user_id=-channel.id,
+    chat_id=channel, message_id=post). Multi-channel safe: every linked channel
+    gets its own unique negative user_id so tracker edits ALL channels live."""
     if msg is None:
         return
     message_id = getattr(msg, "message_id", 0)
     if not message_id:
         return
+    cuid = _channel_delivery_uid(ch)
     with db.conn() as c:
         c.execute("""INSERT OR IGNORE INTO signal_deliveries(user_id,signal_id,delivered_at,chat_id,message_id)
-                     VALUES(0,?,?,?,?)""",
-                  (signal_id, config.now(), str(ch["chat_id"]), int(message_id)))
+                     VALUES(?,?,?,?,?)""",
+                  (cuid, signal_id, config.now(), str(ch["chat_id"]), int(message_id)))
+
+
+def _channel_already_pinned(ch: dict, signal_id: int) -> bool:
+    cuid = _channel_delivery_uid(ch)
+    with db.conn() as c:
+        r = c.execute(
+            "SELECT 1 FROM signal_deliveries WHERE signal_id=? AND (user_id=? OR (user_id<=0 AND chat_id=?)) LIMIT 1",
+            (signal_id, cuid, str(ch["chat_id"])),
+        ).fetchone()
+    return r is not None
+
+
+def _channel_matches_signal(ch: dict, sig: dict) -> bool:
+    """Check whether an enabled auto_signals channel accepts this signal's market/TF/strategy."""
+    from fysb.engines.signal_engine import _norm_sym
+    sig_sym = _norm_sym(sig.get("symbol", ""))
+    sig_tf = (sig.get("timeframe") or "").strip().upper()
+    sig_strat = (sig.get("strategy") or "").strip().upper()
+
+    c_mkts = {_norm_sym(x) for x in (ch.get("markets") or "").split(",") if x.strip()}
+    if c_mkts and "ALL" not in c_mkts and sig_sym not in c_mkts:
+        return False
+    c_tfs = {x.strip().upper() for x in (ch.get("timeframes") or "").split(",") if x.strip()}
+    if c_tfs and "ALL" not in c_tfs and sig_tf not in c_tfs:
+        return False
+    c_strats = {x.strip().upper() for x in (ch.get("strategies") or "").split(",") if x.strip()}
+    if c_strats and "ALL" not in c_strats and sig_strat not in c_strats:
+        return False
+    return True
+
+
+async def emit_to_channels(sig: dict, bot) -> dict:
+    """Broadcast a generated signal to all matching enabled broadcast_channels.
+
+    Skips any channel that already received this signal_id, pins each posted
+    message via pin_channel_delivery (multi-channel safe), and updates last_sent.
+    """
+    from fysb.ui.cards import render_signal_card
+    from fysb.engines.entry_state import birth_pulse_line
+
+    stats = {"channels_sent": 0, "channels_failed": 0}
+    channels = await afn.run(list_channels)
+    if not channels:
+        return stats
+    row = await afn.run(_market_row, sig["symbol"])
+    card = render_signal_card(dict(sig), user_view=True, row=row)
+    pulse = birth_pulse_line(dict(sig), row)
+    if pulse:
+        card += "\n\n<blockquote>" + pulse + "</blockquote>"
+    text = card + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
+
+    for ch in channels:
+        if not ch.get("enabled") or not ch.get("auto_signals"):
+            continue
+        if not _channel_matches_signal(ch, sig):
+            continue
+        if await afn.run(_channel_already_pinned, ch, sig["id"]):
+            continue
+        send = await _send_html(bot, _chat_ref(ch), text)
+        if send.get("ok"):
+            await afn.run(pin_channel_delivery, ch, sig["id"], send.get("message"))
+            await afn.run(update_channel, ch["id"], last_sent=mecca_now().isoformat())
+            stats["channels_sent"] += 1
+        else:
+            stats["channels_failed"] += 1
+    return stats
 
 
 async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
@@ -468,12 +546,17 @@ async def post_signal(cid: int, bot, ch: dict | None = None) -> dict:
                     text = render_signal_card(dict(sig), user_view=True, row=row) + f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
                     send = await _send_html(bot, _chat_ref(ch), text)
                     if send.get("ok"):
-                        # v6.10.0 (owner report 7): the channel post is now a LIVE
-                        # delivery — recorded so the tracker EDITS this exact post
-                        # on every transition and sends it EVERY alert (half-TP1,
-                        # TP1/2/3, SL, expiry) until the trade closes.
+                        # Pin this channel post first (multi-channel safe), then
+                        # unify delivery so eligible users + any other matching
+                        # channels receive the same real signal too.
                         await afn.run(pin_channel_delivery, ch, res["signal_id"], send.get("message"))
                         await afn.run(update_channel, cid, last_sent=mecca_now().isoformat())
+                        try:
+                            from fysb.engines.signal_engine import emit_to_users
+                            from fysb.handlers.inputs import bot_sender_from
+                            await emit_to_users(dict(sig), bot_sender_from(bot), bot=bot, include_channels=True)
+                        except Exception:
+                            pass
                         return {"ok": True}
                     return send  # precise diagnosis from the guarded sender
                 break

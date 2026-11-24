@@ -847,9 +847,10 @@ def _signal_recipients(sid: int) -> list:
 
 
 def _signal_recipient_uids(sid: int) -> list[int]:
-    """(v6.11.0 thread-offload helper) user ids that received one signal."""
+    """(v6.11.0 thread-offload helper) user ids that received one signal (excludes channel rows <=0)."""
     with db.conn() as c:
-        return [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sid,))]
+        return [r["user_id"] for r in c.execute(
+            "SELECT user_id FROM signal_deliveries WHERE signal_id=? AND user_id>0", (sid,))]
 
 
 def _signal_row_full(sid: int) -> dict:

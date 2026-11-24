@@ -53,24 +53,18 @@ def safe(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
-async def render(q, text: str, markup=None, bot=None, force_new: bool = False) -> None:
+async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
     """Deliver callback pages smoothly (v6.13.0 — Smart In-Place Edit + Fallback).
 
-    When `ui_edit_in_place` is enabled (default "1") and `not force_new`:
-      1. Edits the current panel in place via `q.message.edit_text(...)` for a
-         clean, clutter-free chat experience (ignoring "message is not modified").
-      2. If editing is impossible (photo message, >48h panel, deleted message,
-         or BadRequest), automatically falls back to `reply_text` or
-         `bot.send_message` — NEVER silent, NEVER a dead button!
-    When `ui_edit_in_place` is "0" (configurable live in Admin Settings) or
-    `force_new=True`, delivers a fresh message via `reply_text`.
+    Returns the delivered/edited Message object so callers (like u:signalview)
+    can pin message_id/chat_id for live tracker edits.
     """
     t0 = time.monotonic()
     edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "1") == "1")
 
     if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
         try:
-            await q.message.edit_text(
+            msg = await q.message.edit_text(
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.HTML,
@@ -78,18 +72,18 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False) -
             )
             log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
                      q.from_user.id, (time.monotonic() - t0) * 1000)
-            return
+            return msg if msg is not None else q.message
         except BadRequest as e:
             if "message is not modified" in str(e).lower():
                 log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
                          q.from_user.id, (time.monotonic() - t0) * 1000)
-                return
+                return q.message
             log.debug("edit_text fallback (%s) -> sending fresh page", e)
         except Exception as e:
             log.debug("edit_text fallback (%s) -> sending fresh page", type(e).__name__)
 
     if q.message is not None and hasattr(q.message, "reply_text"):
-        await q.message.reply_text(
+        msg = await q.message.reply_text(
             text=text,
             reply_markup=markup,
             parse_mode=ParseMode.HTML,
@@ -97,16 +91,17 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False) -
         )
         log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
                  q.from_user.id, (time.monotonic() - t0) * 1000)
-        return
+        return msg
 
     chat = getattr(q.message, "chat", None) if q.message is not None \
         else getattr(q, "message_chat", None)
     if chat is None or bot is None:
         raise RuntimeError("callback message is no longer available")
-    await bot.send_message(chat.id, text, reply_markup=markup,
-                           parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    msg = await bot.send_message(chat.id, text, reply_markup=markup,
+                                 parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
+    return msg
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -180,6 +180,8 @@ async def market_engine_loop(app):
         # the tracker can edit this exact original card live later.
         return await app.bot.send_message(uid, text, parse_mode="HTML")
 
+    bot_send._bot = app.bot
+
     while True:
         try:
             if await afn.run(db.get_setting, "engine_enabled", "0") == "1" \
@@ -211,6 +213,7 @@ async def market_engine_loop(app):
                                     card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
                                              f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
                                              f"▎📤 التسليم: {stats['sent']} مستلم"
+                                             f" · قنوات: {stats.get('channels_sent', 0)}"
                                              f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
                                              f" · فشل: {stats.get('failed', 0)}</blockquote>")
                                     await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")

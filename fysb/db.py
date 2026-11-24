@@ -97,9 +97,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', full_name TEXT DEFAULT '',
   joined_at TEXT NOT NULL, is_blocked INTEGER DEFAULT 0,
-  notifications INTEGER DEFAULT 1, timeframe TEXT DEFAULT 'M15',
-  strategy TEXT DEFAULT '', market TEXT DEFAULT 'XAUUSD',
-  min_score INTEGER DEFAULT 80, language TEXT DEFAULT 'ar'
+  notifications INTEGER DEFAULT 1, timeframe TEXT DEFAULT '',
+  strategy TEXT DEFAULT '', market TEXT DEFAULT '',
+  min_score INTEGER DEFAULT 0, language TEXT DEFAULT 'ar'
 );
 CREATE TABLE IF NOT EXISTS plans(
   code TEXT PRIMARY KEY, title TEXT NOT NULL, price REAL DEFAULT 0,

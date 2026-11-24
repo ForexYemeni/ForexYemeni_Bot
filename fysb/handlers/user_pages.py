@@ -424,9 +424,18 @@ async def user_page(q, action: str, uid: int, context) -> None:
         personal = await afn.run(user_trade.personal_block, dict(sig), uid)
         if personal:
             card_text += "\n\n<blockquote>" + personal + "</blockquote>"
-        await render(q, card_text,
-                     kb.user_nav([[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}"),
-                                   kb.btn("↩️ كل الإشارات", "u:signals")]]), bot)
+        # v6.14.0: deliver signal card as its own dedicated message AND pin
+        # chat_id/message_id in signal_deliveries so the tracker updates this
+        # card live on TP1/TP2/TP3/SL/price moves!
+        sent_msg = await render(
+            q, card_text,
+            kb.user_nav([[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}", style="success"),
+                          kb.btn("↩️ كل الإشارات", "u:signals")]]),
+            bot, force_new=True,
+        )
+        if sent_msg is not None:
+            from fysb.engines.signal_engine import record_delivery_refs
+            await afn.run(record_delivery_refs, uid, sid, sent_msg)
 
     # ---------- Preferences ----------
     elif action == "preferences":

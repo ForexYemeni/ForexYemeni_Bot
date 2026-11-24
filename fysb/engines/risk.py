@@ -24,15 +24,31 @@ def _s(key: str, default: float) -> float:
     return db.get_setting_float(key, default)
 
 
-def check_signal(symbol: str, rr: float, atr_pct_value: float) -> RiskDecision:
-    """Signal-issuance gate (signals only — no live exposure exists)."""
+def check_signal(symbol: str, rr: float, atr_pct_value: float,
+                 source: str = "AUTO", created_by: int = 0) -> RiskDecision:
+    """Signal-issuance gate (signals only — no live exposure exists).
+
+    v6.14.0: private on-demand Signal-Now requests (source='SIGNAL_NOW') are
+    isolated from the global max_open_signals cap so user requests never starve
+    the global market engine for everyone else (and vice-versa).
+    """
     metrics = {}
     if rr < _s("min_rr", 2.0):
         return RiskDecision(False, f"RR {rr:.2f} below minimum {_s('min_rr', 2.0):.1f}", metrics)
     metrics["rr"] = rr
     max_open = int(_s("max_open_signals", 3))
     with db.conn() as c:
-        open_count = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
+        if (source or "AUTO").upper() == "SIGNAL_NOW" and int(created_by or 0) > 0:
+            open_count = c.execute(
+                "SELECT COUNT(*) n FROM signals WHERE source='SIGNAL_NOW' AND created_by=? "
+                "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
+                (int(created_by),),
+            ).fetchone()["n"]
+        else:
+            open_count = c.execute(
+                "SELECT COUNT(*) n FROM signals WHERE (source IS NULL OR source!='SIGNAL_NOW') "
+                "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')"
+            ).fetchone()["n"]
     metrics["open_signals"] = open_count
     if open_count >= max_open:
         return RiskDecision(False, f"open signals {open_count} reached cap {max_open}", metrics)

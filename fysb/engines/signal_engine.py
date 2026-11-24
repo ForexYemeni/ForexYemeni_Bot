@@ -58,7 +58,8 @@ def _allowed_strategies(symbol: str, timeframe: str) -> list[str]:
 
 
 def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
-                    only_strategies: list[str] | None = None) -> dict:
+                    only_strategies: list[str] | None = None,
+                    source: str = "AUTO", created_by: int = 0) -> dict:
     """Run the full pipeline for one instrument. Returns a result dict:
     {"status": "SIGNAL_CREATED"|"NO_SETUP"|"REJECTED"|"ERROR"|"DUPLICATE",
      "signal_id": int|None, "reason": str, "score": int|None}
@@ -133,8 +134,9 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     best = results[0]
     vol = atr_pct(candles)
 
-    # 12-13: RR + risk gate
-    risk_gate = risk.check_signal(symbol, best.rr, vol)
+    # 12-13: RR + risk gate (SIGNAL_NOW isolated from global max_open_signals)
+    sig_source = (source or "AUTO").upper()
+    risk_gate = risk.check_signal(symbol, best.rr, vol, source=sig_source, created_by=created_by)
     if not risk_gate.allowed:
         _log_run(symbol, entry_tf, "RISK_REJECTED", risk_gate.reason)
         return {"status": "REJECTED", "signal_id": None, "reason": risk_gate.reason, "score": best.score}
@@ -177,8 +179,18 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     hours = max(1, min(db.get_setting_int("signal_expiry_hours", 72) // 2, 36))
     cutoff = (config_now() - timedelta(hours=hours)).isoformat()
     with db.conn() as c:
-        dup = c.execute("""SELECT id FROM signals WHERE source='AUTO' AND symbol=? AND direction=? AND timeframe=?
-                           AND created_at>=? LIMIT 1""", (symbol, best.direction, entry_tf, cutoff)).fetchone()
+        if sig_source == "SIGNAL_NOW" and int(created_by or 0) > 0:
+            dup = c.execute(
+                """SELECT id FROM signals WHERE source='SIGNAL_NOW' AND created_by=? AND symbol=?
+                   AND direction=? AND timeframe=? AND created_at>=? LIMIT 1""",
+                (int(created_by), symbol, best.direction, entry_tf, cutoff),
+            ).fetchone()
+        else:
+            dup = c.execute(
+                """SELECT id FROM signals WHERE source='AUTO' AND symbol=? AND direction=? AND timeframe=?
+                   AND created_at>=? LIMIT 1""",
+                (symbol, best.direction, entry_tf, cutoff),
+            ).fetchone()
         if dup and not force:
             _log_run(symbol, entry_tf, "DUPLICATE_SKIPPED", f"recent signal #{dup['id']}")
             return {"status": "DUPLICATE", "signal_id": dup["id"], "reason": "recent duplicate", "score": best.score}
@@ -191,10 +203,11 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         cur = c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
                            strategy,reason,status,source,created_by,created_at,data_source,data_time,
                            strategy_scores,expires_at,entry_zone_lo,entry_zone_hi,filled_at,live_px)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'AUTO',0,?,?,?,?,?,?,?,?,?)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (symbol, best.direction, entry_tf, best.entry, best.stop, best.tp1, best.tp2, best.tp3,
                          f"{best.tp1},{best.tp2},{best.tp3}", best.rr, best.score, best.code,
-                         " | ".join(best.reasons), birth_status_now, config.now(), "LIVE", payload["last_candle_iso"],
+                         " | ".join(best.reasons), birth_status_now, sig_source, int(created_by or 0),
+                         config.now(), "LIVE", payload["last_candle_iso"],
                          json.dumps({r.code: r.score for r in results}), _expiry_iso(),
                          0.0, 0.0, filled_at_birth, live_px))
         sid = cur.lastrowid
@@ -307,11 +320,16 @@ def _market_row(symbol: str):
     return dict(r) if r else None
 
 
+def _norm_sym(s: str) -> str:
+    """Canonical symbol key: uppercase, whitespace & '/' stripped ('XAU/USD' -> 'XAUUSD')."""
+    return (s or "").strip().upper().replace("/", "")
+
+
 def passes_personal_filters(u, sig_symbol: str, sig_tf: str, sig_strategy: str, sig_score) -> bool:
     """Personal server-side delivery filters for one user row.
 
     Enforced gates (empty value = no personal restriction):
-      * market    : user's chosen market ("XAU/USD" style tolerated)
+      * market    : user's chosen market(s) — slash-normalized exact match
       * timeframe : exact entry-TF match
       * strategy  : the user's selected methodology — "ALL" or empty = every
                     methodology. This makes the profile's "الاستراتيجية المفضلة"
@@ -320,14 +338,12 @@ def passes_personal_filters(u, sig_symbol: str, sig_tf: str, sig_strategy: str, 
     Plan/package entitlements are a separate hard gate in emit_to_users.
     """
     u_market = (u["market"] or "").strip().upper()
-    if u_market:
-        # slash-tolerant both ways: "XAU/USD" <-> "XAUUSD"
-        u_m_n = u_market.replace("/", "")
-        sig_n = sig_symbol.upper().replace("/", "")
-        if sig_n not in u_m_n and sig_n != u_m_n:
+    if u_market and u_market != "ALL":
+        allowed_mkts = {_norm_sym(m) for m in u_market.split(",") if m.strip()}
+        if _norm_sym(sig_symbol) not in allowed_mkts:
             return False
     u_tf = (u["timeframe"] or "").strip().upper()
-    if u_tf and u_tf != sig_tf.upper():
+    if u_tf and u_tf != "ALL" and u_tf != sig_tf.upper():
         return False
     u_strategy = (u["strategy"] or "").strip().upper()
     if u_strategy and u_strategy != "ALL" and u_strategy != (sig_strategy or "").upper():
@@ -346,6 +362,9 @@ def record_delivery_refs(uid: int, signal_id: int, msg) -> None:
         return
     message_id = getattr(msg, "message_id", 0)
     chat_id = getattr(msg, "chat_id", None)
+    if chat_id is None:
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
     if not message_id or chat_id is None:
         return
     with db.conn() as c:
@@ -353,31 +372,31 @@ def record_delivery_refs(uid: int, signal_id: int, msg) -> None:
                   (str(chat_id), int(message_id), uid, signal_id))
 
 
-async def emit_to_users(signal_row, bot_send) -> dict:
-    """Step 16 — deliver a stored signal to eligible users (server-side gates).
+async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool = True) -> dict:
+    """Step 16 — deliver a stored signal to eligible users AND enabled broadcast channels.
 
-    bot_send: async callable(user_id, text) -> None. MUST be awaited inside the
+    bot_send: async callable(user_id, text) -> Message|None. MUST be awaited inside the
     bot's event loop (PTB's httpx client is loop-bound).
     Gates applied per user, all server-side (anti-bypass):
-      1. package entitlement: symbol/timeframe/strategy must be IN the plan
+      1. package entitlement: symbol/timeframe/strategy must be IN the plan (slash-normalized)
       2. personal preferences (market=""/timeframe="" => all allowed by plan)
       3. quality floor (min_score)
       4. daily quota (atomic ledger)
     Each delivered message carries the user's PERSONAL risk/profit block, and
     when auto-trade is on, the trade is opened on his demo account instantly.
-
-    v6.10.0 (owner report 6): BEFORE delivering, every holder of an OPEN signal
-    on the SAME symbol in the OPPOSITE direction receives the royal close
-    advisory — documented profit so far, «close or secure it» — then the new
-    signal flows. No silent direction flip ever again.
+    When `include_channels=True` and a Telegram bot instance is available
+    (`bot` param or `bot_send._bot`), matching enabled `broadcast_channels`
+    receive the live-tracked signal post in the same unified pass.
     """
     from fysb.services.subscriptions import try_consume_signal, release_signal, plan_for
     from fysb.services import user_trade
     from fysb.ui.cards import render_signal_card
 
-    stats = {"sent": 0, "skipped_quota": 0, "failed": 0, "skipped_filters": 0}
+    stats = {"sent": 0, "skipped_quota": 0, "failed": 0, "skipped_filters": 0,
+             "channels_sent": 0, "channels_failed": 0}
     sig = dict(signal_row)
     sig_symbol = sig["symbol"]
+    sig_sym_norm = _norm_sym(sig_symbol)
     sig_tf = sig["timeframe"]
     sig_score = sig["score"]
     sig_strategy = (sig.get("strategy") or "").upper()
@@ -390,18 +409,18 @@ async def emit_to_users(signal_row, bot_send) -> dict:
         if uid == config.ADMIN_ID:
             continue  # the admin is never treated as a signal recipient
 
-        # 1) package entitlement — hard gate (the plan decides, not the client)
+        # 1) package entitlement — hard gate (slash-normalized symbol matching)
         plan = plan_for(uid)
         if not plan:
             stats["skipped_filters"] += 1
             continue
-        p_markets = [x.strip().upper() for x in str(plan["markets"] or "").split(",") if x.strip()]
-        p_tfs = [x.strip().upper() for x in str(plan["timeframes"] or "").split(",") if x.strip()]
-        p_strats = [x.strip().upper() for x in str(plan["strategies"] or "").split(",") if x.strip()]
-        if p_markets and sig_symbol.upper() not in p_markets:
+        p_markets = {_norm_sym(x) for x in str(plan["markets"] or "").split(",") if x.strip()}
+        p_tfs = {x.strip().upper() for x in str(plan["timeframes"] or "").split(",") if x.strip()}
+        p_strats = {x.strip().upper() for x in str(plan["strategies"] or "").split(",") if x.strip()}
+        if p_markets and "ALL" not in p_markets and sig_sym_norm not in p_markets:
             stats["skipped_filters"] += 1
             continue
-        if p_tfs and sig_tf.upper() not in p_tfs:
+        if p_tfs and "ALL" not in p_tfs and sig_tf.upper() not in p_tfs:
             stats["skipped_filters"] += 1
             continue
         if p_strats and "ALL" not in p_strats and sig_strategy not in p_strats:
@@ -443,4 +462,15 @@ async def emit_to_users(signal_row, bot_send) -> dict:
                 await bot_send(uid, user_trade.execution_card(exec_res, sig))
             except Exception:
                 pass
+
+    # 6) unified broadcast to all matching enabled Telegram channels/groups
+    real_bot = bot or getattr(bot_send, "_bot", None)
+    if include_channels and real_bot is not None:
+        try:
+            from fysb.handlers.admin_channels import emit_to_channels
+            ch_stats = await emit_to_channels(sig, real_bot)
+            stats["channels_sent"] = ch_stats.get("channels_sent", 0)
+            stats["channels_failed"] = ch_stats.get("channels_failed", 0)
+        except Exception as e:
+            log.warning("emit_to_channels failed for signal #%s: %s", sig.get("id"), type(e).__name__)
     return stats

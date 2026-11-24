@@ -261,6 +261,40 @@ async def pick_tf(q, uid: int, context, bot, tf: str) -> None:
     await _render(q, body, kb.user_nav(rows) if not d.get("is_admin") else kb.admin_nav(rows), bot)
 
 
+async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
+    """Deliver a private SIGNAL_NOW signal ONLY to its requester (uid), consume
+    their daily quota, pin delivery refs for live tracker edits, and run demo
+    auto-execute if armed."""
+    from fysb.engines.entry_state import birth_pulse_line
+    from fysb.engines.signal_engine import record_delivery_refs
+    from fysb.services import user_trade
+    from fysb.ui.cards import render_signal_card
+
+    got = await afn.run(_delivery_exists, uid, sig["id"])
+    if not got:
+        if not await afn.run(subs.try_consume_signal, uid, sig):
+            return False
+    row = await afn.run(_fetch_market_row, sig["symbol"])
+    text = render_signal_card(sig, user_view=True, row=row)
+    pulse = birth_pulse_line(sig, row)
+    if pulse:
+        text += "\n\n<blockquote>" + pulse + "</blockquote>"
+    personal = await afn.run(user_trade.personal_block, sig, uid)
+    if personal:
+        text += "\n\n<blockquote>" + personal + "</blockquote>"
+    try:
+        msg = await bot.send_message(uid, text, parse_mode="HTML")
+        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
+        if exec_res and exec_res.get("ok"):
+            await bot.send_message(uid, user_trade.execution_card(exec_res, sig), parse_mode="HTML")
+        return True
+    except Exception:
+        if not got:
+            await afn.run(subs.release_signal, uid, sig["id"])
+        return False
+
+
 async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     d = context.user_data.get(DRAFT_KEY) or {}
     if not d or d.get("stage") != "strategy" or strategy.upper() not in (d.get("strategies") or []):
@@ -269,57 +303,57 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     is_admin = bool(d.get("is_admin"))
     symbol, tf = d["symbol"], d["tf"]
     style = d.get("style", "")
-    context.user_data.pop(DRAFT_KEY, None)
+    # v6.14.0 FIX: preserve DRAFT_KEY with the chosen strategy so that when
+    # NO_SETUP occurs, tapping «بحث تلقائي» immediately creates the watcher!
+    d["strategy"] = strategy
+    d["stage"] = "ready_watch"
+    context.user_data[DRAFT_KEY] = d
     await _render(q, "🚀 <b>جارٍ تشغيل المحرك الحقيقي على اختيارك…</b>\n"
                      "<i>السوق والمنهجية والإطار تُفحص فعلياً — لا إشارات مصطنعة أبداً.</i>", None, bot)
+    sig_source = "AUTO" if is_admin else "SIGNAL_NOW"
     try:
-        res = await asyncio.to_thread(generate_signal, symbol, tf, False, [strategy])
+        res = await asyncio.to_thread(
+            generate_signal, symbol, tf, False, [strategy], sig_source, uid
+        )
     except Exception as e:
         log.warning("signow generate failed: %s", type(e).__name__)
         res = {"status": "ERROR", "reason": type(e).__name__}
     if res.get("status") == "SIGNAL_CREATED":
+        context.user_data.pop(DRAFT_KEY, None)
         from fysb.engines.signal_engine import emit_to_users
         from fysb.engines.tracker import seq_of
         sig = await afn.run(_fetch_signal_by_id, res["signal_id"])
         sig = dict(sig) if sig else {}
-        stats = {"sent": 0, "skipped_quota": 0, "failed": 0}
-        if sig:
-            from fysb.handlers.inputs import bot_sender_from
-            stats = await emit_to_users(sig, bot_sender_from(bot))
-            # The requester MUST hold his own copy too (quota consumed like any
-            # delivery) — even if his notifications toggle or plan gate skipped him.
-            got = await afn.run(_delivery_exists, uid, sig["id"])
-            if not got:
-                from fysb.services import user_trade
-                from fysb.ui.cards import render_signal_card
-                if await afn.run(subs.try_consume_signal, uid, sig):
-                    row = await afn.run(_fetch_market_row, sig["symbol"])
-                    text = render_signal_card(sig, user_view=True, row=row)
-                    personal = user_trade.personal_block(sig, uid)
-                    if personal:
-                        text += "\n\n<blockquote>" + personal + "</blockquote>"
-                    try:
-                        msg = await bot.send_message(uid, text, parse_mode="HTML")
-                        from fysb.engines.signal_engine import record_delivery_refs
-                        await afn.run(record_delivery_refs, uid, sig["id"], msg)
-                        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
-                        if exec_res and exec_res.get("ok"):
-                            await bot.send_message(uid, user_trade.execution_card(exec_res, sig),
-                                                   parse_mode="HTML")
-                    except Exception:
-                        pass
+        if is_admin:
+            stats = {"sent": 0, "channels_sent": 0, "skipped_quota": 0, "failed": 0}
+            if sig:
+                from fysb.handlers.inputs import bot_sender_from
+                stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
+            delivery_line = (
+                f"▎📤 وصلت لـ <b>{stats['sent']}</b> مستلم مؤهل"
+                + (f" · قنوات: <b>{stats.get('channels_sent', 0)}</b>" if stats.get("channels_sent") else "")
+            )
+        else:
+            # v6.14.0 PRIVACY: regular user's Signal-Now is delivered PRIVATELY
+            # to the requester only — never broadcast publicly to other users/channels.
+            delivered = await _deliver_private_signal(bot, uid, sig) if sig else False
+            delivery_line = (
+                "▎🔒 إشارة خاصة لك وحدك — وصلتك أعلاه (استُهلكت من حدك اليومي)"
+                if delivered else
+                "▎⚠️ تعذر تسليم الإشارة (تأكد من توفر رصيد في حدك اليومي)"
+            )
         note = (f"✅ <b><u>ولدت إشارة حقيقية 100% — الإشارة #{seq_of(sig['id'])}</u></b>\n"
                 "<blockquote>"
                 f"▎🌐 {esc(symbol)} · ⏱ {tf_name(tf)} · 🧠 {esc(strategy)} · {STYLE_AR.get(style, '')}\n"
                 f"▎⭐ الجودة: <b>{res.get('score', 0)}/100</b>\n"
-                f"▎📤 وصلت لـ <b>{stats['sent']}</b> مستلم مؤهل (حدك اليومي استُهلك كأي إشارة)\n"
+                f"{delivery_line}\n"
                 "▎📡 التتبع اللحظي بدأ من الآن حتى الأهداف أو الوقف — أول بطاقة وصلتك تُحدَّث حية"
                 "</blockquote>")
-        rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals")]]
+        rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="success")]]
         await _render(q, note, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
         return
     if res.get("status") == "NO_SETUP":
-        rows = [[kb.btn(f"⏰ بحث تلقائي كل {p} دقيقة", f"{_prefix(is_admin)}:signowwatch:{p}")]
+        rows = [[kb.btn(f"⏰ بحث تلقائي كل {p} دقيقة", f"{_prefix(is_admin)}:signowwatch:{p}", style="primary")]
                 for p in WATCH_PERIODS]
         body = ("⛔ <b>لا توجد إشارة مؤهلة الآن — ظروف السوق لم تحقق " + esc(strategy) + "</b>\n"
                 "<blockquote>"
@@ -380,8 +414,12 @@ async def run_due_watchers(app) -> None:
             except Exception:
                 pass
             continue
+        is_admin_w = (uid == config.ADMIN_ID)
+        sig_source = "AUTO" if is_admin_w else "SIGNAL_NOW"
         try:
-            res = await asyncio.to_thread(generate_signal, w["symbol"], w["timeframe"], False, [w["strategy"]])
+            res = await asyncio.to_thread(
+                generate_signal, w["symbol"], w["timeframe"], False, [w["strategy"]], sig_source, uid
+            )
         except Exception as e:
             log.warning("watcher %s generation failed: %s", w["id"], type(e).__name__)
             res = {"status": "ERROR"}
@@ -391,27 +429,15 @@ async def run_due_watchers(app) -> None:
             sig = dict(sig) if sig else {}
             if not sig:
                 continue
-            from fysb.engines.signal_engine import emit_to_users, record_delivery_refs
+            from fysb.engines.signal_engine import emit_to_users
             from fysb.engines.tracker import seq_of
             from fysb.handlers.inputs import bot_sender_from
-            stats = await emit_to_users(sig, bot_sender_from(app.bot))
-            got = await afn.run(_delivery_exists, uid, sig["id"])
-            if not got and await afn.run(subs.try_consume_signal, uid, sig):
-                row = await afn.run(_fetch_market_row, sig["symbol"])
-                from fysb.services import user_trade
-                text = render_signal_card(sig, user_view=True, row=row)
-                personal = user_trade.personal_block(sig, uid)
-                if personal:
-                    text += "\n\n<blockquote>" + personal + "</blockquote>"
-                try:
-                    msg = await app.bot.send_message(uid, text, parse_mode="HTML")
-                    await afn.run(record_delivery_refs, uid, sig["id"], msg)
-                    exec_res = await afn.run(user_trade.auto_execute, sig, uid)
-                    if exec_res and exec_res.get("ok"):
-                        await app.bot.send_message(uid, user_trade.execution_card(exec_res, sig),
-                                                   parse_mode="HTML")
-                except Exception:
-                    pass
+            if is_admin_w:
+                stats = await emit_to_users(sig, bot_sender_from(app.bot), bot=app.bot, include_channels=True)
+                sent_n = stats.get("sent", 0)
+            else:
+                ok_priv = await _deliver_private_signal(app.bot, uid, sig)
+                sent_n = 1 if ok_priv else 0
             try:
                 await app.bot.send_message(uid,
                     f"🔔 <b>البحث التلقائي أثمر — صدرت الإشارة الحقيقية #{seq_of(sig['id'])}</b> "
@@ -419,6 +445,6 @@ async def run_due_watchers(app) -> None:
                     parse_mode="HTML")
             except Exception:
                 pass
-            log.info("watcher %s FOUND signal #%s (sent=%s)", w["id"], sig["id"], stats.get("sent"))
+            log.info("watcher %s FOUND signal #%s (sent=%s)", w["id"], sig["id"], sent_n)
         elif res.get("status") in ("NO_SETUP", "REJECTED", "DUPLICATE", "ERROR"):
             await afn.run(reschedule_watcher, w["id"], w["interval_minutes"])

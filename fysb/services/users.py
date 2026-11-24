@@ -14,8 +14,9 @@ def ensure_user(tg_user) -> None:
             return
         if db.get_setting("block_new_users", "0") == "1":
             raise PermissionError("new-user registration is temporarily closed")
-        c.execute("""INSERT INTO users(user_id,username,full_name,joined_at,last_seen)
-                     VALUES(?,?,?,?,?)""",
+        c.execute("""INSERT INTO users(user_id,username,full_name,joined_at,last_seen,
+                     market,timeframe,strategy,min_score)
+                     VALUES(?,?,?,?,?,'','','',0)""",
                   (tg_user.id, tg_user.username or "", tg_user.full_name or "", config.now(), config.now()))
     audit_log.log(tg_user.id, "user_registered")
 

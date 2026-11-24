@@ -864,11 +864,13 @@ def _bot_sender(context):
 
 
 def bot_sender_from(bot):
-    """Bot-object variant of _bot_sender (used by signal_now + watchers)."""
+    """Bot-object variant of _bot_sender (used by signal_now + watchers).
+    Carries `_bot` so emit_to_users can broadcast to enabled channels too."""
 
     async def send(uid: int, text: str):
         return await bot.send_message(uid, text, parse_mode="HTML")
 
+    send._bot = bot
     return send
 
 

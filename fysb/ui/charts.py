@@ -63,6 +63,63 @@ def charts_enabled() -> bool:
     return (db.get_setting("charts_enabled", "1") or "1") == "1"
 
 
+def live_signal_metrics(sig: dict, candles: list[dict] | None = None, row=None) -> dict:
+    """Compute honest live/realized pips & current market price for a signal.
+
+    For open RUNNING/TP1_HIT/TP2_HIT signals whose `pips_result` is still 0 (or
+    whose live market price has travelled further), calculates real floating pips
+    from the latest real candle close (or `sig['live_px']`) — never misleadingly
+    displaying `+0.0 pips` on a trade currently +100 pips in profit.
+    """
+    symbol = str(sig.get("symbol") or "XAUUSD").upper()
+    direction = str(sig.get("direction") or "BUY").upper()
+    entry = float(sig.get("entry") or 0.0)
+    status = str(sig.get("status") or "ACTIVE").upper()
+    stored_pips = float(sig.get("pips_result") or 0.0)
+    closed_at = str(sig.get("closed_at") or "").strip()
+
+    live_px = 0.0
+    if candles:
+        try:
+            live_px = float(candles[-1].get("close") or 0.0)
+        except (TypeError, ValueError):
+            live_px = 0.0
+    if live_px <= 0:
+        try:
+            live_px = float(sig.get("live_px") or 0.0)
+        except (TypeError, ValueError):
+            live_px = 0.0
+
+    floating_pips = 0.0
+    if live_px > 0 and entry > 0:
+        floating_pips = float(instruments.signed_pips(symbol, direction, entry, live_px, row))
+
+    is_closed = bool(closed_at) or status in ("TP3_HIT", "SL_HIT", "EXPIRED", "CANCELLED", "CLOSED")
+    if is_closed and stored_pips != 0.0:
+        display_pips = stored_pips
+        is_floating = False
+    elif status in ("TP1_HIT", "TP2_HIT") and not is_closed:
+        # Show the live floating pips if currently above banked level, else banked pips
+        display_pips = floating_pips if (live_px > 0 and floating_pips > stored_pips) else (stored_pips or floating_pips)
+        is_floating = live_px > 0
+    elif status == "RUNNING" and live_px > 0:
+        display_pips = floating_pips
+        is_floating = True
+    else:
+        display_pips = stored_pips if stored_pips != 0.0 else floating_pips
+        is_floating = (not is_closed) and (live_px > 0)
+
+    return {
+        "live_px": live_px,
+        "floating_pips": round(floating_pips, 1),
+        "stored_pips": round(stored_pips, 1),
+        "display_pips": round(display_pips, 1),
+        "is_floating": is_floating,
+        "is_closed": is_closed,
+        "status": status,
+    }
+
+
 def _load_font(size: int, kind: str = "bold"):
     if not PIL_AVAILABLE:
         return None
@@ -151,14 +208,21 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
     if rr > 0:
         _draw_pill(draw, px_cursor, 48, f"R:R 1:{rr:.2f}", (30, 42, 62, 255), TP_COLOR, f_badge, 10, 4)
 
-    # Header Right: Proof Victory Ribbon or Live Status Badge
+    # Header Right: Proof Victory Ribbon or Live Status Badge (uses REAL live floating pips on RUNNING trades!)
+    metrics = live_signal_metrics(sig, bars, row=row)
+    eff_pips = metrics["display_pips"]
     if proof_mode:
-        usd_001 = instruments.usd_move(symbol, pips_res, 0.01, px=tp3 or tp2 or tp1 or entry, row=row)
-        ribbon_txt = f"VERIFIED WIN  {pips_res:+.1f} PIPS  ({usd_001:+,.2f}$ / 0.01)"
-        _draw_pill(draw, W - 445, 28, ribbon_txt, BORDER_GOLD, BG_DARK, f_badge, 14, 9)
+        usd_001 = instruments.usd_move(symbol, eff_pips, 0.01, px=metrics["live_px"] or tp3 or tp2 or tp1 or entry, row=row)
+        tag_lbl = "LIVE PROFIT" if (metrics["is_floating"] and eff_pips >= 0) else (
+            "LIVE P&L" if metrics["is_floating"] else ("VERIFIED WIN" if eff_pips >= 0 else "CLOSED")
+        )
+        ribbon_bg = BORDER_GOLD if eff_pips >= 0 else BEAR_COLOR
+        ribbon_txt = f"{tag_lbl}  {eff_pips:+.1f} PIPS  ({usd_001:+,.2f}$ / 0.01)"
+        _draw_pill(draw, W - 445, 28, ribbon_txt, ribbon_bg, BG_DARK, f_badge, 14, 9)
     else:
-        badge_txt = f"STATUS: {status}"
-        _draw_pill(draw, W - 245, 30, badge_txt, (28, 38, 58, 255), GOLD_SOFT, f_badge, 12, 8)
+        pip_part = f"  {eff_pips:+.1f}P" if (metrics["live_px"] > 0 or eff_pips != 0.0) else ""
+        badge_txt = f"{status}{pip_part}"
+        _draw_pill(draw, W - 285, 30, badge_txt, (28, 38, 58, 255), TP_COLOR if eff_pips > 0 else GOLD_SOFT, f_badge, 12, 8)
 
     # Chart Plot Area
     plot_l, plot_t = 34, 114
@@ -390,10 +454,13 @@ def _render_board_stdlib(sig: dict, bars: list[dict], row=None, proof_mode: bool
     tp2 = float(sig.get("tp2") or 0.0)
     tp3 = float(sig.get("tp3") or 0.0)
 
+    metrics = live_signal_metrics(sig, bars, row=row)
+    eff_pips = metrics["display_pips"]
     hdr = f"FOREXYEMENI | {symbol} {direction} {tf} | {strat} {score}/100"
     _draw_text(22, 26, hdr[:52], GOLD_SOFT[:3], scale=2)
     if proof_mode:
-        _draw_text(22, 50, f"VERIFIED PROOF | {sig.get('status','')} {float(sig.get('pips_result') or 0):+.1f}P", TP_COLOR[:3], scale=2)
+        lbl = "LIVE" if metrics["is_floating"] else "PROOF"
+        _draw_text(22, 50, f"{lbl} | {sig.get('status','')} {eff_pips:+.1f}P", TP_COLOR[:3] if eff_pips >= 0 else SL_COLOR[:3], scale=2)
 
     highs = [float(b["high"]) for b in bars]
     lows = [float(b["low"]) for b in bars]

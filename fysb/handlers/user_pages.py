@@ -1622,7 +1622,9 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         if not sig:
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
-        png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, dict(sig), False)
+        from fysb.handlers.user_pages import build_signal_chart_bundle
+        bundle = await asyncio.to_thread(build_signal_chart_bundle, dict(sig), False)
+        png_bytes, is_proof = bundle["png"], bundle["is_proof"]
         if not png_bytes:
             await render(
                 q,
@@ -1633,7 +1635,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             return
         cap = (
             f"{'🏆 شارت إثبات موثّق' if is_proof else '📊 شارت الإشارة الملكي'} — "
-            f"<b>{esc(sig['symbol'])}</b> {sig['direction']} · {esc(sig['timeframe'])} · {esc(sig['strategy'])}"
+            f"<b>{esc(sig['symbol'])}</b> {sig['direction']} · {esc(sig['timeframe'])} · {esc(sig['strategy'])}\n"
+            f"{bundle['pips_line']}"
         )
         try:
             import io as _io
@@ -1677,8 +1680,8 @@ def _safe_float(v):
         return None
 
 
-def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes | None, bool]:
-    """Fetch fresh real OHLC candles for `sig` and render local PNG chart (0 cost)."""
+def build_signal_chart_bundle(sig: dict, force_proof: bool = False) -> dict:
+    """Fetch fresh real OHLC candles, compute REAL live/banked pips, and render PNG chart."""
     from fysb.engines import market_data
     from fysb.ui import charts
     sym = str(sig.get("symbol") or "XAUUSD")
@@ -1701,13 +1704,28 @@ def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes
                 break
         except Exception as exc:
             log.warning("chart fetch_candles failed sym=%s interval=%s: %s", prov_sym, interval, exc)
+    metrics = charts.live_signal_metrics(sig, candles, row=row)
     st = str(sig.get("status") or "").upper()
     is_proof = force_proof or st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "CLOSED")
-    if is_proof:
-        png = charts.render_proof_chart(sig, candles, row=row)
-        return png, True
-    png = charts.render_signal_chart(sig, candles, row=row)
-    return png, False
+    png = charts.render_proof_chart(sig, candles, row=row) if is_proof else charts.render_signal_chart(sig, candles, row=row)
+    px_txt = f" · السعر الآن: <code>{instruments.fmt_price(sym, metrics['live_px'], row)}</code>" if metrics["live_px"] > 0 else ""
+    res_label = "الربح/النتيجة اللحظية" if metrics["is_floating"] else "النتيجة المحققة"
+    pips_line = f"▎🎯 {res_label}: <b>{metrics['display_pips']:+.1f} pips</b> ({esc(st)}){px_txt}"
+    return {
+        "png": png,
+        "is_proof": is_proof,
+        "metrics": metrics,
+        "pips": metrics["display_pips"],
+        "live_px": metrics["live_px"],
+        "is_floating": metrics["is_floating"],
+        "pips_line": pips_line,
+    }
+
+
+def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes | None, bool]:
+    """Backward-compatible wrapper returning (png_bytes, is_proof)."""
+    b = build_signal_chart_bundle(sig, force_proof=force_proof)
+    return b["png"], b["is_proof"]
 
 
 def _plans_for_sale():

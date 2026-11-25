@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Royal Mini App v7.7.0</title>
+<title>FOREXYEMENI — Royal Mini App v7.7.1</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root {
@@ -261,7 +261,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.7.0</div>
+      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.7.1</div>
     </div>
   </div>
   <div class="top-right">
@@ -1231,10 +1231,12 @@ const BRIDGE_PLAT_META = {
     ['api_token','Deriv API Token (بصلاحية Trade)','password'],
     ['app_id','App ID (اتركه 1089 افتراضياً)','text'],
   ]},
-  ctrader: {desc:'👑 ربط cTrader Open API لحسابات Demo و Live من الهاتف (IC Markets · Pepperstone · FTMO · FxPro).', fields:[
-    ['access_token','cTrader Access Token','password'],
-    ['account_id','رقم حساب cTrader (Account ID)','text'],
-    ['broker_name','اسم الوسيط (مثال: IC Markets)','text'],
+  ctrader: {desc:'👑 تنفيذ فوري وحقيقي عبر cTrader Open API v2 (Demo & Live) من الهاتف 100% — يكتشف رقم الحساب تلقائياً ويقرأ الرصيد الحي وينفذ الصفقات و50% TP1 + BE.', fields:[
+    ['access_token','cTrader Access Token (مطلوب — بصلاحية Trade)','password'],
+    ['client_id','cTrader Client ID (اختياري إذا ضبطته الإدارة)','text'],
+    ['client_secret','cTrader Client Secret (اختياري إذا ضبطته الإدارة)','password'],
+    ['account_id','رقم حساب cTrader (اختياري — يُكتشف تلقائياً)','text'],
+    ['symbol_suffix','لاحقة الرمز لدى الوسيط إن وجدت (مثال: .raw أو فارغ)','text'],
   ]},
   mt5_bridge: {desc:'🖥 يولّد لك مفتاح جسر مشفّر + ملف ForexYemeni_Bridge.mq5 جاهز للتحميل بضغطة لحسابات MT5 Demo و Live مجاناً 100%.', fields:[
     ['symbol_suffix','لاحقة الرموز لدى الوسيط إن وجدت (مثال: m أو .raw أو اتركها فارغة)','text'],
@@ -1299,8 +1301,9 @@ async function loadBridgeOverview(showToast=false){
       </div>
       <div class="btn-row">
         <button class="btn ghost" onclick="testBridgeConn(${c.id})">🔍 فحص</button>
-        ${c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${c.id})">⬇️ تحميل EA</button>` : ''}
-        <button class="btn ${c.enabled?'ghost':'green'}" onclick="toggleBridgeConn(${c.id})">${c.enabled?'⏸ إيقاف':'▶️ تشغيل'}</button>
+        <button class="btn gold" onclick="runBridgeTestTrade(${c.id})">🧪 صفقة 0.01</button>
+        ${c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${c.id})">⬇️ EA</button>` : ''}
+        <button class="btn ${c.enabled?'ghost':'green'}" onclick="toggleBridgeConn(${c.id})">${c.enabled?'⏸':'▶️'}</button>
         <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${c.id})">🗑</button>
       </div>
     </div>`).join('') : '<div class="empty">لم تربط أي حساب وسيط بعد — اختر منصتك واضغط حفظ أعلاه!</div>';
@@ -1345,6 +1348,12 @@ async function testBridgeConn(id){
   toast('🔍 جارٍ فحص الاتصال والرصيد الحقيقي...');
   const r = await api('/api/bridge/test', {method:'POST', body:JSON.stringify({connection_id:id})});
   toast((r && (r.message || r.error)) || 'اكتمل الفحص', !(r && r.ok));
+  loadBridgeOverview(false);
+}
+async function runBridgeTestTrade(id){
+  toast('🧪 جارٍ إرسال صفقة اختبار EURUSD BUY 0.01 لوت...');
+  const r = await api('/api/bridge/test-trade', {method:'POST', body:JSON.stringify({connection_id:id, symbol:'EURUSD', direction:'BUY', lots:0.01})});
+  toast((r && (r.message || r.error)) || 'اكتمل الاختبار', !(r && r.ok));
   loadBridgeOverview(false);
 }
 async function toggleBridgeConn(id){

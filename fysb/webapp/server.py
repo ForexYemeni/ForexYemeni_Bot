@@ -220,13 +220,24 @@ def dispatch_request(
 
             if m == "GET" and path == "/api/admin/bridge/overview":
                 from fysb.services import auto_bridge as _ab
+                g_cid, g_csec = _ab.get_global_ctrader_app()
                 return _json_resp(200, {
                     "ok": True,
                     "policy": _ab.get_policy(),
+                    "ctrader_app_configured": bool(g_cid and g_csec),
                     "overrides": _ab.list_user_overrides(),
                     "connections": _ab.list_connections(None, 100),
                     "orders": _ab.list_orders(None, 40),
                 })
+
+            if m == "POST" and path == "/api/admin/bridge/ctrader-app":
+                from fysb.services import auto_bridge as _ab
+                res = _ab.set_global_ctrader_app(
+                    str(payload.get("client_id") or ""),
+                    str(payload.get("client_secret") or ""),
+                )
+                audit_log.log(uid, f"webapp_bridge_ctrader_app:configured={int(bool(res.get('configured')))}")
+                return _json_resp(200, res)
 
             if m == "POST" and path == "/api/admin/bridge/policy":
                 from fysb.services import auto_bridge as _ab
@@ -267,6 +278,14 @@ def dispatch_request(
                     res = _ab.delete_connection(cid, is_admin=True)
                 elif op == "test":
                     res = _ab.test_connection(cid, is_admin=True)
+                elif op == "test_trade":
+                    res = _ab.execute_test_trade(
+                        cid,
+                        symbol=str(payload.get("symbol") or "EURUSD"),
+                        direction=str(payload.get("direction") or "BUY"),
+                        lots=float(payload.get("lots") or 0.01),
+                        is_admin=True,
+                    )
                 else:
                     return _json_resp(400, {"ok": False, "error": "Unsupported op"})
                 return _json_resp(200 if res.get("ok") else 400, res)
@@ -953,6 +972,18 @@ def dispatch_request(
         if m == "POST" and path == "/api/bridge/test":
             from fysb.services import auto_bridge as _ab
             res = _ab.test_connection(int(payload.get("connection_id") or 0), user_id=uid, is_admin=principal["is_admin"])
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "POST" and path == "/api/bridge/test-trade":
+            from fysb.services import auto_bridge as _ab
+            res = _ab.execute_test_trade(
+                int(payload.get("connection_id") or 0),
+                symbol=str(payload.get("symbol") or "EURUSD"),
+                direction=str(payload.get("direction") or "BUY"),
+                lots=float(payload.get("lots") or 0.01),
+                user_id=uid,
+                is_admin=principal["is_admin"],
+            )
             return _json_resp(200 if res.get("ok") else 400, res)
 
         if m == "POST" and path == "/api/bridge/toggle":

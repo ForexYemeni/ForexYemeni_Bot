@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Super Admin Web Panel v7.7.0</title>
+<title>FOREXYEMENI — Super Admin Web Panel v7.7.1</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root{
@@ -178,7 +178,7 @@ input:focus,select:focus{border-color:var(--gold)}
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ADMIN</div>
-      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v7.7.0</div>
+      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v7.7.1</div>
     </div>
   </div>
   <div class="top-actions">
@@ -253,6 +253,14 @@ input:focus,select:focus{border-color:var(--gold)}
         <div class="row-form">
           <input id="brAllowedPlans" value="VIP,ROYAL" placeholder="الباقات المسموحة (مثال: VIP,ROYAL)" style="flex:1;min-width:140px"/>
           <button class="btn gold" style="flex:0;min-width:92px" onclick="saveBridgePlans()">💾 حفظ الباقات</button>
+        </div>
+        <div style="margin-top:8px;padding:9px;border-radius:11px;background:rgba(12,18,32,.6);border:1px solid var(--border)">
+          <div style="font-size:11.5px;font-weight:800;margin-bottom:6px">👑 مفاتيح تطبيق cTrader Open API المركزية (اختياري): <span id="admCtAppStatus" class="pill">غير مضبوط</span></div>
+          <div class="row-form" style="margin-bottom:0">
+            <input id="admCtCid" placeholder="cTrader Client ID" style="flex:1;min-width:110px"/>
+            <input id="admCtCsec" type="password" placeholder="cTrader Client Secret" style="flex:1;min-width:110px"/>
+            <button class="btn gold" style="flex:0;min-width:80px" onclick="saveAdminCtraderApp()">🔐 حفظ</button>
+          </div>
         </div>
         <div class="card-hdr" style="margin-top:8px"><h3>🔌 الحسابات المربوطة حالياً</h3><span class="pill" id="admBrConnCnt">0</span></div>
         <div id="admBridgeConns"><div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div></div>
@@ -783,6 +791,14 @@ async function saveBridgePlans(){
   loadAdminBridge();
 }
 
+async function saveAdminCtraderApp(){
+  const client_id = (document.getElementById('admCtCid')?.value || '').trim();
+  const client_secret = (document.getElementById('admCtCsec')?.value || '').trim();
+  const r = await api('/api/admin/bridge/ctrader-app', {method:'POST', body:JSON.stringify({client_id, client_secret})});
+  toast(r && r.ok ? (r.configured ? '🔐 تم حفظ مفاتيح تطبيق cTrader مشفّرة' : 'تم مسح المفاتيح المركزية') : 'خطأ', !(r && r.ok));
+  loadAdminBridge();
+}
+
 async function adminBridgeConnOp(connection_id, op){
   const r = await api('/api/admin/bridge/connection', {method:'POST', body:JSON.stringify({connection_id, op})});
   toast(r && r.ok ? (r.message || '✅ تم تحديث الربط') : ((r && r.error) || 'خطأ'), !(r && r.ok));
@@ -802,6 +818,8 @@ async function loadAdminBridge(){
   });
   const apEl = document.getElementById('brAllowedPlans');
   if(apEl && Array.isArray(pol.allowed_plans)) apEl.value = pol.allowed_plans.join(',');
+  const ctSt = document.getElementById('admCtAppStatus');
+  if(ctSt){ ctSt.textContent = r.ctrader_app_configured ? '🟢 مضبوط ومشفّر' : '⚪ غير مضبوط'; ctSt.className = r.ctrader_app_configured ? 'pill green' : 'pill'; }
 
   const conns = r.connections || [];
   const cntEl = document.getElementById('admBrConnCnt');

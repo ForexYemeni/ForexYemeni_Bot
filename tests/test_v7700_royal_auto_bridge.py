@@ -191,7 +191,82 @@ def test_encrypted_multiplatform_connect_mt5_ea_poll_ack_tp1_partial_be_and_dd_s
 def test_webapp_templates_contain_royal_auto_bridge_ui(env):
     u_html = wa_templates.render_user_miniapp_html()
     a_html = wa_templates.render_admin_panel_html()
-    for token in ("demoBridgeSub", "saveBridgeConnection", "downloadMt5Ea", "selectBridgePlatform"):
+    for token in ("demoBridgeSub", "saveBridgeConnection", "downloadMt5Ea", "selectBridgePlatform", "runBridgeTestTrade"):
         assert token in u_html
-    for token in ("setBridgePolicyMode", "setAdminUserBridgeRule", "loadAdminBridge", "admBridgeConns"):
+    for token in ("setBridgePolicyMode", "setAdminUserBridgeRule", "loadAdminBridge", "admBridgeConns", "saveAdminCtraderApp"):
         assert token in a_html
+
+
+def test_ctrader_openapi_v2_full_lifecycle_test_trade_signal_and_tp1_partial_be(env, monkeypatch):
+    # 1) Admin configures global cTrader App credentials once (encrypted at rest)
+    st_app, _, b_app = wa_server.dispatch_request(
+        "POST", "/api/admin/bridge/ctrader-app", _hdr(ADMIN_UID),
+        json.dumps({"client_id": "ct_app_12345", "client_secret": "ct_secret_xyz"}).encode(),
+    )
+    assert st_app == 200 and json.loads(b_app)["configured"] is True
+
+    # 2) Mock _CTraderClient JSON-WS protocol transport
+    sent_calls = []
+
+    class FakeCTrader:
+        def __init__(self, account_mode="DEMO", timeout=10.0):
+            self.account_mode = account_mode
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def auth_session(self, cid, csec, tok, hint_account_id=""):
+            sent_calls.append(("auth", self.account_mode, cid, tok))
+            return 44556677, {"balance": 1000000, "moneyDigits": 2, "traderLogin": 998877, "brokerTitleShort": "ICMarkets"}
+
+        def execute_market_order(self, ctid, symbol, direction, lots, entry=0.0, sl=0.0, tp=0.0, suffix="", comment=""):
+            sent_calls.append(("order", ctid, symbol, direction, lots, sl, tp))
+            return {"position_id": "555001", "symbol_name": f"{symbol}{suffix}", "volume": int(lots * 10_000_000), "fill_price": entry or 1.0850}
+
+        def partial_close_and_be(self, ctid, position_id, be_price):
+            sent_calls.append(("partial_be", ctid, position_id, be_price))
+            return {"ok": True, "detail": "cTrader TP1: 50% إغلاق ✅ · BE ✅"}
+
+    monkeypatch.setattr(ab, "_CTraderClient", FakeCTrader)
+
+    # 3) VIP connects cTrader DEMO using ONLY access_token (inherits Admin App creds + auto-discovers ctid!)
+    st_c, _, b_c = wa_server.dispatch_request(
+        "POST", "/api/bridge/connect", _hdr(VIP_UID),
+        json.dumps({"platform": "ctrader", "account_mode": "DEMO", "creds": {"access_token": "tok_demo_abc"}}).encode(),
+    )
+    j_c = json.loads(b_c)
+    assert st_c == 200 and j_c["ok"] is True
+    cid = j_c["connection"]["id"]
+
+    # 4) Live connection test reads $10,000.00 balance and persists discovered ctid 44556677
+    st_t, _, b_t = wa_server.dispatch_request(
+        "POST", "/api/bridge/test", _hdr(VIP_UID),
+        json.dumps({"connection_id": cid}).encode(),
+    )
+    j_t = json.loads(b_t)
+    assert st_t == 200 and j_t["ok"] is True and j_t["balance"] == 10000.0 and j_t["ctid"] == 44556677
+
+    # 5) 1-Tap 0.01 lot Test Trade executes directly on cTrader DEMO
+    st_tt, _, b_tt = wa_server.dispatch_request(
+        "POST", "/api/bridge/test-trade", _hdr(VIP_UID),
+        json.dumps({"connection_id": cid, "symbol": "EURUSD", "direction": "BUY", "lots": 0.01}).encode(),
+    )
+    j_tt = json.loads(b_tt)
+    assert st_tt == 200 and j_tt["ok"] is True and j_tt["status"] == "EXECUTED" and j_tt["position_id"] == "555001"
+
+    # 6) Signal publish -> auto-executes on cTrader DEMO -> TP1 triggers real 50% partial close + BE!
+    st_p, _, b_p = wa_server.dispatch_request(
+        "POST", "/api/admin/publish-signal", _hdr(ADMIN_UID),
+        json.dumps({
+            "symbol": "XAUUSD", "direction": "BUY", "timeframe": "M15", "strategy": "SMC",
+            "entry": 2650.0, "sl": 2640.0, "tp1": 2662.0, "tp2": 2675.0, "tp3": 2690.0, "broadcast": False,
+        }).encode(),
+    )
+    sig = json.loads(b_p)["signal"]
+    n_be = ab.dispatch_tp1_partial_be(sig)
+    assert n_be == 1
+    assert any(c[0] == "partial_be" and c[2] == 555001 and c[3] == 2650.0 for c in sent_calls)
+

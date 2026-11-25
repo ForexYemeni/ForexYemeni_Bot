@@ -171,14 +171,18 @@ def test_10_and_11_manual_signal_studio_signal_now_and_smart_demo_auto_copy(env)
     assert j["settings"]["auto_trade"] is True and j["settings"]["partial_tp_be"] is True
 
     # Publish a manual signal from Admin Web App Studio -> auto-copies to USER_UID's Demo account!
-    st2, _, body2 = wa_server.dispatch_request(
-        "POST", "/api/admin/publish-signal", _hdr(ADMIN_UID),
-        json.dumps({
-            "symbol": "XAUUSD", "direction": "BUY", "timeframe": "M15", "strategy": "SMC",
-            "entry": 2650.0, "sl": 2640.0, "tp1": 2662.0, "tp2": 2675.0, "tp3": 2690.0,
-            "broadcast": False,
-        }).encode(),
-    )
+    # Mock live XAUUSD quote inside signal geometry so CI never depends on live Gold spot.
+    from unittest.mock import patch
+    from fysb.engines import market_data as _md
+    with patch.object(_md, "fetch_price", return_value={"price": 2652.0, "fetched_at": config.now()}):
+        st2, _, body2 = wa_server.dispatch_request(
+            "POST", "/api/admin/publish-signal", _hdr(ADMIN_UID),
+            json.dumps({
+                "symbol": "XAUUSD", "direction": "BUY", "timeframe": "M15", "strategy": "SMC",
+                "entry": 2650.0, "sl": 2640.0, "tp1": 2662.0, "tp2": 2675.0, "tp3": 2690.0,
+                "broadcast": False,
+            }).encode(),
+        )
     j2 = json.loads(body2)
     assert st2 == 200 and j2["ok"] is True
     assert j2["signal"]["symbol"] == "XAUUSD" and j2["auto_copied_count"] == 1
@@ -190,7 +194,8 @@ def test_10_and_11_manual_signal_studio_signal_now_and_smart_demo_auto_copy(env)
         assert pos is not None and pos["symbol"] == "XAUUSD"
 
     # Calling auto_copy again must NOT duplicate
-    dup_res = demo_engine.auto_copy_signal_for_subscribers(j2["signal"])
+    with patch.object(_md, "fetch_price", return_value={"price": 2652.0, "fetched_at": config.now()}):
+        dup_res = demo_engine.auto_copy_signal_for_subscribers(j2["signal"])
     assert dup_res == []
 
     # User Mini App: /api/signal-now returns active signal cleanly

@@ -309,6 +309,9 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
         <div style="font-size:12px;font-weight:800">⚡ الإشارات التلقائية: <span id="autoSigStateLbl" style="color:var(--green)">شغّالة</span></div>
         <button class="autosig-btn on-stop" id="autoSigBtn" onclick="toggleAutoSignals()">🔕 إيقاف التلقائية</button>
       </div>
+      <div id="adminJumpBar" style="display:none;margin-top:9px">
+        <button class="btn gold" style="width:100%;padding:10px" onclick="openAdminPanelNow()">👑 فتح لوحة الإدارة الملكية</button>
+      </div>
     </div>
 
     <div class="card gold-edge">
@@ -1233,6 +1236,11 @@ function closeShareModal(){{
   const m = document.getElementById('shareCardModal');
   if(m) m.style.display = 'none';
 }}
+function openAdminPanelNow(){{
+  const base = (API_BASE || window.location.origin).replace(/\\/+$/, '');
+  const qs = window.location.search || '';
+  window.location.href = base + '/admin' + qs;
+}}
 
 // --- v7.7.0 USER ROYAL AUTO-BRIDGE JS ---
 let curBridgePlat = 'tradelocker';
@@ -1434,6 +1442,8 @@ async function boot(){{
     const pctQ = lim > 0 ? Math.min(100, Math.max(8, Math.round(used/lim*100))) : 100;
     document.getElementById('qBarFill').style.width = pctQ + '%';
     renderAutoSigToggle(me.auto_signals !== false);
+    const admBar = document.getElementById('adminJumpBar');
+    if(admBar) admBar.style.display = me.is_admin ? 'block' : 'none';
     renderMarketChips(me.markets);
     if(me.risk){{
       document.getElementById('rBal').value = me.risk.balance;

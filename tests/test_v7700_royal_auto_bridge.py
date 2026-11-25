@@ -270,3 +270,31 @@ def test_ctrader_openapi_v2_full_lifecycle_test_trade_signal_and_tp1_partial_be(
     assert n_be == 1
     assert any(c[0] == "partial_be" and c[2] == 555001 and c[3] == 2650.0 for c in sent_calls)
 
+
+def test_v772_native_bot_buttons_and_admin_home_panel_button(env, monkeypatch):
+    from fysb.ui import keyboards as kb
+    from fysb.handlers import auto_bridge_bot
+
+    # 1) Admin execution hub & finance hub expose native Telegram buttons for Bridge, Promos, Digest
+    exec_cbs = [b.callback_data for r in kb.admin_hub_execution().inline_keyboard for b in r]
+    fin_cbs = [b.callback_data for r in kb.admin_hub_finance().inline_keyboard for b in r]
+    assert "a:bridge" in exec_cbs
+    assert "a:promos" in fin_cbs and "a:digest_now" in fin_cbs
+
+    # 2) Admin menu stays 4 rows offline, and prepends Royal Admin WebApp button when live HTTPS URL is ready
+    monkeypatch.setattr(config, "WEBAPP_URL", "")
+    assert len(kb.admin_menu().inline_keyboard) == 4
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://live.example.com")
+    m_live = kb.admin_menu()
+    assert len(m_live.inline_keyboard) == 5
+    assert "لوحة الإدارة" in m_live.inline_keyboard[0][0].text
+
+    # 3) Luxury cTrader guide renders clean HTML
+    guide = auto_bridge_bot.render_ctrader_luxury_guide_html()
+    assert "openapi.ctrader.com" in guide and "Playground" in guide and "Access Token" in guide
+
+    # 4) User Mini App template contains Admin Jump Bar
+    u_html = wa_templates.render_user_miniapp_html()
+    assert "adminJumpBar" in u_html and "openAdminPanelNow" in u_html
+
+

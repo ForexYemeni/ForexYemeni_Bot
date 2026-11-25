@@ -95,6 +95,9 @@ async def admin_user_detail(q, uid, context, bot, target: int):
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
         [kb.btn("💳 مدفوعاته", f"a:userpayments:{target}"), kb.btn("📡 ما استلمه", f"a:userdeliveries:{target}")],
         [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}", style="primary"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
+        [kb.btn("⚡ سماح بالنسخ", f"a:br_user_set:{target}:ALLOW", style="success"),
+         kb.btn("🚫 منع النسخ", f"a:br_user_set:{target}:DENY", style="danger"),
+         kb.btn("⚙️ تلقائي", f"a:br_user_set:{target}:AUTO")],
         [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}", style="danger")],
         [kb.btn("↩️ دليل المستخدمين", "a:users")],
     ]

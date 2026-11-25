@@ -13,11 +13,29 @@ Honesty contract:
     «لا بيانات كافية بعد» — never invented numbers;
   * realized R uses the SAME pips the tracker banked (no optimistic rounding).
 """
+import threading
+import time
+
 from fysb import db
+
+_LB_TTL = 30.0
+_lb_lock = threading.Lock()
+_lb_cache: tuple[list[dict], float] | None = None
+
+
+def invalidate_leaderboard_cache() -> None:
+    global _lb_cache
+    with _lb_lock:
+        _lb_cache = None
 
 
 def leaderboard() -> list[dict]:
-    """Ranked strength list over closed signals, best first."""
+    """Ranked strength list over closed signals, best first (30s TTL cache)."""
+    global _lb_cache
+    now_m = time.monotonic()
+    with _lb_lock:
+        if _lb_cache is not None and (now_m - _lb_cache[1]) < _LB_TTL:
+            return [dict(d) for d in _lb_cache[0]]
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             """SELECT strategy, symbol, entry, stop, hit_tp, pips_result
@@ -62,6 +80,8 @@ def leaderboard() -> list[dict]:
     out.sort(key=lambda d: (d["strength"], d["win_rate"], d["n"]), reverse=True)
     for i, d in enumerate(out, start=1):
         d["rank"] = i
+    with _lb_lock:
+        _lb_cache = ([dict(d) for d in out], time.monotonic())
     return out
 
 
@@ -97,20 +117,11 @@ def leaderboard_text(limit: int = 8) -> str:
 #           (the registry order below), then the not-yet-implemented last.
 # The result is deterministic for the same data — the same DB always renders
 # the same order, and the order upgrades itself as history accumulates.
-# v6.8.1 — the baseline now covers the FULL world catalog: implemented modules
-# first (their order = documented institutional ranking), then the complete
-# global schools, so the board is ordered for every strategy in the platform.
+# v6.12.0 — ONLY real implemented & automated-tested strategies (13 modules).
+# All 25 empty/unimplemented placeholders have been permanently purged.
 BASELINE_ORDER = [
-    # implemented + tested modules (institutional rank)
-    "ICT", "SMC", "CRT", "PRICE_ACTION", "FIBONACCI", "ICHIMOKU", "TREND",
-    "AMD", "SILVER_BULLET", "TURTLE_SOUP",
-    # documented global schools (closed until implemented + back-tested)
-    "WYCKOFF", "ELLIOTT_WAVE", "HARMONIC", "VOLUME_PROFILE", "ORDER_FLOW",
-    "MARKET_PROFILE", "VWAP", "CPR", "PIVOT_POINTS", "SUPERTREND",
-    "BREAKOUT_RETEST", "SUPPORT_RESISTANCE", "LONDON_BREAK", "ASIA_RANGE",
-    "ORB", "DONCHIAN", "ATR_BREAKOUT", "MOMENTUM", "MA_CROSS", "MACD_STRAT",
-    "RSI_DIVERGENCE", "BOLLINGER", "KELTNER", "MEAN_REVERSION", "GAP_TRADE",
-    "HEIKIN_ASHI",
+    "ICT", "SMC", "CRT", "PRICE_ACTION", "WYCKOFF", "FIBONACCI",
+    "ICHIMOKU", "TREND", "CLASSIC", "SK", "AMD", "SILVER_BULLET", "TURTLE_SOUP",
 ]
 
 

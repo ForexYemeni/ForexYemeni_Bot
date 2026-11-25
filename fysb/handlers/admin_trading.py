@@ -34,91 +34,348 @@ SIG_CATS = {
 }
 
 
-def _signals_page_body(statuses: tuple, page: int, size: int = 8) -> tuple[str, list, int]:
-    with db.conn() as c:
-        if statuses:
-            marks = ",".join("?" for _ in statuses)
-            total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE status IN ({marks})", statuses).fetchone()["n"]
-            rows = c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                 FROM signals WHERE status IN ({marks})
-                                 ORDER BY id DESC LIMIT ? OFFSET ?""",
-                             (*statuses, size, page * size)).fetchall()
-        else:
-            total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-            rows = c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
-                                 FROM signals ORDER BY id DESC LIMIT ? OFFSET ?""",
-                             (size, page * size)).fetchall()
-    rows_kb = [[kb.btn(render_signal_compact(dict(r)), f"a:signalview:{r['id']}")] for r in rows]
-    return total, rows_kb, len(rows)
+def _signals_page_body(statuses: tuple, page: int, size: int = 8, scope: str = "all") -> tuple[int, list, int, dict]:
+    from fysb.services import signal_archive as _sa
+    total, rows, summary = _sa.admin_signals_page(scope=scope, statuses=statuses, page=page, size=size)
+    rows_kb = [[kb.btn(render_signal_compact(r), f"a:signalview:{r['id']}")] for r in rows]
+    return total, rows_kb, len(rows), summary
 
 
-async def _render_signals_center(q, bot, cat: str = "all", page: int = 0):
-    title, st_csv, tab = SIG_CATS.get(cat, SIG_CATS["all"])
+async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope: str = "today"):
+    from fysb.services import signal_archive as _sa
+    title, st_csv, _tab = SIG_CATS.get(cat, SIG_CATS["all"])
     statuses = tuple(s for s in st_csv.split(",") if s)
-    total, rows_kb, shown = await afn.run(_signals_page_body, statuses, page)
+    size = 8
+    counts = await afn.run(_sa.admin_scope_counts)
+    total, rows_kb, shown, summary = await afn.run(_signals_page_body, statuses, page, size, scope)
+    total_pages = max(1, (total + size - 1) // size)
+
+    # Pagination row
     nav_row = []
     if page > 0:
-        nav_row.append(kb.btn("◀️", f"a:sigcat:{cat}:{page - 1}"))
-    if shown == 8:
-        nav_row.append(kb.btn("▶️", f"a:sigcat:{cat}:{page + 1}"))
+        nav_row.append(kb.btn("◀️ السابق", f"a:sigday:{scope}:{cat}:{page - 1}"))
+    if (page + 1) * size < total:
+        nav_row.append(kb.btn("التالي ▶️", f"a:sigday:{scope}:{cat}:{page + 1}"))
     if nav_row:
         rows_kb.append(nav_row)
-    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+
+    # Row 0: Royal Date Scope Tabs (Today / Yesterday / By Date / All)
+    day_iso = _sa.resolve_scope_date(scope)
+    is_today = scope == "today"
+    is_yest = scope == "yesterday"
+    is_custom_date = bool(day_iso) and not is_today and not is_yest
+    is_all = scope == "all"
+    date_row = [
+        kb.btn(("◉ " if is_today else "") + f"📅 اليوم ({counts['today']})", f"a:sigday:today:{cat}:0",
+               style="primary" if is_today else None),
+        kb.btn(("◉ " if is_yest else "") + f"📆 أمس ({counts['yesterday']})", f"a:sigday:yesterday:{cat}:0",
+               style="primary" if is_yest else None),
+        kb.btn(("◉ " if is_custom_date else "") + f"🗓 بالتاريخ ({counts['days']})", "a:sigdates:0",
+               style="primary" if is_custom_date else None),
+        kb.btn(("◉ " if is_all else "") + f"🗂 الكل ({counts['total']})", f"a:sigday:all:{cat}:0",
+               style="primary" if is_all else None),
+    ]
+    # Category pills bound to active date scope
+    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
                for key in list(SIG_CATS)[:4]]
-    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigcat:{key}:0")
+    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
                 for key in list(SIG_CATS)[4:]]
-    rows_kb.insert(0, cat_row)
-    rows_kb.insert(1, cat_row2)
-    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
-    rows_kb.append([kb.btn("🚀 إشارة الآن (بمراحل)", "a:signow"), kb.btn("➕ نشر إشارة يدوية", "a:newsignal")])
-    rows_kb.append([kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow"), kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
-    await render(q, f"📡 <b><u>مركز إدارة الإشارات</u></b> — {title}\n"
-                    f"<blockquote>▎الإجمالي في هذا التصنيف: <b>{total}</b> · صفحة {page + 1}\n"
-                    "▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات</blockquote>",
-                 kb.admin_nav(rows_kb), bot)
+    rows_kb.insert(0, date_row)
+    rows_kb.insert(1, cat_row)
+    rows_kb.insert(2, cat_row2)
+
+    pl_cb = f"a:sigpl:{day_iso}" if is_custom_date else ("a:sigpl" if is_all else f"a:sigpl:{scope}")
+    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl"),
+                    kb.btn("📊 محاسبة هذا اليوم", pl_cb)] if not is_all
+                   else [kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
+    rows_kb.append([kb.btn("⚡ إشارة الآن (بمراحل)", "a:signow", style="success"),
+                    kb.btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")])
+    rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
+    rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
+
+    if is_today:
+        scope_label = f"{_sa.ar_date_label(_sa.today_iso())} · {title}"
+    elif is_yest:
+        scope_label = f"{_sa.ar_date_label(_sa.yesterday_iso())} · {title}"
+    elif is_custom_date:
+        scope_label = f"{_sa.ar_date_label(day_iso)} · {title}"
+    else:
+        scope_label = f"🗂 جميع التواريخ · {title}"
+
+    extra = ["▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات."]
+    if shown == 0:
+        if is_today:
+            extra.append("▎✨ لا توجد إشارات مطابقة اليوم حتى الآن — جرّب «📆 أمس» أو «🗓 بالتاريخ» أو «🗂 الكل».")
+        else:
+            extra.append("▎لا توجد إشارات في هذا النطاق.")
+
+    body = _sa.luxury_day_header("مركز إدارة الإشارات", scope_label, summary, page, total_pages, extra)
+    await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
 async def admin_signals(q, uid, context, bot, page: int = 0):
-    await _render_signals_center(q, bot, "all", page)
+    await _render_signals_center(q, bot, "all", page, scope="today")
 
 
 async def admin_signals_cat(q, uid, context, bot, cat: str, page: int = 0):
-    await _render_signals_center(q, bot, cat, page)
+    await _render_signals_center(q, bot, cat, page, scope="all")
 
 
-async def admin_signal_pl(q, uid, context, bot):
-    """v6.10.0 (owner report 5) — REAL profit/loss accounting per instrument,
-    from the banked pips of closed signals only (TP1/TP2/TP3/SL rows). Every
-    USD figure uses the same 0.01-lot ruler the alerts use — no invented wins."""
-    from fysb import instruments
-    rows = await afn.run(_pl_account_rows)
-    lines = ["💰 <b><u>محاسبة الربح والخسارة — من كل التوصيات المغلقة</u></b>",
-             "<blockquote>▎الحساب حقيقي 100%: النقاط المصروفة فعلياً من المتتبع "
-             "(أهداف مكتملة أو وقف مضروب) — لا شيء متوقع ولا مصطنع.\n"
-             "▎💵 الدولار = نفس مسطرة التنبيهات (0.01 لوت).</blockquote>"]
-    grand_pips = 0.0
-    grand_wins = grand_losses = 0
-    grand_usd = 0.0
-    for r in rows:
-        net = float(r["net_pips"] or 0)
-        usd = instruments.usd_move(r["symbol"], net, 0.01)
-        wr = (int(r["wins"] or 0) / max(1, int(r["n"]))) * 100.0
-        grand_pips += net
-        grand_wins += int(r["wins"] or 0)
-        grand_losses += int(r["losses"] or 0)
-        grand_usd += usd
-        lines.append(f"▎{esc(r['symbol'])}: <b>{r['n']}</b> مغلقة · رابحة <b>{wr:.0f}%</b> "
-                     f"({r['wins'] or 0}W/{r['losses'] or 0}L) · صافي <b>{net:+.1f} pips</b> · 💵 <b>{usd:+,.2f} $</b>")
-    if len(lines) == 3:
-        lines.append("▎لا توجد إشارات مغلقة بعد — تُبنى المحاسبة تلقائياً مع كل إغلاق فعلي.")
+async def admin_signals_day(q, uid, context, bot, scope: str = "today", cat: str = "all", page: int = 0):
+    await _render_signals_center(q, bot, cat, page, scope=scope or "today")
+
+
+async def admin_signals_dates(q, uid, context, bot, page: int = 0):
+    """v6.20.4 — Luxury Trading Journal Calendar for Admin Signals."""
+    from fysb.services import signal_archive as _sa
+    size = 10
+    total_days, rows = await afn.run(_sa.admin_dates_page, page, size)
+    total_pages = max(1, (total_days + size - 1) // size)
+    rows_kb = [
+        [kb.btn(_sa.format_date_journal_button(r), f"a:sigday:{r['day']}:all:0")]
+        for r in rows
+    ]
+    nav_row = []
+    if page > 0:
+        nav_row.append(kb.btn("◀️ أحدث", f"a:sigdates:{page - 1}"))
+    if (page + 1) * size < total_days:
+        nav_row.append(kb.btn("أقدم ▶️", f"a:sigdates:{page + 1}"))
+    if nav_row:
+        rows_kb.append(nav_row)
+    rows_kb.append([
+        kb.btn("📅 إشارات اليوم", "a:sigday:today:all:0", style="primary"),
+        kb.btn("📆 إشارات أمس", "a:sigday:yesterday:all:0"),
+    ])
+    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة", "a:sigpl"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    body = (
+        f"🗓 <b><u>أرشيف الإشارات حسب التاريخ — سجل الإدارة</u></b>\n"
+        f"<blockquote>▎📚 إجمالي الأيام المسجلة: <b>{total_days}</b> · صفحة <b>{page + 1}/{total_pages}</b>\n"
+        f"▎اختر أي تاريخ أدناه لاستعراض إشاراته الكاملة مع عدّادات الربح والخسارة والوقف.</blockquote>"
+    )
+    if not rows:
+        body += "\n\n<i>لا توجد إشارات مسجلة في الأرشيف بعد.</i>"
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+def _pl_period_label(period: str) -> str:
+    from fysb.services import signal_archive as _sa
+    p = (period or "all").strip().lower()
+    return {
+        "all": "كل الإشارات المغلقة والمحققة",
+        "today": _sa.ar_date_label(_sa.today_iso()),
+        "yesterday": _sa.ar_date_label(_sa.yesterday_iso()),
+        "7d": "آخر 7 أيام",
+    }.get(p) or _sa.ar_date_label(p)
+
+
+def _pl_period_row(period: str, cb_prefix: str) -> list:
+    p = (period or "all").strip().lower()
+    return [
+        kb.btn(("◉ " if p == "all" else "") + "🗂 الكل", f"{cb_prefix}:all"),
+        kb.btn(("◉ " if p == "today" else "") + "📅 اليوم", f"{cb_prefix}:today"),
+        kb.btn(("◉ " if p == "yesterday" else "") + "📆 أمس", f"{cb_prefix}:yesterday"),
+        kb.btn(("◉ " if p == "7d" else "") + "🗓 7 أيام", f"{cb_prefix}:7d"),
+    ]
+
+
+def _pl_exec_card(b: dict, title: str = "الملخص التنفيذي العام") -> str:
+    from fysb.theme import bar
+    net_usd = float(b["net_usd"] or 0.0)
+    dot = "🟢" if net_usd >= 0 else "🔴"
+    wr_bar = bar(int(b["wins"]), max(1, int(b["total"])), width=10)
+    return (
+        f"<blockquote>👑 <b>{title}</b> (مسطرة 0.01 لوت)\n"
+        f"▎💵 صافي الربح الحقيقي: <b>{net_usd:+,.2f} $</b> {dot}\n"
+        f"▎📊 الصفقات: <b>{b['total']}</b> (🏆 {b['wins']} رابحة · 🛑 {b['losses']} وقف)\n"
+        f"▎🎯 نسبة النجاح: <b>{b['win_rate']:.0f}%</b> {wr_bar}\n"
+        f"▎📈 إجمالي الأرباح: <b>{b['gross_profit_usd']:+,.2f} $</b> · "
+        f"📉 إجمالي الخسائر: <b>{b['gross_loss_usd']:+,.2f} $</b>\n"
+        f"▎⚖️ معامل الربح (Profit Factor): <b>{b['pf']}</b>\n"
+        f"▎🏁 التوزيع: 👑 TP3: <b>{b['tp3_n']}</b> · 🥈 TP2: <b>{b['tp2_n']}</b> · "
+        f"🥇 TP1: <b>{b['tp1_n']}</b> · 🛑 وقف: <b>{b['sl_n']}</b></blockquote>"
+    )
+
+
+async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
+    """v6.20.5 — Luxury Institutional P/L Hub grouped cleanly by Market Sector
+    (Metals / Forex / Crypto / Indices) with apples-to-apples USD totals,
+    Profit Factor, Win-Rate bar, and 1-tap drill-down per sector & instrument."""
+    from fysb.services import signal_archive as _sa
+    period = (period or "all").strip().lower()
+    data = await afn.run(_sa.admin_pl_detailed, period)
+    grand = data["grand"]
+    sectors = data["sectors"]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"💰 <b><u>محاسبة الربح والخسارة المؤسسية</u></b>",
+        f"✨ <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, "a:sigpl")]
+
+    if grand["total"] == 0:
+        lines.append(
+            "<blockquote>▎لا توجد إشارات مغلقة أو محققة في هذه الفترة بعد.\n"
+            "▎تُبنى المحاسبة الحقيقية تلقائياً مع كل هدف أو وقف يسجّله المتتبع.</blockquote>"
+        )
     else:
-        total_n = grand_wins + grand_losses
-        lines.append("▎─────────────")
-        lines.append(f"▎👑 <b>الإجمالي العام:</b> {total_n} إشارة مغلقة · رابحة "
-                     f"<b>{(grand_wins / max(1, total_n)) * 100:.0f}%</b> · صافي <b>{grand_pips:+.1f} pips</b> "
-                     f"· 💵 <b>{grand_usd:+,.2f} $</b> لكل 0.01 لوت (مجموع الأدوات)")
-    await render(q, "\n".join(lines),
-                 kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
+        lines.append("")
+        lines.append(_pl_exec_card(grand, "الملخص التنفيذي العام — جميع الأسواق"))
+
+        sec_btns = []
+        sym_btns = []
+        for sb in sectors:
+            sec_key = sb["sector"]
+            icon, sec_title, sec_short = _sa.PL_SECTOR_META[sec_key]
+            sec_dot = "🟢" if sb["net_usd"] >= 0 else "🔴"
+            lines.append("")
+            lines.append(
+                f"{icon} <b><u>سوق {sec_title}</u></b> — صافي <b>{sb['net_usd']:+,.2f} $</b> {sec_dot}"
+            )
+            block = [
+                f"▎📊 <b>{sb['total']}</b> صفقة · نجاح <b>{sb['win_rate']:.0f}%</b> "
+                f"(🏆 {sb['wins']} / 🛑 {sb['losses']}) · PF <b>{sb['pf']}</b>"
+            ]
+            for s in sb["symbols"]:
+                s_dot = "🟢" if s["net_usd"] >= 0 else "🔴"
+                block.append(
+                    f"▎• <b>{esc(s['symbol'])}</b> {s_dot} — {s['total']} صفقة "
+                    f"({s['wins']}W/{s['losses']}L · {s['win_rate']:.0f}%)\n"
+                    f"   └ صافي <b>{s['net_pips']:+.1f} pips</b> (متوسط {s['avg_pips']:+.1f}p) "
+                    f"· 💵 <b>{s['net_usd']:+,.2f} $</b>"
+                )
+                sym_btns.append(
+                    kb.btn(
+                        f"{icon} {s['symbol']} ({s['net_usd']:+,.2f}$)",
+                        f"a:sigplsym:{s['symbol']}:{period}",
+                    )
+                )
+            lines.append("<blockquote>" + "\n".join(block) + "</blockquote>")
+            sec_btns.append(
+                kb.btn(f"{icon} {sec_short} ({sb['total']})", f"a:sigplcat:{sec_key}:{period}")
+            )
+
+        lines.append("")
+        lines.append("<i>💡 اضغط على أي سوق أو أداة أدناه لفتح كشف المحاسبة التفصيلي وصفقة بصفقة.</i>")
+
+        if sec_btns:
+            rows_kb.append(sec_btns)
+        for i in range(0, min(len(sym_btns), 8), 2):
+            rows_kb.append(sym_btns[i:i + 2])
+
+    rows_kb.append([kb.btn("🗓 أرشيف التواريخ", "a:sigdates:0"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_pl_sector(q, uid, context, bot, sector: str, period: str = "all"):
+    """v6.20.5 — Focused Luxury P/L Ledger for ONE Market Sector (Metals/Forex/Crypto/Indices)."""
+    from fysb.services import signal_archive as _sa
+    sec_key = (sector or "metal").strip().lower()
+    if sec_key not in _sa.PL_SECTOR_META:
+        sec_key = "forex"
+    period = (period or "all").strip().lower()
+    icon, sec_title, _short = _sa.PL_SECTOR_META[sec_key]
+    data = await afn.run(_sa.admin_pl_detailed, period, sec_key)
+    grand = data["grand"]
+    sec_list = data["sectors"]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"{icon} <b><u>محاسبة سوق {sec_title}</u></b>",
+        f"✨ <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, f"a:sigplcat:{sec_key}")]
+
+    if grand["total"] == 0 or not sec_list:
+        lines.append("<blockquote>▎لا توجد إشارات مغلقة في هذا السوق خلال الفترة المختارة.</blockquote>")
+    else:
+        lines.append("")
+        lines.append(_pl_exec_card(grand, f"ملخص قطاع {sec_title}"))
+        sym_block = []
+        sym_btns = []
+        for s in sec_list[0]["symbols"]:
+            s_dot = "🟢" if s["net_usd"] >= 0 else "🔴"
+            sym_block.append(
+                f"▎• <b>{esc(s['symbol'])}</b> {s_dot} — <b>{s['total']}</b> صفقة · نجاح <b>{s['win_rate']:.0f}%</b> "
+                f"({s['wins']}W/{s['losses']}L) · PF <b>{s['pf']}</b>\n"
+                f"   └ صافي <b>{s['net_pips']:+.1f} pips</b> · أرباح {s['gross_profit_pips']:+.1f}p / خسائر {s['gross_loss_pips']:+.1f}p\n"
+                f"   └ 💵 <b>{s['net_usd']:+,.2f} $</b> (0.01 لوت) · <b>{s['net_usd'] * 10:+,.2f} $</b> (0.10 لوت)"
+            )
+            sym_btns.append(
+                kb.btn(f"{icon} {s['symbol']} ({s['net_usd']:+,.2f}$)", f"a:sigplsym:{s['symbol']}:{period}")
+            )
+        lines.append("")
+        lines.append(f"📋 <b>تفصيل الأدوات داخل {sec_title}</b>")
+        lines.append("<blockquote>" + "\n".join(sym_block) + "</blockquote>")
+        for i in range(0, min(len(sym_btns), 10), 2):
+            rows_kb.append(sym_btns[i:i + 2])
+
+    rows_kb.append([kb.btn("💰 كل الأسواق", f"a:sigpl:{period}"), kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_pl_symbol(q, uid, context, bot, symbol: str, period: str = "all"):
+    """v6.20.5 — Deep Institutional P/L Ledger for ONE Instrument with
+    lot-scale preview, best/worst trade, and clickable trade-by-trade history."""
+    from fysb import instruments
+    from fysb.services import signal_archive as _sa
+    from fysb.theme import signal_status_ar
+    sym = instruments.normalize(symbol)
+    period = (period or "all").strip().lower()
+    data = await afn.run(_sa.admin_pl_detailed, period, "", sym)
+    s = data["by_symbol"].get(sym)
+    sec_key = s["sector"] if s else _sa.sector_of_symbol(sym)
+    icon, sec_title, sec_short = _sa.PL_SECTOR_META[sec_key]
+    p_label = _pl_period_label(period)
+
+    lines = [
+        f"{icon} <b><u>كشف المحاسبة التفصيلي — {esc(sym)}</u></b>",
+        f"✨ سوق {sec_title} · <b>{esc(p_label)}</b>",
+    ]
+    rows_kb = [_pl_period_row(period, f"a:sigplsym:{sym}")]
+
+    if not s or s["total"] == 0:
+        lines.append("<blockquote>▎لا توجد صفقات مغلقة لهذه الأداة خلال الفترة المختارة.</blockquote>")
+    else:
+        lines.append("")
+        lines.append(_pl_exec_card(s, f"أداء {sym}"))
+        pips_card = [
+            f"▎📐 <b>صافي النقاط:</b> <b>{s['net_pips']:+.1f} pips</b> (متوسط <b>{s['avg_pips']:+.1f}p</b>/صفقة)",
+            f"▎🟢 مجموع نقاط الربح: <b>{s['gross_profit_pips']:+.1f}p</b> · 🔴 مجموع نقاط الوقف: <b>{s['gross_loss_pips']:+.1f}p</b>",
+            f"▎🏆 أفضل صفقة: <b>{float(s['best_pips'] or 0):+.1f}p</b> ({float(s['best_usd'] or 0):+,.2f} $)",
+            f"▎📉 أسوأ صفقة: <b>{float(s['worst_pips'] or 0):+.1f}p</b> ({float(s['worst_usd'] or 0):+,.2f} $)",
+            f"▎💼 <b>مقياس اللوت:</b> 0.01لوت: <b>{s['net_usd']:+,.2f}$</b> · "
+            f"0.10لوت: <b>{s['net_usd'] * 10:+,.2f}$</b> · 1.00لوت: <b>{s['net_usd'] * 100:+,.2f}$</b>",
+        ]
+        lines.append("<blockquote>" + "\n".join(pips_card) + "</blockquote>")
+
+        # Clickable trade-by-trade ledger (up to 8 most recent)
+        trade_lines = []
+        for tr in s["trades"][:8]:
+            d_ico = "🟢" if tr["direction"] == "BUY" else "🔴"
+            pips = float(tr.get("pips_result") or 0.0)
+            usd = float(tr.get("usd") or 0.0)
+            day = (tr.get("created_at") or "")[:10]
+            trade_lines.append(
+                f"▎{d_ico} <b>#{tr['seq']}</b> {tr['direction']} {tr['timeframe']} · "
+                f"{signal_status_ar(tr)} · <b>{pips:+.1f}p</b> ({usd:+,.2f}$) · {day}"
+            )
+            rows_kb.append([
+                kb.btn(
+                    f"{d_ico} #{tr['seq']} {tr['direction']} {tr['timeframe']} · {pips:+.1f}p ({usd:+,.2f}$) · {day}",
+                    f"a:signalview:{tr['id']}",
+                )
+            ])
+        lines.append("")
+        lines.append(f"📜 <b>سجل الصفقات المغلقة ({min(len(s['trades']), 8)} من {s['total']})</b>")
+        lines.append("<blockquote>" + "\n".join(trade_lines) + "</blockquote>")
+
+    rows_kb.append([
+        kb.btn(f"{icon} قطاع {sec_short}", f"a:sigplcat:{sec_key}:{period}"),
+        kb.btn("💰 كل الأسواق", f"a:sigpl:{period}"),
+    ])
+    rows_kb.append([kb.btn("↩️ مركز الإشارات", "a:signals")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
 async def admin_signal_view(q, uid, context, bot, sid: int):
@@ -126,9 +383,11 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
+    from fysb.theme import is_signal_closed
     sig = dict(r)
     live_note = ""
-    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+    sig_open = (not is_signal_closed(sig)) and sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT")
+    if sig_open:
         try:
             quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
             price = float(quote["price"])
@@ -145,9 +404,15 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
                 live_note += "\n⚠️ السعر تجاوز وقف الخسارة — اضغط «فحص مفتوحة الآن» لتحصيل الحالة فوراً."
         except Exception:
             live_note = "\n⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
+    elif sig["status"] in ("TP1_HIT", "TP2_HIT"):
+        live_note = f"\n🔒 <b>صفقة مغلقة على ربح محقق ({float(sig.get('pips_result') or 0):+.1f} pips)</b> — أُغلقت عند التأمين."
     rows_kb = []
-    if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+    if sig_open:
         rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
+    rows_kb.append([
+        kb.btn("📊 شارت الإشارة", f"a:sigchart:{sid}", style="primary"),
+        kb.btn("🏆 نشر إثبات للقنوات", f"a:sigproof:{sid}", style="success"),
+    ])
     rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
     body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم.{live_note}"
@@ -160,11 +425,11 @@ async def admin_delete_signal_confirm(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة (ربما حُذفت سابقاً).", kb.admin_nav(), bot)
         return
-    from fysb.theme import status_ar
+    from fysb.theme import signal_status_ar
     sig = dict(r)
     body = (f"🗑 <b>حذف نهائي للإشارة #{sid}</b>\n"
             f"<blockquote>▎🌐 {esc(sig['symbol'])} · {esc(sig['direction'])} · {esc(sig['timeframe'])}\n"
-            f"▎📌 الحالة: <b>{status_ar(sig['status'])}</b> · الجودة {sig['score']}/100\n"
+            f"▎📌 الحالة: <b>{signal_status_ar(sig)}</b> · الجودة {sig['score']}/100\n"
             f"▎📬 مستلمون مسجلون: <b>{deliveries}</b>\n"
             f"▎⚠️ سيُمحى السجل <b>بأكمله نهائياً</b> — الإشارة، التسليمات، كل شيء. لا أرشيف ولا رجوع.</blockquote>")
     rows_kb = [
@@ -244,20 +509,40 @@ async def admin_new_signal(q, uid, context, bot):
 
 
 async def admin_track_now(q, uid, context, bot):
-    """Run one tracker pass immediately (admin action) with real provider data."""
+    """Run one tracker pass immediately (admin action) with real provider data,
+    live-editing ALL user + linked channel cards and sending status/expiry alerts."""
     from fysb.engines import tracker
-    await render(q, "🔄 جارٍ فحص الإشارات المفتوحة مقابل بيانات السوق اللحظية...", None)
+    from fysb.handlers.background import _safe_edit, _safe_send
+    await render(q, "🔄 جارٍ فحص الإشارات المفتوحة وتحديث البطاقات الحية (مستخدمون + قنوات)...", None)
     result = await asyncio.to_thread(tracker.check_open_signals, config.market_api_key())
-    for note_uid, text in result["notifications"]:
-        try:
-            await bot.send_message(note_uid, text, parse_mode="HTML")
-        except Exception:
-            pass
-    expired = await afn.run(tracker.expire_stale_signals)
+    edited = 0
+    sent = 0
+    for _uid, chat_id, mid, text in result.get("edits", []):
+        if await _safe_edit(bot, chat_id, mid, text):
+            edited += 1
+    for target, text in result.get("notifications", []):
+        if await _safe_send(bot, target, text):
+            sent += 1
+    expired, exp_edits, exp_notes = await afn.run(tracker.expire_with_alerts)
+    for _uid, chat_id, mid, text in exp_edits:
+        if await _safe_edit(bot, chat_id, mid, text):
+            edited += 1
+    for target, text in exp_notes:
+        if await _safe_send(bot, target, text):
+            sent += 1
     stats = result["stats"]
-    await render(q, f"✅ <b>نتيجة الفحص</b>\nفُحصت: {stats['checked']} · حُدثت: <b>{stats['updated']}</b>\n"
-                    f"تخطيت بسبب قدم البيانات: {stats['skipped_stale']} · أخطاء مزود: {stats['errors']} · انتهت صلاحيتها: {expired}",
-                 kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals")]]), bot)
+    await render(
+        q,
+        f"✅ <b>نتيجة الفحص والتتبع الحي</b>\n"
+        f"<blockquote>"
+        f"▎📊 فُحصت: <b>{stats['checked']}</b> · حُدثت حالتها: <b>{stats['updated']}</b>\n"
+        f"▎🔄 بطاقات حية حُدّثت (مستخدمون + قنوات): <b>{edited}</b>\n"
+        f"▎📨 تنبيهات أُرسلت (مستخدمون + قنوات): <b>{sent}</b>\n"
+        f"▎⏳ انتهت صلاحيتها: <b>{expired}</b> · تخطيت (قدم البيانات): {stats['skipped_stale']} · أخطاء مزود: {stats['errors']}"
+        f"</blockquote>",
+        kb.admin_nav([[kb.btn("↩️ الإشارات", "a:signals"), kb.btn("🔄 فحص مجدداً", "a:tracknow")]]),
+        bot,
+    )
 
 
 async def update_message(q, text):
@@ -270,23 +555,315 @@ async def admin_engine(q, uid, context, bot):
     enabled = await afn.run(db.get_setting, "engine_enabled", "0") == "1"
     interval = await afn.run(db.get_setting_int, "engine_interval_seconds", 300)
     min_score = await afn.run(db.get_setting_int, "engine_min_score", 80)
+    scan_tfs_raw = await afn.run(db.get_setting, "engine_scan_timeframes", "M15,H1")
     markets, runs = await afn.run(_engine_page_rows)
     lines = ["🧠 <b>محرك السوق والتحليل</b>",
              f"📌 الحالة: <b>{'🟢 يعمل' if enabled else '⚪ متوقف'}</b>",
              f"⏱ فاصل الدورة: {interval} ثانية",
              f"⭐ الحد الأدنى للجودة: {min_score}/100",
+             f"📐 فريمات المسح الآلي: <b>{esc(scan_tfs_raw or 'M15,H1')}</b>",
              f"🌐 أسواق جاهزة (مفعلة+موثقة): <b>{markets}</b>",
              "",
              "<b>آخر الدورات:</b>"]
     for r in runs:
         lines.append(f"  {r['created_at'][11:16]} {esc(r['symbol'])} {esc(r['timeframe'])}: {esc(r['result'])}")
     rows_kb = [
-        [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle")],
+        [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle", style="danger" if enabled else "success")],
+        [kb.btn(f"📐 فريمات المسح الآلي ({scan_tfs_raw or 'M15,H1'})", "a:scantfs", style="primary")],
         [kb.btn("➖ فاصل", f"a:engineadj:interval:-60"), kb.btn(f"⏱ {interval}s", "a:plannoop"), kb.btn("➕ فاصل", f"a:engineadj:interval:60")],
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
+        [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success")],
+        [kb.btn("📊 شارتات الإشارات (تبديل)", "a:chartstoggle", style="primary"), kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+_SCAN_TF_CHOICES = ("M5", "M15", "M30", "H1", "H4", "D1")
+
+
+def _toggle_scan_tf_sync(code: str) -> str:
+    code = (code or "").strip().upper()
+    raw = (db.get_setting("engine_scan_timeframes", "M15,H1") or "M15,H1").strip()
+    cur = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    if code in cur:
+        if len(cur) > 1:
+            cur.remove(code)
+    else:
+        if code in _SCAN_TF_CHOICES:
+            cur.append(code)
+    ordered = [tf for tf in _SCAN_TF_CHOICES if tf in cur] or ["M15"]
+    new_val = ",".join(ordered)
+    db.set_setting("engine_scan_timeframes", new_val)
+    return new_val
+
+
+async def admin_scan_tfs(q, uid, context, bot):
+    raw = await afn.run(db.get_setting, "engine_scan_timeframes", "M15,H1")
+    active = {x.strip().upper() for x in (raw or "M15,H1").split(",") if x.strip()}
+    rows_kb = []
+    row = []
+    for tf in _SCAN_TF_CHOICES:
+        on = tf in active
+        row.append(kb.btn(f"{'✅' if on else '⬜'} {tf}", f"a:togglescantf:{tf}", style="success" if on else None))
+        if len(row) == 3:
+            rows_kb.append(row)
+            row = []
+    if row:
+        rows_kb.append(row)
+    rows_kb.append([kb.btn("↩️ المحرك", "a:engine")])
+    body = (
+        "📐 <b><u>فريمات المسح الآلي متعدد الأطر</u></b>\n"
+        f"<blockquote>▎الفريمات النشطة حالياً: <b>{esc(raw or 'M15,H1')}</b>\n"
+        "▎اضغط على أي فريم لتفعيله أو إيقافه في دورة المحرك الآلي (يبقى فريم واحد نشط على الأقل).</blockquote>"
+    )
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
+    new_val = await afn.run(_toggle_scan_tf_sync, code)
+    await afn.run(audit_log.log, uid, f"engine_scan_timeframes:{new_val}")
+    await admin_scan_tfs(q, uid, context, bot)
+
+
+# --- v6.25.0 Live News Guard, Strategy Leaderboard & Currency Strength ---------
+def _news_guard_state_sync() -> tuple[bool, int, str]:
+    from fysb.engines import news_guard as _ng
+    on = _ng.is_enabled()
+    win = _ng.window_minutes()
+    body = _ng.render_news_calendar_html(enabled=on, buf_min=win)
+    return on, win, body
+
+
+def _news_guard_toggle_sync() -> bool:
+    cur = (db.get_setting("news_guard_enabled", "1") or "1") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting("news_guard_enabled", nxt)
+    return nxt == "1"
+
+
+def _news_guard_set_win_sync(mins: int) -> int:
+    m = max(5, min(120, int(mins)))
+    db.set_setting("news_guard_minutes", str(m))
+    return m
+
+
+async def admin_news_guard(q, uid, context, bot):
+    on, win, body = await afn.run(_news_guard_state_sync)
+    rows_kb = [
+        [kb.btn("⏹ إيقاف درع الأخبار" if on else "▶️ تفعيل درع الأخبار", "a:newsguardtoggle",
+                style="danger" if on else "success")],
+        [
+            kb.btn(f"{'✅ ' if win == 15 else ''}±15د", "a:newsguardwin:15", style="success" if win == 15 else "primary"),
+            kb.btn(f"{'✅ ' if win == 30 else ''}±30د", "a:newsguardwin:30", style="success" if win == 30 else "primary"),
+            kb.btn(f"{'✅ ' if win == 45 else ''}±45د", "a:newsguardwin:45", style="success" if win == 45 else "primary"),
+            kb.btn(f"{'✅ ' if win == 60 else ''}±60د", "a:newsguardwin:60", style="success" if win == 60 else "primary"),
+        ],
+        [kb.btn("🔄 تحديث التقويم", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_news_guard_toggle(q, uid, context, bot):
+    nxt = await afn.run(_news_guard_toggle_sync)
+    await afn.run(audit_log.log, uid, f"news_guard_enabled:{int(nxt)}")
+    await admin_news_guard(q, uid, context, bot)
+
+
+async def admin_news_guard_win(q, uid, context, bot, mins: int):
+    m = await afn.run(_news_guard_set_win_sync, mins)
+    await afn.run(audit_log.log, uid, f"news_guard_minutes:{m}")
+    await admin_news_guard(q, uid, context, bot)
+
+
+def _active_channel_chat_ids() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute("SELECT chat_id FROM broadcast_channels WHERE enabled=1").fetchall()
+    return [str(r["chat_id"]) for r in rows if r["chat_id"]]
+
+
+async def admin_leaderboard(q, uid, context, bot, period: str = "30d", notice: str = ""):
+    if period not in ("7d", "30d", "all"):
+        period = "30d"
+    from fysb.services import leaderboard as _lb
+    body = await afn.run(_lb.render_leaderboard_card, period, False)
+    if notice:
+        body = f"<blockquote>{esc(notice)}</blockquote>\n\n" + body
+    p_row = [
+        kb.btn("📅 7 أيام" + (" ✓" if period == "7d" else ""), "a:lb:7d", style="success" if period == "7d" else "primary"),
+        kb.btn("📆 30 يوماً" + (" ✓" if period == "30d" else ""), "a:lb:30d", style="success" if period == "30d" else "primary"),
+        kb.btn("📚 الكل" + (" ✓" if period == "all" else ""), "a:lb:all", style="success" if period == "all" else "primary"),
+    ]
+    rows_kb = [
+        p_row,
+        [kb.btn("📢 نشر المصفوفة في القنوات الآن", f"a:lbpublish:{period}", style="success")],
+        [kb.btn("🧭 قوة العملات (8)", "a:strength", style="primary"), kb.btn("📰 درع الأخبار", "a:newsguard", style="primary")],
+        [kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_leaderboard_publish(q, uid, context, bot, period: str = "30d"):
+    if period not in ("7d", "30d", "all"):
+        period = "30d"
+    from fysb.services import leaderboard as _lb
+    card_txt = await afn.run(_lb.render_leaderboard_card, period, True)
+    chat_ids = await afn.run(_active_channel_chat_ids)
+    sent = 0
+    failed = 0
+    for cid in chat_ids:
+        try:
+            target = int(cid) if cid.lstrip("-").isdigit() else cid
+            await bot.send_message(target, card_txt, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+    await afn.run(audit_log.log, uid, f"leaderboard_published:{period}:sent={sent}")
+    note = (
+        f"✅ تم نشر مصفوفة الاستراتيجيات ({period}) في {sent} قناة" + (f" · فشل {failed}" if failed else "")
+        if chat_ids else "⚠️ لا توجد قنوات مفعّلة حالياً للنشر."
+    )
+    await admin_leaderboard(q, uid, context, bot, period=period, notice=note)
+
+
+async def admin_strength(q, uid, context, bot):
+    from fysb.engines import intelligence as _intel
+    body = await afn.run(_intel.render_strength_card)
+    rows_kb = [
+        [kb.btn("🔄 تحديث فوري", "a:strength", style="success"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="primary")],
+        [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+# --- v6.26.0 Local Zero-Cost Pillow Charts & Before/After Proof Publisher -----
+def _toggle_charts_sync() -> bool:
+    cur = (db.get_setting("charts_enabled", "1") or "1") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting("charts_enabled", nxt)
+    return nxt == "1"
+
+
+async def admin_charts_toggle(q, uid, context, bot):
+    enabled = await afn.run(_toggle_charts_sync)
+    await afn.run(audit_log.log, uid, f"charts_enabled:{int(enabled)}")
+    state_txt = "🟢 مفعّلة (توليد شارتات إشارات وإثباتات محلياً مجاناً 100%)" if enabled else "⚪ متوقفة"
+    await render(
+        q,
+        f"📊 <b><u>حالة شارتات الإشارات المحلية</u></b>\n<blockquote>▎الحالة الجديدة: <b>{state_txt}</b></blockquote>",
+        kb.admin_nav([[kb.btn("↩️ المحرك", "a:engine")]]),
+        bot,
+    )
+
+
+async def admin_signal_chart(q, uid, context, bot, sid: int):
+    r, _ = await afn.run(_signal_with_deliveries, sid)
+    if not r:
+        await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
+        return
+    from fysb.handlers.user_pages import _build_signal_chart_png
+    sig = dict(r)
+    png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, sig, False)
+    if not png_bytes:
+        await render(q, "⚠️ تعذر توليد الشارت حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+        return
+    import io as _io
+    cap = f"{'🏆 إثبات صفقة' if is_proof else '📊 شارت الإشارة'} #{sid} · <b>{esc(sig['symbol'])}</b> {sig['direction']} ({esc(sig['timeframe'])})"
+    try:
+        await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+    except Exception:
+        await render(q, "⚠️ تعذر إرسال صورة الشارت.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+
+
+async def admin_signal_proof_publish(q, uid, context, bot, sid: int):
+    r, _ = await afn.run(_signal_with_deliveries, sid)
+    if not r:
+        await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
+        return
+    from fysb.handlers.user_pages import _build_signal_chart_png
+    sig = dict(r)
+    png_bytes, _ = await asyncio.to_thread(_build_signal_chart_png, sig, True)
+    if not png_bytes:
+        await render(q, "⚠️ تعذر توليد شارت الإثبات حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+        return
+    pips = float(sig.get("pips_result") or 0.0)
+    cap = (
+        f"🏆 <b><u>إثبات صفقة موثّق — ForexYemeni Royal</u></b>\n"
+        f"▎📌 <b>{esc(sig['symbol'])}</b> {sig['direction']} · ⏱ {esc(sig['timeframe'])} · {esc(sig['strategy'])}\n"
+        f"▎🎯 النتيجة: <b>{pips:+.1f} pips</b> ({esc(sig.get('status') or '')})\n"
+        f"▎🛡 شارت قبل/بعد موثّق تلقائياً من محرك ForexYemeni."
+    )
+    import io as _io
+    sent, failed = 0, 0
+    try:
+        await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+    except Exception:
+        pass
+    chat_ids = await afn.run(_enabled_channel_ids_sync)
+    for cid in chat_ids:
+        try:
+            target = int(cid) if cid.lstrip("-").isdigit() else cid
+            await bot.send_photo(chat_id=target, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+    await afn.run(audit_log.log, uid, f"signal_proof_publish:{sid}:sent={sent}")
+    await render(
+        q,
+        f"🏆 <b>تم توليد شارت الإثبات ونشره!</b>\n<blockquote>▎📤 تم الإرسال إليك وإلى <b>{sent}</b> قناة نشطة (فشل: {failed}).</blockquote>",
+        kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]),
+        bot,
+    )
+
+
+def _enabled_backtest_markets() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol LIMIT 12"
+        ).fetchall()
+    return [r["symbol"] for r in rows] or ["XAUUSD", "EURUSD", "BTCUSD"]
+
+
+async def admin_backtest(q, uid, context, bot):
+    mkts = await afn.run(_enabled_backtest_markets)
+    rows_kb = []
+    for sym in mkts[:8]:
+        rows_kb.append([
+            kb.btn(f"🧪 {sym} M15", f"a:btrun:{sym}:M15"),
+            kb.btn(f"🧪 {sym} H1", f"a:btrun:{sym}:H1"),
+        ])
+    rows_kb.append([kb.btn("🧠 العودة للمحرك", "a:engine")])
+    body = (
+        "🧪 <b><u>مختبر الاختبار التاريخي المؤسسي (Walk-Forward Backtest)</u></b>\n"
+        "<blockquote>"
+        "▎📊 يختبر جميع الاستراتيجيات الـ 13 على شموع السوق التاريخية المغلقة (بلا Repainting).\n"
+        "▎🛡 يطبّق فلتر الإجماع الاتجاهي، وقاعدة SL-أولاً، وتأمين نقطة الدخول بعد TP1.\n"
+        "▎📈 يحسب نسبة النجاح، عامل الربح (Profit Factor)، صافي R، وأقصى تراجع (Max DD)."
+        "</blockquote>\n"
+        "اختر السوق والإطار الزمني لبدء الاختبار:"
+    )
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str):
+    from fysb.engines.backtest import format_report, run_backtest
+    from fysb.engines.quality_gate import DEFAULT_MIN_SCORE
+    sym = (symbol or "XAUUSD").strip().upper()
+    tf_u = (tf or "M15").strip().upper()
+    min_sc = await afn.run(db.get_setting_int, "min_signal_score", DEFAULT_MIN_SCORE)
+    await render(q, f"🧪 <b>جارٍ تشغيل الاختبار التاريخي المؤسسي لـ {esc(sym)} ({esc(tf_u)})…</b>\n<i>يُفحص حتى 800 شمعة مغلقة مع فلتر الفريم الأعلى والتذبذب — يرجى الانتظار بضع ثوانٍ.</i>", None, bot)
+    rep = await asyncio.to_thread(run_backtest, sym, tf_u, min_score=min_sc, api_key=config.market_api_key())
+    await afn.run(audit_log.log, uid, f"backtest:{sym}:{tf_u}:n={rep.filled_trades}:r={rep.net_r}")
+    rows_kb = [
+        [
+            kb.btn(("◉ " if tf_u == "M15" else "") + "⏱ M15", f"a:btrun:{sym}:M15"),
+            kb.btn(("◉ " if tf_u == "H1" else "") + "⏱ H1", f"a:btrun:{sym}:H1"),
+            kb.btn(("◉ " if tf_u == "H4" else "") + "⏱ H4", f"a:btrun:{sym}:H4"),
+        ],
+        [kb.btn(f"🔄 إعادة {sym} {tf_u}", f"a:btrun:{sym}:{tf_u}"), kb.btn("🧪 سوق آخر", "a:backtest")],
+        [kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")],
+    ]
+    await render(q, format_report(rep), kb.admin_nav(rows_kb), bot)
 
 
 async def admin_engine_toggle(q, uid, context, bot):
@@ -309,19 +886,65 @@ async def admin_engine_adjust(q, uid, context, bot, key: str, delta: float):
     await admin_engine(q, uid, context, bot)
 
 
+def _signal_by_id(sid: int):
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+    return dict(r) if r else None
+
+
 async def admin_engine_now(q, uid, context, bot):
-    from fysb.engines.signal_engine import generate_signal
+    from fysb.engines.signal_engine import emit_to_users, generate_signal, opposite_close_advisory
+    from fysb.handlers.background import _safe_send
+    from fysb.handlers.inputs import bot_sender_from
+    from fysb.ui.cards import diagnose_no_signal
     await render(q, "🚀 جارٍ تشغيل دورة فورية للمحرك على الأسواق المفعلة...", None)
     markets = await afn.run(_enabled_verified_market_dicts)
     if not markets:
         await render(q, "⛔ لا توجد أسواق مفعلة وموثقة. فعّل سوقاً من قسم الأسواق أولاً (زر التحقق).", kb.admin_nav(), bot)
         return
+    created_cnt = 0
+    guarded_cnt = 0
     results = []
     for m in markets:
         res = await asyncio.to_thread(generate_signal, m["symbol"])
-        results.append(f"{esc(m['symbol'])}: <b>{esc(res['status'])}</b>" + (f" ({esc(res.get('reason', ''))[:60]})" if res.get("reason") else ""))
-    await render(q, "🚀 <b>نتيجة الدورة الفورية</b>\n" + "\n".join(results),
-                 kb.admin_nav([[kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")]]), bot)
+        st = (res.get("status") or "").upper()
+        if st == "SIGNAL_CREATED" and res.get("signal_id"):
+            created_cnt += 1
+            sig = await afn.run(_signal_by_id, int(res["signal_id"]))
+            extra = ""
+            if sig:
+                try:
+                    for target, adv_txt in await afn.run(opposite_close_advisory, sig):
+                        await _safe_send(bot, target, adv_txt)
+                except Exception:
+                    pass
+                stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
+                extra = f" · 📤 مستلمون: <b>{stats.get('sent', 0)}</b> · قنوات: <b>{stats.get('channels_sent', 0)}</b>"
+            results.append(
+                f"▎🟢 <b>{esc(m['symbol'])}</b> — <b>صدرت إشارة حقيقية ⭐ {res.get('score', 0)}/100</b>{extra}"
+            )
+        else:
+            guarded_cnt += 1
+            icon, title, _exp, _rec = diagnose_no_signal(st, res.get("reason", ""))
+            reason_txt = f"\n   <code>{esc(res['reason'][:90])}</code>" if res.get("reason") else ""
+            results.append(f"▎{icon} <b>{esc(m['symbol'])}</b> — {title}{reason_txt}")
+    header = (
+        "👑 <b><u>تقرير الدورة الفورية للمحرك المؤسسي</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"▎🌐 الأسواق المفحوصة: <b>{len(markets)}</b> · 🟢 إشارات صادرة: <b>{created_cnt}</b> · 🛡 محجوبة لحماية رأس المال: <b>{guarded_cnt}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>" + "\n".join(results) + "</blockquote>\n"
+        "<i>👑 المحرك لا يصنّع إشارات أبداً — الإشارة تصدر فقط عند اكتمال كافة شروط الجودة والاتجاه.</i>"
+    )
+    await render(
+        q,
+        header,
+        kb.admin_nav([
+            [kb.btn("🚀 دورة فورية مجدداً", "a:enginenow", style="success"), kb.btn("⚡ إشارة الآن", "a:signow", style="success")],
+            [kb.btn("🧠 المحرك", "a:engine", style="primary"), kb.btn("📡 الإشارات", "a:signals", style="primary")],
+        ]),
+        bot,
+    )
 
 
 async def admin_engine_clean(q, uid, context, bot):
@@ -476,7 +1099,9 @@ async def admin_risk(q, uid, context, bot):
         ("risk_per_signal_pct", "المخاطرة لكل إشارة", 0.1, 0.1),
         ("max_daily_risk_pct", "أقصى مخاطرة يومية", 0.5, 0.5),
         ("max_daily_loss_pct", "أقصى خسارة يومية", 0.5, 1.0),
-        ("max_open_signals", "أقصى إشارات مفتوحة", 1, 1),
+        ("max_open_per_symbol", "أقصى إشارات مفتوحة لكل سوق", 1, 3),
+        ("max_open_signals", "أقصى إشارات مفتوحة (الكلي)", 1, 12),
+        ("max_correlated_signals", "أقصى صفقات مترابطة بنفس الاتجاه", 1, 3),
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
     ]
@@ -484,20 +1109,24 @@ async def admin_risk(q, uid, context, bot):
     vf = await afn.run(db.get_setting, "volatility_filter", "1")
     lines = ["🛡 <b>محرك إدارة المخاطر</b>",
              f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
-             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>", "",
+             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>",
+             "<blockquote>▎✨ <b>سقف السوق</b> يمنع تكدّس الإشارات على سوق واحد دون خنق باقي الأسواق.\n"
+             "▎👑 <b>⚡ إشارة الآن للإدارة</b> مستثناة من سقف الإشارات الآلية ولا تستهلك حصتها.</blockquote>",
              "<b>الحدود (تطبق على السيرفر قبل أي إشارة):</b>"]
     rows_kb = []
     for key, title, step, _d in keys:
         val = await afn.run(db.get_setting_float, key, 0)
         lines.append(f"  {title}: <b>{val:g}</b>")
         rows_kb.append([kb.btn("➖", f"a:riskadj:{key}:-{step}"), kb.btn(f"{title} {val:g}", "a:plannoop"), kb.btn("➕", f"a:riskadj:{key}:{step}")])
-    rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch"), kb.btn(f"🌊 فلتر التقلب", "a:volfilter")])
+    rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch", style="danger"),
+                    kb.btn("🌊 فلتر التقلب", "a:volfilter", style="primary")])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
 async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
     bounds = {"risk_per_signal_pct": (0.1, 5.0), "max_daily_risk_pct": (1.0, 20.0),
-              "max_daily_loss_pct": (1.0, 30.0), "max_open_signals": (1, 20),
+              "max_daily_loss_pct": (1.0, 30.0), "max_open_per_symbol": (1, 10),
+              "max_open_signals": (1, 50), "max_correlated_signals": (1, 10),
               "min_rr": (1.0, 10.0), "atr_pct_max": (1.0, 15.0)}
     if key not in bounds:
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)
@@ -579,7 +1208,122 @@ async def admin_markets(q, uid, context, bot):
             pair, unverified = unverified[:2], unverified[2:]
             rows_kb.append([kb.btn(f"✅ تحقق {r['symbol']} من المزود", f"a:market_verify:{r['symbol']}") for r in pair])
     rows_kb.append([kb.btn("➕ إضافة سوق جديد", "a:market_add")])
+    rows_kb.append([kb.btn("🎯 أسواق إشارات حساب الإدارة", "a:adminmkts", style="primary")])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+# --- Admin personal signal-receive market filter (v6.17.0) ----------------------
+def _parse_csv_syms(raw: str) -> list[str]:
+    out = []
+    for x in (raw or "").split(","):
+        s = x.strip().upper().replace("/", "")
+        if s and s != "ALL" and s not in out:
+            out.append(s)
+    return out
+
+
+async def admin_signal_markets(q, uid, context, bot, notice: str = ""):
+    """v6.17.0: multi-toggle market filter for ADMIN_ID's own personal signal &
+    tracker alerts — NEVER disables any market for users or channels."""
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    raw = (await afn.run(db.get_setting, "admin_signal_markets", "") or "").strip()
+    selected = _parse_csv_syms(raw)
+    all_mode = (not selected)
+    active_set = set(live) if all_mode else (set(selected) & set(live))
+    if not all_mode and not active_set and live:
+        # fallback cleanly if previously-selected markets were disabled
+        all_mode = True
+        active_set = set(live)
+
+    summary = "🌍 جميع الأسواق المفعّلة" if all_mode else " · ".join(sorted(active_set))
+    lines = [
+        "🎯 <b><u>أسواق إشارات حساب الإدارة</u></b>",
+        "<blockquote>"
+        f"▎📌 ما يصلك حالياً على حسابك: <b>{esc(summary)}</b>\n"
+        f"▎🌐 إجمالي الأسواق المفعّلة على المنصة: <b>{len(live)}</b>\n"
+        "▎✨ هذا الإعداد يتحكم بما يصلك <b>أنت شخصياً</b> من الإشارات وتحديثات التتبع فقط — "
+        "ولا يغلق أي سوق على المستخدمين أو القنوات."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>{esc(notice)}</i>")
+    if not live:
+        lines.append("⚠️ لا توجد أسواق مفعّلة وموثّقة حالياً — فعّل الأسواق من قسم 🌐 الأسواق أولاً.")
+    else:
+        lines.append("<b>اضغط أي سوق لتشغيله ✅ أو إيقافه ⚪ على حساب الإدارة:</b>")
+
+    rows_kb = []
+    rows_kb.append([kb.btn(
+        ("✅ " if all_mode else "🌍 ") + "استلام جميع الأسواق المفعّلة",
+        "a:adminmktsall",
+        style="success" if all_mode else "primary",
+    )])
+    if "XAUUSD" in live:
+        gold_only = (not all_mode and active_set == {"XAUUSD"})
+        rows_kb.append([kb.btn(
+            ("⭐ " if gold_only else "🥇 ") + "تحديد الذهب فقط (XAUUSD)",
+            "a:adminmktsonly:XAUUSD",
+            style="success" if gold_only else "primary",
+        )])
+    for i in range(0, len(live), 3):
+        rows_kb.append([
+            kb.btn(
+                ("✅ " if s in active_set else "⚪ ") + s,
+                f"a:adminmktstog:{s}",
+                style="success" if s in active_set else "",
+            )
+            for s in live[i:i + 3]
+        ])
+    rows_kb.append([kb.btn("📡 مركز الإشارات", "a:signals"), kb.btn("🌐 إدارة الأسواق", "a:markets")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_signal_markets_toggle(q, uid, context, bot, symbol: str):
+    symbol = (symbol or "").strip().upper().replace("/", "")
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    if symbol not in live:
+        await admin_signal_markets(q, uid, context, bot, notice=f"السوق {symbol} غير مفعّل حالياً.")
+        return
+    raw = (await afn.run(db.get_setting, "admin_signal_markets", "") or "").strip()
+    selected = _parse_csv_syms(raw)
+    cur = list(live) if not selected else [s for s in selected if s in live]
+    if not cur:
+        cur = list(live)
+    notice = ""
+    if symbol in cur:
+        if len(cur) <= 1:
+            notice = "يجب إبقاء سوق واحد على الأقل نشطاً (أو أوقف دفع الإشارات من الإشعارات)."
+        else:
+            cur = [s for s in cur if s != symbol]
+            notice = f"تم إيقاف استلام إشارات {symbol} على حساب الإدارة (تبقى مفعّلة للمستخدمين)."
+    else:
+        cur.append(symbol)
+        notice = f"تم تفعيل استلام إشارات {symbol} على حساب الإدارة."
+    new_val = "" if set(cur) >= set(live) else ",".join(sorted(set(cur)))
+    await afn.run(db.set_setting, "admin_signal_markets", new_val)
+    await afn.run(audit_log.log, uid, f"admin_signal_markets:{new_val or 'ALL'}")
+    await admin_signal_markets(q, uid, context, bot, notice=notice)
+
+
+async def admin_signal_markets_only(q, uid, context, bot, symbol: str):
+    symbol = (symbol or "").strip().upper().replace("/", "")
+    live = [m["symbol"] for m in await afn.run(_enabled_verified_market_dicts)]
+    if symbol not in live:
+        await admin_signal_markets(q, uid, context, bot, notice=f"السوق {symbol} غير مفعّل حالياً.")
+        return
+    new_val = "" if live == [symbol] else symbol
+    await afn.run(db.set_setting, "admin_signal_markets", new_val)
+    await afn.run(audit_log.log, uid, f"admin_signal_markets:only:{symbol}")
+    await admin_signal_markets(
+        q, uid, context, bot,
+        notice=f"تم ضبط حساب الإدارة لاستلام إشارات {symbol} فقط (بينما باقي الأسواق تعمل للمستخدمين والقنوات).",
+    )
+
+
+async def admin_signal_markets_all(q, uid, context, bot):
+    await afn.run(db.set_setting, "admin_signal_markets", "")
+    await afn.run(audit_log.log, uid, "admin_signal_markets:ALL")
+    await admin_signal_markets(q, uid, context, bot, notice="تم تفعيل استلام جميع الأسواق المفعّلة على حساب الإدارة.")
 
 
 async def admin_market_toggle(q, uid, context, bot, symbol: str):
@@ -667,17 +1411,27 @@ async def admin_tf_verify(q, uid, context, bot, code: str):
 
 
 # --- Brokers (real adapter registry: add API → test → approve) ----------------------
+def _safe_broker_cfg(raw: str) -> tuple[dict, bool]:
+    from fysb.services import secrets as secrets_service
+    try:
+        return secrets_service.decrypt_json(raw or ""), True
+    except Exception:
+        return {}, False
+
+
 async def admin_brokers(q, uid, context, bot):
     rows = await afn.run(_broker_rows)
     body = [f"🏦 <b><u>إدارة الوسطاء (Broker Adapters)</u></b>",
             "▎سجّل وسيطاً بمفاتيح API حقيقية، افحص الاتصال فعلياً، ثم اعتمده من هنا.",
-            "▎المفاتيح لا تُعرض ولا تُطبع أبداً — تُخزن في قاعدة البيانات فقط.", ""]
+            "▎المفاتيح لا تُعرض ولا تُطبع أبداً — تُخزن مشفرة (ENC1) في قاعدة البيانات فقط.", ""]
     rows_kb = []
     for r in rows:
-        cfg = json.loads(r["config_json"] or "{}")
+        cfg, dec_ok = _safe_broker_cfg(r["config_json"] or "")
         state_icon = {"CONFIGURED": "🔵", "VERIFIED": "🟡", "ACTIVE": "🟢", "DISABLED": "⚪"}.get(r["status"], "🔵")
         body.append(f"▎{state_icon} <b>#{r['id']} {esc(r['title'])}</b> · {esc(r['key'])} · <b>{esc(r['status'])}</b>")
-        if cfg.get("account_id"):
+        if not dec_ok:
+            body.append("   ⚠️ تعذر فك تشفير المفاتيح (تحقق من BROKER_SECRET_KEY أو أعد إدخال الوسيط)")
+        elif cfg.get("account_id"):
             body.append(f"   🆔 حساب: <code>{esc(cfg['account_id'])}</code>")
         row = [kb.btn("🔌 فحص اتصال", f"a:brokertest:{r['id']}")]
         if r["status"] == "VERIFIED":
@@ -722,7 +1476,11 @@ async def admin_broker_test(q, uid, context, bot, bid: int):
     if not r:
         await render(q, "الوسيط غير موجود.", kb.admin_nav(), bot)
         return
-    cfg = json.loads(r["config_json"] or "{}")
+    cfg, dec_ok = _safe_broker_cfg(r["config_json"] or "")
+    if not dec_ok:
+        await render(q, "❌ تعذر فك تشفير مفاتيح الوسيط — تحقق من <code>BROKER_SECRET_KEY</code> أو احذف الوسيط وأعد إضافته.",
+                     kb.admin_nav([[kb.btn("↩️ الوسطاء", "a:brokers")]]), bot)
+        return
     await render(q, f"🔌 جارٍ فحص الاتصال الحقيقي مع <b>{esc(r['title'])}</b>...", None)
     ok, detail = await asyncio.to_thread(broker_test_connectivity, cfg, r["key"])
     new_status = "VERIFIED" if ok else ("CONFIGURED" if r["status"] not in ("ACTIVE",) else "ACTIVE")
@@ -797,14 +1555,10 @@ async def admin_live(q, uid, context, bot):
 
 
 # --- v6.11.0 thread-offload helpers ---
-def _pl_account_rows() -> list[dict]:
-    """(v6.11.0 thread-offload helper) closed-signals P/L accounting per symbol."""
-    with db.conn() as c:
-        return [dict(r) for r in c.execute(
-            """SELECT symbol, COUNT(*) n, SUM(pips_result>0) wins, SUM(pips_result<=0) losses,
-                      SUM(pips_result) net_pips, ROUND(AVG(pips_result),1) avg_pips
-               FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-               GROUP BY symbol ORDER BY net_pips DESC""").fetchall()]
+def _pl_account_rows(period: str = "all") -> list[dict]:
+    """(v6.20.4 PostgreSQL + SQLite safe) closed-signals P/L accounting per symbol."""
+    from fysb.services import signal_archive as _sa
+    return _sa.admin_pl_rows(period)
 
 
 def _signal_with_deliveries(sid: int):
@@ -832,9 +1586,10 @@ def _signal_recipients(sid: int) -> list:
 
 
 def _signal_recipient_uids(sid: int) -> list[int]:
-    """(v6.11.0 thread-offload helper) user ids that received one signal."""
+    """(v6.11.0 thread-offload helper) user ids that received one signal (excludes channel rows <=0)."""
     with db.conn() as c:
-        return [r["user_id"] for r in c.execute("SELECT user_id FROM signal_deliveries WHERE signal_id=?", (sid,))]
+        return [r["user_id"] for r in c.execute(
+            "SELECT user_id FROM signal_deliveries WHERE signal_id=? AND user_id>0", (sid,))]
 
 
 def _signal_row_full(sid: int) -> dict:
@@ -861,7 +1616,7 @@ def _signal_purge_tx():
 def _cancel_signal_tx(sid: int) -> int:
     """(v6.11.0 thread-offload helper) cancel an open signal (tx) — rowcount."""
     with db.tx() as c:
-        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
+        cur = c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')",
                         (config.now(), sid))
         return cur.rowcount
 

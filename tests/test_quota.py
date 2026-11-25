@@ -33,8 +33,9 @@ class TestQuota(unittest.TestCase):
     def test_free_default_quota_is_two(self):
         state = subs.quota_state(self.uid)
         self.assertEqual(state["plan"], "FREE")
-        self.assertEqual(state["quota"], 2)
-        self.assertEqual(state["remaining"], 2)
+        # v6.22.0 4-tier royal architecture: FREE ships 1/day
+        self.assertEqual(state["quota"], 1)
+        self.assertEqual(state["remaining"], 1)
 
     def test_view_consumes_and_blocks_third(self):
         subs.release_signal(self.uid, 1)
@@ -42,9 +43,7 @@ class TestQuota(unittest.TestCase):
         r1 = subs.consume_on_view(self.uid, 1)
         self.assertTrue(r1["ok"])
         r2 = subs.consume_on_view(self.uid, 2)
-        self.assertTrue(r2["ok"])
-        r3 = subs.consume_on_view(self.uid, 3)
-        self.assertFalse(r3["ok"], "third FREE view in a day must be blocked")
+        self.assertFalse(r2["ok"], "second FREE view in a day must be blocked (1/day cap)")
         # replay of the same signal is allowed (already delivered)
         r1b = subs.consume_on_view(self.uid, 1)
         self.assertTrue(r1b["ok"] and r1b.get("already"))
@@ -52,12 +51,12 @@ class TestQuota(unittest.TestCase):
     def test_restart_does_not_reset_quota(self):
         # quota is computed from the DB ledger by UTC date, not session state
         state = subs.quota_state(self.uid)
-        self.assertEqual(state["used"], min(2, state["used"]))
+        self.assertEqual(state["used"], min(1, state["used"]))
 
     def test_concurrent_consumption_no_double_spend(self):
         subs.release_signal(self.uid, 11)
         subs.release_signal(self.uid, 12)
-        # simulate parallel sessions racing for the two daily slots (distinct signals)
+        # simulate parallel sessions racing for the daily slot (distinct signals)
         with db.conn() as c:
             c.execute("DELETE FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
                       (self.uid, db.day_start_utc()))
@@ -67,14 +66,14 @@ class TestQuota(unittest.TestCase):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
             results = list(ex.map(consume, range(6)))
-        self.assertEqual(results.count(True), 2, "exactly 2 consumers must win the race")
+        self.assertEqual(results.count(True), 1, "exactly 1 consumer must win the 1/day race")
 
     def test_paid_plan_gets_plan_quota(self):
         subs.grant_subscription(self.uid, "PRO", source="TEST")
         state = subs.quota_state(self.uid)
         self.assertEqual(state["plan"], "PRO")
-        # v6.10.0 luxury tiering: PRO ships 5/day (floor for paid plans = 5)
-        self.assertGreaterEqual(state["quota"], 5)
+        # v6.22.0 4-tier royal architecture: PRO ships 4/day
+        self.assertEqual(state["quota"], 4)
         subs.cancel_subscription(self.uid)
 
     def test_release_rolls_back(self):

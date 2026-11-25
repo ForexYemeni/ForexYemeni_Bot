@@ -22,7 +22,7 @@ Score weights (deterministic):
 Base 40. Cap 95. Outside the windows the strategy simply returns None.
 """
 from fysb.engines.analysis import atr_pct, ema, fair_value_gaps, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 from datetime import datetime
 
 SB_WINDOWS = [("LONDON_SB", 7, 8), ("NY_AM_SB", 15, 16), ("NY_PM_SB", 19, 20)]
@@ -56,31 +56,40 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     close = last["close"]
     bias_dir = "BUY" if close > (or_hi + or_lo) / 2 else "SELL"
 
-    # FVGs formed inside this window (recent 10 candles)
+    # FVGs formed inside this window (recent 10 candles) — INTACT only (v6.19.0):
+    # a bullish FVG with close already below fvg['lo'] (or bearish above hi) is
+    # invalidated and must never produce a born-in-drawdown signal.
     fvgs = fair_value_gaps(candles[-10:], 4)
     fvg = None
     for f in fvgs:
         kind_dir = "BUY" if f["kind"] == "bullish" else "SELL"
-        if kind_dir == bias_dir:
-            fvg = f
-            break
+        if kind_dir != bias_dir:
+            continue
+        if bias_dir == "BUY" and close < f["lo"]:
+            continue
+        if bias_dir == "SELL" and close > f["hi"]:
+            continue
+        fvg = f
+        break
     if not fvg:
         return None
 
     direction = bias_dir
-    entry = (fvg["lo"] + fvg["hi"]) / 2
+    fvg_mid = (fvg["lo"] + fvg["hi"]) / 2
+    entry = min(fvg_mid, close) if direction == "BUY" else max(fvg_mid, close)
     a_ptr = atr_pct(candles)
     struct = structure_labels(candles)
     bias = structure_labels(ctx.bias_candles)
 
+    a_abs = max(a_ptr * entry / 100.0, 1e-9)
     if direction == "BUY":
         stop = min(min(c["low"] for c in candles[-8:]), fvg["lo"]) - 0.4 * (or_hi - or_lo) * 0.5
-        stop = min(stop, entry - 0.8 * a_ptr * entry / 100)
+        stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = entry - stop
         tp1, tp2, tp3 = entry + risk * 2.0, entry + risk * 3.0, entry + risk * 5.0
     else:
         stop = max(max(c["high"] for c in candles[-8:]), fvg["hi"]) + 0.4 * (or_hi - or_lo) * 0.5
-        stop = max(stop, entry + 0.8 * a_ptr * entry / 100)
+        stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = stop - entry
         tp1, tp2, tp3 = entry - risk * 2.0, entry - risk * 3.0, entry - risk * 5.0
     if risk <= 0:

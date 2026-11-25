@@ -14,26 +14,73 @@ from fysb.services import support as support_service
 from fysb.services import users as users_service
 from fysb.theme import ICON, bar, esc, human_dt, strategy_name, tf_name
 from fysb.ui import keyboards as kb
-from fysb.ui.cards import (render_analysis_card, render_plan_card,
-                           render_signal_card, render_signal_compact,
-                           render_user_card)
+from fysb.ui.cards import (plan_tier_icon, render_analysis_card,
+                           render_luxury_upgrade_card, render_plan_card,
+                           render_plans_showcase_card, render_signal_card,
+                           render_signal_compact, render_user_card)
 
 TICKET_TYPES = [("عام", "general"), ("مشكلة تقنية", "technical"), ("المدفوعات", "billing"), ("اقتراح", "suggestion")]
 
 
-async def _upsell(q, uid, bot, why: str) -> None:
-    """The luxury locked-content card — shown whenever a plan gate trips."""
-    plan = await afn.run(subs.plan_for, uid)
-    plans = await afn.run(_plans_for_sale)
-    body = (f"{ICON['lock']} <b><u>محتوى ملكي — يتطلب باقة أعلى</u></b>\n"
-            f"<blockquote>"
-            f"▎⛔ {esc(why)}.\n"
-            f"▎💎 باقتك الحالية: <b>{esc(plan['title'])}</b>\n"
-            f"▎✨ رقّ باقتك لفتح أسواق وأطر ومنهجيات أكثر وحدوداً يومية أعلى.\n"
-            f"</blockquote>")
-    rows_kb = [[kb.btn(f"💎 {esc(p['title'])} · {p['price']:g} {p['currency']}", f"u:planview:{p['code']}")] for p in plans]
-    rows_kb.append([kb.btn("↩️ رجوع", "u:preferences")])
+async def _upsell(
+    q,
+    uid,
+    bot,
+    why: str,
+    unlock_kind: str | None = None,
+    unlock_item: str | None = None,
+    trial_expired: bool = False,
+    quota_exhausted: bool = False,
+) -> None:
+    """v6.22.1 Ultra-luxury locked-content, daily-quota & trial-expiry upgrade card."""
+    plan = dict(await afn.run(subs.plan_for, uid))
+    plans = [dict(r) for r in await afn.run(_plans_for_sale)]
+    rec = (
+        await afn.run(subs.cheapest_plan_unlocking, unlock_kind, unlock_item)
+        if (unlock_kind and unlock_item)
+        else await afn.run(subs.next_higher_plan, plan.get("code", "FREE"))
+    )
+    body = render_luxury_upgrade_card(
+        why=why,
+        current_plan=plan,
+        paid_plans=plans,
+        recommended_plan=rec,
+        trial_expired=trial_expired,
+        quota_exhausted=quota_exhausted,
+    )
+    cur_price = float(plan.get("price") or 0.0)
+    target_plans = [p for p in plans if float(p.get("price") or 0) > cur_price] or plans
+    rows_kb = []
+    for p in target_plans:
+        code = (p["code"] or "").upper()
+        ic = plan_tier_icon(code)
+        is_rec = bool(rec and (rec["code"] or "").upper() == code)
+        tag = " ⭐ المقترحة لك" if is_rec else (" 🔥" if code == "VIP" else (" 🏆" if code == "ROYAL" else ""))
+        rows_kb.append([
+            kb.btn(
+                f"{ic} الترقية إلى {esc(p['code'])}{tag} · {p['price']:g} {p['currency']}",
+                f"u:planview:{p['code']}",
+                style="success" if (is_rec or code in ("VIP", "ROYAL")) else "primary",
+            )
+        ])
+    rows_kb.append([kb.btn("💎 مقارنة جميع الباقات", "u:plans", style="primary")])
     await render(q, body, kb.user_nav(rows_kb), bot)
+
+
+async def _guard_free_trial(q, uid: int, u, bot, feature_ar: str) -> bool:
+    """Return True and render the luxury trial-expired upgrade card if the user's
+    FREE trial window has ended."""
+    if uid == config.ADMIN_ID:
+        return False
+    trial = await afn.run(subs.free_trial_status, uid, u)
+    if trial.get("expired"):
+        await _upsell(
+            q, uid, bot,
+            f"انتهت فترتك المجانية ({trial.get('trial_days', 7)} يوم) — قم بالترقية للاستمرار في {feature_ar}",
+            trial_expired=True,
+        )
+        return True
+    return False
 
 
 async def _render_chain_payment(q, bot, req, chain: str) -> None:
@@ -63,42 +110,157 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
         "وعند التوافق تُفتح باقتك فوراً ويُحجب الـ TXID نهائياً.</i>",
     ]
     await render(q, "\n".join(body), kb.user_nav([
-        [kb.btn(f"⛓ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}")],
+        [kb.copy_btn("📋 نسخ عنوان المحفظة بضغطة واحدة", wallet, style="primary")],
+        [kb.btn(f"⚡ أرسل TXID — تحقق فوري على {chain}", f"u:usdttxt:{pid}:{chain}", style="success")],
         [kb.btn("↩️ وسائل الدفع الأخرى", f"u:planview:{req['plan_code']}")],
         [kb.btn("🧾 مدفوعاتي", "u:payments")],
     ]), bot)
 
 
-async def user_page(q, action: str, uid: int, context) -> None:
+def _parse_user_markets(raw: str) -> list[str]:
+    out = []
+    for x in (raw or "").split(","):
+        s = x.strip().upper().replace("/", "")
+        if s and s != "ALL" and s not in out:
+            out.append(s)
+    return out
+
+
+def _format_user_markets(raw: str) -> str:
+    syms = _parse_user_markets(raw)
+    return "الكل (حسب باقتك)" if not syms else " · ".join(syms)
+
+
+def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None, dict]:
+    """Single-connection snapshot for /start & u:home (v6.20.1 — 1 checkout instead of 9)."""
+    day = db.day_start_utc()
+    with db.conn() as c:
+        u = dict(preloaded_u) if preloaded_u is not None else None
+        if u is None:
+            r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            u = dict(r) if r else None
+        plan = subs.plan_for(uid, conn_obj=c)
+        used = c.execute(
+            "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
+            (uid, day),
+        ).fetchone()["n"]
+    quota = (max(1, int(plan["max_signals_per_day"] or 1))
+             if (plan and plan["code"] != "FREE")
+             else max(1, db.get_setting_int("free_daily_signals", int((plan or {}).get("max_signals_per_day") or 1))))
+    state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
+             "used": used, "remaining": max(0, quota - used), "day": day}
+    trial = subs.free_trial_status(uid, user_row=u, plan_row=plan)
+    return u, plan, state, trial
+
+
+async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) -> str:
+    """v6.20.1: Luxury executive user home banner shared by /start and u:home (single DB checkout)."""
+    u, plan, state, trial = await afn.run(_home_snapshot, uid, preloaded_u)
+    plan_title = esc(plan["title"] if plan else "Free")
+    mkts_txt = esc(_format_user_markets((u["market"] if u else "") or ""))
+    notif_txt = "🟢 مفعّلة" if (u and u["notifications"]) else "🔕 متوقفة"
+    greet = f"أهلاً بك يا <b>{esc(tg_name)}</b>" if tg_name else "مرحباً بك في منصتك المؤسسية"
+    trial_line = ""
+    if trial.get("is_free") and not trial.get("unlimited"):
+        if trial.get("expired"):
+            trial_line = "▎🔒 <b>الفترة المجانية:</b> منتهية — اضغط <b>💎 الاشتراك والباقات</b> للترقية الآن\n"
+        else:
+            dl = trial.get("days_left") or 0
+            hl = trial.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
+            trial_line = f"▎⏳ <b>الفترة المجانية التجريبية:</b> متبقي <b>{rem}</b> (من أصل {trial.get('trial_days', 7)} يوم)\n"
+    return (
+        f"👑 <b><u>{esc(config.BRAND)}</u></b>\n"
+        f"{greet}\n\n"
+        "<blockquote>"
+        f"▎💎 باقتك الحالية: <b>{plan_title}</b>\n"
+        f"{trial_line}"
+        f"▎📡 رصيد الإشارات اليومي: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+        f"▎🌐 أسواق إشاراتك: <b>{mkts_txt}</b>\n"
+        f"▎🔔 الإشعارات: <b>{notif_txt}</b>"
+        "</blockquote>\n"
+        "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول بالأسفل، "
+        "وخصّص أسواقك المفضلة بحرية من <b>🌐 أسواقي وتخصيصي</b>.</i>"
+    )
+
+
+async def _render_user_markets(q, uid: int, u, bot, notice: str = ""):
+    """v6.17.0: Multi-toggle user market subscriptions within their plan."""
+    plan = await afn.run(subs.plan_for, uid)
+    allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
+    rows = await afn.run(_live_market_rows)
+    available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+    selected = _parse_user_markets(u["market"] or "")
+    all_mode = (not selected)
+    active_set = set(available) if all_mode else (set(selected) & set(available))
+    if not all_mode and not active_set and available:
+        all_mode = True
+        active_set = set(available)
+
+    summary = "🌍 كل أسواق باقتك" if all_mode else " · ".join(sorted(active_set))
+    lines = [
+        "🌐 <b><u>أسواق إشاراتي</u></b>",
+        "<blockquote>"
+        f"▎💎 باقتك: <b>{esc(plan['title'])}</b> ({len(available)} سوق متاح)\n"
+        f"▎📌 الأسواق النشطة حالياً: <b>{esc(summary)}</b>\n"
+        "▎✨ اضغط أي سوق لتشغيله ✅ أو إيقافه ⚪ — مثلاً أغلق الذهب وأبقِ البيتكوين حسب باقتك."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>{esc(notice)}</i>")
+
+    rows_kb = [[kb.btn(
+        ("✅ " if all_mode else "🌍 ") + "تفعيل كل أسواق باقتي",
+        "u:setmarket:ALL",
+        style="success" if all_mode else "primary",
+    )]]
+    for i in range(0, len(available), 3):
+        rows_kb.append([
+            kb.btn(
+                ("✅ " if s in active_set else "⚪ ") + s,
+                f"u:togmarket:{s}",
+                style="success" if s in active_set else "",
+            )
+            for s in available[i:i + 3]
+        ])
+    rows_kb.append([kb.btn("💎 ترقية الباقة لمزيد من الأسواق", "u:plans", style="primary")])
+    rows_kb.append([kb.btn("↩️ التخصيص", "u:preferences")])
+    await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+
+
+async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None:
     bot = context.bot
-    # v6.8.1 hot path: throttled last_seen + profile read in ONE pooled trip.
-    # v6.11.0: every blocking call below runs in the worker pool — the loop
-    # never waits on WAN, so buttons stay instant even while Supabase is slow.
-    u = await afn.run(users_service.touch_and_get, uid)
+    # v6.20.1: reuse preloaded user row from dispatcher._route_user so we NEVER
+    # hit the database twice for the exact same user row on one button tap!
+    u = preloaded_u if preloaded_u is not None else await afn.run(users_service.touch_and_get, uid)
     if not u:
         await render(q, "لم يتم العثور على حسابك. أرسل /start أولاً.", kb.user_menu(), bot)
         return
 
     # ---------- Home / profile ----------
     if action == "home":
-        await render(q, f"👑 <b>{config.BRAND}</b>\nالقائمة الرئيسية:", kb.user_menu(), bot)
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
+        await render(q, home_text, kb.user_menu(), bot)
 
     elif action == "profile":
-        profile = await afn.run(users_service.profile_summary, uid)
+        profile = await afn.run(users_service.profile_summary, uid, u)
         await render(q, render_user_card(u, profile),
                      kb.user_nav([
-                         [kb.btn("🎛 تخصيص الإشارات", "u:preferences"), kb.btn("💎 الاشتراك", "u:plans")],
-                         [kb.btn("🧾 مدفوعاتي", "u:payments"), kb.btn("🎧 الدعم", "u:support")],
+                         [kb.btn("📈 إحصائياتي", "u:my_stats", style="primary"), kb.btn("🎛 تخصيص الإشارات", "u:preferences")],
+                         [kb.btn("💎 الاشتراك", "u:plans", style="success"), kb.btn("🧾 مدفوعاتي", "u:payments")],
+                         [kb.btn("🎧 الدعم", "u:support")],
                      ]), bot)
 
     elif action == "dashboard":
-        p = await afn.run(subs.plan_for, uid)
-        state = await afn.run(subs.quota_state, uid)
-        total, active, wins, delivered, anl_used = await afn.run(_dashboard_counts, uid)
+        first_mkt = (_parse_user_markets(u["market"] or "") or ["XAUUSD"])[0]
+        snap = await afn.run(_dashboard_snapshot, uid, first_mkt)
+        p = snap["plan"]
+        state = snap["state"]
+        total, active, wins, delivered, anl_used = snap["counts"]
         plan_title = esc(p["title"] if p else "Free")
         anl_quota = int(p["max_analyses_per_day"] or 0) if p else 0
-        mrow = await afn.run(_market_row, u["market"])
-        mcat = (mrow or {}).get("category") if mrow else instruments.spec(u["market"]).category
+        mrow = snap["market_row"]
+        mcat = (mrow or {}).get("category") if mrow else instruments.spec(first_mkt).category
         from fysb.engines.market_data import market_state
         mstate = market_state(mcat)
         mstate_txt = "🟢 مفتوح" if mstate else ("🔴 مغلق" if mstate is False else "🟡 غير محدد")
@@ -108,17 +270,25 @@ async def user_page(q, action: str, uid: int, context) -> None:
                 f"▎🧾 إجمالي ما وصلتك: <b>{delivered}</b>\n\n"
                 f"🔬 <b>التحليلات:</b>\n"
                 f"▎استهلاك اليوم: <b>{anl_used}/{anl_quota}</b>\n\n"
-                f"🛡 وضع المنصة: <b>{esc(await afn.run(db.get_setting, 'trading_mode', 'SIGNALS_ONLY'))}</b>\n"
-                f"🌍 أفضلك ({esc(u['market'])}): <b>{mstate_txt}</b>\n"
+                f"🛡 وضع المنصة: <b>{esc(snap['trading_mode'])}</b>\n"
+                f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
-        await render(q, body, kb.user_nav([
+        dash_rows = [
             [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
             [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
-            [kb.btn("💎 الباقات", "u:plans"), kb.btn("📈 إحصائياتي", "u:my_stats")],
-        ]), bot)
+            [kb.btn("🎓 الأكاديمية المستقلة", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
+            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans")],
+            [kb.btn("🛡 ملف المخاطرة", "u:risk"), kb.btn("📓 مفكرة التداول", "u:journal")],
+            [kb.btn("🔗 ربط منصات الكريبتو (Binance/Bybit/OKX)", "u:exchange", style="primary")],
+        ]
+        if config.webapp_ready():
+            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", f"{config.WEBAPP_URL}/", style="success")])
+        await render(q, body, kb.user_nav(dash_rows), bot)
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
     elif action == "analytics":
+        if await _guard_free_trial(q, uid, u, bot, "التحليلات الفورية"):
+            return
         from fysb.services import analytics as anl
         if not await afn.run(anl.analytics_enabled):
             await render(q, "🔬 قسم التحليلات معطل حالياً من الإدارة.", kb.user_nav(), bot)
@@ -126,6 +296,14 @@ async def user_page(q, action: str, uid: int, context) -> None:
         state = await afn.run(anl.quota_state, uid)
         plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
+        if not is_admin and (state["quota"] <= 0 or state["remaining"] <= 0):
+            why_txt = (
+                "التحليلات الفورية غير مفعّلة في باقتك الحالية"
+                if state["quota"] <= 0
+                else f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"
+            )
+            await _upsell(q, uid, bot, why_txt, quota_exhausted=True)
+            return
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
         rows = await afn.run(_catalog_rows)
         if not rows:
@@ -213,26 +391,22 @@ async def user_page(q, action: str, uid: int, context) -> None:
         await render(q, body, kb.user_nav(mkt_rows), bot)
 
     elif action == "upgrade":
-        plans = await afn.run(_plans_for_sale)
-        body = (f"{ICON['diamond']} <b><u>بطاقة الترقية الملكية</u></b>\n"
-                "<blockquote>"
-                "▎🔒 هذا المحتوى يمنحك باقات أعلى: أسواق إضافية، أطر زمنية أكثر،\n"
-                "▎استراتيجيات مؤسسية موسعة، وحدود إشارات وتحليلات يومية أعلى.\n"
-                "▎الترقية فورية بعد تأكيد الدفع من الإدارة.\n"
-                "</blockquote>")
-        rows_kb = [[kb.btn(f"💎 {esc(p['title'])} · {p['price']:g} {p['currency']} / {'دائم' if not p['duration_days'] else str(p['duration_days']) + ' يوم'}",
-                           f"u:planview:{p['code']}")] for p in plans]
-        rows_kb.append([kb.btn("↩️ التحليلات", "u:analytics")])
-        await render(q, body, kb.user_nav(rows_kb), bot)
+        await _upsell(
+            q, uid, bot,
+            "افتح الأسواق العالمية والأطر الزمنية والمدارس المؤسسية الـ 13 وحدوداً يومية أعلى",
+        )
 
     elif action.startswith("anlsym:"):
+        if await _guard_free_trial(q, uid, u, bot, "التحليلات الفورية"):
+            return
         from fysb.services import analytics as anl
         symbol = action.split(":", 1)[1]
         plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
-        if not is_admin and symbol.upper() not in p_markets:
-            await _upsell(q, uid, bot, "هذا السوق غير مشمول في باقتك")
+        if not is_admin and "ALL" not in p_markets and symbol.upper() not in p_markets:
+            await _upsell(q, uid, bot, f"السوق {symbol.upper()} غير مشمول في باقتك الحالية",
+                          unlock_kind="markets", unlock_item=symbol.upper())
             return
         # v6.8.1 NOTE: the picker NEVER dead-ends (regression-pinned live bug) —
         # even a ⚪ closed market keeps flowing; the analysis stage itself is
@@ -272,8 +446,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_tfs = [x.strip().upper() for x in (plan["timeframes"] or "").split(",") if x.strip()]
-        if not is_admin and tf.upper() != "ALL" and tf.upper() not in p_tfs:
-            await _upsell(q, uid, bot, "هذا الإطار الزمني غير مشمول في باقتك")
+        if not is_admin and "ALL" not in p_tfs and tf.upper() != "ALL" and tf.upper() not in p_tfs:
+            await _upsell(q, uid, bot, f"الإطار الزمني {tf.upper()} غير مشمول في باقتك الحالية",
+                          unlock_kind="timeframes", unlock_item=tf.upper())
             return
         draft["tf"] = tf.upper()
         context.user_data["anl_draft"] = draft
@@ -323,8 +498,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
         plan = await afn.run(subs.plan_for, uid)
         is_admin = uid == config.ADMIN_ID
         p_strats = [x.strip().upper() for x in (plan["strategies"] or "").split(",") if x.strip()]
-        if not is_admin and strategy.upper() != "ALL" and strategy.upper() not in p_strats:
-            await _upsell(q, uid, bot, "هذه المنهجية غير مشمولة في باقتك")
+        if not is_admin and "ALL" not in p_strats and strategy.upper() != "ALL" and strategy.upper() not in p_strats:
+            await _upsell(q, uid, bot, f"الاستراتيجية {strategy.upper()} غير مشمولة في باقتك الحالية",
+                          unlock_kind="strategies", unlock_item=strategy.upper())
             return
         draft["strategy"] = strategy.upper()
         state = await afn.run(anl.quota_state, uid)
@@ -337,8 +513,12 @@ async def user_page(q, action: str, uid: int, context) -> None:
                                       enforce_plan=not is_admin)
         context.user_data.pop("anl_draft", None)
         if not res.get("ok"):
-            await render(q, f"⛔ {esc(res.get('error', 'تعذر التوليد'))}",
-                         kb.user_nav([[kb.btn("↩️ التحليلات", "u:analytics")]]), bot)
+            err_msg = res.get("error", "تعذر التوليد")
+            if res.get("quota_exhausted") or "حصة التحليلات" in err_msg:
+                await _upsell(q, uid, bot, err_msg, quota_exhausted=True)
+                return
+            await render(q, f"⛔ {esc(err_msg)}",
+                         kb.user_nav([[kb.btn("↩️ التحليلات", "u:analytics", style="primary")]]), bot)
             return
         an = res["analysis"]
         q_state = res.get("quota") or (await afn.run(anl.quota_state, uid))
@@ -349,40 +529,158 @@ async def user_page(q, action: str, uid: int, context) -> None:
                      kb.user_nav([[kb.btn("🔬 تحليل جديد", "u:analytics"),
                                    kb.btn("📡 الإشارات", "u:signals")]]), bot)
 
-    # ---------- Signals (quota enforced server-side) ----------
-    elif action == "signals":
-        state = await afn.run(subs.quota_state, uid)
+    # ---------- Signals (v6.20.4 luxury date-grouped archive: Today / Yesterday / By Date) ----------
+    elif action == "signals" or action.startswith("sigday:"):
+        if await _guard_free_trial(q, uid, u, bot, "مركز الإشارات"):
+            return
+        from fysb.services import signal_archive as _sa
+        from fysb.ui.cards import render_signal_compact
+        scope = "today"
+        page = 0
+        if action.startswith("sigday:"):
+            parts = action.split(":")
+            scope = (parts[1] if len(parts) > 1 else "today") or "today"
+            page = _safe_int(parts[2]) if len(parts) > 2 else 0
+            page = max(0, page or 0)
+
         plan = await afn.run(subs.plan_for, uid)
+        state = await afn.run(subs.quota_state, uid, plan)
         markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
         timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
         strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
         min_score = int(plan["min_score"] or 60)
-        marks_m = ",".join("?" for _ in markets)
-        marks_t = ",".join("?" for _ in timeframes)
-        marks_s = ",".join("?" for _ in strategies)
-        args = markets + timeframes + strategies + [min_score]
-        rows = await afn.run(_live_signals_page, markets, timeframes, strategies, min_score)
-        # Which of these are still viewable under the remaining quota?
-        delivered_ids = await afn.run(_delivered_set, uid, [r["id"] for r in rows])
-        fresh = [r for r in rows if r["id"] in delivered_ids or state["remaining"] > 0]
-        lines = [f"💎 <b>الباقة:</b> {esc(plan['title'])}",
-                 f"📊 الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
-                 "اختر إشارة لعرض بطاقة الدخول الكاملة:"]
-        rows_kb = [[kb.btn(f"{'🟢' if r['direction'] == 'BUY' else '🔴'} #{r['seq']} {esc(r['symbol'])} {r['direction']} · {r['score']}/100",
-                           f"u:signalview:{r['id']}")] for r in fresh[:8]]
-        if not rows_kb:
-            rows_kb = [[kb.btn("🔄 تحديث الإشارات", "u:signals")]]
+
+        size = 8
+        counts = await afn.run(_sa.user_scope_counts, uid, markets, timeframes, strategies, min_score)
+        total, rows, summary, delivered_ids = await afn.run(
+            _sa.user_signals_page, uid, markets, timeframes, strategies, min_score, scope, page, size
+        )
+        total_pages = max(1, (total + size - 1) // size)
+
+        day_iso = _sa.resolve_scope_date(scope)
+        is_today = scope == "today"
+        is_yest = scope == "yesterday"
+        is_open = scope == "open"
+        is_all = scope == "all"
+        is_custom_date = bool(day_iso) and not is_today and not is_yest
+
+        rows_kb = [
+            [
+                kb.btn(("◉ " if is_today else "") + f"📅 اليوم ({counts['today']})", "u:sigday:today:0",
+                       style="primary" if is_today else None),
+                kb.btn(("◉ " if is_yest else "") + f"📆 أمس ({counts['yesterday']})", "u:sigday:yesterday:0",
+                       style="primary" if is_yest else None),
+                kb.btn(("◉ " if is_custom_date else "") + f"🗓 بالتاريخ ({counts['days']})", "u:sigdates:0",
+                       style="primary" if is_custom_date else None),
+            ],
+            [
+                kb.btn(("◉ " if is_open else "") + f"🟢 المفتوحة الآن ({counts['open']})", "u:sigday:open:0",
+                       style="success" if is_open else None),
+                kb.btn(("◉ " if is_all else "") + f"🗂 كل الإشارات ({counts['total']})", "u:sigday:all:0"),
+            ],
+        ]
+
+        for r in rows:
+            is_deliv = int(r["id"]) in delivered_ids
+            prefix = "" if (is_deliv or state["remaining"] > 0) else "🔒 "
+            rows_kb.append([kb.btn(prefix + render_signal_compact(r), f"u:signalview:{r['id']}")])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(kb.btn("◀️ السابق", f"u:sigday:{scope}:{page - 1}"))
+        if (page + 1) * size < total:
+            nav_row.append(kb.btn("التالي ▶️", f"u:sigday:{scope}:{page + 1}"))
+        if nav_row:
+            rows_kb.append(nav_row)
+
+        if not rows:
+            rows_kb.append([kb.btn("🔄 تحديث الإشارات", f"u:sigday:{scope}:0")])
+
+        extra = [
+            f"▎💎 الباقة: <b>{esc(plan['title'])}</b> · الحد اليومي: <b>{state['used']}/{state['quota']}</b> (المتبقي: <b>{state['remaining']}</b>)",
+            "▎📌 الإشارات التي استلمتها محفوظة في أرشيفك ولا تختفي أبداً بعد الإغلاق.",
+        ]
         # v6.10.0 (owner report 7) — «إشارة الآن» right inside the user's
         # signals hub + the watcher status line (honest auto-search).
         from fysb.handlers import signal_now as _sn
         w = await afn.run(_sn.active_watcher, uid)
         if w:
-            lines.append(f"⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
+            extra.append(f"▎⏰ بحث تلقائي نشط: <b>{esc(w['symbol'])} · {esc(w['strategy'])}</b> كل {w['interval_minutes']} دقيقة")
             rows_kb.append([kb.btn("🔴 إلغاء البحث التلقائي", f"u:watchoff:{w['id']}")])
-        rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow")])
-        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        if not rows:
+            if is_today:
+                extra.append("▎✨ لم تصلك إشارات حية اليوم بعد — المحرك يراقب الأسواق تلقائياً وستصلك كل إشارة حقيقية فور اكتمال شروطها، أو اضغط «🚀 إشارة الآن».")
+            elif is_open:
+                extra.append("▎✨ لا توجد صفقات مفتوحة مرسلة لحسابك حالياً — ستظهر هنا وتُتتبع لحظياً فور صدور إشارة جديدة.")
+            else:
+                extra.append("▎لا توجد إشارات مرسلة لحسابك في هذا التاريخ.")
+
+        rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow", style="success")])
+        rows_kb.append([
+            kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="success"),
+            kb.btn("🧭 قوة العملات", "u:strength", style="primary"),
+            kb.btn("📰 الأخبار", "u:news", style="primary"),
+        ])
+        rows_kb.append([
+            kb.btn("🛡 ملف المخاطرة واللوت", "u:risk", style="primary"),
+            kb.btn("📓 مفكرة التداول", "u:journal", style="success"),
+        ])
+
+        if is_today:
+            scope_label = _sa.ar_date_label(_sa.today_iso())
+        elif is_yest:
+            scope_label = _sa.ar_date_label(_sa.yesterday_iso())
+        elif is_custom_date:
+            scope_label = _sa.ar_date_label(day_iso)
+        elif is_open:
+            scope_label = "🟢 الصفقات المفتوحة الآن"
+        else:
+            scope_label = "🗂 سجل جميع الإشارات"
+
+        body = _sa.luxury_day_header("مركز الإشارات والأرشيف", scope_label, summary, page, total_pages, extra)
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("sigdates:"):
+        if await _guard_free_trial(q, uid, u, bot, "أرشيف الإشارات"):
+            return
+        from fysb.services import signal_archive as _sa
+        page = max(0, _safe_int(action.split(":", 1)[1]) or 0)
+        plan = await afn.run(subs.plan_for, uid)
+        markets = [instruments.normalize(x) for x in (plan["markets"] or "XAUUSD").split(",") if x.strip()]
+        timeframes = [x.strip() for x in (plan["timeframes"] or "M15").split(",") if x.strip()]
+        strategies = [x.strip() for x in (plan["strategies"] or "ICT").split(",") if x.strip()]
+        min_score = int(plan["min_score"] or 60)
+        size = 10
+        total_days, rows = await afn.run(_sa.user_dates_page, uid, markets, timeframes, strategies, min_score, page, size)
+        total_pages = max(1, (total_days + size - 1) // size)
+        rows_kb = [
+            [kb.btn(_sa.format_date_journal_button(r), f"u:sigday:{r['day']}:0")]
+            for r in rows
+        ]
+        nav_row = []
+        if page > 0:
+            nav_row.append(kb.btn("◀️ أحدث", f"u:sigdates:{page - 1}"))
+        if (page + 1) * size < total_days:
+            nav_row.append(kb.btn("أقدم ▶️", f"u:sigdates:{page + 1}"))
+        if nav_row:
+            rows_kb.append(nav_row)
+        rows_kb.append([
+            kb.btn("📅 إشارات اليوم", "u:sigday:today:0", style="primary"),
+            kb.btn("📆 إشارات أمس", "u:sigday:yesterday:0"),
+        ])
+        rows_kb.append([kb.btn("🟢 المفتوحة الآن", "u:sigday:open:0"), kb.btn("↩️ الإشارات", "u:signals")])
+        body = (
+            f"🗓 <b><u>أرشيف إشاراتك حسب التاريخ</u></b>\n"
+            f"<blockquote>▎📚 إجمالي الأيام المسجلة في حسابك: <b>{total_days}</b> · صفحة <b>{page + 1}/{total_pages}</b>\n"
+            f"▎اختر أي تاريخ لاستعراض جميع إشاراته المفتوحة والمغلقة مع نتائجها الحقيقية.</blockquote>"
+        )
+        if not rows:
+            body += "\n\n<i>لا توجد إشارات مسجلة في أرشيفك بعد.</i>"
+        await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("signalview:"):
+        if await _guard_free_trial(q, uid, u, bot, "تفاصيل الإشارات"):
+            return
         sid = _safe_int(action.split(":", 1)[1])
         if sid is None:
             await render(q, "معرّف غير صالح.", kb.user_nav(), bot)
@@ -391,86 +689,166 @@ async def user_page(q, action: str, uid: int, context) -> None:
         if not sig or sig["status"] in ("CANCELLED",):
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
+        # v6.23.0: strict post-join & privacy guard — a user can NEVER view or get
+        # enrolled into tracking for pre-join signals or another user's private SIGNAL_NOW.
+        if uid != config.ADMIN_ID and int(sig["created_by"] or 0) != uid:
+            is_delivered = await afn.run(_user_has_delivered_signal, uid, sid)
+            if not is_delivered:
+                from fysb.engines.signal_engine import _parse_iso_utc
+                is_other_priv = (sig["source"] or "").upper() == "SIGNAL_NOW"
+                sig_dt = _parse_iso_utc(sig["created_at"] or "")
+                join_dt = _parse_iso_utc((u["joined_at"] if u and "joined_at" in u.keys() else "") or "")
+                is_pre_join = (sig_dt is not None and join_dt is not None and sig_dt < join_dt)
+                if is_other_priv or is_pre_join:
+                    await render(
+                        q,
+                        "⛔ <b>هذه الإشارة لم تُرسل لحسابك</b>\n"
+                        "<blockquote>▎لا يمكن عرض أو تتبع إشارات سابقة قبل انضمامك أو خاصة بمستخدم آخر.\n"
+                        "▎المحرك يراقب الأسواق تلقائياً وستصلك كل إشارة حية جديدة فور صدورها.</blockquote>",
+                        kb.user_nav([[kb.btn("🚀 إشارة الآن", "u:signow", style="success")], [kb.btn("↩️ الإشارات", "u:signals")]]),
+                        bot,
+                    )
+                    return
         # Server-side quota consumption (anti-bypass: re-check on every callback)
         consumption = await afn.run(subs.consume_on_view, uid, sid)
         if not consumption["ok"] and not consumption.get("already"):
-            plan = await afn.run(subs.plan_for, uid)
-            await render(q,
-                         f"⛔ <b>انتهى حد الإشارات اليومي</b>\n"
-                         f"الباقة: {esc(plan['title'])} · المستهلك: {consumption['used']}/{consumption['quota']}\n"
-                         f"الحد يتجدد يومياً على السيرفر ولا يمكن تجاوزه من الجهاز.",
-                         kb.user_nav([[kb.btn("💎 ترقية الباقة", "u:plans"), kb.btn("🔄 لاحقاً", "u:signals")]]), bot)
+            await _upsell(
+                q, uid, bot,
+                f"انتهت حصة الإشارات اليومية ({consumption['used']}/{consumption['quota']}) — تتجدد يومياً",
+                quota_exhausted=True,
+            )
             return
         row = await afn.run(_market_row, sig["symbol"])
         card_text = render_signal_card(dict(sig), user_view=True, row=row)
-        # Live market pulse for open trades — the card is alive, not a snapshot.
-        if sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
+        # Live market pulse ONLY for still-OPEN trades — v6.20.3: CLOSED signals
+        # (including TP1/TP2 closed at Breakeven) NEVER show a drifting market price.
+        from fysb.theme import is_signal_closed
+        sig_d = dict(sig)
+        if is_signal_closed(sig_d):
+            if (sig_d.get("status") or "").upper() in ("TP1_HIT", "TP2_HIT"):
+                banked = float(sig_d.get("pips_result") or 0.0)
+                card_text += (
+                    f"\n\n<blockquote>🔒 <b>الصفقة مغلقة نهائياً على ربح محقق ({banked:+.1f} pips)</b> — "
+                    f"أُغلق الجزء المتبقي عند نقطة التأمين (الدخول) وانتهت متابعة هذه الإشارة؛ "
+                    f"المحرك يبحث الآن عن الفرص الجديدة.</blockquote>"
+                )
+        elif sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT"):
             try:
                 from fysb.engines import market_data
                 from fysb.engines.tracker import drift_pips
-                quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
-                price = float(quote["price"])
-                entry = float(sig["entry"])
-                drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
-                side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
-                card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
-                              f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"
-                              f" · {side} · <b>{drift:+.1f} pips</b> من الدخول</blockquote>")
+                price = market_data.cached_price(sig["symbol"], max_age_seconds=120.0)
+                if price <= 0:
+                    price = float(sig_d.get("live_px") or 0.0)
+                if price <= 0:
+                    quote = await asyncio.wait_for(
+                        asyncio.to_thread(market_data.fetch_price, sig["symbol"]),
+                        timeout=1.5,
+                    )
+                    price = float((quote or {}).get("price") or 0.0)
+                if price > 0:
+                    entry = float(sig["entry"])
+                    drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
+                    side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
+                    card_text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
+                                  f"<code>{instruments.fmt_price(sig['symbol'], price, row)}</code>"
+                                  f" · {side} · <b>{drift:+.1f} pips</b> من الدخول</blockquote>")
             except Exception:
                 pass
         from fysb.services import user_trade
-        personal = await afn.run(user_trade.personal_block, dict(sig), uid)
+        personal = await afn.run(user_trade.personal_block, dict(sig), uid, row)
         if personal:
             card_text += "\n\n<blockquote>" + personal + "</blockquote>"
-        await render(q, card_text,
-                     kb.user_nav([[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}"),
-                                   kb.btn("↩️ كل الإشارات", "u:signals")]]), bot)
+        # v6.14.0: deliver signal card as its own dedicated message AND pin
+        # chat_id/message_id in signal_deliveries so the tracker updates this
+        # card live on TP1/TP2/TP3/SL/price moves!
+        action_rows = [
+            [kb.btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
+             kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary")],
+            [kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success"),
+             kb.btn("❌ تجاهلتها", f"u:jskip:{sid}", style="danger")],
+        ]
+        nav_btns = action_rows + (
+            [[kb.btn("📅 إشارات اليوم", "u:sigday:today:0"), kb.btn("🗓 أرشيف التواريخ", "u:sigdates:0")]]
+            if is_signal_closed(sig_d)
+            else [[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}", style="success"),
+                   kb.btn("↩️ كل الإشارات", "u:signals")]]
+        )
+        sent_msg = await render(
+            q, card_text,
+            kb.user_nav(nav_btns),
+            bot, force_new=True,
+        )
+        if sent_msg is not None:
+            from fysb.engines.signal_engine import record_delivery_refs
+            await afn.run(record_delivery_refs, uid, sid, sent_msg)
 
     # ---------- Preferences ----------
     elif action == "preferences":
         plan = await afn.run(subs.plan_for, uid)
-        mkt_pref = "الكل (حسب باقتك)" if not (u["market"] or "").strip() else esc(u["market"])
+        mkt_pref = esc(_format_user_markets(u["market"] or ""))
         tf_pref = "الكل (حسب باقتك)" if not (u["timeframe"] or "").strip() else tf_name(u["timeframe"])
-        body = (f"🎛 <b>تخصيص الإشارات</b>\n\n"
+        body = (f"🎛 <b><u>أسواقي وتخصيص الإشارات</u></b>\n\n"
                 f"<blockquote>"
-                f"▎🌐 السوق المفضل: <b>{mkt_pref}</b>\n"
+                f"▎🌐 أسواق الإشارات: <b>{mkt_pref}</b>\n"
                 f"▎⏱ الإطار المفضل: <b>{tf_pref}</b>\n"
                 f"▎🧠 الاستراتيجية المفضلة: <b>{esc(strategy_name(u['strategy']))}</b>\n"
                 f"▎⭐ الجودة الدنيا: <b>{u['min_score']}/100</b>\n"
                 f"▎🔔 الإشعارات: <b>{'مفعلة' if u['notifications'] else 'متوقفة'}</b>\n"
                 f"</blockquote>\n"
-                f"<i>الخيارات مقيدة بمزايا باقتك ({esc(plan['title'])}) — والخيار «الكل» يعني استلام كل ما تسمح به باقتك.</i>")
+                f"<i>الخيارات مقيدة بمزايا باقتك ({esc(plan['title'])}) — ويمكنك تفعيل أو إيقاف أي سوق فردياً من «🌐 أسواق إشاراتي».</i>")
         await render(q, body, kb.user_nav([
-            [kb.btn("🌐 السوق", "u:markets"), kb.btn("⏱ الإطار", "u:timeframes")],
+            [kb.btn("🌐 أسواق إشاراتي", "u:markets", style="primary"), kb.btn("⏱ الإطار", "u:timeframes")],
             [kb.btn("🧠 الاستراتيجية", "u:strategies"), kb.btn("⭐ الجودة", "u:quality")],
             [kb.btn("🔔 الإشعارات", "u:notifications")],
         ]), bot)
 
     elif action == "markets":
+        await _render_user_markets(q, uid, u, bot)
+
+    elif action.startswith("togmarket:"):
+        symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
         plan = await afn.run(subs.plan_for, uid)
-        allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
+        allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
+        if "ALL" not in allowed and symbol not in allowed:
+            await _upsell(q, uid, bot, f"السوق {symbol} غير متاح في باقتك الحالية",
+                          unlock_kind="markets", unlock_item=symbol)
+            return
         rows = await afn.run(_live_market_rows)
-        available = [r["symbol"] for r in rows if r["symbol"].upper() in allowed] or allowed
-        rows_kb = [[kb.btn("🌍 الكل (حسب باقتك)", "u:setmarket:ALL")]]
-        rows_kb += [[kb.btn(("✅ " if s == u["market"] else "") + s, f"u:setmarket:{s}") for s in available[i:i + 3]]
-                    for i in range(0, len(available), 3)]
-        rows_kb.append([kb.btn("↩️ التفضيلات", "u:preferences")])
-        await render(q, "🌐 <b>اختر السوق المفضل</b>\nمقيد بالأسواق المتاحة في باقتك والموثقة لدى المزود:",
-                     kb.user_nav(rows_kb), bot)
+        available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+        selected = _parse_user_markets(u["market"] or "")
+        cur = list(available) if not selected else [s for s in selected if s in available]
+        if not cur:
+            cur = list(available)
+        notice = ""
+        if symbol in cur:
+            if len(cur) <= 1:
+                notice = "يجب إبقاء سوق واحد على الأقل نشطاً (ولإيقاف الإشارات مؤقتاً استخدم 🔔 الإشعارات)."
+            else:
+                cur = [s for s in cur if s != symbol]
+                notice = f"تم إيقاف إشارات {symbol} على حسابك."
+        else:
+            cur.append(symbol)
+            notice = f"تم تفعيل إشارات {symbol} على حسابك."
+        new_val = "" if set(cur) >= set(available) else ",".join(sorted(set(cur)))
+        await afn.run(users_service.set_preference, uid, "market", new_val, {"market"})
+        u2 = await afn.run(users_service.get_user, uid)
+        await _render_user_markets(q, uid, u2 or u, bot, notice=notice)
 
     elif action.startswith("setmarket:"):
-        symbol = action.split(":", 1)[1]
+        symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
         plan = await afn.run(subs.plan_for, uid)
-        allowed = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
+        allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
         if symbol == "ALL":
             await afn.run(users_service.set_preference, uid, "market", "", {"market"})
-            await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من الأسواق مباشرة.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
+            u2 = await afn.run(users_service.get_user, uid)
+            await _render_user_markets(q, uid, u2 or u, bot, notice="✅ تم تفعيل جميع أسواق باقتك بنجاح.")
             return
-        if symbol.upper() not in allowed:
-            await _upsell(q, uid, bot, "هذا السوق غير متاح في باقتك")
+        if "ALL" not in allowed and symbol not in allowed:
+            await _upsell(q, uid, bot, f"السوق {symbol} غير متاح في باقتك الحالية",
+                          unlock_kind="markets", unlock_item=symbol)
             return
         await afn.run(users_service.set_preference, uid, "market", symbol, {"market"})
-        await render(q, f"✅ تم حفظ السوق المفضل: <b>{esc(symbol)}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
+        await render(q, f"✅ تم حفظ السوق المفضل: <b>{esc(symbol)}</b>", kb.user_nav([[kb.btn("🌐 أسواق إشاراتي", "u:markets")], [kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
     elif action == "timeframes":
         plan = await afn.run(subs.plan_for, uid)
@@ -491,8 +869,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
             await afn.run(users_service.set_preference, uid, "timeframe", "", {"timeframe"})
             await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من الأطر الزمنية.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
             return
-        if tf.upper() not in allowed:
-            await _upsell(q, uid, bot, "هذا الإطار غير متاح في باقتك")
+        if "ALL" not in allowed and tf.upper() not in allowed:
+            await _upsell(q, uid, bot, f"الإطار الزمني {tf.upper()} غير متاح في باقتك الحالية",
+                          unlock_kind="timeframes", unlock_item=tf.upper())
             return
         await afn.run(users_service.set_preference, uid, "timeframe", tf, {"timeframe"})
         await render(q, f"✅ تم حفظ الإطار: <b>{esc(tf_name(tf))}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
@@ -527,8 +906,9 @@ async def user_page(q, action: str, uid: int, context) -> None:
             await afn.run(users_service.set_preference, uid, "strategy", "", {"strategy"})
             await render(q, "✅ سيصلك <b>كل ما تسمح به باقتك</b> من المنهجيات.", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
             return
-        if st.upper() not in allowed:
-            await _upsell(q, uid, bot, "هذه الاستراتيجية غير متاحة في باقتك")
+        if "ALL" not in allowed and st.upper() not in allowed:
+            await _upsell(q, uid, bot, f"الاستراتيجية {st.upper()} غير متاحة في باقتك الحالية",
+                          unlock_kind="strategies", unlock_item=st.upper())
             return
         await afn.run(users_service.set_preference, uid, "strategy", st, {"strategy"})
         await render(q, f"✅ تم حفظ الاستراتيجية: <b>{esc(strategy_name(st))}</b>", kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
@@ -600,32 +980,47 @@ async def user_page(q, action: str, uid: int, context) -> None:
             "<i>العدّ آلي وموثوق 100% (لا يحتسب إلا الاشتراك الفعلي)، وتُمنح المكافآت يدوياً من الإدارة عند تحقيق كل مستوى.</i>",
         ]
         rows_kb = [
-            [InlineKeyboardButton("🟢 📤 شارك رابط الدعوة (نص فاخر جاهز)", url=share_link)],
-            [InlineKeyboardButton("🔗 فتح رابط الدعوة", url=st["link"])],
-            [kb.btn("🟡 💎 الباقات", "u:plans")],
+            [kb.copy_btn("📋 نسخ رابط الدعوة بضغطة واحدة", st["link"], style="primary")],
+            [kb.url_btn("📤 شارك رابط الدعوة (نص فاخر جاهز)", share_link, style="success")],
+            [kb.url_btn("🔗 فتح رابط الدعوة", st["link"])],
+            [kb.btn("💸 لوحة عمولات الشركاء (15%–35%)", "u:affiliate", style="success"),
+             kb.btn("💎 الباقات", "u:plans", style="primary")],
         ]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     # ---------- Plans & payments ----------
     elif action == "plans":
-        rows = await afn.run(_all_plans)
-        current = await afn.run(subs.plan_for, uid)
-        rows_kb = [[kb.btn(f"💎 {esc(r['title'])} · {r['price']:g} {r['currency']} · {'مجاني' if not r['duration_days'] else str(r['duration_days']) + ' يوم'}",
-                           f"u:planview:{r['code']}")] for r in rows]
-        rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments")])
-        await render(q, f"💎 <b>الاشتراكات المميزة</b>\nباقتك الحالية: <b>{esc(current['title'])}</b>\nاختر باقة لعرض مزاياها:",
-                     kb.user_nav(rows_kb), bot)
+        rows = [dict(r) for r in await afn.run(_all_plans)]
+        current = dict(await afn.run(subs.plan_for, uid))
+        trial = await afn.run(subs.free_trial_status, uid, u, current)
+        rows_kb = []
+        for r in rows:
+            code = (r["code"] or "").upper()
+            ic = plan_tier_icon(code)
+            price = float(r["price"] or 0)
+            dur = int(r["duration_days"] or 0)
+            if code == "FREE":
+                p_lbl = f"مجاني · {'مفتوح' if dur == 0 else f'{dur} يوم'}"
+            else:
+                p_lbl = f"{price:g} {r['currency']} · {'دائم' if dur == 0 else f'{dur} يوم'}"
+            badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
+            btn_style = "success" if code in ("VIP", "ROYAL") else "primary"
+            rows_kb.append([kb.btn(f"{ic} {esc(r['title'])}{badge} · {p_lbl}", f"u:planview:{r['code']}", style=btn_style)])
+        rows_kb.append([kb.btn("🧾 مدفوعاتي وطلباتي", "u:payments", style="primary")])
+        body = render_plans_showcase_card(rows, current, trial_info=trial)
+        await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("planview:"):
         code = action.split(":", 1)[1]
         p = await afn.run(_plan_row, code)
         if not p:
-            await render(q, "هذه الباقة غير متاحة حالياً.", kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
+            await render(q, "هذه الباقة غير متاحة حالياً.", kb.user_nav([[kb.btn("↩️ الباقات", "u:plans", style="primary")]]), bot)
             return
         methods = await afn.run(payments_service.list_methods, enabled_only=True)
         chains = await afn.run(payments_service.configured_chains)
+        trial = await afn.run(subs.free_trial_status, uid, u) if code.upper() == "FREE" else None
         rows_kb = []
-        body = render_plan_card(dict(p))
+        body = render_plan_card(dict(p), trial_info=trial)
         # v6.10.0 (owner report 8) — the plan's strategies: ONE LINE EACH with
         # a button per methodology opening the REAL identity page in-chat.
         plan_strats = [x.strip().upper() for x in (p["strategies"] or "").split(",") if x.strip() and x.upper() != "ALL"]
@@ -654,7 +1049,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
                     "</blockquote>"
                 )
                 for ch in chains:
-                    rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:usdtpay:{code}:{ch}")])
+                    rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:usdtpay:{code}:{ch}", style="success")])
             if methods:
                 for m in methods:
                     rows_kb.append([kb.btn(f"🧾 اشتراك عبر {esc(m['title'])}", f"u:requestplan:{code}:{m['id']}")])
@@ -739,7 +1134,10 @@ async def user_page(q, action: str, uid: int, context) -> None:
             rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
         else:
             body.append("\n📸 <b>أرسل صورة الإيصال هنا</b> — يبقى الاشتراك معلقاً حتى مراجعة الإدارة.")
-            rows_kb = [[kb.btn("🧾 مدفوعاتي", "u:payments")]]
+            rows_kb = []
+            if method and method.get("account_ref"):
+                rows_kb.append([kb.copy_btn("📋 نسخ رقم الحساب / المحفظة", method["account_ref"], style="primary")])
+            rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments")])
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     elif action.startswith("paychain:"):
@@ -886,11 +1284,15 @@ async def user_page(q, action: str, uid: int, context) -> None:
                      kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
 
     elif action == "demopick":
-        rows = await afn.run(_open_signals_rows)
+        rows = await afn.run(_open_signals_rows, uid)
         rows_kb = [[kb.btn(f"#{r['seq']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
         rows_kb.append([kb.btn("↩️ التجريبي", "u:demo")])
-        await render(q, "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):",
-                     kb.user_nav(rows_kb), bot)
+        body_demo = (
+            "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):"
+            if rows else
+            "🚀 <b>فتح صفقة تجريبية</b>\n<i>لا توجد إشارات مفتوحة مرسلة لحسابك حالياً — ستظهر هنا فور استلامك إشارة جديدة.</i>"
+        )
+        await render(q, body_demo, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("demolots:"):
         sid = _safe_int(action.split(":", 1)[1])
@@ -994,23 +1396,7 @@ async def user_page(q, action: str, uid: int, context) -> None:
         await render(q, body, kb.user_nav([[kb.btn("🧪 التداول التجريبي", "u:demo"), kb.btn("📡 الإشارات", "u:signals")]]), bot)
 
     elif action == "support":
-        context.user_data["awaiting_ticket"] = True
-        cfg = await afn.run(support_service.config_row) or {}
-        body = ["🎧 <b>الدعم الفني</b>"]
-        if any(cfg.get(x) for x in ("username", "phone", "channel", "group_chat")):
-            body.append("\n<b>وسائل التواصل:</b>")
-            if cfg.get("username"):
-                body.append(f"  ✉️ @{esc(cfg['username'])}")
-            if cfg.get("phone"):
-                body.append(f"  📞 {esc(cfg['phone'])}")
-            if cfg.get("channel"):
-                body.append(f"  📢 {esc(cfg['channel'])}")
-            if cfg.get("group_chat"):
-                body.append(f"  👥 {esc(cfg['group_chat'])}")
-        body.append("\n<b>لفتح تذكرة:</b> أرسل رسالتك هنا كنص واحد، ويمكن إرفاق صورة بعد الرسالة.")
-        mine = await afn.run(support_service.user_tickets, uid)
-        rows_kb = [[kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")] for t in mine]
-        await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
+        await _handle_support_page(q, uid, context, bot)
 
     elif action.startswith("ticket:"):
         tid = _safe_int(action.split(":", 1)[1])
@@ -1076,6 +1462,190 @@ async def user_page(q, action: str, uid: int, context) -> None:
         from fysb.handlers import signal_now as _sn
         await _sn.stop_watch(q, uid, context, bot, _safe_int(action.split(":", 1)[1]) or 0)
 
+    elif action == "leaderboard" or action.startswith("lb:"):
+        period = action.split(":", 1)[1] if action.startswith("lb:") else "30d"
+        if period not in ("7d", "30d", "all"):
+            period = "30d"
+        from fysb.services import leaderboard as _lb
+        body = await afn.run(_lb.render_leaderboard_card, period, False)
+        p_row = [
+            kb.btn("📅 7 أيام" + (" ✓" if period == "7d" else ""), "u:lb:7d", style="success" if period == "7d" else "primary"),
+            kb.btn("📆 30 يوماً" + (" ✓" if period == "30d" else ""), "u:lb:30d", style="success" if period == "30d" else "primary"),
+            kb.btn("📚 الكل" + (" ✓" if period == "all" else ""), "u:lb:all", style="success" if period == "all" else "primary"),
+        ]
+        rows_kb = [
+            p_row,
+            [kb.btn("🧭 قوة العملات", "u:strength", style="primary"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
+            [kb.btn("📡 مركز الإشارات", "u:signals", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "strength":
+        from fysb.engines import intelligence as _intel
+        body = await afn.run(_intel.render_strength_card)
+        rows_kb = [
+            [kb.btn("🔄 تحديث فوري", "u:strength", style="success"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
+            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "news":
+        from fysb.engines import news_guard as _ng
+        body = await afn.run(_ng.render_news_calendar_html)
+        rows_kb = [
+            [kb.btn("🔄 تحديث التقويم", "u:news", style="success"), kb.btn("🧭 قوة العملات", "u:strength", style="primary")],
+            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    # --- v6.26.0 Risk Profile, 1-Tap Lot Calculator, Daily DD Guard, Journal & Charts ---
+    elif action == "risk" or action.startswith(("rbal:", "rrisk:", "rlev:", "rdd:")):
+        from fysb.services import risk_journal as _rj
+        if action.startswith("rbal:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, balance=val)
+        elif action.startswith("rrisk:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, risk_pct=val)
+        elif action.startswith("rlev:"):
+            val = _safe_int(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, leverage=val)
+        elif action.startswith("rdd:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, max_daily_dd_pct=val)
+        prof = await afn.run(_rj.get_risk_profile, uid)
+        body = await afn.run(_rj.render_risk_profile_card, uid)
+        rows_kb = [
+            [
+                kb.btn(f"{'✅ ' if prof['balance'] == 250 else ''}$250", "u:rbal:250"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 1000 else ''}$1K", "u:rbal:1000"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 5000 else ''}$5K", "u:rbal:5000"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 10000 else ''}$10K", "u:rbal:10000"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 0.5 else ''}0.5%", "u:rrisk:0.5"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 1.0 else ''}1%", "u:rrisk:1"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 2.0 else ''}2%", "u:rrisk:2"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 3.0 else ''}3%", "u:rrisk:3"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['leverage'] == 50 else ''}1:50", "u:rlev:50"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 100 else ''}1:100", "u:rlev:100"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 200 else ''}1:200", "u:rlev:200"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 500 else ''}1:500", "u:rlev:500"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 2.0 else ''}سحب 2%", "u:rdd:2", style="danger"),
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 3.0 else ''}سحب 3%", "u:rdd:3", style="danger"),
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 5.0 else ''}سحب 5%", "u:rdd:5", style="danger"),
+            ],
+            [kb.btn("📓 مفكرة التداول التلقائية", "u:journal", style="success"), kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "journal" or action.startswith("journal:"):
+        days = _safe_int(action.split(":", 1)[1]) if ":" in action else 30
+        if days not in (7, 30, 90):
+            days = 30
+        from fysb.services import risk_journal as _rj
+        body = await afn.run(_rj.render_journal_card, uid, days)
+        rows_kb = [
+            [
+                kb.btn("📅 7 أيام" + (" ✓" if days == 7 else ""), "u:journal:7", style="success" if days == 7 else "primary"),
+                kb.btn("📆 30 يوماً" + (" ✓" if days == 30 else ""), "u:journal:30", style="success" if days == 30 else "primary"),
+                kb.btn("📚 90 يوماً" + (" ✓" if days == 90 else ""), "u:journal:90", style="success" if days == 90 else "primary"),
+            ],
+            [kb.btn("🛡 تعديل ملف المخاطرة", "u:risk", style="primary"), kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("lotcalc:"):
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        from fysb.services import risk_journal as _rj
+        mrow = await afn.run(_market_row, sig["symbol"])
+        body = await afn.run(_rj.render_lot_calculator_card, uid, dict(sig), mrow)
+        rows_kb = [
+            [kb.btn("🛡 تعديل رصيدي ومخاطرتي", "u:risk", style="primary"),
+             kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success")],
+            [kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary"),
+             kb.btn("↩️ الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith(("jtake:", "jskip:")):
+        is_take = action.startswith("jtake:")
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        from fysb.services import risk_journal as _rj
+        res = await afn.run(_rj.log_journal_action, uid, dict(sig), "TAKEN" if is_take else "SKIPPED")
+        dd = res.get("drawdown") or {}
+        if is_take:
+            dd_warn = (
+                f"\n▎🚨 <b>تحذير حارس السحب اليومي:</b> خسارة يومك {dd.get('today_loss_pct', 0):.2f}% "
+                f"(تجاوزت حدك {dd.get('max_daily_dd_pct', 3):g}%)!"
+                if dd.get("breached") else ""
+            )
+            body = (
+                f"✅ <b><u>تم تسجيل دخولك الصفقة في مفكرة التداول</u></b>\n"
+                f"<blockquote>"
+                f"▎📌 الأداة: <b>{esc(sig['symbol'])}</b> {sig['direction']} · ⏱ {esc(sig['timeframe'])}\n"
+                f"▎📦 اللوت المحسوب من ملف مخاطرتك: <code>{res['lots']:.2f} lot</code> (مخاطرة: <b>{res['risk_usd']:,.2f} $</b>)\n"
+                f"▎🔄 ستُحدّث نتيجتك في المفكرة تلقائياً فور إغلاق الصفقة.{dd_warn}"
+                f"</blockquote>"
+            )
+        else:
+            body = (
+                f"❌ <b>تم تسجيل تجاهل الصفقة في مفكرتك ({esc(sig['symbol'])} {sig['direction']})</b>\n"
+                "<blockquote>▎يساعدك ذلك في قياس انضباطك ومقارنة الصفقات التي دخلتها بتلك التي تجاهلتها.</blockquote>"
+            )
+        rows_kb = [
+            [kb.btn("📓 عرض مفكرة التداول", "u:journal", style="success"),
+             kb.btn("🧮 حاسبة اللوت", f"u:lotcalc:{sid}", style="primary")],
+            [kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("sigchart:"):
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, dict(sig), False)
+        if not png_bytes:
+            await render(
+                q,
+                "⚠️ تعذر توليد الشارت اللحظي حالياً (بيانات الشموع غير متوفرة مؤقتاً) — يمكنك متابعة مستويات الإشارة النصية.",
+                kb.user_nav([[kb.btn("↩️ الإشارات", "u:signals")]]),
+                bot,
+            )
+            return
+        cap = (
+            f"{'🏆 شارت إثبات موثّق' if is_proof else '📊 شارت الإشارة الملكي'} — "
+            f"<b>{esc(sig['symbol'])}</b> {sig['direction']} · {esc(sig['timeframe'])} · {esc(sig['strategy'])}"
+        )
+        try:
+            import io as _io
+            await bot.send_photo(
+                chat_id=uid,
+                photo=_io.BytesIO(png_bytes),
+                caption=cap,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await render(q, "⚠️ تعذر إرسال صورة الشارت حالياً.", kb.user_nav([[kb.btn("↩️ الإشارات", "u:signals")]]), bot)
+
     elif action == "help":
         await render(q,
                      "❓ <b>مركز المساعدة</b>\n\n"
@@ -1097,6 +1667,34 @@ def _safe_int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_float(v):
+    try:
+        val = float(v)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes | None, bool]:
+    """Fetch fresh real OHLC candles for `sig` and render local PNG chart (0 cost)."""
+    from fysb.engines import market_data
+    from fysb.ui import charts
+    sym = str(sig.get("symbol") or "XAUUSD")
+    tf = str(sig.get("timeframe") or "H1")
+    row = _market_row(sym)
+    try:
+        candles, _src = market_data.fetch_candles(sym, tf, count=72)
+    except Exception:
+        candles = []
+    st = str(sig.get("status") or "").upper()
+    is_proof = force_proof or st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "CLOSED")
+    if is_proof:
+        png = charts.render_proof_chart(sig, candles, row=row)
+        return png, True
+    png = charts.render_signal_chart(sig, candles, row=row)
+    return png, False
 
 
 def _plans_for_sale():
@@ -1154,15 +1752,52 @@ def _enabled_strategy_codes():
 
 
 def _dashboard_counts(uid: int):
-    """(v6.11.0 thread-offload helper) ONE pooled trip for the 5 dashboard counters."""
+    """(v6.20.1) Consolidated single-pass dashboard counters (3 queries instead of 5)."""
+    day = db.day_start_utc()
     with db.conn() as c:
-        total = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-        active = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
-        wins = c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"]
+        srow = c.execute(
+            "SELECT COUNT(*) total, "
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END),0) wins FROM signals"
+        ).fetchone()
         delivered = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
         anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
-                             (uid, db.day_start_utc())).fetchone()["n"]
-    return total, active, wins, delivered, anl_used
+                             (uid, day)).fetchone()["n"]
+    return int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used
+
+
+def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
+    """(v6.20.1) Full user dashboard data on ONE single DB connection (replaces 14 sequential RTs!)."""
+    day = db.day_start_utc()
+    with db.conn() as c:
+        plan = subs.plan_for(uid, conn_obj=c)
+        srow = c.execute(
+            "SELECT COUNT(*) total, "
+            "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END),0) active, "
+            "COALESCE(SUM(CASE WHEN status='TP3_HIT' OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END),0) wins FROM signals"
+        ).fetchone()
+        drow = c.execute(
+            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
+            "FROM signal_deliveries WHERE user_id=?",
+            (day, uid),
+        ).fetchone()
+        anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
+                             (uid, day)).fetchone()["n"]
+        mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (first_mkt,)).fetchone()
+    used_today = int(drow["today"] or 0) if drow else 0
+    delivered = int(drow["total"] or 0) if drow else 0
+    quota = (max(int(plan["max_signals_per_day"] or 5), 5)
+             if (plan and plan["code"] != "FREE")
+             else max(1, db.get_setting_int("free_daily_signals", 2)))
+    state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
+             "used": used_today, "remaining": max(0, quota - used_today), "day": day}
+    return {
+        "plan": plan,
+        "state": state,
+        "counts": (int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used),
+        "market_row": dict(mrow) if mrow else None,
+        "trading_mode": db.get_setting("trading_mode", "SIGNALS_ONLY"),
+    }
 
 
 def _live_signals_page(markets, timeframes, strategies, min_score):
@@ -1175,6 +1810,7 @@ def _live_signals_page(markets, timeframes, strategies, min_score):
     with db.conn() as c:
         return c.execute(f"""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
                              FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                             AND (closed_at IS NULL OR closed_at='')
                              AND REPLACE(symbol,'/','') IN ({marks_m}) AND timeframe IN ({marks_t})
                              AND strategy IN ({marks_s}) AND score>=?
                              ORDER BY id DESC LIMIT 12""", args).fetchall()
@@ -1198,11 +1834,34 @@ def _signal_row(sid: int):
         return c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
 
 
-def _open_signals_rows():
-    """(v6.11.0 thread-offload helper) latest open signals for the demo picker."""
+def _user_has_delivered_signal(uid: int, sid: int) -> bool:
+    """(v6.23.0 thread-offload helper) True iff `sid` was actually delivered to `uid`."""
     with db.conn() as c:
+        r = c.execute(
+            "SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=? LIMIT 1",
+            (int(uid), int(sid)),
+        ).fetchone()
+    return r is not None
+
+
+def _open_signals_rows(uid: int | None = None):
+    """(v6.11.0 / v6.23.0) latest open signals for the demo picker — scoped to
+    signals actually delivered to `uid` (admin sees all open signals)."""
+    with db.conn() as c:
+        if uid is not None and int(uid) != config.ADMIN_ID:
+            return c.execute(
+                """SELECT s.*, (SELECT COUNT(*) FROM signals s2 WHERE s2.id <= s.id) AS seq
+                   FROM signals s
+                   JOIN signal_deliveries d ON d.signal_id=s.id
+                   WHERE d.user_id=?
+                     AND s.status IN ('ACTIVE','RUNNING','TP1_HIT')
+                     AND (s.closed_at IS NULL OR s.closed_at='')
+                   ORDER BY s.id DESC LIMIT 6""",
+                (int(uid),),
+            ).fetchall()
         return c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
                             FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
+                            AND (closed_at IS NULL OR closed_at='')
                             ORDER BY id DESC LIMIT 6""").fetchall()
 
 
@@ -1233,3 +1892,94 @@ async def _notify_admin_ticket(bot, tid: int, note: str) -> None:
             await bot.send_message(config.ADMIN_ID, f"🎫 تذكرة #{tid}: {note}")
         except Exception:
             pass
+
+
+def _tg_or_web_url(raw: str) -> str | None:
+    """Convert a Telegram handle (@name), t.me link, or https URL into a safe
+    Telegram InlineKeyboardButton URL; return None if not a valid URL target."""
+    import re
+    s = (raw or "").strip()
+    if not s or any(ch.isspace() for ch in s):
+        return None
+    low = s.lower()
+    if low.startswith("https://") or low.startswith("http://"):
+        return s
+    if low.startswith("t.me/") or low.startswith("telegram.me/"):
+        return "https://" + s
+    handle = s.lstrip("@")
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,63}", handle):
+        return f"https://t.me/{handle}"
+    return None
+
+
+def _support_contact_rows(cfg: dict) -> list[list]:
+    """Build luxury colored 1-tap contact buttons (Telegram / WhatsApp / Copy /
+    Channel / Group) instead of dumping raw usernames & numbers as plain text."""
+    import re
+    rows: list[list] = []
+
+    username = (cfg.get("username") or "").strip()
+    if username:
+        tg_url = _tg_or_web_url(username)
+        if tg_url:
+            rows.append([kb.url_btn("✈️ تواصل مباشر عبر تلغرام", tg_url, style="primary")])
+        else:
+            rows.append([kb.copy_btn("✈️ نسخ معرّف الدعم", f"@{username.lstrip('@')}", style="primary")])
+
+    phone = (cfg.get("phone") or "").strip()
+    if phone:
+        digits = re.sub(r"[^\d]", "", phone)
+        if 7 <= len(digits) <= 15:
+            rows.append([
+                kb.url_btn("💬 تواصل عبر واتساب", f"https://wa.me/{digits}", style="success"),
+                kb.copy_btn("📋 نسخ الرقم", phone, style="primary"),
+            ])
+        else:
+            rows.append([kb.copy_btn("📞 نسخ رقم التواصل", phone, style="primary")])
+
+    comm_row: list = []
+    channel = (cfg.get("channel") or "").strip()
+    if channel:
+        ch_url = _tg_or_web_url(channel)
+        comm_row.append(
+            kb.url_btn("📢 القناة الرسمية", ch_url, style="primary")
+            if ch_url else kb.copy_btn("📢 نسخ القناة", channel, style="primary")
+        )
+    group_chat = (cfg.get("group_chat") or "").strip()
+    if group_chat:
+        gr_url = _tg_or_web_url(group_chat)
+        comm_row.append(
+            kb.url_btn("👥 مجموعة المجتمع", gr_url, style="success")
+            if gr_url else kb.copy_btn("👥 نسخ المجموعة", group_chat, style="success")
+        )
+    if comm_row:
+        rows.append(comm_row)
+
+    return rows
+
+
+async def _handle_support_page(q, uid: int, context, bot):
+    context.user_data["awaiting_ticket"] = True
+    cfg = await afn.run(support_service.config_row) or {}
+    contact_rows = _support_contact_rows(cfg)
+    has_contacts = bool(contact_rows)
+
+    body_lines = [
+        "🎧 <b><u>مركز الدعم الفني والتواصل المباشر</u></b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "<blockquote>",
+    ]
+    if has_contacts:
+        body_lines.append("▎👑 <b>التواصل الفوري:</b>\nاختر وسيلة التواصل المناسبة لك مباشرة من الأزرار بالأسفل بضغطة واحدة.\n")
+    body_lines.append(
+        "▎🎫 <b>فتح تذكرة دعم داخل البوت:</b>\n"
+        "أرسل رسالتك هنا كنص واحد، ويمكنك إرفاق صورة بعدها مباشرة وسيرد عليك فريق الدعم فوراً."
+    )
+    body_lines.append("</blockquote>")
+
+    mine = await afn.run(support_service.user_tickets, uid)
+    rows_kb = list(contact_rows)
+    for t in mine:
+        rows_kb.append([kb.btn(f"🎫 تذكرة #{t['id']} · {esc(t['subject'])} · {esc(t['status'])}", f"u:ticket:{t['id']}")])
+    rows_kb.append([kb.btn("❓ مركز المساعدة", "u:help", style="primary")])
+    await render(q, "\n".join(body_lines), kb.user_nav(rows_kb), bot)

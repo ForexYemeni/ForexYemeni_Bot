@@ -21,7 +21,7 @@ Score weights (deterministic):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 OPEN_WINDOW = 8          # candles forming the accumulation range
 
@@ -60,20 +60,28 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     a = atr(candles)
     if a <= 0:
         return None
-    entry = close if direction == "BUY" and close < hi else \
-        close if direction == "SELL" and close > lo else \
-        (hi - 0.25 * a) if direction == "BUY" else (lo + 0.25 * a)
+    # v6.20.0: reject invalidated manipulation breaks and never place entry in drawdown
+    if direction == "BUY":
+        if close < manip_level:
+            return None
+        raw_entry = close if close < hi else (hi - 0.25 * a)
+        entry = min(raw_entry, close)
+    else:
+        if close > manip_level:
+            return None
+        raw_entry = close if close > lo else (lo + 0.25 * a)
+        entry = max(raw_entry, close)
 
     if direction == "BUY":
         stop = min(manip_level, lo) - 0.5 * a
-        stop = min(stop, entry - 0.8 * a)
+        stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = entry - stop
         tp1 = hi + (hi - lo) * 0.5
         tp2 = hi + (hi - lo)
         tp3 = hi + (hi - lo) * 1.5
     else:
         stop = max(manip_level, hi) + 0.5 * a
-        stop = max(stop, entry + 0.8 * a)
+        stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = stop - entry
         tp1 = lo - (hi - lo) * 0.5
         tp2 = lo - (hi - lo)

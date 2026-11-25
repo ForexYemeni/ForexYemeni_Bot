@@ -32,7 +32,7 @@ def dashboard() -> dict:
         }
         signals = {
             "total": c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"],
-            "open": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"],
+            "open": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')").fetchone()["n"],
             "completed": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('TP3_HIT','SL_HIT','CLOSED_WIN')").fetchone()["n"],
             "cancelled": c.execute("SELECT COUNT(*) n FROM signals WHERE status='CANCELLED'").fetchone()["n"],
             "expired": c.execute("SELECT COUNT(*) n FROM signals WHERE status='EXPIRED'").fetchone()["n"],
@@ -126,23 +126,30 @@ def signals_report() -> str:
         rows = c.execute("SELECT status, COUNT(*) n FROM signals GROUP BY status ORDER BY n DESC").fetchall()
         by_status = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b>" for r in rows) or "▎لا إشارات."
         lines.append(card(by_status))
-        strat = c.execute("SELECT strategy, COUNT(*) n, ROUND(AVG(score),1) avg_s FROM signals GROUP BY strategy ORDER BY n DESC").fetchall()
-        by_strat = "\n".join(f"▎<b>{esc(r['strategy'])}</b>: <b>{r['n']}</b> (متوسط الجودة <b>{r['avg_s']}</b>)"
+        strat = c.execute("SELECT strategy, COUNT(*) n, AVG(score) avg_s FROM signals GROUP BY strategy ORDER BY n DESC").fetchall()
+        by_strat = "\n".join(f"▎<b>{esc(r['strategy'])}</b>: <b>{r['n']}</b> (متوسط الجودة <b>{float(r['avg_s'] or 0):.1f}</b>)"
                              for r in strat) or "▎لا بيانات استراتيجيات."
         lines.append(f"{ICON['brain']} <b>حسب الاستراتيجية</b>")
         lines.append(card(by_strat))
-        pips = c.execute("SELECT ROUND(SUM(pips_result),1) s, SUM(pips_result>0) w, SUM(pips_result<0) l FROM signals WHERE status IN ('TP3_HIT','SL_HIT')").fetchone()
-        if pips and pips["s"] is not None:
-            lines.append(card(f"📊 <b>النتائج المغلقة:</b> <b>{pips['s']:+.1f}</b> pips إجمالاً "
-                              f"(رابحة: <b>{pips['w'] or 0}</b> / خاسرة: <b>{pips['l'] or 0}</b>)"))
+        pips = c.execute(
+            """SELECT COALESCE(SUM(pips_result), 0) s,
+                      COALESCE(SUM(CASE WHEN pips_result > 0 THEN 1 ELSE 0 END), 0) w,
+                      COALESCE(SUM(CASE WHEN pips_result < 0 THEN 1 ELSE 0 END), 0) l
+               FROM signals
+               WHERE status IN ('TP3_HIT','SL_HIT')
+                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')"""
+        ).fetchone()
+        if pips and (int(pips["w"] or 0) + int(pips["l"] or 0)) > 0:
+            lines.append(card(f"📊 <b>النتائج المغلقة:</b> <b>{float(pips['s'] or 0):+.1f}</b> pips إجمالاً "
+                              f"(رابحة: <b>{int(pips['w'] or 0)}</b> / خاسرة: <b>{int(pips['l'] or 0)}</b>)"))
     return "\n".join(lines)
 
 
 def payments_report() -> str:
     with db.conn() as c:
         lines = [f"{ICON['money']} <b><u>تقرير المدفوعات</u></b>"]
-        rows = c.execute("SELECT status, COUNT(*) n, ROUND(SUM(amount),2) s FROM payments GROUP BY status").fetchall()
-        body = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b> طلب — <b>{r['s'] or 0:.2f} USD</b>"
+        rows = c.execute("SELECT status, COUNT(*) n, COALESCE(SUM(amount), 0) s FROM payments GROUP BY status").fetchall()
+        body = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b> طلب — <b>{float(r['s'] or 0):.2f} USD</b>"
                          for r in rows) or "▎لا مدفوعات بعد."
         lines.append(card(body))
         plans = c.execute("SELECT plan_code, COUNT(*) n FROM payments WHERE status='APPROVED' GROUP BY plan_code").fetchall()

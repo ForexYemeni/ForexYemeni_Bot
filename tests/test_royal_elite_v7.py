@@ -94,7 +94,7 @@ class TestProviderChain(unittest.TestCase):
     def test_gold_chain_real(self):
         """Network test (skipped gracefully offline): gold price must be real-ish."""
         try:
-            p = md.fetch_price("XAU/USD", "")
+            p = md.fetch_price("XAU/USD", "", use_cache=False)
         except RuntimeError:
             self.skipTest("network unavailable")
             return
@@ -214,19 +214,19 @@ class TestPlanGating(unittest.TestCase):
         self.assertEqual(stats["sent"], 0)
 
     def test_allowed_signal_delivered_with_personal_block(self):
-        sig = _sig_row(strategy="PRICE_ACTION")
+        sig = _sig_row(strategy="CLASSIC")
         stats, sent = self._deliver(sig)
         self.assertEqual(stats["sent"], 1)
         uid, text = sent[0]
         self.assertEqual(uid, self.uid)
         self.assertIn("خطتك الشخصية", text)   # personal risk/profit block
         # v6.10.0 owner rule: strategy names are the SHORT ROYAL CODES everywhere
-        self.assertIn("PRICE_ACTION", text)
+        self.assertIn("CLASSIC", text)
 
     def test_preference_all_follows_plan(self):
         users_service.set_preference(self.uid, "market", "", {"market"})
         users_service.set_preference(self.uid, "timeframe", "", {"timeframe"})
-        sig = _sig_row(strategy="PRICE_ACTION")
+        sig = _sig_row(strategy="CLASSIC")
         stats, sent = self._deliver(sig)
         self.assertEqual(stats["sent"], 1)
 

@@ -1,7 +1,42 @@
 """Users service — profiles, activity tracking, blocking, admin operations."""
+import threading
+import time
+
 from fysb import config, db
 from fysb.services import subscriptions as subs
 from fysb.services import audit as audit_log
+
+# v6.16.0 Phase 6: true in-memory throttle for last_seen writes (60s per user)
+# so button taps only perform a lightweight SELECT instead of a write transaction.
+TOUCH_THROTTLE_SECONDS = 60.0
+_touch_lock = threading.Lock()
+_last_touch_mono: dict[int, float] = {}
+
+
+def reset_touch_cache() -> None:
+    """Clear in-memory touch throttle (used in tests)."""
+    with _touch_lock:
+        _last_touch_mono.clear()
+
+
+def _should_touch(uid: int) -> bool:
+    now_m = time.monotonic()
+    with _touch_lock:
+        prev = _last_touch_mono.get(uid)
+        if prev is not None and (now_m - prev) < TOUCH_THROTTLE_SECONDS:
+            return False
+        if len(_last_touch_mono) > 10000:
+            cutoff = now_m - TOUCH_THROTTLE_SECONDS
+            stale = [k for k, v in _last_touch_mono.items() if v < cutoff]
+            for k in stale[:5000]:
+                _last_touch_mono.pop(k, None)
+        _last_touch_mono[uid] = now_m
+        return True
+
+
+def _mark_touched(uid: int) -> None:
+    with _touch_lock:
+        _last_touch_mono[uid] = time.monotonic()
 
 
 def ensure_user(tg_user) -> None:
@@ -11,12 +46,15 @@ def ensure_user(tg_user) -> None:
         if existing:
             c.execute("UPDATE users SET username=?, full_name=?, last_seen=? WHERE user_id=?",
                       (tg_user.username or "", tg_user.full_name or "", config.now(), tg_user.id))
+            _mark_touched(tg_user.id)
             return
         if db.get_setting("block_new_users", "0") == "1":
             raise PermissionError("new-user registration is temporarily closed")
-        c.execute("""INSERT INTO users(user_id,username,full_name,joined_at,last_seen)
-                     VALUES(?,?,?,?,?)""",
+        c.execute("""INSERT INTO users(user_id,username,full_name,joined_at,last_seen,
+                     market,timeframe,strategy,min_score)
+                     VALUES(?,?,?,?,?,'','','',0)""",
                   (tg_user.id, tg_user.username or "", tg_user.full_name or "", config.now(), config.now()))
+    _mark_touched(tg_user.id)
     audit_log.log(tg_user.id, "user_registered")
 
 
@@ -28,24 +66,34 @@ def get_user(uid: int):
 
 def touch(uid: int) -> None:
     """Throttled last_seen update (max once per minute to avoid write storms)."""
+    if not _should_touch(uid):
+        return
     try:
         with db.conn() as c:
-            c.execute("UPDATE users SET last_seen=? WHERE user_id=? AND (last_seen IS NULL OR last_seen<=?)",
-                      (config.now(), uid, config.now()))
+            c.execute("UPDATE users SET last_seen=? WHERE user_id=?", (config.now(), uid))
     except Exception:
         pass
 
 
 def touch_and_get(uid: int):
-    """v6.8.1 hot-path helper: ONE pooled connection for the two calls every
-    button press makes (throttled last_seen + profile read). Halves the
-    round trips on the user navigation path — WAN PostgreSQL makes each one
-    cost real latency."""
+    """v6.16.0 hot-path helper: throttled last_seen (at most once/60s per user)
+    + profile read on ONE pooled connection.
+
+    98%+ of button taps execute a single read-only SELECT (zero SQLite write
+    lock contention and half the WAN round trips on PostgreSQL).
+    """
+    need_write = _should_touch(uid)
     try:
         with db.conn() as c:
-            c.execute("UPDATE users SET last_seen=? WHERE user_id=? AND (last_seen IS NULL OR last_seen<=?)",
-                      (config.now(), uid, config.now()))
-            r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            if need_write:
+                c.execute("UPDATE users SET last_seen=? WHERE user_id=?", (config.now(), uid))
+            r = c.execute(
+                """SELECT u.*,
+                          EXISTS(SELECT 1 FROM channel_partners cp
+                                 WHERE cp.user_id = u.user_id AND cp.enabled = 1) AS is_active_partner
+                   FROM users u WHERE u.user_id=?""",
+                (uid,),
+            ).fetchone()
         return dict(r) if r else None
     except Exception:
         return get_user(uid)
@@ -104,22 +152,57 @@ def page_list(page: int = 0, size: int = 8) -> dict:
             "pages": max(1, (total + size - 1) // size)}
 
 
-def profile_summary(uid: int) -> dict:
-    u = get_user(uid)
-    if not u:
-        return {}
-    plan = subs.active_plan(uid)
-    state = subs.quota_state(uid)
+def profile_summary(uid: int, preloaded_u=None) -> dict:
+    """Single-connection user profile summary (v6.20.1 — 1 checkout instead of 6)."""
+    day = db.day_start_utc()
     with db.conn() as c:
-        consumed_total = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=?", (uid,)).fetchone()["n"]
-        payments = c.execute("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN status='APPROVED' THEN amount ELSE 0 END),0) s FROM payments WHERE user_id=?", (uid,)).fetchone()
+        if preloaded_u is not None:
+            u = dict(preloaded_u)
+        else:
+            ur = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+            if not ur:
+                return {}
+            u = dict(ur)
+        sub_r = c.execute(
+            "SELECT plan_code, ends_at FROM subscriptions "
+            "WHERE user_id=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+            (uid,),
+        ).fetchone()
+        plan_row = subs.plan_for(uid, conn_obj=c)
+        valid_sub = bool(sub_r and (not sub_r["ends_at"] or sub_r["ends_at"] > config.now()))
+        quota_cap = (max(int(plan_row["max_signals_per_day"] or 5), 5)
+                     if (plan_row and plan_row["code"] != "FREE")
+                     else max(1, db.get_setting_int("free_daily_signals", 2)))
+        deliv = c.execute(
+            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
+            "FROM signal_deliveries WHERE user_id=?",
+            (day, uid),
+        ).fetchone()
+        payments = c.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN status='APPROVED' THEN amount ELSE 0 END),0) s "
+            "FROM payments WHERE user_id=?",
+            (uid,),
+        ).fetchone()
         demo = c.execute("SELECT balance FROM demo_accounts WHERE user_id=?", (uid,)).fetchone()
-    return {"user": u, "plan_code": plan["plan_code"] if plan else "FREE",
-            "plan_title": plan["title"] if plan else "Free",
-            "plan_ends": plan["ends_at"] if plan else None,
-            "quota": state, "consumed_total": consumed_total,
-            "payments_count": payments["n"], "payments_total": payments["s"],
-            "demo_balance": demo["balance"] if demo else None}
+    used_today = int(deliv["today"] or 0) if deliv else 0
+    state = {
+        "plan": plan_row["code"] if plan_row else "FREE",
+        "quota": quota_cap,
+        "used": used_today,
+        "remaining": max(0, quota_cap - used_today),
+        "day": day,
+    }
+    return {
+        "user": u,
+        "plan_code": plan_row["code"] if plan_row else "FREE",
+        "plan_title": plan_row["title"] if plan_row else "Free",
+        "plan_ends": sub_r["ends_at"] if valid_sub else None,
+        "quota": state,
+        "consumed_total": int(deliv["total"] or 0) if deliv else 0,
+        "payments_count": int(payments["n"] or 0) if payments else 0,
+        "payments_total": float(payments["s"] or 0) if payments else 0.0,
+        "demo_balance": demo["balance"] if demo else None,
+    }
 
 
 def admin_edit_subscription(uid: int, plan_code: str, actor: int, days: int | None = None) -> dict:

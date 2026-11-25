@@ -1,0 +1,52 @@
+name: Build & Publish Release Asset
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-asset:
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: "000:ci-dummy-token"
+      ADMIN_ID: "1"
+      DB_PATH: "/tmp/ci_forexyemeni.db"
+      LOG_LEVEL: "INFO"
+      TWELVEDATA_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies & run test suite
+        run: |
+          pip install -r requirements.txt pytest
+          python -m pytest -q
+      - name: Build and verify ForexYemeni1.zip + SHA-256
+        run: |
+          git archive --format=zip --prefix=ForexYemeni_Bot/ -o ForexYemeni1.zip HEAD
+          python -c "
+          import pathlib, updater
+          zp = pathlib.Path('ForexYemeni1.zip')
+          assert updater.validate_package(zp), 'invalid release archive'
+          sha = updater.sha256_file(zp)
+          pathlib.Path('ForexYemeni1.zip.sha256').write_text(f'{sha}  ForexYemeni1.zip\n')
+          print('Built ForexYemeni1.zip:', zp.stat().st_size, 'bytes | sha256:', sha)
+          "
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ForexYemeni1.zip ForexYemeni1.zip.sha256 --clobber
+          else
+            gh release create "$TAG" ForexYemeni1.zip ForexYemeni1.zip.sha256 \
+              --title "$TAG" --generate-notes
+          fi

@@ -21,7 +21,7 @@ from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
     premium_discount, structure_labels,
 )
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -62,18 +62,46 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not direction:
         return None
 
-    # --- Entry: retrace into the nearest FVG/OB in trade direction ---------
+    # --- Entry: retrace into the nearest INTACT FVG/OB in trade direction ---
+    # v6.19.0: skip zones already broken against the trade direction (BUY with
+    # close below zone low, or SELL with close above zone high) and never place
+    # a limit entry already in drawdown against current close.
     entry_zone = None
     for f in fvgs:
         if f["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+            if direction == "BUY" and close < f["lo"]:
+                continue
+            if direction == "SELL" and close > f["hi"]:
+                continue
             entry_zone = (f["lo"], f["hi"])
             break
     if entry_zone is None:
         for ob in obs:
             if ob["kind"] == ("bullish" if direction == "BUY" else "bearish"):
+                if direction == "BUY" and close < ob["lo"]:
+                    continue
+                if direction == "SELL" and close > ob["hi"]:
+                    continue
                 entry_zone = (ob["lo"], ob["hi"])
                 break
-    entry = (entry_zone[0] + entry_zone[1]) / 2 if entry_zone else close
+    if entry_zone:
+        z_mid = (entry_zone[0] + entry_zone[1]) / 2
+        entry = min(z_mid, close) if direction == "BUY" else max(z_mid, close)
+    else:
+        entry = close
+
+    # v6.20.6: True ICT trigger guard — never fire blindly on every bar merely
+    # because HTF bias is up/down. Require EITHER a matching liquidity sweep
+    # (SSL for BUY / BSL for SELL) OR an intact FVG/OB zone backed by
+    # displacement + matching structure. Also require the trigger candle not
+    # to close strongly against our entry direction without a sweep.
+    has_matching_sweep = (sweep["sell_side"] and direction == "BUY") or (sweep["buy_side"] and direction == "SELL")
+    has_zone_trigger = (entry_zone is not None) and displacement and (
+        (direction == "BUY" and mss["trend"] != "down" and close >= float(last["open"]))
+        or (direction == "SELL" and mss["trend"] != "up" and close <= float(last["open"]))
+    )
+    if not (has_matching_sweep or has_zone_trigger):
+        return None
 
     # --- Stop: beyond the swept liquidity level / recent extreme -----------
     a = atr(candles)
@@ -81,14 +109,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         return None
     if direction == "BUY":
         swing_low = min(c["low"] for c in candles[-8:])
-        stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.5 * a
-        if stop >= entry:
-            stop = entry - 1.5 * a
+        stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.85 * a
     else:
         swing_high = max(c["high"] for c in candles[-8:])
-        stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.5 * a
-        if stop <= entry:
-            stop = entry + 1.5 * a
+        stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.85 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
 
     risk = abs(entry - stop)
     tps = (
@@ -135,7 +160,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     reasons = [
         f"HTF bias={bias['trend']}",
-        f"liquidity sweep {'BSL' if direction=='BUY' else 'SSL'} @ {sweep['level']:.5g}" if checks["sweep"] else "no matching sweep",
+        f"liquidity sweep {'SSL' if direction=='BUY' else 'BSL'} @ {sweep['level']:.5g}" if checks["sweep"] else "no matching sweep",
         "displacement leg confirmed" if displacement else "no displacement",
         f"entry retraces FVG/OB zone {entry_zone[0]:.5g}-{entry_zone[1]:.5g}" if entry_zone else "entry at market (no zone)",
         f"premium/discount={pd['zone']} (pos={pd['pos']:.2f})",

@@ -19,7 +19,7 @@ BOOT_TS = time.time()   # v6.8.3: /ping reports uptime
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import Conflict
+from telegram.error import BadRequest, Conflict
 from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
@@ -53,41 +53,86 @@ def safe(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
-async def render(q, text: str, markup=None, bot=None) -> None:
-    """Deliver callback pages as FRESH messages — the proven v6.8.0 fix.
-
-    Restored 100% by owner demand (v6.8.4 ROYAL RESTORE): reply_text under
-    the tapped panel, every tap, no exceptions. Inaccessible >48h panels
-    (no reply_text) deliver via bot.send_message to msg.chat — still a
-    fresh page, never an edit, never silent.
-    """
-    t0 = time.monotonic()
-    # v6.8.4 ROYAL RESTORE — the EXACT v6.8.0 button experience, restored 100%.
-    # EVERY tap delivers a FRESH message right under the tapped panel
-    # (q.message.reply_text). Nothing is ever edited in place, nothing is
-    # ever deleted, nothing can silently mutate high up in the chat history —
-    # the page ALWAYS visibly appears where the user is looking. That is
-    # precisely why v6.8.0 «كانت تعمل بشكل حقيقي وفاخر جداً».
-    if q.message is not None and hasattr(q.message, "reply_text"):
-        await q.message.reply_text(
+async def _send_guarded(send_fn, text: str, markup=None):
+    """Bulletproof Telegram sender: tries full HTML + styled buttons first,
+    then automatically degrades (strip Bot API 9.4 styles -> repaired HTML ->
+    plain text) on BadRequest so NO button press can EVER die silently."""
+    from fysb.ui import htmlguard
+    try:
+        return await send_fn(
             text=text,
             reply_markup=markup,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        log.info("PAGE RENDERED | user=%s | method=new_message", q.from_user.id)
-        return
-    # Fallback (hardened, never an edit): panels older than 48h arrive as
-    # InaccessibleMessage with no reply_text — deliver a fresh page through
-    # bot.send_message to msg.chat. Still a fresh visible page, never silent.
+    except BadRequest as first_err:
+        log.warning("render BadRequest (%s) -> retrying with style-stripped fallback", first_err)
+        plain_mk = kb.strip_button_styles(markup)
+        for body, pmode in (
+            (text, ParseMode.HTML),
+            (htmlguard.truncate_safe(text, 3900), ParseMode.HTML),
+            (htmlguard.plain_fallback(text)[:3900], None),
+        ):
+            try:
+                kw = {"text": body, "reply_markup": plain_mk, "disable_web_page_preview": True}
+                if pmode is not None:
+                    kw["parse_mode"] = pmode
+                return await send_fn(**kw)
+            except BadRequest:
+                continue
+        raise first_err
+
+
+async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
+    """Deliver callback pages reliably (v6.14.1 — Proven Fresh Page by default,
+    optional In-Place Edit toggle in Admin Settings, + automatic BadRequest
+    fallback stripping button styles / repairing HTML so buttons NEVER fail).
+
+    Returns the delivered/edited Message object so callers (like u:signalview)
+    can pin message_id/chat_id for live tracker edits.
+    """
+    t0 = time.monotonic()
+    edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "0") == "1")
+
+    if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
+        try:
+            msg = await q.message.edit_text(
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
+                     q.from_user.id, (time.monotonic() - t0) * 1000)
+            return msg if msg is not None else q.message
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
+                         q.from_user.id, (time.monotonic() - t0) * 1000)
+                return q.message
+            log.debug("edit_text fallback (%s) -> sending fresh page", e)
+        except Exception as e:
+            log.debug("edit_text fallback (%s) -> sending fresh page", type(e).__name__)
+
+    if q.message is not None and hasattr(q.message, "reply_text"):
+        msg = await _send_guarded(q.message.reply_text, text, markup)
+        log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
+                 q.from_user.id, (time.monotonic() - t0) * 1000)
+        return msg
+
     chat = getattr(q.message, "chat", None) if q.message is not None \
         else getattr(q, "message_chat", None)
     if chat is None or bot is None:
         raise RuntimeError("callback message is no longer available")
-    await bot.send_message(chat.id, text, reply_markup=markup,
-                           parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    async def _chat_send(**kw):
+        t = kw.pop("text")
+        return await bot.send_message(chat.id, t, **kw)
+
+    msg = await _send_guarded(_chat_send, text, markup)
     log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
+    return msg
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,11 +144,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "⛔ التسجيل مغلق مؤقتاً. تواصل مع الدعم إذا كان لديك حساب قائم.")
         return
-    await afn.run(users_service.touch, uid)
+    # ensure_user already updated last_seen — no redundant touch() round trip.
     # --- Royal referral capture (first link wins, server-side only) ---------
     # /start ref<CODE> — e.g. https://t.me/<bot>?start=refROYAL
     payload = (context.args or [""])[0] if context.args else ""
-    if isinstance(payload, str) and payload.lower().startswith("ref") and len(payload) > 3 \
+    if isinstance(payload, str) and payload.lower().startswith("ref_") and payload[4:].isdigit() \
+            and uid != config.ADMIN_ID:
+        try:
+            from fysb.services import affiliates as _aff
+            if await afn.run(_aff.bind_referral, int(payload[4:]), uid):
+                await afn.run(audit_log.log, uid, f"affiliate_ref_bound:{payload[4:]}")
+        except Exception:
+            log.exception("affiliate referral bind failed")
+    elif isinstance(payload, str) and payload.lower().startswith("ref") and len(payload) > 3 \
             and uid != config.ADMIN_ID:
         try:
             from fysb.services import referrals
@@ -113,21 +166,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("referral capture failed")
     if uid == config.ADMIN_ID:
-        await update.effective_message.reply_text(
+        await _send_guarded(
+            update.effective_message.reply_text,
             f"👑 <b>{config.BRAND}</b>\n"
             f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
             f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
-            parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
+            kb.admin_menu(),
+        )
         await afn.run(audit_log.log, uid, "admin_panel_open")
         return
-    from fysb.theme import header
-    sent = await update.effective_message.reply_text(
-        header("منصة التداول", "اختر وجهتك من لوحة الأزرار التفاعلية") +
-        "\n\n<b>الوحدات المتاحة:</b>\n"
-        "📊 لوحة الأداء · 📡 الإشارات المباشرة\n"
-        "💎 الباقات · 🧪 التداول التجريبي\n"
-        "🎧 الدعم الفني · ⚙️ التفضيلات",
-        parse_mode=ParseMode.HTML, reply_markup=kb.user_menu())
+    from fysb.services import partners as partners_svc
+    active_p = await afn.run(partners_svc.get_partner_by_user, uid)
+    if active_p and active_p.get("enabled"):
+        # v6.21.2 Strict Partner-Only Mode: while registered & active as a
+        # Channel Partner, the regular User account interface is closed and
+        # /start opens ONLY the Partner Command Panel until Admin disables or
+        # removes the partner.
+        from fysb.handlers import admin_partners
+        await admin_partners.render_partner_start(update, active_p)
+        return
+    from fysb.handlers.user_pages import build_user_home_card
+    home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "")
+    await _send_guarded(
+        update.effective_message.reply_text,
+        home_text,
+        kb.user_menu(),
+    )
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,12 +217,16 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     up = max(0, int(time.time() - BOOT_TS))
     up_txt = f"{up // 3600} ساعة {up % 3600 // 60} د" if up >= 3600 else f"{up // 60} دقيقة {up % 60} ث"
     db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
+    import telegram as _tg
+    ui_mode = "تعديل مكاني" if (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1" else "رسالة جديدة (فورية)"
+    color_state = "✅ مفعّلة بالكامل" if kb._HAS_STYLE else "⚠️ تحتاج تحديث python-telegram-bot>=22.7"
     await update.effective_message.reply_text(
         f"🩺 <b>فحص سريع — {config.BRAND}</b>\n"
         f"<blockquote>◆ الإصدار: <b>v{config.VERSION}</b>\n"
         f"◆ المحرك: {engine}\n"
         f"◆ قاعدة البيانات: {db_state}\n"
-        f"◆ مدة التشغيل: {up_txt}</blockquote>\n"
+        f"◆ وضع الأزرار: {ui_mode} · الألوان الفاخرة: {color_state}\n"
+        f"◆ مكتبة تلغرام: PTB v{getattr(_tg, '__version__', '?')} · مدة التشغيل: {up_txt}</blockquote>\n"
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
         parse_mode=ParseMode.HTML)
@@ -166,12 +234,13 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """v6.9.0 — التحديث الذاتي من داخل تلغرام (الإدارة فقط).
+    """v6.16.0 — التحديث الذاتي الفاخر من داخل تلغرام (الإدارة فقط).
 
-    يجلب أحدث ForexYemeni1.zip من GitHub Releases، يثبّته بأمان
-    (بلا مساس لـ .env وقواعد البيانات والسجلات)، ثم يعيد تشغيل العملية.
-    بلا تحديث أحدث ⇒ رسالة واضحة، وبأي فشل ⇒ السبب + الإقلاع القادم
-    يفحص تلقائياً على أي حال.
+    الأوضاع المدعومة:
+      * /update              ← التحديث لأحدث إصدار منشور على GitHub
+      * /update v6.14.1      ← تثبيت إصدار محدد (ترقية أو رجوع لإصدار سابق أو إعادة تثبيت)
+      * /update list         ← عرض أحدث الإصدارات بأزرار تثبيت وتراجع فوري
+      * /update rollback     ← تراجع فوري لآخر نسخة محفوظة محلياً (حتى بلا إنترنت)
     """
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
@@ -179,19 +248,121 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     import updater
-    msg = await update.effective_message.reply_text(
-        "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
-        f"◆ الإصدار الحالي: v{config.VERSION}",
-        parse_mode=ParseMode.HTML)
-    res = await asyncio.to_thread(updater.self_update)
+    args = list(getattr(context, "args", None) or [])
+    arg = (args[0].strip() if args else "")
+    arg_l = arg.lower()
+
+    # --- 1) List available versions with 1-tap buttons -----------------------
+    if arg_l in ("list", "versions", "ls", "الإصدارات", "اصدارات"):
+        msg = await update.effective_message.reply_text(
+            "🔎 <b>جارٍ جلب قائمة الإصدارات من GitHub...</b>",
+            parse_mode=ParseMode.HTML)
+        releases = await asyncio.to_thread(updater.list_releases, 8)
+        snaps = await asyncio.to_thread(updater.list_rollback_snapshots)
+        lines = [
+            "🔄 <b><u>إدارة إصدارات البوت</u></b>",
+            f"<blockquote>◆ الإصدار الحالي: <b>v{safe(config.VERSION)}</b>",
+        ]
+        if snaps:
+            lines.append(f"◆ نسخة تراجع محلية جاهزة: <b>v{safe(updater.snapshot_version(snaps[0]))}</b>")
+        lines.append("</blockquote>")
+        rows_kb = []
+        if releases:
+            lines.append("<b>الإصدارات المتاحة على GitHub (اضغط للتثبيت أو الرجوع):</b>")
+            for rel in releases[:8]:
+                tag = rel["tag"]
+                ver = updater.display_tag(tag)
+                is_cur = updater.parse_version(tag) == updater.parse_version(config.VERSION)
+                mark = "✅ الحالي" if is_cur else ("⬆️ أحدث" if updater.is_newer(tag, config.VERSION) else "⬇️ سابق")
+                lines.append(f"  • <code>/update {safe(tag)}</code> — {mark}")
+                rows_kb.append([kb.btn(
+                    f"{'🔄 إعادة تثبيت' if is_cur else ('⬆️ ترقية' if updater.is_newer(tag, config.VERSION) else '⬇️ رجوع')} v{ver}",
+                    f"a:updver:{tag}",
+                    style="success" if updater.is_newer(tag, config.VERSION) else ("primary" if not is_cur else ""),
+                )])
+        else:
+            lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك كتابة <code>/update v6.14.1</code> مباشرة أو استخدام التراجع المحلي.")
+        if snaps:
+            rows_kb.append([kb.btn(
+                f"↩️ تراجع فوري للنسخة السابقة (v{updater.snapshot_version(snaps[0])})",
+                "a:updrollback",
+                style="danger",
+            )])
+        lines.append("\n<i>مثال سريع للرجوع لأي إصدار: <code>/update v6.14.1</code></i>")
+        await _send_guarded(msg.edit_text, "\n".join(lines), kb.InlineKeyboardMarkup(rows_kb) if rows_kb else None)
+        return
+
+    # --- 2) Instant offline rollback to previous local snapshot --------------
+    if arg_l in ("rollback", "back", "prev", "تراجع", "رجوع"):
+        msg = await update.effective_message.reply_text(
+            "↩️ <b>جارٍ استعادة النسخة السابقة المحفوظة محلياً...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.rollback_update)
+        if res.get("status") == "rolled_back":
+            await afn.run(audit_log.log, uid,
+                          f"self_update_rollback:{res.get('local')}->{res.get('restored_version')}")
+            await msg.edit_text(
+                f"✅ <b>تم التراجع بنجاح إلى الإصدار v{safe(res.get('restored_version'))}.</b>\n"
+                f"◆ الملفات المستعادة: {res.get('files', 0)}\n"
+                "♻️ إعادة تشغيل البوت الآن — جاهز خلال لحظات.\n"
+                "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار.</i>",
+                parse_mode=ParseMode.HTML)
+            await asyncio.sleep(1.5)
+            updater.restart()
+            return
+        await afn.run(audit_log.log, uid, f"self_update_rollback:error:{str(res.get('detail', ''))[:80]}")
+        await msg.edit_text(
+            "⚠️ <b>تعذّر التراجع المحلي.</b>\n"
+            f"◆ السبب: {safe(res.get('detail') or 'غير معروف')}\n"
+            "<i>يمكنك الرجوع لأي إصدار من GitHub مباشرة: <code>/update v6.14.1</code></i>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    # --- 3) Pin / install a specific version (upgrade, downgrade, reinstall) -
+    if arg:
+        norm = updater.normalize_tag(arg)
+        if not norm:
+            await update.effective_message.reply_text(
+                "⚠️ <b>صيغة أمر التحديث غير معروفة.</b>\n"
+                "<blockquote>◆ أحدث إصدار: <code>/update</code>\n"
+                "◆ إصدار محدد: <code>/update v6.14.1</code>\n"
+                "◆ قائمة الإصدارات: <code>/update list</code>\n"
+                "◆ تراجع فوري: <code>/update rollback</code></blockquote>",
+                parse_mode=ParseMode.HTML)
+            return
+        msg = await update.effective_message.reply_text(
+            f"🔎 <b>جارٍ جلب وتثبيت الإصدار {safe(norm)}...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}\n"
+            "<i>سيتم حفظ نسخة تراجع تلقائية قبل التثبيت دون المساس بـ .env أو قاعدة البيانات.</i>",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.self_update, None, norm, True)
+    else:
+        # --- 4) Default: upgrade to latest GitHub release --------------------
+        msg = await update.effective_message.reply_text(
+            "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
+            f"◆ الإصدار الحالي: v{config.VERSION}",
+            parse_mode=ParseMode.HTML)
+        res = await asyncio.to_thread(updater.self_update)
+
     status = res.get("status")
     if status == "updated":
-        await afn.run(audit_log.log, uid, f"self_update:{res.get('local')}->{res.get('remote')}")
+        direction = res.get("direction") or "upgrade"
+        dir_label = {
+            "downgrade": "⬇️ تم الرجوع وتثبيت الإصدار",
+            "reinstall": "🔄 تمت إعادة تثبيت الإصدار",
+        }.get(direction, "✅ تم تنزيل وتثبيت الإصدار")
+        sha_line = "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
+        bak_line = (f"◆ نسخة تراجع محفوظة: <code>{safe(res.get('rollback_backup'))}</code>\n"
+                    if res.get("rollback_backup") else "")
+        await afn.run(audit_log.log, uid,
+                      f"self_update:{direction}:{res.get('local')}->{res.get('remote')}")
         await msg.edit_text(
-            f"✅ <b>تم تنزيل وتثبيت الإصدار v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
+            f"<b>{dir_label} v{safe(updater.display_tag(res.get('remote')))} بنجاح.</b>\n"
             f"◆ الملفات المثبتة: {res.get('files', 0)}\n"
+            f"{sha_line}{bak_line}"
             "♻️ إعادة تشغيل البوت الآن — جاهز خلال لحظات.\n"
-            "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار الجديد.</i>",
+            "<i>بعد الإقلاع أرسل /ping للتحقق من الإصدار، وللتراجع أرسل /update rollback.</i>",
             parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.5)     # الوقت اللازم لتوصيل الرد قبل استبدال العملية
         updater.restart()            # استبدال فوري للعملية — لا يعود
@@ -201,7 +372,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(
             "🟢 <b>أنت على أحدث إصدار بالفعل.</b>\n"
             f"◆ المحلي: v{safe(res.get('local'))}\n"
-            f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}",
+            f"◆ الأحدث على GitHub: v{safe(updater.display_tag(res.get('remote')))}\n"
+            "<i>لعرض كل الإصدارات أو الرجوع لإصدار سابق: <code>/update list</code> أو <code>/update v6.14.1</code></i>",
             parse_mode=ParseMode.HTML)
         return
     await afn.run(audit_log.log, uid, f"self_update:error:{str(res.get('detail', ''))[:80]}")
@@ -209,7 +381,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ <b>تعذّر التحديث الآن — الإصدار الحالي ما زال يعمل بشكل طبيعي.</b>\n"
         f"◆ الإصدار الحالي: v{safe(res.get('local'))}\n"
         f"◆ السبب: {safe(res.get('detail') or 'غير معروف')}\n"
-        "<i>جرّب لاحقاً من جديد، أو أعد التشغيل من اللوحة — الإقلاع يفحص التحديث تلقائياً.</i>",
+        "<i>جرّب <code>/update list</code> لعرض الإصدارات أو <code>/update rollback</code> للتراجع المحلي.</i>",
         parse_mode=ParseMode.HTML)
 
 
@@ -219,10 +391,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await afn.run(audit_log.log, uid, "security:admin_command_denied")
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
-    sent = await update.effective_message.reply_text(
-        f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر وحدة الإدارة من الأزرار:",
-        parse_mode=ParseMode.HTML, reply_markup=kb.admin_menu())
-    register_panel(sent.chat_id, sent.message_id)
+    sent = await _send_guarded(
+        update.effective_message.reply_text,
+        f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
+        kb.admin_menu(),
+    )
+    if sent is not None:
+        register_panel(getattr(sent, "chat_id", None), getattr(sent, "message_id", None))
 
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -5,10 +5,53 @@ inside IMMEDIATE transactions (atomic). Restart / re-tap / parallel sessions /
 direct callback replay all re-enter the same server check — there is no client
 state to trick. Viewing a signal card or receiving a push consumes quota.
 """
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from fysb import config, db
 from fysb.config import log
+
+# v6.20.1 performance: tiny plans table (3-5 rows) + per-user active plan code
+# cached in memory with short TTL and write-through invalidation on any grant/
+# cancel/expiry. Cuts plan_for() from 2 WAN round trips down to 0-1.
+_PLANS_TTL = 60.0
+_USER_PLAN_TTL = 15.0
+_cache_lock = threading.Lock()
+_plans_cache: dict[str, dict] = {}
+_plans_loaded_at: float = 0.0
+_user_plan_cache: dict[int, tuple[str, float]] = {}  # uid -> (plan_code, expires_mono)
+
+
+def invalidate_plans_cache(user_id: int | None = None) -> None:
+    """Clear plans and/or a specific user's active plan cache."""
+    global _plans_loaded_at
+    with _cache_lock:
+        if user_id is None:
+            _plans_cache.clear()
+            _plans_loaded_at = 0.0
+            _user_plan_cache.clear()
+        else:
+            _user_plan_cache.pop(int(user_id), None)
+
+
+def _plans_map(conn_obj=None) -> dict[str, dict]:
+    global _plans_loaded_at
+    now_m = time.monotonic()
+    with _cache_lock:
+        if _plans_cache and (now_m - _plans_loaded_at) < _PLANS_TTL:
+            return dict(_plans_cache)
+    if conn_obj is not None:
+        rows = conn_obj.execute("SELECT * FROM plans").fetchall()
+    else:
+        with db.conn() as c:
+            rows = c.execute("SELECT * FROM plans").fetchall()
+    fresh = {r["code"]: dict(r) for r in rows}
+    with _cache_lock:
+        _plans_cache.clear()
+        _plans_cache.update(fresh)
+        _plans_loaded_at = time.monotonic()
+    return fresh
 
 
 def active_plan(uid: int):
@@ -24,17 +67,88 @@ def active_plan(uid: int):
     return None
 
 
-def plan_for(uid: int):
-    """Plan row for the user (FREE fallback, always a valid row)."""
-    p = active_plan(uid)
-    code = p["plan_code"] if p else "FREE"
+def plan_for(uid: int, conn_obj=None):
+    """Plan row for the user (FREE fallback, always a valid row).
+
+    v6.20.1: uses cached plans table + single lightweight subscription lookup
+    (15s per-user cache, invalidated immediately on grant/cancel/expiry),
+    eliminating 2-4 sequential WAN queries on every user button tap.
+    """
+    uid_i = int(uid)
+    now_m = time.monotonic()
+    cached_code: str | None = None
+    with _cache_lock:
+        ent = _user_plan_cache.get(uid_i)
+        if ent is not None and now_m < ent[1]:
+            cached_code = ent[0]
+    if cached_code is not None:
+        pmap = _plans_map(conn_obj)
+        row = pmap.get(cached_code) or pmap.get("FREE")
+        if row is not None:
+            return row
+
+    def _query(c):
+        return c.execute(
+            "SELECT plan_code, ends_at FROM subscriptions "
+            "WHERE user_id=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+            (uid_i,),
+        ).fetchone()
+
+    if conn_obj is not None:
+        sub = _query(conn_obj)
+        pmap = _plans_map(conn_obj)
+    else:
+        with db.conn() as c:
+            sub = _query(c)
+            pmap = _plans_map(c)
+
+    code = "FREE"
+    if sub and (not sub["ends_at"] or sub["ends_at"] > config.now()):
+        code = sub["plan_code"]
+    with _cache_lock:
+        if len(_user_plan_cache) > 5000:
+            _user_plan_cache.clear()
+        _user_plan_cache[uid_i] = (code, time.monotonic() + _USER_PLAN_TTL)
+    return pmap.get(code) or pmap.get("FREE")
+
+
+def plans_for_users(uids: list[int]) -> dict[int, dict]:
+    """v6.16.0 batch resolver: resolve active plan (with FREE fallback) for a
+    whole batch of user_ids in 2 SQL queries instead of 2N queries."""
+    if not uids:
+        return {}
+    now_iso = config.now()
+    uid_set = {int(u) for u in uids}
     with db.conn() as c:
-        row = c.execute("SELECT * FROM plans WHERE code=?", (code,)).fetchone()
-    return row
+        plans_by_code = {
+            r["code"]: dict(r)
+            for r in c.execute("SELECT * FROM plans").fetchall()
+        }
+        subs_rows = c.execute(
+            "SELECT user_id, plan_code, ends_at FROM subscriptions "
+            "WHERE status='ACTIVE' ORDER BY id DESC"
+        ).fetchall()
+    free_plan = plans_by_code.get("FREE")
+    active_code: dict[int, str] = {}
+    for r in subs_rows:
+        u = int(r["user_id"])
+        if u not in uid_set or u in active_code:
+            continue
+        ends = r["ends_at"]
+        if not ends or ends > now_iso:
+            active_code[u] = r["plan_code"]
+    out: dict[int, dict] = {}
+    for u in uid_set:
+        code = active_code.get(u, "FREE")
+        plan = plans_by_code.get(code) or free_plan
+        if plan:
+            out[u] = plan
+    return out
 
 
 def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", actor: int = 0,
-                       override_days: int | None = None) -> dict:
+                       override_days: int | None = None, payment_id: int = 0,
+                       amount: float | None = None, currency: str = "USD") -> dict:
     """Activate/extend a subscription. Previous ACTIVE subs of the user end now
     (upgrade/downgrade/replace semantics). Returns the new subscription id."""
     with db.conn() as c:
@@ -51,10 +165,9 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
                            VALUES(?,?,?,?,?,?,?)""",
                         (user_id, plan_code, start.isoformat(), ends, "ACTIVE", config.now(), source))
         sub_id = cur.lastrowid
+    invalidate_plans_cache(user_id)
     log.info("SUBSCRIPTION %s | user=%s plan=%s source=%s actor=%s", source, user_id, plan_code, source, actor)
     # --- Royal referral conversion (server-side, idempotent) ---------------
-    # The moment a package becomes ACTIVE, the invitee's referral flips to
-    # «مشترك فعلاً» — the royal metric can never be self-reported.
     try:
         from fysb.services import referrals
         conv = referrals.mark_converted(user_id, plan_code)
@@ -64,14 +177,29 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
                      conv.get("target_converted"), conv.get("target_met"))
     except Exception:
         log.exception("referral conversion mark failed (non-fatal)")
-    return {"ok": True, "subscription_id": sub_id, "ends_at": ends, "plan": plan_code}
+    # --- Channel Partner Revenue-Share Commission (v6.21.0) ----------------
+    comm_info = None
+    try:
+        from fysb.services import partners
+        comm_info = partners.credit_commission_on_subscription(
+            user_id, plan_code, payment_id=payment_id, amount=amount, currency=currency,
+        )
+        if comm_info:
+            log.info("PARTNER COMMISSION | partner=%s buyer=%s plan=%s comm=%s %s",
+                     comm_info["partner_id"], user_id, plan_code,
+                     comm_info["commission_amount"], comm_info["currency"])
+    except Exception:
+        log.exception("partner commission credit failed (non-fatal)")
+    return {"ok": True, "subscription_id": sub_id, "ends_at": ends, "plan": plan_code, "commission": comm_info}
 
 
 def cancel_subscription(user_id: int, actor: int = 0) -> bool:
     with db.tx() as c:
         cur = c.execute("UPDATE subscriptions SET status='CANCELLED', ends_at=? WHERE user_id=? AND status='ACTIVE'",
                         (config.now(), user_id))
-        return cur.rowcount > 0
+        ok = cur.rowcount > 0
+    invalidate_plans_cache(user_id)
+    return ok
 
 
 def expired_but_unmarked() -> list[dict]:
@@ -84,6 +212,7 @@ def expired_but_unmarked() -> list[dict]:
 def mark_expired(sub_id: int) -> None:
     with db.conn() as c:
         c.execute("UPDATE subscriptions SET status='EXPIRED' WHERE id=?", (sub_id,))
+    invalidate_plans_cache()
 
 
 def due_reminders() -> list[dict]:
@@ -109,17 +238,122 @@ def mark_reminded(sub_id: int, stage: int) -> None:
         c.execute(f"UPDATE subscriptions SET {col}=1 WHERE id=?", (sub_id,))
 
 
-# --- FREE quota ledger -------------------------------------------------------
+# --- FREE trial & quota ledger -----------------------------------------------
+def _parse_iso_utc(raw: str) -> datetime | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def free_trial_status(uid: int, user_row=None, plan_row=None) -> dict:
+    """Compute a user's FREE trial window status (controlled by Admin via
+    `plans.duration_days` for `FREE`: `0` = open forever, `> 0` = N days from
+    the user's `joined_at`). Paid subscribers and ADMIN always return expired=False."""
+    if int(uid) == int(config.ADMIN_ID or 0):
+        return {
+            "is_free": False, "expired": False, "unlimited": True,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    p = plan_row if plan_row is not None else plan_for(uid)
+    if not p or (p.get("code") or "FREE").upper() != "FREE":
+        return {
+            "is_free": False, "expired": False, "unlimited": False,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    trial_days = int(p.get("duration_days") or 0)
+    if trial_days <= 0:
+        return {
+            "is_free": True, "expired": False, "unlimited": True,
+            "trial_days": 0, "days_left": None, "hours_left": None, "expires_at": "",
+        }
+    joined_raw = ""
+    if user_row is not None:
+        try:
+            joined_raw = user_row["joined_at"] or ""
+        except Exception:
+            joined_raw = ""
+    else:
+        with db.conn() as c:
+            r = c.execute("SELECT joined_at FROM users WHERE user_id=?", (int(uid),)).fetchone()
+            joined_raw = (r["joined_at"] if r else "") or ""
+    joined_dt = _parse_iso_utc(joined_raw)
+    if joined_dt is None:
+        return {
+            "is_free": True, "expired": False, "unlimited": False,
+            "trial_days": trial_days, "days_left": trial_days,
+            "hours_left": trial_days * 24, "expires_at": "",
+        }
+    expires_dt = joined_dt + timedelta(days=trial_days)
+    now_dt = datetime.now(timezone.utc)
+    if now_dt >= expires_dt:
+        return {
+            "is_free": True, "expired": True, "unlimited": False,
+            "trial_days": trial_days, "days_left": 0, "hours_left": 0,
+            "expires_at": expires_dt.isoformat(),
+        }
+    rem_sec = (expires_dt - now_dt).total_seconds()
+    days_left = max(0, int(rem_sec // 86400))
+    hours_left = max(1, int((rem_sec + 3599) // 3600))
+    return {
+        "is_free": True, "expired": False, "unlimited": False,
+        "trial_days": trial_days, "days_left": days_left,
+        "hours_left": hours_left, "expires_at": expires_dt.isoformat(),
+    }
+
+
+def is_free_trial_expired(uid: int, user_row=None, plan_row=None) -> bool:
+    return bool(free_trial_status(uid, user_row=user_row, plan_row=plan_row).get("expired"))
+
+
+def next_higher_plan(current_code: str) -> dict | None:
+    """Return the exact next enabled paid tier strictly above `current_code`
+    (e.g. FREE -> PRO -> VIP -> ROYAL) based on ascending price."""
+    pmap = _plans_map()
+    cur = pmap.get((current_code or "FREE").upper())
+    cur_price = float((cur or {}).get("price") or 0.0)
+    paid = sorted(
+        (p for p in pmap.values() if p.get("enabled") and float(p.get("price") or 0) > cur_price),
+        key=lambda x: float(x.get("price") or 0),
+    )
+    return paid[0] if paid else None
+
+
+def cheapest_plan_unlocking(kind: str, item: str) -> dict | None:
+    """Return the cheapest enabled paid plan whose `kind` ('markets', 'timeframes',
+    'strategies') includes `item` (or 'ALL'). Used by luxury upgrade cards."""
+    target = (item or "").strip().upper().replace("/", "")
+    if not target or kind not in ("markets", "timeframes", "strategies"):
+        return None
+    pmap = _plans_map()
+    paid = sorted(
+        (p for p in pmap.values() if p.get("enabled") and float(p.get("price") or 0) > 0),
+        key=lambda x: float(x.get("price") or 0),
+    )
+    for p in paid:
+        vals = {x.strip().upper().replace("/", "") for x in str(p.get(kind) or "").split(",") if x.strip()}
+        if "ALL" in vals or target in vals:
+            return p
+    return paid[-1] if paid else None
+
+
 def _quota_for(user_id: int, plan_row=None) -> int:
     if plan_row is None:
         plan_row = plan_for(user_id)
     if plan_row and (plan_row["code"] != "FREE"):
-        return max(int(plan_row["max_signals_per_day"] or 5), 5)
-    return max(1, db.get_setting_int("free_daily_signals", 2))
+        return max(1, int(plan_row["max_signals_per_day"] or 1))
+    return max(1, db.get_setting_int("free_daily_signals", int((plan_row or {}).get("max_signals_per_day") or 1)))
 
 
-def quota_state(user_id: int) -> dict:
-    plan_row = plan_for(user_id)
+def quota_state(user_id: int, plan_row=None) -> dict:
+    if plan_row is None:
+        plan_row = plan_for(user_id)
     quota = _quota_for(user_id, plan_row)
     day = db.day_start_utc()
     with db.conn() as c:
@@ -129,18 +363,17 @@ def quota_state(user_id: int) -> dict:
             "quota": quota, "used": used, "remaining": max(0, quota - used), "day": day}
 
 
-def try_consume_signal(user_id: int, signal_row) -> bool:
+def try_consume_signal(user_id: int, signal_row, plan_row=None) -> bool:
     """Atomically consume one quota slot. False => quota exhausted (send blocked)."""
-    state = quota_state(user_id)
-    if state["remaining"] <= 0:
-        return False
+    if plan_row is None:
+        plan_row = plan_for(user_id)
+    quota = _quota_for(user_id, plan_row)
     try:
         with db.tx(immediate=True) as c:
             # Re-check inside the write-lock: two racing consumers can't both pass.
             day = db.day_start_utc()
             used = c.execute("SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
                              (user_id, day)).fetchone()["n"]
-            quota = _quota_for(user_id)
             if used >= quota:
                 return False
             c.execute("""INSERT OR IGNORE INTO signal_deliveries(user_id,signal_id,delivered_at)
@@ -181,3 +414,71 @@ def mark_expired_and_notify_targets() -> list[dict]:
     if targets:
         log.info("subscriptions expired: %s", [t["user_id"] for t in targets])
     return targets
+
+
+def free_trial_due_reminders() -> list[dict]:
+    """v6.24.0 (#8) Return FREE-trial users due for a luxury drip reminder:
+      * '48h'     : <= 48h and > 24h left
+      * '24h'     : <= 24h and > 0h left
+      * 'expired' : trial just expired (<= 0h left)
+    Each stage is returned at most ONCE per user (tracked in free_trial_reminders).
+    """
+    with db.conn() as c:
+        fp = c.execute("SELECT * FROM plans WHERE code='FREE'").fetchone()
+        if not fp:
+            return []
+        free_plan = dict(fp)
+        trial_days = int(free_plan.get("duration_days") or 0)
+        if trial_days <= 0:
+            return []
+        users_rows = c.execute(
+            "SELECT user_id, joined_at, notifications, is_blocked FROM users "
+            "WHERE is_blocked=0 AND notifications=1"
+        ).fetchall()
+        sent_rows = c.execute("SELECT user_id, stage FROM free_trial_reminders").fetchall()
+    already = {(int(r["user_id"]), str(r["stage"])) for r in sent_rows}
+
+    from fysb.services import partners as partners_svc
+    active_partners = partners_svc.active_partner_user_ids()
+    uids = [
+        int(u["user_id"]) for u in users_rows
+        if int(u["user_id"]) != config.ADMIN_ID and int(u["user_id"]) not in active_partners
+    ]
+    plans_map = plans_for_users(uids)
+    due: list[dict] = []
+    for u in users_rows:
+        uid = int(u["user_id"])
+        if uid == config.ADMIN_ID or uid in active_partners:
+            continue
+        p = plans_map.get(uid)
+        if not p or str(p.get("code") or "").upper() != "FREE":
+            continue
+        st = free_trial_status(uid, user_row=u, plan_row=free_plan)
+        if not st.get("is_free") or st.get("unlimited"):
+            continue
+        rem_h = float(st.get("hours_left") or 0)
+        stage = ""
+        if st.get("expired") or rem_h <= 0:
+            stage = "expired"
+        elif rem_h <= 24.0:
+            stage = "24h"
+        elif rem_h <= 48.0:
+            stage = "48h"
+        if not stage or (uid, stage) in already:
+            continue
+        due.append({
+            "user_id": uid,
+            "stage": stage,
+            "hours_left": max(1, int(round(rem_h))) if not st.get("expired") and rem_h > 0 else 0,
+            "trial_days": trial_days,
+        })
+    return due
+
+
+def mark_free_trial_reminded(user_id: int, stage: str) -> None:
+    """Record that a FREE-trial drip reminder stage was sent to `user_id`."""
+    with db.conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO free_trial_reminders(user_id, stage, sent_at) VALUES(?,?,?)",
+            (int(user_id), str(stage), config.now()),
+        )

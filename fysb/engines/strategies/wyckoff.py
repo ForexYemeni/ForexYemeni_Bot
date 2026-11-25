@@ -34,7 +34,7 @@ real volume data) · kill zone +6 · volatility regime +4 · RR(TP1)>=2 +8.
 Base 40. Cap 95. Minimum 55 to fire — a weak spring is no spring at all.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 RANGE_WINDOW = 26          # candles defining the trading range (excluding the event)
 RANGE_MAX_ATR = 3.0        # range width ceiling in ATR — consolidation, not drift
@@ -80,7 +80,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         return None
 
     checks: dict = {}
-    score = 40.0
+    score = 32.0
     reasons: list[str] = []
 
     # 1) a REAL sideways range — not a trend wearing a costume
@@ -88,7 +88,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["range_ok"] = width_ok
     if not width_ok:
         return None
-    score += 14
+    score += 10
     reasons.append(f"range {range_low:.5g}–{range_high:.5g} (width {(range_high - range_low) / a:.2f} ATR)")
 
     # two-sided auction: the close must have traded BOTH sides of the midline
@@ -96,7 +96,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["alternations"] = alts
     if alts < MIN_ALTERNATIONS:
         return None
-    score += 10
+    score += 8
 
     # 2) the Wyckoff event — exactly one direction can qualify
     inside_prev = range_low <= float(prev["close"]) <= range_high
@@ -115,12 +115,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         return None
     checks["event"] = "SPRING" if direction == "BUY" else "UPTHRUST"
-    score += 22
+    score += 16
     reasons.append(f"{checks['event']}: wick swept {'below support' if direction == 'BUY' else 'above resistance'} then closed back inside")
 
     # close confirmed back inside the range
     checks["close_inside"] = range_low <= close <= range_high
-    score += 14
+    score += 8
 
     # 4) effort vs result — volume surge on the event (only with real data)
     if _real_volume(candles[-RANGE_WINDOW - 1:]):
@@ -148,22 +148,25 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         stop = wick_extreme - 0.5 * a
     else:
         stop = wick_extreme + 0.5 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
 
     # 7) targets — opposite boundary floored at 2R, measured move, 1.618× extension
+    # v6.20.0 FIX: scale minimum TP separation by risk (never hardcoded 0.01 which is 100 pips on FX!)
+    min_step = max(0.5 * risk, 1e-6)
     if direction == "BUY":
         tp1 = max(range_high, entry + 2.0 * risk)
-        tp2 = max(tp1 + 0.01, entry + height)
-        tp3 = max(tp2 + 0.01, entry + 1.618 * height)
+        tp2 = max(tp1 + min_step, entry + height)
+        tp3 = max(tp2 + min_step, entry + 1.618 * height)
     else:
         tp1 = min(range_low, entry - 2.0 * risk)
-        tp2 = min(tp1 - 0.01, entry - height)
-        tp3 = min(tp2 - 0.01, entry - 1.618 * height)
-    rr = 2.0
-    checks["rr_ok"] = True
-    score += 8
+        tp2 = min(tp1 - min_step, entry - height)
+        tp3 = min(tp2 - min_step, entry - 1.618 * height)
+    rr = round(abs(tp1 - entry) / risk, 2)
+    checks["rr_ok"] = rr >= 2.0
+    score += 4 if checks["rr_ok"] else 0
 
     if score < MIN_SCORE:
         return None

@@ -14,7 +14,7 @@ Score weights (documented, deterministic):
 Base 50. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, structure_labels, swings, support_resistance
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -44,32 +44,38 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not direction:
         return None
 
-    # --- Demand / Supply zone from the last opposite swing before the move ---
+    # --- Demand / Supply zone from the last INTACT opposite swing (v6.20.0) --
+    # Skip broken swings where price already closed beyond the zone boundary.
     highs, lows = swings(candles, 3)
     a = atr(candles)
     if a <= 0:
         return None
     zone = None
     if direction == "BUY" and lows:
-        base = lows[-1]
-        zone = (base["price"], base["price"] + 1.2 * a)
-        entry = min(zone[1], close)  # retrace limit into demand
+        for base in reversed(lows):
+            if close >= base["price"]:
+                zone = (base["price"], base["price"] + 1.2 * a)
+                break
+        if zone is None:
+            return None  # All demand zones violated — structure is broken
+        entry = min(zone[1], close)
     elif direction == "SELL" and highs:
-        base = highs[-1]
-        zone = (base["price"] - 1.2 * a, base["price"])
+        for base in reversed(highs):
+            if close <= base["price"]:
+                zone = (base["price"] - 1.2 * a, base["price"])
+                break
+        if zone is None:
+            return None  # All supply zones violated — structure is broken
         entry = max(zone[0], close)
     else:
         entry = close
 
-    # --- Stop beyond the protective swing ----------------------------------
+    # --- Stop beyond the protective swing (v6.20.6: 0.85 ATR breathing room) --
     if direction == "BUY":
-        stop = (zone[0] - 0.6 * a) if zone else entry - 1.8 * a
-        if stop >= entry:
-            stop = entry - 1.8 * a
+        stop = (zone[0] - 0.85 * a) if zone else entry - 1.8 * a
     else:
-        stop = (zone[1] + 0.6 * a) if zone else entry + 1.8 * a
-        if stop <= entry:
-            stop = entry + 1.8 * a
+        stop = (zone[1] + 0.85 * a) if zone else entry + 1.8 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.8, max_atr=2.8, cap_atr=2.4)
 
     risk = abs(entry - stop)
     if risk <= 0:

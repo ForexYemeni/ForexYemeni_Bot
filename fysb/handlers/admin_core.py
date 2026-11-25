@@ -90,11 +90,12 @@ async def admin_user_detail(q, uid, context, bot, target: int):
         return
     profile = await afn.run(users_service.profile_summary, target)
     rows_kb = [
-        [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}"),
+        [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}",
+                style="danger" if not u["is_blocked"] else "success"),
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
         [kb.btn("💳 مدفوعاته", f"a:userpayments:{target}"), kb.btn("📡 ما استلمه", f"a:userdeliveries:{target}")],
-        [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
-        [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}")],
+        [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}", style="primary"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
+        [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}", style="danger")],
         [kb.btn("↩️ دليل المستخدمين", "a:users")],
     ]
     await render(q, render_user_card(u, profile), kb.admin_nav(rows_kb), bot)
@@ -215,6 +216,11 @@ async def admin_sub_set(q, uid, context, bot, target: int, code: str):
         note += f"\nالانتهاء: {human_dt(res['ends_at'])}"
     try:
         await bot.send_message(target, f"✅ تم تحديث اشتراكك إلى <b>{esc(code)}</b> من قبل الإدارة.", parse_mode="HTML")
+    except Exception:
+        pass
+    try:
+        from fysb.services import partners as partners_svc
+        await partners_svc.notify_commission_and_vip(bot, target, code, res.get("commission"))
     except Exception:
         pass
     await render(q, note, kb.admin_nav([[kb.btn("↩️ الملف", f"a:userdetail:{target}")]]), bot)
@@ -436,26 +442,59 @@ async def admin_plan_edit(q, uid, context, bot, code: str):
     # v6.10.0 (owner report 4) — DIRECT-ENTRY editor: the old +/- stepper rows
     # are retired («أراه سيء للغاية وليس فاخر»). One tap opens a single-number
     # prompt; any value lands instantly. Blocks stay as fast chip rows.
+    dur_val = int(p["duration_days"] or 0)
+    dur_label = ("♾️ مفتوحة دائماً" if dur_val == 0 else f"{dur_val} يوم") if code == "FREE" else (
+        "دائم" if dur_val == 0 else f"{dur_val} يوم"
+    )
     rows_kb = [
-        [kb.btn(f"💰 السعر: {p['price']:g} {p['currency']}", f"a:planfield:{code}:price"),
-         kb.btn(f"📅 المدة: {'دائم' if not p['duration_days'] else str(p['duration_days']) + ' يوم'}", f"a:planfield:{code}:days")],
-        [kb.btn(f"📡 الإشارات: {p['max_signals_per_day']}/يوم", f"a:planfield:{code}:quota"),
-         kb.btn(f"🔬 التحليلات: {p['max_analyses_per_day'] or 0}/يوم", f"a:planfield:{code}:anal")],
-        [kb.btn(f"⭐ الجودة: {p['min_score']}/100", f"a:planfield:{code}:score")],
+        [kb.btn(f"💰 السعر: {p['price']:g} {p['currency']}", f"a:planfield:{code}:price", style="primary"),
+         kb.btn(f"📅 {'مدة التجربة' if code == 'FREE' else 'المدة'}: {dur_label}", f"a:planfield:{code}:days", style="primary")],
     ]
+    if code == "FREE":
+        # v6.22.0: 1-tap FREE Trial Duration presets right inside Admin -> FREE Plan
+        rows_kb.append([
+            kb.btn(
+                (("✅ " if dur_val == d else "") + ("♾️ مفتوحة" if d == 0 else f"{d} يوم")),
+                f"a:plantrial:FREE:{d}",
+                style="success" if dur_val == d else "primary",
+            )
+            for d in (3, 7, 14, 30, 0)
+        ])
+    rows_kb.extend([
+        [kb.btn(f"📡 الإشارات: {p['max_signals_per_day']}/يوم", f"a:planfield:{code}:quota", style="primary"),
+         kb.btn(f"🔬 التحليلات: {p['max_analyses_per_day'] or 0}/يوم", f"a:planfield:{code}:anal", style="primary")],
+        [kb.btn(f"⭐ الجودة: {p['min_score']}/100", f"a:planfield:{code}:score", style="primary")],
+    ])
     # Feature toggles — what THIS plan may use (markets / timeframes / strategies)
+    free_note = (
+        "\n⏳ <b>ضبط الفترة المجانية لكل مستخدم:</b> اختر مدة جاهزة بالأسفل (3 / 7 / 14 / 30 يوم أو ♾️ مفتوحة دائماً) "
+        "أو اضغط «📅 مدة التجربة» لإدخال أي عدد أيام مخصص — تنتهي تلقائياً لكل مستخدم بعد مضي المدة من انضمامه ويُعرض له عرض ترقية فاخر.\n"
+        if code == "FREE" else "\n"
+    )
     body = (render_plan_card(p) +
             f"\n\n🌐 <b>الأسواق المسموحة:</b>\n<blockquote>{esc(mkt_row)}</blockquote>" +
             f"⏱ <b>الأطر الزمنية المسموحة:</b>\n<blockquote>{esc(tf_row)}</blockquote>" +
             f"🧠 <b>الاستراتيجيات المسموحة:</b>\n<blockquote>{esc(st_row)}</blockquote>" +
-            "\n<i>اضغط أي قيمة بالأسفل لكتابة القيمة الجديدة مباشرة (سعر/مدة/حدود/جودة)، "
+            free_note +
+            "<i>اضغط أي قيمة بالأسفل لكتابة القيمة الجديدة مباشرة (سعر/مدة/حدود/جودة)، "
             "واضغط صفوف الأسواق والأطر والاستراتيجيات للتبديل الفوري — كل شيء سهل جداً وبضغطة واحدة.</i>")
-    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets"),
-                    kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes")])
-    rows_kb.append([kb.btn("🧠 الاستراتيجيات ⬇️", f"a:planfeatpage:{code}:strategies")])
-    rows_kb.append([kb.btn(f"{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'} · تفعيل/تعطيل", f"a:toggleplan:{code}")])
-    rows_kb.append([kb.btn("🗑 حذف الباقة", f"a:plandel:{code}") if code not in ("FREE",) else kb.btn("🔒 الباقة المجانية محمية", "a:plannoop")])
+    rows_kb.append([kb.btn("🌐 الأسواق ⬇️", f"a:planfeatpage:{code}:markets", style="primary"),
+                    kb.btn("⏱ الأطر ⬇️", f"a:planfeatpage:{code}:timeframes", style="primary")])
+    rows_kb.append([kb.btn("🧠 الاستراتيجيات ⬇️", f"a:planfeatpage:{code}:strategies", style="primary")])
+    rows_kb.append([kb.btn(f"{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'} · تفعيل/تعطيل", f"a:toggleplan:{code}",
+                           style="success" if p["enabled"] else "danger")])
+    rows_kb.append([kb.btn("🗑 حذف الباقة", f"a:plandel:{code}", style="danger") if code not in ("FREE",)
+                    else kb.btn("🔒 الباقة المجانية محمية", "a:plannoop", style="primary")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_plan_days_preset(q, uid, context, bot, code: str, days: int):
+    """v6.22.0: 1-tap duration preset (e.g. FREE trial 3/7/14/30 days or 0=forever)."""
+    n = max(0, min(3650, int(days)))
+    await afn.run(_plan_field_update, code, "duration_days", n)
+    await afn.run(subs.invalidate_plans_cache)
+    await afn.run(audit_log.log, uid, f"plan_days_preset:{code}:{n}")
+    await admin_plan_edit(q, uid, context, bot, code)
 
 
 PLAN_FIELD_LABELS = {"price": "السعر (رقم، مثال 19 أو 19.5)",
@@ -483,30 +522,37 @@ def plan_field_apply(code: str, field: str, raw: str) -> str:
             if not (0 <= val <= 100000):
                 raise ValueError("السعر بين 0 و 100000")
             c.execute("UPDATE plans SET price=? WHERE code=?", (val, code))
+            subs.invalidate_plans_cache()
             return f"حُفظ سعر {code}: {val:g} {c.execute('SELECT currency FROM plans WHERE code=?', (code,)).fetchone()['currency']}"
         if field == "days":
             n = int(val)
             if not (0 <= n <= 3650):
                 raise ValueError("المدة بين 0 و 3650 يوماً (0 = دائم)")
             c.execute("UPDATE plans SET duration_days=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظت مدة {code}: {'دائم' if n == 0 else f'{n} يوم'}"
         if field == "quota":
             n = int(val)
             if not (1 <= n <= 1000):
                 raise ValueError("حد الإشارات بين 1 و 1000")
             c.execute("UPDATE plans SET max_signals_per_day=? WHERE code=?", (n, code))
+            if code.upper() == "FREE":
+                db.set_setting("free_daily_signals", str(n))
+            subs.invalidate_plans_cache()
             return f"حُفظ حد إشارات {code}: {n}/يوم"
         if field == "anal":
             n = int(val)
             if not (0 <= n <= 1000):
                 raise ValueError("حد التحليلات بين 0 و 1000")
             c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظ حد تحليلات {code}: {n}/يوم" + (" (بدون تحليلات)" if n == 0 else "")
         if field == "score":
             n = int(val)
             if not (40 <= n <= 100):
                 raise ValueError("الجودة الدنيا بين 40 و 100")
             c.execute("UPDATE plans SET min_score=? WHERE code=?", (n, code))
+            subs.invalidate_plans_cache()
             return f"حُفظت الجودة الدنيا لـ {code}: {n}/100"
     raise ValueError("حقل غير معروف")
 
@@ -656,7 +702,8 @@ async def admin_payment_detail(q, uid, context, bot, pid: int):
     plan = await afn.run(_plan_title_row, p["plan_code"])
     rows_kb = []
     if p["status"] == "PENDING":
-        rows_kb.append([kb.btn("✅ قبول الطلب", f"a:approvepay:{pid}"), kb.btn("❌ رفض الطلب", f"a:rejectpay:{pid}")])
+        rows_kb.append([kb.btn("✅ قبول الطلب", f"a:approvepay:{pid}", style="success"),
+                        kb.btn("❌ رفض الطلب", f"a:rejectpay:{pid}", style="danger")])
     if p["receipt_file_id"]:
         rows_kb.append([kb.btn("🖼 عرض الإيصال", f"a:viewreceipt:{pid}")])
     rows_kb.append([kb.btn("👤 ملف المستخدم", f"a:userdetail:{p['user_id']}"), kb.btn("↩️ المدفوعات", "a:payments")])
@@ -674,6 +721,11 @@ async def admin_payment_approve(q, uid, context, bot, pid: int):
         await bot.send_message(p["user_id"],
                                f"✅ تمت الموافقة على طلبك #{pid} وتفعيل باقة <b>{esc(p['plan_code'])}</b>.",
                                parse_mode="HTML")
+    except Exception:
+        pass
+    try:
+        from fysb.services import partners as partners_svc
+        await partners_svc.notify_commission_and_vip(bot, p["user_id"], p["plan_code"], res.get("commission"))
     except Exception:
         pass
     await admin_payment_detail(q, uid, context, bot, pid)
@@ -793,12 +845,13 @@ async def admin_pm_toggle_plan(q, uid, context, bot, code: str):
         await render(q, "انتهت الجلسة — ابدأ من إضافة وسيلة.", kb.admin_nav(), bot)
         return
     d["linked"] = (d["linked"] - [code]) if code in d["linked"] else (d["linked"] + [code])
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import InlineKeyboardMarkup
     plans = await afn.run(_plan_code_title_rows)
-    kb_rows = [[InlineKeyboardButton(("✅ " if p["code"] in d["linked"] else "") + p["title"],
-                                     callback_data=f"a:pmplan:{p['code']}")] for p in plans]
-    kb_rows.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
-                    InlineKeyboardButton("🗑 إلغاء", callback_data="a:pmcancel")])
+    kb_rows = [[kb.btn(("✅ " if p["code"] in d["linked"] else "▫️ ") + p["title"],
+                       f"a:pmplan:{p['code']}",
+                       style="success" if p["code"] in d["linked"] else "primary")] for p in plans]
+    kb_rows.append([kb.btn("💾 حفظ الوسيلة", "a:pmsave", style="success"),
+                    kb.btn("🗑 إلغاء", "a:pmcancel", style="danger")])
     await render(q, f"💎 الباقات المرتبطة: <b>{', '.join(d['linked']) or 'الكل'}</b>",
                  InlineKeyboardMarkup(kb_rows), bot)
 
@@ -879,7 +932,7 @@ def _delivery_lines(target: int) -> list[str]:
     real sequential numbering and USD results all off the loop (v6.11.0)."""
     from fysb.engines.tracker import seq_of
     from fysb import instruments
-    from fysb.theme import dir_badge, status_ar
+    from fysb.theme import dir_badge, signal_status_ar
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             """SELECT d.delivered_at, s.* FROM signal_deliveries d
@@ -894,7 +947,7 @@ def _delivery_lines(target: int) -> list[str]:
             usd = instruments.usd_move(r["symbol"], float(r["pips_result"] or 0), 0.01)
             res = f"\n   ▎📈 النتيجة المسجلة: <b>{float(r['pips_result'] or 0):+.1f} pips</b> · <b>{usd:+,.2f} $</b> بـ 0.01 لوت"
         lines.append(
-            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {status_ar(r['status'])}" + res)
+            f"▎{d_emoji} <b>#{seq}</b> {esc(r['symbol'])} {dir_badge(r['direction'])} · ⏱ {r['timeframe']} · {signal_status_ar(r)}" + res)
     if not rows:
         lines.append("▎لا شيء بعد.")
     return lines
@@ -983,6 +1036,7 @@ def _plan_feature_apply(code: str, col: str, joined: str) -> None:
     """(v6.11.0 thread-offload helper) write one plan feature CSV column."""
     with db.conn() as c:
         c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (joined, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_field_value(code: str, col: str):
@@ -995,6 +1049,7 @@ def _plan_field_update(code: str, col: str, value) -> None:
     """(v6.11.0 thread-offload helper) write one plan column after adjustment."""
     with db.conn() as c:
         c.execute(f"UPDATE plans SET {col}=? WHERE code=?", (value, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_enabled_row(code: str):
@@ -1007,6 +1062,7 @@ def _plan_enabled_set(code: str, new: int) -> None:
     """(v6.11.0 thread-offload helper) write the enabled flag of one plan."""
     with db.conn() as c:
         c.execute("UPDATE plans SET enabled=? WHERE code=?", (new, code))
+    subs.invalidate_plans_cache()
 
 
 def _plan_active_subs_count(code: str) -> int:
@@ -1019,6 +1075,7 @@ def _plan_delete_row(code: str) -> None:
     """(v6.11.0 thread-offload helper) erase one plan row."""
     with db.conn() as c:
         c.execute("DELETE FROM plans WHERE code=?", (code,))
+    subs.invalidate_plans_cache()
 
 
 def _plan_title_row(code: str):

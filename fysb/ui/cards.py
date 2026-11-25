@@ -10,7 +10,8 @@ neutral "بيانات السوق اللحظية" (provider names are never expos
 """
 from fysb import instruments
 from fysb.theme import (DIRECTION_EMOJI, ICON, bar, card, dir_badge, esc,
-                        expandable, footer, human_dt, rich, status_ar, status_badge,
+                        expandable, footer, human_dt, is_signal_closed, rich,
+                        signal_status_ar, signal_status_badge, status_ar, status_badge,
                         strategy_name, tf_name)
 
 
@@ -36,12 +37,13 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
     symbol = sig["symbol"]
     direction = sig["direction"]
     d_emoji = DIRECTION_EMOJI.get(direction, "")
-    status_line = status_badge(sig["status"])
+    status_line = signal_status_badge(sig)
     spec = instruments.spec(symbol, row)
 
-    # Prices card — each level with its pip distance from entry
+    # Prices card — each level with its directional signed pip distance from entry
+    # (SL always negative -X.X pips, TP1/TP2/TP3 always positive +X.X pips).
     def level_line(icon, label, price):
-        pips_d = instruments.pips(symbol, sig["entry"], price, row)
+        pips_d = instruments.signed_pips(symbol, direction, sig["entry"], price, row)
         return (f"{icon} <b>{label}:</b> <code>{fmt_sym_price(symbol, price, row)}</code>"
                 f"  <i>({pips_d:+.1f} pips)</i>")
 
@@ -61,6 +63,19 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
         f"🧠 <b>الاستراتيجية:</b> <b>{esc(strategy_name(sig['strategy']))}</b>",
         f"📌 <b>الحالة:</b> {status_line}",
     ]
+    # v6.25.0 (#4): Institutional Confluence Matrix badge when multi-strategy scores exist
+    try:
+        raw_scores = sig["strategy_scores"]
+    except (KeyError, IndexError, TypeError):
+        raw_scores = ""
+    if raw_scores:
+        try:
+            from fysb.engines.intelligence import format_confluence_from_scores
+            conf_line = format_confluence_from_scores(raw_scores, sig["strategy"])
+            if conf_line:
+                meta.append(conf_line)
+        except Exception:
+            pass
 
     head = (f"{d_emoji} <b><u>{esc(symbol)}</u></b>  ·  <b>{'شراء' if direction == 'BUY' else 'بيع'}</b>  ·  "
             f"<b>{esc(tf_name(sig['timeframe']))}</b>\n{status_line}")
@@ -76,6 +91,12 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
         dt = human_dt(sig["data_time"]) if sig["data_time"] else "—"
         data_lines.append(f"🕐 <b>آخر شمعة سوق فعلية:</b> {dt}")
         data_lines.append(f"🕐 <b>وقت الإصدار:</b> {human_dt(sig['created_at'])}")
+        try:
+            closed_at = sig["closed_at"]
+        except (KeyError, IndexError, TypeError):
+            closed_at = ""
+        if closed_at:
+            data_lines.append(f"🔒 <b>وقت الإغلاق:</b> {human_dt(closed_at)}")
         if sig["pips_result"]:
             emoji = "📈" if sig["pips_result"] > 0 else "📉"
             data_lines.append(f"{emoji} <b>النتيجة المسجلة:</b> {sig['pips_result']:+.1f} pips")
@@ -153,7 +174,7 @@ def render_signal_compact(sig) -> str:
                   "SL_HIT": "🔴", "CANCELLED": "⚪", "EXPIRED": "⚪"}
     shown_no = sig.get("seq") or sig["id"]
     return (f"{status_map.get(sig['status'], '🔵')} #{shown_no} · {sig['symbol']} {d_emoji} "
-            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {status_ar(sig['status'])}")
+            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {signal_status_ar(sig)}")
 
 
 def render_payment_card(p, plan_title: str = "") -> str:
@@ -209,16 +230,342 @@ def render_user_card(u: dict, profile: dict) -> str:
     return "\n".join(out)
 
 
-def render_plan_card(p) -> str:
-    body = [
-        f"💰 السعر: <b>{p['price']:g} {esc(p['currency'])}</b>",
-        f"📅 المدة: <b>{p['duration_days'] or 'دائم (مجاني)'}</b>",
-        f"📡 حد الإشارات اليومي: <b>{p['max_signals_per_day']}</b>",
-        f"🔬 حد التحليلات اليومي: <b>{p.get('max_analyses_per_day', 0) if isinstance(p, dict) else 0}</b>",
-        f"⭐ الجودة الدنيا: <b>{p['min_score']}/100</b>",
-        f"🌐 الأسواق: <code>{esc(p['markets'])}</code>",
-        f"⏱ الأطر: <code>{esc(p['timeframes'])}</code>",
-        f"🧠 الاستراتيجيات: <code>{esc(p['strategies'])}</code>",
-        f"📌 الحالة: <b>{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'}</b>",
+def diagnose_no_signal(status: str, reason: str = "") -> tuple[str, str, str, str]:
+    """Translate raw engine status/reason into a luxury institutional protection
+    diagnosis tuple: (icon, title, explanation, recommendation)."""
+    st = (status or "").upper().strip()
+    r = (reason or "").strip()
+    rl = r.lower()
+
+    if "htf" in rl or "الفريم الأعلى" in r or "عكس الاتجاه" in r:
+        return (
+            "🛡",
+            "درع حماية الاتجاه المؤسسي — تم حجب صفقة عكس التيار",
+            "الفريم الأعلى يحمل زخماً قوياً معاكساً للاتجاه المقترح؛ الدخول ضد التيار المؤسسي يرفع احتمالية ضرب الوقف، لذلك تدخّل درع الحماية ومنع الصفقة حفاظاً على رأس المال.",
+            "فعّل <b>البحث التلقائي الملكي</b> بالأسفل ليقتنص المحرك لحظة اصطفاف السعر مع الاتجاه العام، أو جرّب فريم <code>H1 / H4</code> أو سوقاً آخر.",
+        )
+    if "متذبذب" in r or "عرضي" in r or "chop" in rl or "er=" in rl or "كوفمان" in r:
+        return (
+            "🌊",
+            "درع حماية السيولة — السوق في نطاق عرضي متذبذب",
+            "حركة السعر حالياً متقطعة بلا اتجاه مؤسسي واضح؛ التداول داخل مناطق التذبذب يسبّب إشارات كاذبة ويستنزف الرصيد.",
+            "فعّل <b>البحث التلقائي الملكي</b> لالتقاط أول اختراق حقيقي وزخم مؤسسي مؤكد، أو افحص زوجاً آخر.",
+        )
+    if "زخم" in r or "momentum" in rl or "اندفاع" in r:
+        return (
+            "⚡",
+            "درع حماية الزخم — السعر في موجة معاكسة حادة",
+            "الشموع الأخيرة تُظهر اندفاعاً مضاداً قوياً ضد منطقة الدخول؛ الانتظار حتى هدوء الزخم وتأكيد الارتداد يحمي الصفقة.",
+            "فعّل <b>البحث التلقائي</b> لمتابعة السعر لحظة بلحظة وإصدار الإشارة فور استقرار السلوك السعري.",
+        )
+    if st == "DUPLICATE" or "مفتوحة" in r or "تهدئة" in r or "cooldown" in rl or "مكرر" in r:
+        return (
+            "🔁",
+            "حماية التمركز — توجد صفقة نشطة أو فترة تهدئة جارية",
+            "المحرك يمنع تكديس الصفقات المتكررة على نفس الزوج خلال فترة قصيرة حفاظاً على انضباط إدارة رأس المال.",
+            "تابع البطاقة الحية في <b>📡 الإشارات المباشرة</b> أو اختر زوجاً آخر للفحص الآن.",
+        )
+    if "جودة" in r or "score" in rl or "rr" in rl or "مخاطر" in r or "وقف" in r or "حد" in r or "kill" in rl:
+        return (
+            "⚖️",
+            "درع الجودة والمخاطر — الإعداد دون المعيار المؤسسي",
+            "المعطيات الحالية لم تبلغ الحد الصارم للجودة أو نسبة العائد إلى المخاطرة المعتمدة، والمنصة لا تُصدر إلا الفرص النخبوية.",
+            "فعّل <b>البحث التلقائي الملكي</b> لانتظار فرصة بدرجة جودة أعلى، أو جرّب إطاراً زمنياً آخر.",
+        )
+    if (
+        st == "ERROR"
+        or "مغلق" in r
+        or "سيولة" in r
+        or "جلسة" in r
+        or "بيانات" in r
+        or "شموع" in r
+        or "مزوّد" in r
+        or "مزود" in r
+        or "thin" in rl
+        or "stale" in rl
+    ):
+        return (
+            "🌙",
+            "حالة الجلسة والسيولة — السوق غير مهيّأ للتنفيذ حالياً",
+            "السوق مغلق أو يمرّ بساعة سيولة ضعيفة أو لم تتوفر شموع لحظية كافية للتحقق الدقيق؛ السلامة أولاً دائماً.",
+            "أعد المحاولة خلال جلسة لندن أو نيويورك، أو فعّل <b>البحث التلقائي</b> وسيتولى المحرك المراقبة عنك.",
+        )
+    return (
+        "👑",
+        "صمت المحرك أمانة — لا يوجد نموذج مؤسسي مكتمل الآن",
+        "تم فحص الشموع المغلقة بدقة عبر قواعد التحليل المؤسسي ولم تكتمل شروط الدخول بنسبة 100%؛ المنصة ترفض تصنيع إشارات وهمية.",
+        "اختر فترة <b>البحث التلقائي الملكي</b> بالأسفل وسيراقب المحرك السوق عنك حتى اقتناص أول فرصة حقيقية.",
+    )
+
+
+def render_no_signal_card(
+    symbol: str = "",
+    timeframe: str = "",
+    strategy_label: str = "",
+    style_label: str = "",
+    status: str = "NO_SETUP",
+    reason: str = "",
+    show_watch_hint: bool = True,
+) -> str:
+    """Luxury Royal Institutional Protection Card shown whenever a live scan
+    or Signal-Now finds no qualifying setup (v6.20.9)."""
+    icon, title, explanation, recommendation = diagnose_no_signal(status, reason)
+    meta_parts = []
+    if symbol:
+        meta_parts.append(f"🌐 <b>السوق:</b> <code>{esc(symbol)}</code>")
+    if timeframe:
+        meta_parts.append(f"⏱ <b>الفريم:</b> <code>{esc(tf_name(timeframe))}</code>")
+    meta_line_1 = " · ".join(meta_parts)
+
+    meta_parts_2 = []
+    if strategy_label:
+        meta_parts_2.append(f"🧠 <b>المنهجية:</b> {esc(strategy_label)}")
+    if style_label:
+        meta_parts_2.append(f"🎯 <b>الأسلوب:</b> {esc(style_label)}")
+    meta_line_2 = " · ".join(meta_parts_2)
+
+    lines = [
+        f"{icon} <b><u>تقرير الفحص المؤسسي — حماية رأس المال</u></b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "▎👑 <b>قرار المحرك:</b> <b>لا توجد إشارة مؤهلة للدخول حالياً</b>",
     ]
-    return f"{ICON['diamond']} <b><u>{esc(p['title'])}</u></b> ({esc(p['code'])})\n" + card("\n".join(body))
+    if meta_line_1:
+        lines.append(f"▎{meta_line_1}")
+    if meta_line_2:
+        lines.append(f"▎{meta_line_2}")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
+    quote = [f"{icon} <b>{title}</b>", ""]
+    if reason and reason.upper() not in ("NO_SETUP", "REJECTED"):
+        quote.append(f"▎📌 <b>التشخيص الفني الدقيق:</b>\n<code>{esc(reason)}</code>")
+        quote.append("")
+    quote.append(f"▎💡 <b>لماذا لم تُصدر إشارة؟</b>\n{explanation}")
+    if show_watch_hint:
+        quote.append("")
+        quote.append(f"▎🧭 <b>الخطوة الذكية:</b>\n{recommendation}")
+        quote.append("▎⌛ <i>البحث التلقائي يعمل حتى 24 ساعة ويتوقف تلقائياً فور صدور الإشارة أو عند إلغائك له.</i>")
+
+    lines.append("<blockquote>" + "\n".join(quote) + "</blockquote>")
+    lines.append("<i>👑 في التداول المؤسسي، الامتناع عن صفقة غير مكتملة الشروط هو بحد ذاته صفقة رابحة.</i>")
+    return "\n".join(lines)
+
+
+_PLAN_TIER_META = {
+    "FREE": {
+        "icon": "🆓",
+        "tagline": "بوابة التجربة المجانية — تحقّق من دقة المحرك قبل الترقية",
+        "perks": [],
+    },
+    "PRO": {
+        "icon": "⚡",
+        "tagline": "الاختيار الذكي للمتداول المنضبط — فرص يومية منتقاة بسعر اقتصادي",
+        "perks": ["🛡 تتبع تلقائي كامل للأهداف (TP1 / TP2 / TP3) وتنبيهات الوقف"],
+    },
+    "VIP": {
+        "icon": "👑",
+        "tagline": "الأكثر طلباً 🔥 — مدارس الأموال الذكية (SMC · ICT · Wyckoff · SK)",
+        "perks": [
+            "🔐 دخول فوري تلقائي لقناة VIP الخاصة برابط حصري فور التفعيل",
+            "👁 ميزة مراقبة الفرص التلقائية (Watchers) على أسواقك المختارة",
+        ],
+    },
+    "ROYAL": {
+        "icon": "🏆",
+        "tagline": "القوة المؤسسية الكاملة — أقوى 4 استراتيجيات قنص سيولة حصرية",
+        "perks": [
+            "🎯 حصرياً: CRT · AMD · Silver Bullet · Turtle Soup (كل الـ 13 استراتيجية)",
+            "🔐 دخول تلقائي لقناة VIP الخاصة + أولوية قصوى في الدعم الفني",
+            "📊 وصول كامل لجميع أسواق المنصة والأطر الزمنية والتداول التجريبي الذكي",
+        ],
+    },
+}
+
+
+def plan_tier_icon(code: str) -> str:
+    return _PLAN_TIER_META.get((code or "").upper(), {}).get("icon", "💎")
+
+
+def render_plan_card(p, trial_info: dict | None = None) -> str:
+    code = (p.get("code") or "").upper() if isinstance(p, dict) else (p["code"] or "").upper()
+    meta = _PLAN_TIER_META.get(code, {"icon": "💎", "tagline": "", "perks": []})
+    icon = meta["icon"]
+    price = float(p["price"] or 0)
+    price_txt = "مجاناً (0$)" if price <= 0 else f"{price:g} {esc(p['currency'])}"
+    dur = int(p["duration_days"] or 0)
+    if code == "FREE":
+        dur_txt = f"فترة تجريبية {dur} يوم" if dur > 0 else "دائم (مجاني مفتوح)"
+    else:
+        dur_txt = f"{dur} يوم" if dur > 0 else "دائم"
+
+    mkts = [x.strip() for x in str(p["markets"] or "").split(",") if x.strip()]
+    tfs = [x.strip() for x in str(p["timeframes"] or "").split(",") if x.strip()]
+    strats = [x.strip() for x in str(p["strategies"] or "").split(",") if x.strip()]
+    anl_q = int(p.get("max_analyses_per_day", 0) if isinstance(p, dict) else 0)
+    sig_q = int(p["max_signals_per_day"] or 0)
+
+    core = [
+        f"▎💰 <b>السعر:</b> <b>{price_txt}</b>",
+        f"▎📅 <b>المدة:</b> <b>{dur_txt}</b>",
+        f"▎📡 <b>حد الإشارات اليومي:</b> <b>{sig_q} إشارة / يوم</b>",
+        f"▎🔬 <b>حد التحليلات اليومي:</b> <b>{anl_q} تحليل / يوم</b>",
+        f"▎⭐ <b>الجودة الدنيا:</b> <b>{p['min_score']}/100</b>",
+        f"▎📌 <b>الحالة:</b> <b>{'🟢 مفعلة' if p['enabled'] else '⚪ معطلة'}</b>",
+    ]
+    if trial_info and code == "FREE" and trial_info.get("is_free") and not trial_info.get("unlimited"):
+        if trial_info.get("expired"):
+            core.append("▎🔒 <b>حالتك الآن:</b> انتهت فترتك المجانية — اختر باقة مدفوعة للاستمرار")
+        else:
+            dl = trial_info.get("days_left") or 0
+            hl = trial_info.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
+            core.append(f"▎⏳ <b>المتبقي من تجربتك:</b> <b>{rem}</b>")
+
+    mkt_preview = " · ".join(mkts[:8]) + (f" (+{len(mkts) - 8} أخرى)" if len(mkts) > 8 else "")
+    scope = [
+        f"▎🌐 <b>الأسواق ({len(mkts)}):</b> <code>{esc(mkt_preview or '—')}</code>",
+        f"▎⏱ <b>الأطر ({len(tfs)}):</b> <code>{esc(' · '.join(tfs) or '—')}</code>",
+        f"▎🧠 <b>الاستراتيجيات ({len(strats)}):</b> <code>{esc(' · '.join(strats) or '—')}</code>",
+    ]
+    for perk in meta["perks"]:
+        scope.append(f"▎{perk}")
+
+    head = f"{icon} <b><u>{esc(p['title'])}</u></b>  <code>[{esc(code)}]</code>"
+    if meta["tagline"]:
+        head += f"\n<i>{meta['tagline']}</i>"
+    return (
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        + card("\n".join(core)) + "\n"
+        + card("\n".join(scope))
+    )
+
+
+def render_plans_showcase_card(plans: list[dict], current_plan: dict, trial_info: dict | None = None) -> str:
+    """Ultra-luxury overview of all enabled plans on `u:plans`."""
+    cur_code = (current_plan.get("code") or "FREE").upper()
+    cur_icon = plan_tier_icon(cur_code)
+    status_lines = [f"▎{cur_icon} باقتك الحالية: <b>{esc(current_plan['title'])}</b>"]
+    if trial_info and trial_info.get("is_free"):
+        if trial_info.get("unlimited"):
+            status_lines.append("▎⏳ الفترة المجانية: <b>♾️ مفتوحة حالياً</b>")
+        elif trial_info.get("expired"):
+            status_lines.append("▎🔒 <b>انتهت فترتك المجانية التجريبية</b> — اختر باقة بالأسفل للاستمرار فوراً")
+        else:
+            dl = trial_info.get("days_left") or 0
+            hl = trial_info.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
+            status_lines.append(f"▎⏳ متبقي من تجربتك المجانية: <b>{rem}</b> (من أصل {trial_info.get('trial_days', 7)} يوم)")
+
+    tier_lines = []
+    for r in plans:
+        code = (r["code"] or "").upper()
+        ic = plan_tier_icon(code)
+        price = float(r["price"] or 0)
+        p_txt = "مجاناً" if price <= 0 else f"{price:g}$/شهر"
+        sig_q = int(r["max_signals_per_day"] or 0)
+        anl_q = int(r.get("max_analyses_per_day") or 0)
+        n_st = len([x for x in str(r["strategies"] or "").split(",") if x.strip()])
+        n_mk = len([x for x in str(r["markets"] or "").split(",") if x.strip()])
+        badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
+        tier_lines.append(
+            f"▎{ic} <b>{esc(code)}</b>{badge} · <b>{p_txt}</b> — "
+            f"<code>{sig_q}</code> إشارة · <code>{anl_q}</code> تحليل · "
+            f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية"
+        )
+
+    return (
+        "💎 <b><u>باقات الاشتراك الملكية — FOREXYEMENI</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + card("\n".join(status_lines)) + "\n"
+        + "<b>مقارنة الباقات المتاحة:</b>\n"
+        + card("\n".join(tier_lines)) + "\n"
+        + "⚡ <i>تفعيل فوري وتلقائي عبر USDT (TRC20 / BEP20) أو التحويلات المحلية — اضغط أي باقة لعرض تفاصيلها الكاملة:</i>"
+    )
+
+
+def render_luxury_upgrade_card(
+    why: str,
+    current_plan: dict,
+    paid_plans: list[dict],
+    recommended_plan: dict | None = None,
+    trial_expired: bool = False,
+    quota_exhausted: bool = False,
+) -> str:
+    """Ultra-luxury persuasion card when a user hits a plan gate, daily quota limit, or trial expiry."""
+    cur_sig = int(current_plan.get("max_signals_per_day") or 0)
+    cur_anl = int(current_plan.get("max_analyses_per_day") or 0)
+    cur_strats = len([x for x in str(current_plan.get("strategies") or "").split(",") if x.strip()])
+    cur_mkts = len([x for x in str(current_plan.get("markets") or "").split(",") if x.strip()])
+
+    if trial_expired:
+        head = "⏳ <b><u>انتهت فترتك المجانية — حان وقت الترقية الملكية!</u></b>"
+        lead = (
+            f"▎🔒 {esc(why)}\n"
+            "▎✨ لقد جرّبت دقة بياناتنا الحقيقية وبطاقاتنا الفاخرة — انتقل الآن للباقات المدفوعة\n"
+            "▎   لفتح الإشارات اليومية، التحليلات الفورية، والمدارس المؤسسية بلا توقف."
+        )
+    elif quota_exhausted:
+        head = "🚀 <b><u>وصلت للحد اليومي لباقتك — ارتقِ للخطة التالية الآن!</u></b>"
+        lead = (
+            f"▎⛔ <b>{esc(why)}</b>\n"
+            f"▎💎 باقتك الحالية: <b>{esc(current_plan['title'])}</b> "
+            f"(<code>{cur_sig}</code> إشارة · <code>{cur_anl}</code> تحليل/يوم)"
+        )
+    else:
+        head = f"{ICON['crown']} <b><u>ميزة ملكية — ارتقِ بمستوى تداولك الآن</u></b>"
+        lead = (
+            f"▎🔒 <b>السبب:</b> {esc(why)}\n"
+            f"▎💎 باقتك الحالية: <b>{esc(current_plan['title'])}</b>"
+        )
+
+    jump_block = ""
+    if recommended_plan:
+        rec_code = (recommended_plan["code"] or "").upper()
+        rec_ic = plan_tier_icon(rec_code)
+        rec_sig = int(recommended_plan.get("max_signals_per_day") or 0)
+        rec_anl = int(recommended_plan.get("max_analyses_per_day") or 0)
+        rec_strats = len([x for x in str(recommended_plan.get("strategies") or "").split(",") if x.strip()])
+        rec_mkts = len([x for x in str(recommended_plan.get("markets") or "").split(",") if x.strip()])
+        rec_perk = (
+            "\n▎🔐 + <b>دخول فوري تلقائي لقناة VIP الخاصة</b>"
+            if rec_code in ("VIP", "ROYAL") else ""
+        )
+        rec_elite = (
+            "\n▎🎯 + <b>حصرياً: CRT · AMD · Silver Bullet · Turtle Soup</b>"
+            if rec_code == "ROYAL" else ""
+        )
+        jump_lines = [
+            f"▎🌟 <b>خطتك التالية المقترحة:</b> {rec_ic} <b>{esc(recommended_plan['title'])}</b> — "
+            f"<b>{recommended_plan['price']:g} {esc(recommended_plan['currency'])}</b> / {int(recommended_plan.get('duration_days') or 30)} يوم",
+            f"▎📈 الإشارات: <code>{cur_sig}</code> ⬅️ <b>{rec_sig} يومياً</b> · "
+            f"التحليلات: <code>{cur_anl}</code> ⬅️ <b>{rec_anl} يومياً</b>",
+            f"▎🌍 الأسواق: <code>{cur_mkts}</code> ⬅️ <b>{rec_mkts} سوق</b> · "
+            f"الاستراتيجيات: <code>{cur_strats}</code> ⬅️ <b>{rec_strats} استراتيجية</b>"
+            + rec_perk + rec_elite,
+        ]
+        jump_block = "\n✨ <b>ماذا تفتح فوراً عند الترقية؟</b>\n" + card("\n".join(jump_lines))
+
+    cur_price = float(current_plan.get("price") or 0.0)
+    shown_plans = [p for p in paid_plans if float(p.get("price") or 0) > cur_price] or paid_plans
+    comp = []
+    for p in shown_plans:
+        code = (p["code"] or "").upper()
+        ic = plan_tier_icon(code)
+        n_st = len([x for x in str(p["strategies"] or "").split(",") if x.strip()])
+        n_mk = len([x for x in str(p["markets"] or "").split(",") if x.strip()])
+        extra = " · 🔐 VIP" if code in ("VIP", "ROYAL") else ""
+        crown = " 🔥 الأكثر طلباً" if code == "VIP" else (" 🏆 الكاملة" if code == "ROYAL" else "")
+        comp.append(
+            f"▎{ic} <b>{esc(code)}</b> ({p['price']:g}$){crown}\n"
+            f"▎   <code>{p['max_signals_per_day']}</code> إشارة · <code>{p.get('max_analyses_per_day', 0)}</code> تحليل · "
+            f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية{extra}"
+        )
+
+    return (
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        + card(lead)
+        + jump_block + "\n"
+        + "<b>الخطط المتاحة للترقية الفورية:</b>\n"
+        + card("\n".join(comp)) + "\n"
+        + "⚡ <i>تفعيل لحظي تلقائي عبر USDT (TRC20 / BEP20) أو التحويل المحلي — اضغط خطتك بالأسفل:</i>"
+    )
+

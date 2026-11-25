@@ -214,11 +214,10 @@ class TestAnalytics(unittest.TestCase):
 
 
 class TestBackupZip(unittest.TestCase):
-    def test_full_archive_is_zip_with_env(self):
-        # CI / clean clones carry no .env — the guarantee under test is
-        # «if .env exists it MUST be inside the admin archive». Make the test
-        # self-sufficient: provision a dummy .env only when missing, never touch
-        # a real one, and clean it up afterwards.
+    def test_full_archive_is_zip_excluding_env_by_default(self):
+        # Security (v6.12.0): .env holds BOT_TOKEN, DATABASE_URL, and
+        # BROKER_SECRET_KEY — excluded by default so unencrypted Telegram ZIPs
+        # never leak secrets. Opt-in include_env=True remains available offline.
         base = config.BASE_DIR
         env_file = base / ".env"
         created = False
@@ -226,21 +225,28 @@ class TestBackupZip(unittest.TestCase):
             env_file.write_text("BOT_TOKEN=000:royal-test-dummy\nADMIN_ID=1\n", encoding="utf-8")
             created = True
         dest = None
+        dest_opt = None
         try:
             dest = backup_service.full_project_archive()
             self.assertEqual(dest.suffix, ".zip")
             with zipfile.ZipFile(str(dest)) as z:
                 names = z.namelist()
-                self.assertIn(".env", names, "the archive must carry .env per admin request")
+                self.assertNotIn(".env", names, ".env must be excluded by default for security")
+                self.assertIn("ENV_EXCLUDED_FOR_SECURITY.txt", names)
                 self.assertTrue(any(n.startswith("fysb/") for n in names), "code must be included")
                 self.assertTrue(any("database/" in n for n in names), "DB snapshot must be included")
             ok, detail = backup_service.verify_archive(dest)
             self.assertTrue(ok, detail)
+            dest_opt = backup_service.full_project_archive(include_env=True)
+            with zipfile.ZipFile(str(dest_opt)) as z:
+                self.assertIn(".env", z.namelist())
         finally:
             if created:
                 env_file.unlink(missing_ok=True)
             if dest is not None:
                 dest.unlink(missing_ok=True)
+            if dest_opt is not None:
+                dest_opt.unlink(missing_ok=True)
 
 
 class TestAdminExclusion(unittest.TestCase):
@@ -342,7 +348,11 @@ class TestBrokerPresets(unittest.TestCase):
         with db.conn() as c:
             row = c.execute("SELECT * FROM broker_adapters WHERE key='BINANCE' ORDER BY id DESC LIMIT 1").fetchone()
         self.assertIsNotNone(row)
-        cfg = __import__("json").loads(row["config_json"])
+        from fysb.services import secrets as secrets_service
+        self.assertTrue(secrets_service.is_encrypted(row["config_json"]))
+        self.assertNotIn("SECRETKEY123", row["config_json"])
+        self.assertNotIn("SECRETSECRET", row["config_json"])
+        cfg = secrets_service.decrypt_json(row["config_json"])
         self.assertEqual(cfg["api_key"], "SECRETKEY123")
         self.assertNotIn("SECRETKEY123", upd.effective_message.last, "API key must never be echoed")
         with db.conn() as c:

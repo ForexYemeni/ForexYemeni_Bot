@@ -110,7 +110,10 @@ class TestChainVerify(unittest.TestCase):
     def test_human_amount_decimal_scaling(self):
         from fysb.services import chain_verify
         self.assertAlmostEqual(chain_verify._human_amount(19_500_000), 19.5)
-        self.assertAlmostEqual(chain_verify._human_amount(19.5), 19.5)
+        # Strict scaling: raw units < 1_000_000 MUST STILL divide by 10**6
+        # (prevents $0.01 = 10,000 raw units from being read as $10,000 USDT!).
+        self.assertAlmostEqual(chain_verify._human_amount(10_000), 0.01)
+        self.assertAlmostEqual(chain_verify._human_amount(19 * 10**18, decimals=18), 19.0)
 
     def _mock_events(self, monkey_amount=19_500_000, dest=WALLET, contract=CANONICAL_USDT,
                      confirmed=True):

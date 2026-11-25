@@ -24,7 +24,7 @@ fresh cross bonus +6 · future cloud color +12 · chikou confirm +10 ·
 HTF bias +12 · kill zone +6 · volatility +4 · RR +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 TENKAN_P, KIJUN_P, SENKOU_B_P, DISPLACEMENT = 9, 26, 52, 26
 
@@ -57,7 +57,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     fut_b = _mid(candles, SENKOU_B_P)
 
     checks: dict = {}
-    score = 40.0
+    score = 32.0
 
     # 1) cloud position decides the direction (exactly one side)
     if close > cloud_top:
@@ -67,13 +67,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         return None
     checks["cloud"] = True
-    score += 18
+    score += 14
 
     tk_aligned = (tenkan > kijun) if direction == "BUY" else (tenkan < kijun)
     checks["tk"] = tk_aligned
     if not tk_aligned:
         return None
-    score += 14
+    score += 10
     # fresh cross: tenkan/kijun order flipped within the last 5 closes
     fresh = False
     for i in range(len(candles) - 5, len(candles)):
@@ -83,21 +83,22 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             fresh = True
             break
     checks["fresh_cross"] = fresh
-    score += 6 if fresh else 0
+    score += 8 if fresh else 0
 
     fut_bullish = fut_a > fut_b
     checks["future_cloud"] = (direction == "BUY" and fut_bullish) or (direction == "SELL" and not fut_bullish)
     if not checks["future_cloud"]:
         return None
-    score += 12
+    score += 8
 
-    chikou_ok = ((float(candles[-1 - DISPLACEMENT]["close"]) > float(candles[-1 - 2 * DISPLACEMENT]["close"]))
-                 if direction == "BUY" else
-                 (float(candles[-1 - DISPLACEMENT]["close"]) < float(candles[-1 - 2 * DISPLACEMENT]["close"])))
+    # v6.20.0 FIX: True Chikou Span compares CURRENT close (plotted 26 bars back)
+    # against the price 26 bars ago — NOT 26-ago vs 52-ago!
+    ref_26 = float(candles[-1 - DISPLACEMENT]["close"])
+    chikou_ok = (close > ref_26) if direction == "BUY" else (close < ref_26)
     checks["chikou"] = chikou_ok
     if not chikou_ok:
         return None
-    score += 10
+    score += 8
 
     bias_close = float(ctx.bias_candles[-1]["close"]) if ctx.bias_candles else close
     bias_kijun = _mid(ctx.bias_candles, KIJUN_P) if len(ctx.bias_candles) >= KIJUN_P else bias_close
@@ -105,7 +106,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["htf_bias"] = bias_ok
     if not bias_ok:
         return None
-    score += 12
+    score += 8
 
     last = candles[-1]
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
@@ -117,6 +118,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     entry = close
     stop = (kijun - 0.5 * a) if direction == "BUY" else (kijun + 0.5 * a)
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
@@ -125,7 +127,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     tp3 = entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0
     rr = 2.0
     checks["rr_ok"] = True
-    score += 8
+    score += 5
 
     if score < 55:
         return None

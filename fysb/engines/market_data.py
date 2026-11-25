@@ -37,6 +37,7 @@ from pathlib import Path
 
 from fysb import config
 from fysb.config import log
+from fysb.engines import crypto_ws, provider_health
 
 BASE_URL_TD = "https://api.twelvedata.com/time_series"
 QUOTE_URL_TD = "https://api.twelvedata.com/price"
@@ -48,6 +49,7 @@ YAHOO_BASES = ("https://query1.finance.yahoo.com/v8/finance/chart/",
                "https://query2.finance.yahoo.com/v8/finance/chart/")
 
 CACHE_TTL_SECONDS = 25           # short TTL — quotes must stay "لحظية"
+QUOTE_CACHE_TTL_SECONDS = 8      # burst-protection cache for live quotes
 PROVIDER_COOLDOWN_SECONDS = 45   # after a failure, pause that provider
 MIN_CANDLES = 35
 CALIB_MAX_RATIO = 0.02           # reject absurd calibration offsets (>2%)
@@ -58,6 +60,11 @@ YAHOO_FX_MAP = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
     "NZDUSD": "NZDUSD=X",
+    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "EURGBP": "EURGBP=X",
+    "AUDJPY": "AUDJPY=X", "CADJPY": "CADJPY=X", "CHFJPY": "CHFJPY=X",
+    "NZDJPY": "NZDJPY=X", "EURAUD": "EURAUD=X", "EURCHF": "EURCHF=X",
+    "EURCAD": "EURCAD=X", "GBPAUD": "GBPAUD=X", "GBPCHF": "GBPCHF=X",
+    "GBPCAD": "GBPCAD=X", "AUDCAD": "AUDCAD=X", "AUDNZD": "AUDNZD=X",
 }
 BINANCE_MAP = {
     "XAUUSD": "PAXGUSDT",
@@ -76,7 +83,7 @@ TWELVEDATA_MAP = {
     "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY", "BTCUSD": "BTC/USD",
     "ETHUSD": "ETH/USD",
 }
-FOREX_ONLY = {"EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"}
+FOREX_ONLY = set(YAHOO_FX_MAP.keys())
 
 _cache: dict[tuple, dict] = {}
 _fail_streak: dict[str, tuple[float, int]] = {}
@@ -162,6 +169,8 @@ def _ck(provider: str, symbol: str, interval: str) -> str:
 
 
 def in_cooldown(provider: str, symbol: str, interval: str) -> bool:
+    if provider_health.is_open(provider):
+        return True
     entry = _fail_streak.get(_ck(provider, symbol, interval))
     if not entry:
         return False
@@ -169,14 +178,16 @@ def in_cooldown(provider: str, symbol: str, interval: str) -> bool:
     return time.time() < until
 
 
-def _mark_failure(provider: str, symbol: str, interval: str) -> None:
+def _mark_failure(provider: str, symbol: str, interval: str, err: str = "") -> None:
     key = _ck(provider, symbol, interval)
     streak = _fail_streak.get(key, (0.0, 0))[1] + 1
     _fail_streak[key] = (time.time() + PROVIDER_COOLDOWN_SECONDS * min(streak, 4), streak)
+    provider_health.record_failure(provider, err)
 
 
-def _mark_success(provider: str, symbol: str, interval: str) -> None:
+def _mark_success(provider: str, symbol: str, interval: str, latency_ms: float = 0.0) -> None:
     _fail_streak.pop(_ck(provider, symbol, interval), None)
+    provider_health.record_success(provider, latency_ms)
 
 
 def _http_json(url: str, timeout: int = 15, headers: dict | None = None) -> dict:
@@ -360,6 +371,27 @@ def _apply_offset(values: list[dict], offset: float) -> list[dict]:
     return out
 
 
+def _fetch_venue_gold_price(venue_symbol: str) -> float:
+    """Fetch PAXG venue quote from Binance, failing over to Bybit if Binance is
+    unreachable or geo-blocked."""
+    try:
+        return _fetch_binance_price(venue_symbol)
+    except Exception:
+        return _fetch_bybit_price(venue_symbol)
+
+
+def _fetch_venue_gold_candles(venue_symbol: str, interval: str, outputsize: int) -> list[dict]:
+    """Fetch PAXG venue candles from Binance, failing over to Bybit if Binance
+    is unreachable or geo-blocked."""
+    try:
+        vals = _fetch_binance_candles(venue_symbol, interval, outputsize)
+        if len(vals) >= MIN_CANDLES:
+            return vals
+    except Exception:
+        pass
+    return _fetch_bybit_candles(venue_symbol, interval, outputsize)
+
+
 def _gold_offset_now(internal: str, venue_symbol: str) -> float | None:
     """Live offset from the real spot reference vs the venue gold token."""
     spot_ticker = GOLD_API_MAP.get(internal)
@@ -367,7 +399,7 @@ def _gold_offset_now(internal: str, venue_symbol: str) -> float | None:
         return None
     try:
         spot = _fetch_goldapi_price(spot_ticker)["price"]
-        venue = _fetch_binance_price(venue_symbol)
+        venue = _fetch_venue_gold_price(venue_symbol)
         return _learn_gold_offset(internal, spot, venue)
     except Exception:
         return _persisted_offset(internal)
@@ -383,22 +415,32 @@ def _fetch_binance_candles(venue_symbol: str, interval: str, outputsize: int) ->
     q = urllib.parse.urlencode({"symbol": venue_symbol, "interval": _binance_interval(interval),
                                 "limit": max(40, min(outputsize, 1000))})
     raw = _http_json(config.BINANCE_BASE_URL + "/api/v3/klines?" + q)
+    if not isinstance(raw, list):
+        msg = raw.get("msg", "unexpected payload") if isinstance(raw, dict) else "unexpected payload"
+        raise RuntimeError(f"binance klines error: {str(msg)[:120]}")
     out = []
     for row in raw:
         try:
-            dt = datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            ts_raw = int(row[0])
+            ts_sec = ts_raw / 1000.0 if ts_raw > 1e11 else float(ts_raw)
+            dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             item = {"datetime": dt, "open": float(row[1]), "high": float(row[2]),
                     "low": float(row[3]), "close": float(row[4])}
             if all(math.isfinite(item[k]) for k in ("open", "high", "low", "close")) and item["high"] >= item["low"]:
                 out.append(item)
-        except (IndexError, TypeError, ValueError):
+        except (IndexError, TypeError, ValueError, OverflowError):
             continue
     return out
 
 
 def _fetch_binance_price(venue_symbol: str) -> float:
     raw = _http_json(config.BINANCE_BASE_URL + "/api/v3/ticker/price?" + urllib.parse.urlencode({"symbol": venue_symbol}), timeout=10)
-    return float(raw["price"])
+    if not isinstance(raw, dict) or "price" not in raw:
+        raise RuntimeError("binance: bad price payload")
+    price = float(raw["price"])
+    if not math.isfinite(price) or price <= 0:
+        raise RuntimeError("binance: non-positive price")
+    return price
 
 
 # --- provider: VENUE-2 (Bybit) ---------------------------------------------------
@@ -411,23 +453,41 @@ def _fetch_bybit_candles(venue_symbol: str, interval: str, outputsize: int) -> l
     q = urllib.parse.urlencode({"category": "spot", "symbol": venue_symbol,
                                 "interval": _bybit_interval(interval), "limit": max(40, min(outputsize, 1000))})
     raw = _http_json(config.BYBIT_BASE_URL + "/v5/market/kline?" + q)
+    if not isinstance(raw, dict):
+        raise RuntimeError("bybit: unexpected kline payload")
+    if int(raw.get("retCode", 0) or 0) != 0:
+        raise RuntimeError(f"bybit kline error: {str(raw.get('retMsg', ''))[:120]}")
     rows = ((raw.get("result") or {}).get("list") or [])
+    if not isinstance(rows, list):
+        raise RuntimeError("bybit: empty kline list")
     out = []
     for row in reversed(rows):  # newest-first -> oldest-first
         try:
-            dt = datetime.fromtimestamp(int(row[0]), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            # Bybit v5 startTime is in MILLISECONDS (e.g. "1700000000000");
+            # handle both ms and s safely so timestamps never overflow.
+            ts_raw = int(row[0])
+            ts_sec = ts_raw / 1000.0 if ts_raw > 1e11 else float(ts_raw)
+            dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             item = {"datetime": dt, "open": float(row[1]), "high": float(row[2]),
                     "low": float(row[3]), "close": float(row[4])}
             if all(math.isfinite(item[k]) for k in ("open", "high", "low", "close")) and item["high"] >= item["low"]:
                 out.append(item)
-        except (IndexError, TypeError, ValueError):
+        except (IndexError, TypeError, ValueError, OverflowError):
             continue
     return out
 
 
 def _fetch_bybit_price(venue_symbol: str) -> float:
     raw = _http_json(config.BYBIT_BASE_URL + "/v5/market/tickers?" + urllib.parse.urlencode({"category": "spot", "symbol": venue_symbol}), timeout=10)
-    return float(raw["result"]["list"][0]["lastPrice"])
+    if not isinstance(raw, dict) or int(raw.get("retCode", 0) or 0) != 0:
+        raise RuntimeError(f"bybit ticker error: {str((raw or {}).get('retMsg', ''))[:120]}")
+    items = ((raw.get("result") or {}).get("list") or [])
+    if not items:
+        raise RuntimeError("bybit: empty ticker list")
+    price = float(items[0]["lastPrice"])
+    if not math.isfinite(price) or price <= 0:
+        raise RuntimeError("bybit: non-positive price")
+    return price
 
 
 # --- provider: KEYED (TwelveData, optional) ---------------------------------------
@@ -459,7 +519,7 @@ def _fetch_td_price(td_symbol: str, api_key: str) -> float:
 
 # --- unified facade ------------------------------------------------------------
 def _assemble(internal: str, interval: str, values: list[dict], source: str, use_cache: bool,
-              cache_key, raw_symbol: str) -> dict:
+              cache_key, raw_symbol: str, provider_name: str = "") -> dict:
     values.sort(key=lambda x: x["datetime"])
     if len(values) < MIN_CANDLES:
         raise RuntimeError(f"insufficient valid candles: {len(values)} (need at least {MIN_CANDLES})")
@@ -470,8 +530,8 @@ def _assemble(internal: str, interval: str, values: list[dict], source: str, use
         "fetched_at": config.now(), "fetched_epoch": time.time(),
         "last_candle_iso": last_iso, "age_seconds": age, "source": source,
     }
-    _mark_success(source, internal, interval)
-    _last_provider[internal] = source
+    _mark_success(provider_name or source, internal, interval)
+    _last_provider[internal] = provider_name or source
     if use_cache:
         _cache[cache_key] = {"t": time.time(), "payload": result}
         if len(_cache) > 200:
@@ -486,10 +546,11 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
 
     Chain per symbol class (config.PRICE_PROVIDER may reorder it — preference
     first, everything else stays as the fallback net):
-      * gold   : VENUE gold candles CALIBRATED to real spot -> KEYED -> error
+      * gold   : VENUE gold candles (Binance -> Bybit PAXG) CALIBRATED to real spot -> KEYED -> error
       * metal  : KEYED only (silver has no venue candles; quotes use SPOT-REF)
       * forex  : FX-REF real spot candles -> KEYED -> error
       * crypto : VENUE-1 -> VENUE-2 -> KEYED -> error
+      * custom : KEYED (if TWELVEDATA_API_KEY configured) -> error
     Raises RuntimeError with SANITIZED Arabic messages when everything fails —
     callers must never fabricate prices.
     """
@@ -503,8 +564,8 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
 
     errors: list[str] = []
     cls = _class_of(internal)
-    chain = _ordered_chain(_CANDLE_CHAINS.get(cls, []), config.PRICE_PROVIDER,
-                           config.has_market_api())
+    base_chain = _CANDLE_CHAINS.get(cls, ["twelvedata"] if cls is None else [])
+    chain = _ordered_chain(base_chain, config.PRICE_PROVIDER, config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
 
     for provider in chain:
@@ -514,7 +575,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
         try:
             if provider == "venue-gold":
                 v = BINANCE_MAP[internal]
-                values = _fetch_binance_candles(v, interval, outputsize)
+                values = _fetch_venue_gold_candles(v, interval, outputsize)
                 offset = _gold_offset_now(internal, v)
                 if offset is None:
                     offset = _persisted_offset(internal) or 0.0
@@ -522,15 +583,21 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
             elif provider == "fx-ref":
                 values = _fetch_yahoo_candles(YAHOO_FX_MAP[internal], interval, outputsize)
             elif provider == "binance":
+                if not venue:
+                    continue
                 values = _fetch_binance_candles(venue, interval, outputsize)
             elif provider == "bybit":
-                values = _fetch_bybit_candles(BYBIT_MAP[internal], interval, outputsize)
+                bybit_sym = BYBIT_MAP.get(internal) or venue
+                if not bybit_sym:
+                    continue
+                values = _fetch_bybit_candles(bybit_sym, interval, outputsize)
             elif provider == "twelvedata":
                 values = _fetch_td_candles(_td_symbol(internal, symbol), interval,
                                            config.market_api_key(), outputsize)
             else:
                 continue
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol)
+            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol,
+                             provider_name=provider)
         except Exception as exc:
             _mark_failure(provider, internal, interval)
             errors.append(f"{provider}:" + type(exc).__name__)
@@ -541,53 +608,116 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
     raise RuntimeError("تعذر جلب بيانات لحظية لهذه الأداة الآن — أعد المحاولة بعد قليل")
 
 
-def fetch_price(symbol: str, api_key: str = "") -> dict:
+def _store_quote(internal: str, provider: str, payload: dict, use_cache: bool) -> dict:
+    _mark_success(provider, internal, "quote")
+    _last_provider[internal] = provider
+    if use_cache:
+        _cache[("quote", internal)] = {"t": time.time(), "payload": payload}
+        if len(_cache) > 250:
+            for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
+                _cache.pop(k, None)
+    return payload
+
+
+def cached_price(symbol: str, max_age_seconds: float = 120.0) -> float:
+    """Return a cached live price in 0ms without hitting any external API (0.0 if absent/stale)."""
+    internal = _norm(symbol)
+    hit = _cache.get(("quote", internal))
+    if hit and (time.time() - hit["t"]) <= max_age_seconds:
+        try:
+            return float((hit.get("payload") or {}).get("price") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
     """Latest REAL quote — headline prices must match the actual market."""
     internal = _norm(symbol)
     cls = _class_of(internal)
-    chain = _ordered_chain(_QUOTE_CHAINS.get(cls, []), config.PRICE_PROVIDER,
-                           config.has_market_api())
+    # v6.24.0: sub-second free live crypto WebSocket tick fast-path
+    if use_cache and cls == "crypto":
+        ws_px = crypto_ws.get_live_price(internal)
+        if ws_px and ws_px > 0:
+            _last_provider[internal] = "crypto-ws"
+            return {
+                "symbol": symbol,
+                "price": ws_px,
+                "fetched_at": config.now(),
+                "source": "LIVE",
+                "ws": True,
+            }
+    if use_cache:
+        qhit = _cache.get(("quote", internal))
+        if qhit and time.time() - qhit["t"] < QUOTE_CACHE_TTL_SECONDS:
+            out = dict(qhit["payload"])
+            out["symbol"] = symbol
+            return out
+
+    base_chain = _QUOTE_CHAINS.get(cls, ["twelvedata"] if cls is None else [])
+    chain = _ordered_chain(base_chain, config.PRICE_PROVIDER, config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
 
     for provider in chain:
         if in_cooldown(provider, internal, "quote"):
             continue
+        t0 = time.monotonic()
         try:
             if provider == "spot-ref":
                 ref = _fetch_goldapi_price(GOLD_API_MAP[internal])
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
-                        "source": "LIVE", "spot_ref": True}
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": ref["price"],
+                                     "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
+                                    use_cache)
             if provider == "fx-ref":
                 ref = _fetch_yahoo_quote(YAHOO_FX_MAP[internal])
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": ref["price"], "fetched_at": config.now(),
-                        "source": "LIVE", "spot_ref": True}
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": ref["price"],
+                                     "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
+                                    use_cache)
             if provider == "venue-gold":
                 v = BINANCE_MAP[internal]
-                venue_price = _fetch_binance_price(v)
+                venue_price = _fetch_venue_gold_price(v)
                 offset = _gold_offset_now(internal, v)
                 if offset is None:
                     offset = _persisted_offset(internal)
                 if offset:
                     venue_price = venue_price + offset
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": venue_price, "fetched_at": config.now(),
-                        "source": "LIVE", "spot_ref": bool(offset)}
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": venue_price,
+                                     "fetched_at": config.now(), "source": "LIVE", "spot_ref": bool(offset)},
+                                    use_cache)
             if provider == "binance":
+                if not venue:
+                    continue
                 price = _fetch_binance_price(venue)
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": price,
+                                     "fetched_at": config.now(), "source": "LIVE"},
+                                    use_cache)
             if provider == "bybit":
-                price = _fetch_bybit_price(BYBIT_MAP[internal])
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
+                bybit_sym = BYBIT_MAP.get(internal) or venue
+                if not bybit_sym:
+                    continue
+                price = _fetch_bybit_price(bybit_sym)
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": price,
+                                     "fetched_at": config.now(), "source": "LIVE"},
+                                    use_cache)
             if provider == "twelvedata":
                 price = _fetch_td_price(_td_symbol(internal, symbol), config.market_api_key())
-                _last_provider[internal] = "LIVE"
-                return {"symbol": symbol, "price": price, "fetched_at": config.now(), "source": "LIVE"}
-        except Exception:
-            _mark_failure(provider, internal, "quote")
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
+                return _store_quote(internal, provider,
+                                    {"symbol": symbol, "price": price,
+                                     "fetched_at": config.now(), "source": "LIVE"},
+                                    use_cache)
+        except Exception as exc:
+            _mark_failure(provider, internal, "quote", str(exc))
             continue
 
     if internal in FOREX_ONLY and not config.has_market_api():

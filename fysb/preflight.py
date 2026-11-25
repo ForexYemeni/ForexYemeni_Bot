@@ -25,7 +25,7 @@ def run() -> int:
         plans = c.execute("SELECT COUNT(*) n FROM plans").fetchone()["n"]
         markets = c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
         strategies = c.execute("SELECT COUNT(*) n FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchone()["n"]
-        open_signals = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')").fetchone()["n"]
+        open_signals = c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')").fetchone()["n"]
     print("✅ BOOT: environment validated (BOT_TOKEN present, ADMIN_ID present)")
     engine = "PostgreSQL (Supabase)" if config.USE_PG else f"SQLite ({config.DB_FILE.name})"
     print(f"✅ BOOT: database ok ({integrity}) | engine={engine} — users={users}, plans={plans}")

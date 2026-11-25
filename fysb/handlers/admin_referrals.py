@@ -86,10 +86,12 @@ async def admin_ref_view(q, uid, context, bot, cid: int):
     if st["converted_met"]:
         body.append("✨ <b>تم تحقيق هدف المشتركين الملكي! 🥇</b>")
     rows = [
-        [kb.btn("👥 قائمة المدعوين", f"a:reflist:{cid}"), kb.btn("🔵 تحديث", f"a:refview:{cid}")],
-        [kb.btn(f"{'🟠 إيقاف الحملة' if camp['enabled'] else '🟢 تفعيل الحملة'}", f"a:reftoggle:{cid}")],
+        [kb.copy_btn("📋 نسخ رابط الحملة بضغطة واحدة", link, style="primary")],
+        [kb.btn("👥 قائمة المدعوين", f"a:reflist:{cid}", style="primary"), kb.btn("🔄 تحديث", f"a:refview:{cid}")],
+        [kb.btn(f"{'⏸ إيقاف الحملة' if camp['enabled'] else '▶️ تفعيل الحملة'}", f"a:reftoggle:{cid}",
+                style="danger" if camp["enabled"] else "success")],
         [kb.btn("🎯 هدف الدعوات", f"a:reftgti:{cid}"), kb.btn("💎 هدف المشتركين", f"a:reftgtc:{cid}")],
-        [kb.btn("🔴 حذف الحملة", f"a:refdel:{cid}"), kb.btn("🤝 كل الحملات", "a:refs")],
+        [kb.btn("🗑 حذف الحملة", f"a:refdel:{cid}", style="danger"), kb.btn("🤝 كل الحملات", "a:refs")],
     ]
     await render(q, "\n".join(body), kb.admin_nav(rows), bot)
 

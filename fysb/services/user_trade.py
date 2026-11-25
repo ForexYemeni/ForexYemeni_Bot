@@ -14,22 +14,40 @@ from fysb.engines import demo as demo_engine
 from fysb.theme import bar, esc, strategy_name, tf_name
 
 
-def personal_block(sig: dict, user_id: int) -> str:
-    """Return the personal risk/profit card lines for this user+signal."""
+def _compute_lots_from_acc(acc: dict, symbol: str, entry: float, sl: float, row=None) -> tuple[float, float, float]:
+    """Pure lot calculation from an already-loaded demo account dict (0 SQL)."""
+    risk_pct = float(acc.get("risk_pct") or 1.0)
+    balance = max(1.0, float(acc.get("balance") or demo_engine.DEMO_DEFAULT_BALANCE))
+    if (acc.get("lot_mode") or "auto") == "fixed":
+        lots = float(acc.get("fixed_lot") or 0.01)
+        risk_money = abs(instruments.pnl(symbol, "BUY", lots, entry, sl, row)) if sl else 0.0
+        return round(lots, 2), risk_money, risk_pct
+    lots = instruments.position_size(balance, risk_pct, entry, sl, symbol, row)
+    lots = max(0.01, min(lots, 10.0))
+    risk_money = balance * risk_pct / 100.0
+    return round(lots, 2), risk_money, risk_pct
+
+
+def personal_block(sig: dict, user_id: int, row=None, acc: dict | None = None) -> str:
+    """Return the personal risk/profit card lines for this user+signal.
+
+    Accepts optional preloaded `row` (market_catalog) and `acc` (demo_accounts)
+    to eliminate N+1 queries during broadcast & live-card refresh loops.
+    """
     try:
         symbol = instruments.normalize(sig["symbol"])
-        row = None
-        with db.conn() as c:
-            r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
-            if r:
-                row = dict(r)
-        acc = demo_engine.get_or_create_account(user_id)
+        if row is None:
+            with db.conn() as c:
+                r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+                if r:
+                    row = dict(r)
+        if acc is None:
+            acc = demo_engine.get_or_create_account(user_id)
         entry = float(sig["entry"])
         sl = float(sig["stop"] or 0)
-        lots, risk_money, risk_pct = demo_engine.compute_lots(user_id, symbol, entry, sl, row)
-        spec = instruments.spec(symbol, row)
-        dist_sl = abs(entry - sl) if sl else 0.0
-        risk_money = dist_sl * lots * spec.contract_size if dist_sl else risk_money
+        lots, risk_money, risk_pct = _compute_lots_from_acc(acc, symbol, entry, sl, row)
+        if sl:
+            risk_money = abs(instruments.pnl(symbol, "BUY", lots, entry, sl, row))
         lines = [
             f"💼 <b>خطتك الشخصية على حسابك التجريبي:</b>",
             f"▎💰 الرصيد المستخدم: <b>{acc['balance']:,.2f} USD</b>",
@@ -39,20 +57,28 @@ def personal_block(sig: dict, user_id: int) -> str:
         for i, tp in enumerate((sig["tp1"], sig["tp2"], sig["tp3"]), start=1):
             if not tp:
                 continue
-            dist = abs(float(tp) - entry)
-            profit = dist * lots * spec.contract_size
+            profit = abs(instruments.pnl(symbol, sig["direction"], lots, entry, float(tp), row))
             lines.append(f"▎🏁 ربح متوقع عند TP{i}: <b>{profit:+,.2f} $</b>")
         lines.append(f"▎🤖 التنفيذ التلقائي: <b>{'مفعّل — تُفتح الصفقة في حسابك تلقائياً' if acc.get('auto_trade') else 'متوقف — فعّله من إعدادات التجريبي'}</b>")
+        # v6.26.0 (#22): append real-account Risk Profile lot recommendation if configured
+        try:
+            from fysb.services import risk_journal as _rj
+            real_snip = _rj.compact_risk_snippet(user_id, sig, row=row)
+            if real_snip:
+                lines.append(real_snip)
+        except Exception:
+            pass
         return "\n".join(lines)
     except Exception:
         return ""
 
 
-def auto_execute(sig: dict, user_id: int) -> dict | None:
+def auto_execute(sig: dict, user_id: int, acc: dict | None = None) -> dict | None:
     """Execute the signal on the user's demo account when auto-trade is ON.
     Returns the execution summary dict (or None when disabled/failed silently)."""
     try:
-        acc = demo_engine.get_or_create_account(user_id)
+        if acc is None:
+            acc = demo_engine.get_or_create_account(user_id)
         if not (acc.get("auto_trade") or 0):
             return None
         res = demo_engine.open_from_signal(user_id, sig, config.market_api_key())

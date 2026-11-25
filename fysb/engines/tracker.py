@@ -65,15 +65,37 @@ def _provider_symbol(symbol: str) -> str:
     return r["provider_symbol"] if r else symbol
 
 
-def _tracking_payload(provider_symbol: str, api_key: str) -> dict:
+def _tracking_intervals_for(since_iso: str) -> tuple[tuple[str, int], ...]:
+    """Pick the finest candle interval whose window covers `since_iso`.
+
+    5min x 200 covers ~16.6h; 15min x 120 covers ~30h; 1h x 100 covers ~100h.
+    Always retains all three intervals as a failover chain.
+    """
+    if not since_iso:
+        return (("5min", 200), ("15min", 120), ("1h", 100))
+    try:
+        from datetime import datetime, timezone
+        cut = _utc_cutoff(since_iso)
+        dt = datetime.strptime(cut, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+        if age_hours > 28.0:
+            return (("1h", 100), ("15min", 120), ("5min", 200))
+        if age_hours > 14.0:
+            return (("15min", 120), ("1h", 100), ("5min", 200))
+    except Exception:
+        pass
+    return (("5min", 200), ("15min", 120), ("1h", 100))
+
+
+def _tracking_payload(provider_symbol: str, api_key: str, since_iso: str = "") -> dict:
     """Fetch a candle window LONG ENOUGH to cover the signal's whole lifetime.
 
-    A young signal needs fine granularity; an old one needs history. The chain
-    walks 5min -> 15min -> 1h and returns the first FRESH payload (each covers
-    16h / 30h / 100h respectively). Raises RuntimeError when everything fails.
+    A young signal needs fine granularity (5min); an older one needs deeper
+    history (15min -> 1h) so fills/TPs beyond 16h are never missed. Raises
+    RuntimeError when everything fails.
     """
     last_err: Exception | None = None
-    for interval, size in (("5min", 200), ("15min", 120), ("1h", 100)):
+    for interval, size in _tracking_intervals_for(since_iso):
         try:
             payload = market_data.fetch_candles(provider_symbol, interval, api_key, outputsize=size)
         except RuntimeError as e:
@@ -166,15 +188,21 @@ def check_open_signals(api_key: str) -> dict:
     stats = {"checked": 0, "updated": 0, "refreshed": 0, "skipped_stale": 0, "errors": 0}
     notifications: list[tuple[int, str]] = []
     edits: list[tuple[int, str, int, str]] = []
+    proof_signals: list[dict] = []
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id").fetchall()]
+            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') "
+            "AND (closed_at IS NULL OR closed_at='') ORDER BY id").fetchall()]
+    catalog_map = _load_market_catalog_map() if rows else {}
     for sig in rows:
         stats["checked"] += 1
         symbol = sig["symbol"]
+        mkt_row = catalog_map.get(symbol)
+        prov_sym = (mkt_row["provider_symbol"] if mkt_row and mkt_row.get("provider_symbol") else symbol)
         try:
-            payload = _tracking_payload(_provider_symbol(symbol), api_key)
+            since = sig.get("filled_at") or sig.get("created_at") or ""
+            payload = _tracking_payload(prov_sym, api_key, since_iso=since)
         except RuntimeError as e:
             stats["errors"] += 1
             _log(symbol, sig["timeframe"], "TRACK_ERROR", str(e)[:200])
@@ -237,6 +265,15 @@ def check_open_signals(api_key: str) -> dict:
                 _log(symbol, sig["timeframe"], "MISSED_ENTRY",
                      f"signal #{sig['id']} reached TP1 without ever touching the entry")
                 continue
+            # v6.25.0 (#8): Smart pending CHoCH auto-invalidation
+            inv_ok, inv_why = detect_pending_choch_invalidation(sig, candles)
+            if inv_ok:
+                stats["updated"] += 1
+                notes, _, new_edits = _apply_transition(sig, "CANCELLED", payload, live_px)
+                notifications.extend(notes)
+                edits.extend(new_edits)
+                _log(symbol, sig["timeframe"], "PENDING_INVALIDATED", f"signal #{sig['id']} {inv_why}")
+                continue
             # Still a live pending plan: keep the card pulsing with the real
             # price, but NEVER bank targets or celebrate halfway for a trade
             # the market has not given us yet.
@@ -251,16 +288,23 @@ def check_open_signals(api_key: str) -> dict:
             continue
 
         # ---- FILLED signals: full lifecycle from the fill candle onward ----
-        transition = _evaluate_signal(sig, candles)
+        transition = _evaluate_signal(sig, candles, live_px=live_px)
         if transition:
             stats["updated"] += 1
             notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
             notifications.extend(notes)
             edits.extend(new_edits)
+            if transition in ("TP2_HIT", "TP3_HIT"):
+                proof_signals.append({
+                    **sig,
+                    "status": transition,
+                    "pips_result": result_pips,
+                    "candles": candles[-72:],
+                })
             continue
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified,
-        # post-fill candles only — a pre-fill visit to the half level counts 0)
-        if not sig.get("half_notified") and sig["status"] in ("RUNNING", "TP1_HIT", "TP2_HIT"):
+        # strictly while RUNNING — never fires retroactively after TP1/TP2 is already banked)
+        if not sig.get("half_notified") and sig["status"] == "RUNNING":
             try:
                 fill_cut = _utc_cutoff(sig.get("filled_at") or sig["created_at"])
                 post = [c for c in candles if c["datetime"] >= fill_cut]
@@ -270,6 +314,14 @@ def check_open_signals(api_key: str) -> dict:
                     notes, new_edits = _halfway_notes(sig, post, live_px)
                     notifications.extend(notes)
                     edits.extend(new_edits)
+            except Exception:
+                pass
+        # v6.25.0 (#10): Early Invalidation Warning (one-time per RUNNING trade)
+        if sig["status"] == "RUNNING" and int(sig.get("hit_tp") or 0) == 0 and live_px:
+            try:
+                warn_ok, warn_txt = detect_early_invalidation(sig, live_px, candles)
+                if warn_ok and warn_txt:
+                    notifications.extend(_alert_targets(sig, warn_txt))
             except Exception:
                 pass
         # Live-card pulse: re-render the ORIGINAL delivered card while the price
@@ -283,7 +335,8 @@ def check_open_signals(api_key: str) -> dict:
                               (live_px, payload["last_candle_iso"], sig["id"]))
                 stats["refreshed"] += 1
     return {"stats": stats, "notifications": notifications,
-            "admin_notice": admin_notice, "edits": edits}
+            "admin_notice": admin_notice, "edits": edits,
+            "proof_signals": proof_signals}
 
 
 def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:
@@ -307,6 +360,38 @@ def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def _alert_targets(sig: dict, text: str) -> list[tuple]:
+    """Build deduplicated push-alert targets for a signal.
+
+    * Respects private SIGNAL_NOW isolation (does NOT spam ADMIN_ID on a
+      subscriber's private on-demand query).
+    * Deduplicates targets so ADMIN_ID never receives 2 copies if already
+      present in signal_deliveries.
+    * Includes broadcast channels (user_id <= 0 routed via chat_id).
+    """
+    from fysb.engines.signal_engine import admin_accepts_market
+    with db.conn() as c:
+        refs = [dict(r) for r in c.execute(
+            "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
+    notes: list[tuple] = []
+    seen: set[str] = set()
+    for r in refs:
+        duid = int(r["user_id"] or 0)
+        target = r["chat_id"] if duid <= 0 else duid
+        if target in (None, "", 0):
+            continue
+        key = str(target)
+        if key not in seen:
+            seen.add(key)
+            notes.append((target, text))
+    sig_src = (sig.get("source") or "AUTO").upper()
+    if (sig_src != "SIGNAL_NOW" and config.ADMIN_ID
+            and str(config.ADMIN_ID) not in seen
+            and admin_accepts_market(sig["symbol"])):
+        notes.append((config.ADMIN_ID, text))
+    return notes
+
+
 def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tuple[list[tuple[int, str]], list]:
     """LUXURY half-way secure-profit advisory (v6.8.0) — for every receiver AND
     the admin (the old one-liner «💧 إشارة #N … نصف الطريق» is gone; admin sees
@@ -315,7 +400,6 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
     (+ live-card edits so the original message shows the current state)."""
     from fysb import instruments
     from fysb.theme import bar, dir_badge, esc, tf_name
-    from fysb import config as cfg
     symbol = sig["symbol"]
     entry = float(sig["entry"])
     tp1 = float(sig["tp1"])
@@ -326,9 +410,11 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
                               if instruments.pips(symbol, entry, tp1) > 0 else 0.0))
     remaining = instruments.pips(symbol, entry, tp1) - max(0.0, drift)
     usd_now = instruments.usd_move(symbol, drift, 0.01, px=px) if px else 0.0
-    usd_tp1 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp1), 0.01)
-    usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp2"] or tp1)), 0.01)
-    usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, float(sig["tp3"] or tp1)), 0.01)
+    usd_tp1 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp1), 0.01, px=tp1)
+    tp2_val = float(sig["tp2"] or tp1)
+    tp3_val = float(sig["tp3"] or tp1)
+    usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp2_val), 0.01, px=tp2_val)
+    usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp3_val), 0.01, px=tp3_val)
     text = (
         f"💧 <b>إدارة الصفقة الملكية</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
@@ -350,13 +436,7 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
         + f"</blockquote>\n"
         + f"<i>أرقام موثقة من أسعار السوق الفعلية — إدارة صفقتك بيدك، والتنبيه لا ينفذ في حسابك تلقائياً إلا إذا فعّلت التنفيذ الآلي في حسابك التجريبي.</i>"
     )
-    with db.conn() as c:
-        refs = [dict(r) for r in c.execute(
-            "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
-    notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
-             for r in refs]
-    if cfg.ADMIN_ID:
-        notes.append((cfg.ADMIN_ID, text))
+    notes = _alert_targets(sig, text)
     edits = _card_refresh_edits(sig, live_px, _delivery_refs(sig["id"]))
     return notes, edits
 
@@ -424,37 +504,91 @@ def _market_row(symbol: str):
     return dict(r) if r else None
 
 
-def _live_card_text(sig: dict, uid: int, px: float) -> str:
-    """Rebuild the EXACT luxury card the user first received — current status,
-    fresh market pulse, personal block. This text REPLACES the original
-    message body via edit_message_text, so the first card is the live board."""
-    from fysb.services import user_trade
+def _load_market_catalog_map() -> dict[str, dict]:
+    """Batch-load market_catalog once per tracker pass (eliminates N+1 queries)."""
+    with db.conn() as c:
+        return {r["symbol"]: dict(r) for r in c.execute("SELECT * FROM market_catalog").fetchall()}
+
+
+def _load_demo_accounts_map(uids: list[int]) -> dict[int, dict]:
+    """Batch-load demo_accounts for a signal's recipients in 1 SQL query."""
+    uniq = sorted({int(u) for u in uids if int(u or 0) > 0})
+    if not uniq:
+        return {}
+    out: dict[int, dict] = {}
+    with db.conn() as c:
+        for i in range(0, len(uniq), 400):
+            chunk = uniq[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            for r in c.execute(f"SELECT * FROM demo_accounts WHERE user_id IN ({ph})", tuple(chunk)).fetchall():
+                out[int(r["user_id"])] = dict(r)
+    return out
+
+
+def _base_live_card_text(sig: dict, px: float, row=None) -> str:
+    """Build the invariant portion of the live signal card ONCE per signal.
+
+    v6.20.3 honesty: once a signal is CLOSED (including TP1_HIT / TP2_HIT closed
+    at breakeven with closed_at stamped), NEVER append a live drifting market
+    price below entry — instead display the final secured-profit close summary.
+    """
+    from fysb.theme import is_signal_closed
     from fysb.ui.cards import render_signal_card
-    row = _market_row(sig["symbol"])
+    if row is None:
+        row = _market_row(sig["symbol"])
     text = render_signal_card(sig, user_view=True, row=row)
+    closed = is_signal_closed(sig)
+    if closed:
+        st = (sig.get("status") or "").upper()
+        if st in ("TP1_HIT", "TP2_HIT"):
+            banked = float(sig.get("pips_result") or 0.0)
+            text += (
+                f"\n\n<blockquote>🔒 <b>الصفقة مغلقة نهائياً على ربح محقق ({banked:+.1f} pips)</b> — "
+                f"أُغلق الجزء المتبقي عند نقطة التأمين (الدخول) وانتهت متابعة هذه الإشارة؛ "
+                f"المحرك يبحث الآن عن الفرص الجديدة.</blockquote>"
+            )
+        return text
     if px:
         entry = float(sig["entry"])
         side = "أعلى الدخول" if px > entry else ("عند الدخول" if px == entry else "أدنى الدخول")
         text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
                  f"<code>{instruments.fmt_price(sig['symbol'], px, row)}</code>"
                  f" · {side} · <b>{drift_pips(sig['symbol'], sig['direction'], entry, px):+.1f} pips</b> من الدخول</blockquote>")
-    personal = user_trade.personal_block(sig, uid)
-    if personal:
-        text += "\n\n<blockquote>" + personal + "</blockquote>"
     return text
 
 
-def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict]) -> list:
-    """Edits for every delivered card. A status change deserves an edit even
-    without a price (expiry/terminal states) — the price line appears only
-    when a real close is available."""
+def _live_card_text(sig: dict, uid: int, px: float, row=None, acc=None, base_text: str | None = None) -> str:
+    """Rebuild the EXACT luxury card the user first received — current status,
+    fresh market pulse, personal block. This text REPLACES the original
+    message body via edit_message_text, so the first card is the live board."""
+    from fysb.services import user_trade
+    if row is None:
+        row = _market_row(sig["symbol"])
+    text = base_text if base_text is not None else _base_live_card_text(sig, px, row=row)
+    if int(uid or 0) > 0:
+        personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
+        if personal:
+            text += "\n\n<blockquote>" + personal + "</blockquote>"
+    else:
+        text += f"\n\n📡 <b>{config.BOT_SIGNATURE}</b>"
+    return text
+
+
+def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict], market_row=None) -> list:
+    """Edits for every delivered card — builds the base card ONCE and
+    batch-loads all recipients' demo accounts in 1 SQL query (O(1) instead of 3N)."""
     if not refs:
         return []
+    row = market_row if market_row is not None else _market_row(sig["symbol"])
+    base_text = _base_live_card_text(sig, live_px, row=row)
+    acc_map = _load_demo_accounts_map([r["user_id"] for r in refs])
     return [(r["user_id"], r["chat_id"], int(r["message_id"]),
-             _live_card_text(sig, r["user_id"], live_px)) for r in refs]
+             _live_card_text(sig, r["user_id"], live_px, row=row,
+                             acc=acc_map.get(int(r["user_id"] or 0)), base_text=base_text))
+            for r in refs]
 
 
-def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | None:
+def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0) -> str | None:
     """Return the next status if price data justifies it, else None.
 
     Only candles AT/AFTER the fill anchor are walked — `cutoff` (or the
@@ -474,6 +608,7 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
         conservative model already in place.
     """
     direction = sig["direction"]
+    entry = float(sig["entry"])
     sl, tp1, tp2, tp3 = sig["stop"], sig["tp1"], sig["tp2"], sig["tp3"]
     hit_tp = int(sig["hit_tp"] or 0)
 
@@ -484,10 +619,19 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
     pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
     buf = TP_CONFIRM_PIPS * pip
     progress_tp = hit_tp
-    for c in walked:
+    # Track the bar index where the already-banked target (hit_tp) was reached
+    # so the fill bar itself (at entry) never false-triggers a breakeven stop.
+    banked_bar_idx = -1
+    be_stopped = False
+    for idx, c in enumerate(walked):
         hi, lo = c["high"], c["low"]
         if direction == "BUY":
             sl_now = lo <= sl
+            be_now = lo <= entry
+            if hit_tp == 1 and banked_bar_idx < 0 and hi >= tp1 + buf:
+                banked_bar_idx = idx
+            elif hit_tp == 2 and banked_bar_idx < 0 and hi >= tp2 + buf:
+                banked_bar_idx = idx
             new_tp = 0
             if progress_tp == 0 and hi >= tp1 + buf:
                 new_tp = 1
@@ -497,6 +641,11 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
                 new_tp = max(new_tp, 3)
         else:
             sl_now = hi >= sl
+            be_now = hi >= entry
+            if hit_tp == 1 and banked_bar_idx < 0 and lo <= tp1 - buf:
+                banked_bar_idx = idx
+            elif hit_tp == 2 and banked_bar_idx < 0 and lo <= tp2 - buf:
+                banked_bar_idx = idx
             new_tp = 0
             if progress_tp == 0 and lo <= tp1 - buf:
                 new_tp = 1
@@ -504,15 +653,138 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "") -> str | 
                 new_tp = max(new_tp, 2)
             if progress_tp <= 2 and lo <= tp3 - buf:
                 new_tp = max(new_tp, 3)
-        if sl_now and progress_tp == hit_tp and new_tp == 0:
-            return "SL_HIT"                       # stopped out before any gain
+        if sl_now and progress_tp == 0:
+            # Conservative SL-first rule: if a candle hits SL before any target
+            # was banked (including gap candles spanning both SL and TP), record
+            # SL_HIT — never optimistically credit a target on a gap candle.
+            return "SL_HIT"
         if new_tp > progress_tp:
             progress_tp = new_tp                  # target banked; keep running
+            if progress_tp == 3:
+                break
+        # v6.20.0 Breakeven stop-out for already-banked TP1_HIT / TP2_HIT runners:
+        # only triggers strictly AFTER the banked target candle (or on post-fill
+        # bars if the TP candle predates the current candle window).
+        if hit_tp in (1, 2) and progress_tp == hit_tp and be_now:
+            if (banked_bar_idx >= 0 and idx > banked_bar_idx) or (
+                banked_bar_idx < 0 and c["datetime"] > cut
+            ):
+                be_stopped = True
+                break
     if progress_tp > hit_tp:
         if progress_tp == 3:
             return "TP3_HIT"
         return {1: "TP1_HIT", 2: "TP2_HIT", 3: "TP3_HIT"}[progress_tp]
+    # Fallback live-quote breakeven check for already-banked TP1/TP2 runners:
+    # if the current live price is already back at/past entry on the adverse side,
+    # close immediately at breakeven so the trade NEVER hangs open.
+    if not be_stopped and hit_tp in (1, 2) and live_px > 0:
+        if (direction == "BUY" and live_px <= entry) or (direction == "SELL" and live_px >= entry):
+            be_stopped = True
+    if be_stopped and hit_tp in (1, 2):
+        return f"TP{hit_tp}_BE"
     return None
+
+
+_EARLY_WARNED_SIDS: set[int] = set()
+
+
+def detect_pending_choch_invalidation(sig: dict, candles: list[dict]) -> tuple[bool, str]:
+    """v6.25.0 (#8): Smart Pending CHoCH Auto-Invalidation.
+
+    For an unfilled ACTIVE limit/pending signal, if a confirmed candle closes
+    decisively beyond the planned Stop Loss (structure broken before fill),
+    invalidate and cancel cleanly so traders are never pulled into a broken setup.
+    """
+    if not candles or sig.get("status") != "ACTIVE":
+        return False, ""
+    direction = (sig.get("direction") or "").upper()
+    stop = float(sig.get("stop") or 0.0)
+    if stop <= 0:
+        return False, ""
+    for c in candles:
+        close_px = float(c.get("close") or 0.0)
+        if close_px <= 0:
+            continue
+        if direction == "BUY" and close_px <= stop:
+            return True, f"CHoCH هبوطي — إغلاق أسفل وقف الخسارة {stop:g} قبل تفعيل الدخول"
+        if direction == "SELL" and close_px >= stop:
+            return True, f"CHoCH صعودي — إغلاق أعلى وقف الخسارة {stop:g} قبل تفعيل الدخول"
+    return False, ""
+
+
+def dynamic_stop_advisory(sig: dict, hit_tp: int) -> str:
+    """v6.25.0 (#9): Exact dynamic Break-Even (after TP1) & Lock-50% (after TP2) stop levels."""
+    from fysb import instruments
+    sym = sig["symbol"]
+    if hit_tp == 1:
+        be_px = instruments.fmt_price(sym, float(sig["entry"]))
+        return (
+            f"▎🛡 <b>الوقف الديناميكي (Break-Even):</b> انقل وقف الخسارة إلى نقطة الدخول "
+            f"<code>{be_px}</code> (مخاطرة 0$) واترك الجزء المتبقي نحو TP2 وTP3.\n"
+        )
+    if hit_tp == 2:
+        lock_px = instruments.fmt_price(sym, float(sig["tp1"]))
+        return (
+            f"▎🔒 <b>تأمين 50% ربح (Trailing Lock):</b> ارفع وقف الخسارة الآن إلى TP1 "
+            f"<code>{lock_px}</code> لتثبيت ربح مضمون حتى لو انعكس السوق!\n"
+        )
+    return ""
+
+
+def detect_early_invalidation(sig: dict, live_px: float, candles: list[dict]) -> tuple[bool, str]:
+    """v6.25.0 (#10): One-time Early Invalidation Advisory for RUNNING trades.
+
+    Triggers when live price has retraced >= 62% of the distance from entry to SL
+    AND the most recent candle prints a strong adverse conviction body (>= 60% of range).
+    """
+    sid = int(sig.get("id") or 0)
+    if sid <= 0 or sid in _EARLY_WARNED_SIDS:
+        return False, ""
+    if sig.get("status") != "RUNNING" or int(sig.get("hit_tp") or 0) > 0:
+        return False, ""
+    entry = float(sig.get("entry") or 0.0)
+    stop = float(sig.get("stop") or 0.0)
+    direction = (sig.get("direction") or "").upper()
+    risk = abs(entry - stop)
+    if risk <= 0 or live_px <= 0 or not candles:
+        return False, ""
+
+    adverse_move = (entry - live_px) if direction == "BUY" else (live_px - entry)
+    ratio = adverse_move / risk
+    if ratio < 0.62 or ratio >= 0.99:
+        return False, ""
+
+    last = candles[-1]
+    o = float(last.get("open") or 0.0)
+    h = float(last.get("high") or 0.0)
+    l = float(last.get("low") or 0.0)
+    c_px = float(last.get("close") or 0.0)
+    rng = max(h - l, 1e-9)
+    adverse_candle = (
+        (direction == "BUY" and c_px < o and ((o - c_px) / rng) >= 0.60)
+        or (direction == "SELL" and c_px > o and ((c_px - o) / rng) >= 0.60)
+    )
+    if not adverse_candle:
+        return False, ""
+
+    _EARLY_WARNED_SIDS.add(sid)
+    from fysb import instruments
+    from fysb.theme import dir_badge, esc, tf_name
+    seq = seq_of(sid)
+    cur_pips = drift_pips(sig["symbol"], direction, entry, live_px)
+    txt = (
+        f"⚠️ <b><u>تنبيه ضعف مبكر (Early Invalidation) — الإشارة #{seq}</u></b> "
+        f"— {esc(sig['symbol'])} {dir_badge(direction)} ⏱ {tf_name(sig['timeframe'])}\n"
+        f"<blockquote>"
+        f"▎📉 السعر الحالي: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code> "
+        f"(<b>{cur_pips:+.1f} pips</b> · <b>{int(ratio * 100)}%</b> نحو الوقف)\n"
+        f"▎⚡ رُصدت شمعة زخم معاكسة قوية (CHoCH محتمل) قبل ملامسة وقف الخسارة "
+        f"<code>{instruments.fmt_price(sig['symbol'], stop)}</code>.\n"
+        f"▎🛡 <b>تنبيه إداري:</b> يمكنك تقليص المخاطرة أو الخروج المبكر بخسارة أقل — القرار بيدك."
+        f"</blockquote>"
+    )
+    return True, txt
 
 
 def halfway_reached(sig: dict, candles: list[dict]) -> bool:
@@ -545,7 +817,8 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     RUNNING transitions anchor `filled_at` (the fill candle's datetime) so all
     later target evaluation starts from the true fill moment."""
     from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
-    status = new_status
+    is_be_close = new_status in ("TP1_BE", "TP2_BE")
+    status = {"TP1_BE": "TP1_HIT", "TP2_BE": "TP2_HIT"}.get(new_status, new_status)
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3,
               "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
     pips_result = 0.0
@@ -557,24 +830,33 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         pips_result = instruments.pips(sig["symbol"], sig["entry"], tp_map[hit_tp])
     if status == "RUNNING":
         filled_at = filled_at or sig.get("filled_at") or config.now()
-    closed_at = config.now() if status in TERMINAL else ""
+    closed_at = config.now() if (status in TERMINAL or is_be_close) else ""
+    half_done = 1 if (status.startswith("TP") or status in TERMINAL or is_be_close) else int(sig.get("half_notified") or 0)
     with db.tx(immediate=True) as c:
-        r = c.execute("SELECT status FROM signals WHERE id=?", (sig["id"],)).fetchone()
-        if not r or r["status"] in TERMINAL:
-            return [], 0.0, []  # already terminal — never double-update
+        r = c.execute("SELECT status, closed_at FROM signals WHERE id=?", (sig["id"],)).fetchone()
+        if not r or r["status"] in TERMINAL or (r["closed_at"] or ""):
+            return [], 0.0, []  # already closed/terminal — never double-update
         c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
-                     data_time=?, live_px=?, filled_at=? WHERE id=? AND status=?""",
+                     data_time=?, live_px=?, filled_at=?, half_notified=?
+                     WHERE id=? AND status=? AND (closed_at IS NULL OR closed_at='')""",
                   (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
-                   live_px, filled_at or sig.get("filled_at") or "", sig["id"], sig["status"]))
-    _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{status}",
+                   live_px, filled_at or sig.get("filled_at") or "", half_done, sig["id"], sig["status"]))
+    _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{new_status}",
          f"signal #{sig['id']} pips={pips_result:.1f} filled_at={filled_at or sig.get('filled_at') or '-'}")
+    if status in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+        try:
+            from fysb.services import strategy_stats
+            strategy_stats.invalidate_leaderboard_cache()
+        except Exception:
+            pass
 
     # The card the user holds is re-rendered with the NEW status immediately —
     # «بانتظار التنفيذ» never outlives the candle that ended it.
     sig_now = dict(sig)
     sig_now.update(status=status, hit_tp=hit_tp, pips_result=pips_result,
                    closed_at=closed_at, data_time=payload["last_candle_iso"],
-                   filled_at=filled_at or sig.get("filled_at") or "")
+                   filled_at=filled_at or sig.get("filled_at") or "",
+                   half_notified=half_done)
     edits = _card_refresh_edits(sig_now, live_px, _delivery_refs(sig["id"]))
 
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
@@ -600,16 +882,26 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         detail = ("▎⛔ <b>فات الدخول:</b> لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
                   "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
         result_line = ""
-    if status.startswith("TP"):
-        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_map[hit_tp])}</code>"
-                  f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01):+,.2f} $</b> لكل 0.01 لوت\n")
-        if hit_tp == 1:
-            detail += ("▎🛡 <b>إدارة الصفقة:</b> انقل وقف الخسارة إلى نقطة الدخول (حماية كاملة) "
-                       "واُترك الجزء المتبقي يعمل نحو الهدفين التاليين.\n")
+    if is_be_close:
+        tp_px = float(tp_map[hit_tp])
+        detail = (
+            f"▎🏁 الهدف المحقق سابقاً: <code>{instruments.fmt_price(sig['symbol'], tp_px)}</code>"
+            f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01, px=tp_px):+,.2f} $</b> لكل 0.01 لوت\n"
+            f"▎🛡 <b>إغلاق مؤمّن عند نقطة الدخول (Breakeven):</b> عاد السعر إلى منطقة الدخول "
+            f"<code>{instruments.fmt_price(sig['symbol'], float(sig['entry']))}</code> بعد تحقق الهدف — "
+            f"تُغلق متابعة الجزء المتبقي على ربح مضمون دون أي خسارة.\n"
+        )
+    elif status.startswith("TP"):
+        tp_px = float(tp_map[hit_tp])
+        detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_px)}</code>"
+                  f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01, px=tp_px):+,.2f} $</b> لكل 0.01 لوت\n")
+        dyn_adv = dynamic_stop_advisory(sig, hit_tp)
+        if dyn_adv:
+            detail += dyn_adv
         if status == "TP3_HIT":
             detail += "▎👑 <b>صفقة مكتملة بكل الأهداف — أداء ممتاز.</b>\n"
     if status == "SL_HIT":
-        usd_sl = instruments.usd_move(sig["symbol"], pips_result, 0.01)
+        usd_sl = instruments.usd_move(sig["symbol"], pips_result, 0.01, px=float(sig["stop"]))
         detail = (f"▎🛡 الخسارة محدودة بمقدار وقف الخسارة المخطط"
                   + (f" · 💵 <b>{usd_sl:+,.2f} $</b> لكل 0.01 لوت" if usd_sl else "")
                   + " — التزم بإدارة المخاطر في الفكرة القادمة.\n")
@@ -617,32 +909,24 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     # number the signals center displays (after deletions the following
     # signals take the freed numbers), never the raw internal id.
     seq = seq_of(sig["id"])
+    status_label = f"{status_ar(status)} · إغلاق مؤمّن عند الدخول 🛡" if is_be_close else status_ar(status)
     text = (
         f"📡 <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
-        f"▎📌 الحالة الجديدة: <b>{status_ar(status)}</b>\n"
+        f"▎📌 الحالة الجديدة: <b>{status_label}</b>\n"
         f"{result_line}"
         f"{detail}"
         f"▎🧠 المنهجية: <b>{strategy_name(sig['strategy'])}</b> · ⭐ الجودة: <code>{int(sig['score'] or 0)}/100</code>\n"
         f"</blockquote>\n"
         f"<i>تحديث قائم على بيانات السعر الفعلية من السوق اللحظي — تتابع لحظي حتى الإغلاق.</i>"
     )
-    with db.conn() as c:
-        refs = [dict(r) for r in c.execute(
-            "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sig["id"],))]
-    # v6.8.1 — the ADMIN receives the SAME royal card the users receive.
-    # v6.10.0 — CHANNELS too: a channel delivery row (user_id=0, chat_id=-100…)
-    # routes to its chat — the owner demanded FULL channel alerting from birth
-    # to the final close, not just the first card.
-    notes = [((r["chat_id"] if int(r["user_id"] or 0) <= 0 else r["user_id"]), text)
-             for r in refs]
-    if config.ADMIN_ID:
-        notes.append((config.ADMIN_ID, text))
+    notes = _alert_targets(sig, text)
     return notes, pips_result, edits
 
 
 def expire_stale_signals() -> int:
-    """Mark ACTIVE signals past their expiry window as EXPIRED (no price claims).
+    """Mark unbanked signals past their expiry window as EXPIRED, and close
+    expired TP1_HIT/TP2_HIT trades while preserving their banked winning status.
 
     Two sweeps, both honest (no fabricated outcomes):
       * expires_at set and already passed;
@@ -652,39 +936,80 @@ def expire_stale_signals() -> int:
     from datetime import datetime, timedelta, timezone
     hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
     legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    now_iso = config.now()
     with db.conn() as c:
+        # Preserve banked TP1/TP2 winners: stamp closed_at so tracking stops,
+        # without erasing their winning status to EXPIRED.
+        c.execute("""UPDATE signals SET closed_at=?
+                     WHERE status IN ('TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')
+                     AND ((expires_at!='' AND expires_at<=?)
+                          OR (expires_at='' AND created_at<=?))""",
+                  (now_iso, now_iso, legacy_cutoff))
         cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
-                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                           WHERE status IN ('ACTIVE','RUNNING')
                            AND ((expires_at!='' AND expires_at<=?)
                                 OR (expires_at='' AND created_at<=?))""",
-                        (config.now(), config.now(), legacy_cutoff))
+                        (now_iso, now_iso, legacy_cutoff))
         return cur.rowcount
 
 
-def expire_with_card_edits() -> tuple[int, list]:
-    """The expiry sweep PLUS live-card edits: a retired signal's own message
-    must stop claiming «بانتظار التنفيذ» — the card is re-rendered with the
-    EXPIRED badge in place (no price line; expiry makes no price claims)."""
+def expire_with_alerts() -> tuple[int, list, list]:
+    """The expiry sweep PLUS live-card edits AND push notifications (v6.20.0).
+
+    A retired signal's original message stops claiming «بانتظار التنفيذ» AND
+    every holder (users + channels + admin for non-private signals) receives
+    an explicit EXPIRED push notification so no trade vanishes silently."""
     from datetime import datetime, timedelta, timezone
+    from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
     hours = max(1, db.get_setting_int("signal_expiry_hours", 72))
     legacy_cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    now_iso = config.now()
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING')
                AND ((expires_at!='' AND expires_at<=?)
                     OR (expires_at='' AND created_at<=?))""",
-            (config.now(), legacy_cutoff)).fetchall()]
+            (now_iso, legacy_cutoff)).fetchall()]
     edits: list = []
+    notifications: list[tuple] = []
     for sig in rows:
+        prev_status = sig["status"]
         sig["status"] = "EXPIRED"
         edits.extend(_card_refresh_edits(sig, 0.0, _delivery_refs(sig["id"])))
+        seq = seq_of(sig["id"])
+        why = ("لم يلمس السعر منطقة الدخول خلال نافذة الصلاحية."
+               if prev_status == "ACTIVE"
+               else "انتهت نافذة المتابعة الزمنية للإشارة دون بلوغ الأهداف أو الوقف.")
+        text = (
+            f"⌛ <b><u>انتهاء صلاحية الإشارة #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+            f"<blockquote>"
+            f"▎📌 الحالة النهائية: <b>{status_ar('EXPIRED')}</b>\n"
+            f"▎📋 السبب: {why}\n"
+            f"▎🧠 المنهجية: <b>{strategy_name(sig['strategy'])}</b>\n"
+            f"▎🛡 <b>الإجراء:</b> أُغلقت المتابعة لهذه الفكرة؛ لا تدخل عليها بعد انتهاء الصلاحية."
+            f"</blockquote>"
+        )
+        notifications.extend(_alert_targets(sig, text))
     with db.conn() as c:
+        c.execute("""UPDATE signals SET closed_at=?
+                     WHERE status IN ('TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')
+                     AND ((expires_at!='' AND expires_at<=?)
+                          OR (expires_at='' AND created_at<=?))""",
+                  (now_iso, now_iso, legacy_cutoff))
         cur = c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
-                           WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                           WHERE status IN ('ACTIVE','RUNNING')
                            AND ((expires_at!='' AND expires_at<=?)
                                 OR (expires_at='' AND created_at<=?))""",
-                        (config.now(), config.now(), legacy_cutoff))
-    return max(cur.rowcount, 0), edits
+                        (now_iso, now_iso, legacy_cutoff))
+    return max(cur.rowcount, 0), edits, notifications
+
+
+def expire_with_card_edits() -> tuple[int, list]:
+    """Backward-compatible 2-tuple wrapper around expire_with_alerts()."""
+    count, edits, _notes = expire_with_alerts()
+    return count, edits
 
 
 def _log(symbol, tf, result, detail):

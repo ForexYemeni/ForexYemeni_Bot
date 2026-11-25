@@ -47,15 +47,26 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     a = atr(candles)
     if a <= 0:
         return None
+    # v6.20.6: require directional candle conviction (reject tiny indecision dojis)
+    last_bar = candles[-1]
+    body = abs(float(last_bar["close"]) - float(last_bar["open"]))
+    if body < 0.25 * a:
+        return None
     entry = close
     if direction == "BUY":
-        stop = min(c["low"] for c in candles[-6:]) - 0.5 * a
-        if stop >= entry:
+        stop = min(c["low"] for c in candles[-6:]) - 0.85 * a
+        if stop >= entry or (entry - stop) < 1.2 * a:
             stop = entry - 1.8 * a
+        elif (entry - stop) > 2.6 * a:
+            # v6.23.0: cap abnormal news-wick stops so SL/TP3 stay institutional
+            stop = entry - 2.4 * a
     else:
-        stop = max(c["high"] for c in candles[-6:]) + 0.5 * a
-        if stop <= entry:
+        stop = max(c["high"] for c in candles[-6:]) + 0.85 * a
+        if stop <= entry or (stop - entry) < 1.2 * a:
             stop = entry + 1.8 * a
+        elif (stop - entry) > 2.6 * a:
+            # v6.23.0: cap abnormal news-wick stops so SL/TP3 stay institutional
+            stop = entry + 2.4 * a
 
     risk = abs(entry - stop)
     if risk <= 0:
@@ -73,7 +84,6 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     score += 16 if checks["breakout_retest"] else 0
     checks["ema_trend"] = (direction == "BUY" and trend_up) or (direction == "SELL" and trend_down)
     score += 10 if checks["ema_trend"] else 0
-    bias = ctx.bias_candles and (ema(ctx.bias_candles[-50:][0:0] or [c["close"] for c in ctx.bias_candles[-50:]], 21))
     htf_up = ema([c["close"] for c in ctx.bias_candles[-50:]], 21) > ema([c["close"] for c in ctx.bias_candles[-50:]], 50) if len(ctx.bias_candles) >= 50 else trend_up
     checks["htf_bias"] = (direction == "BUY" and htf_up) or (direction == "SELL" and not htf_up)
     score += 10 if checks["htf_bias"] else 0
@@ -85,7 +95,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         near_level = True
     checks["sr_confluence"] = near_level
     score += 8 if near_level else 0
-    checks["rsi_regime"] = (55 <= r <= 75) if direction == "BUY" else (25 <= r <= 45)
+    checks["rsi_regime"] = (52 <= r <= 75) if direction == "BUY" else (25 <= r <= 48)
     score += 6 if checks["rsi_regime"] else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
@@ -93,7 +103,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     score += 6 if checks["rr_ok"] else 0
 
-    if score < 55:
+    # v6.20.6: block isolated counter-HTF noise patterns without S/R or breakout retest
+    if not checks["htf_bias"] and not (checks["sr_confluence"] or checks["breakout_retest"]):
+        return None
+    if score < 70:
         return None
 
     reasons = [

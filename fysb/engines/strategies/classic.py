@@ -20,7 +20,7 @@ direction-correct side +14 · confirmation pattern +16 · EMA50 slope +10 ·
 kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, support_resistance
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 PROXIMITY_ATR = 2.0
 
@@ -35,7 +35,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     last = candles[-1]
     close = float(last["close"])
     checks: dict = {}
-    score = 40.0
+    score = 32.0
 
     e50_now = ema([float(c["close"]) for c in candles], 50)
     e50_prev = ema([float(c["close"]) for c in candles[:-6]], 50)
@@ -49,14 +49,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["trend_side"] = bool(direction)
     if not direction:
         return None
-    score += 20
+    score += 14
 
     # 2) EMA50 slope agrees with the direction (real trend, not a flat hug)
     slope_ok = (e50_now > e50_prev) if direction == "BUY" else (e50_now < e50_prev)
     checks["ema50_slope"] = slope_ok
     if not slope_ok:
         return None
-    score += 10
+    score += 8
 
     # 3) a REAL horizontal level retested from the correct side
     # support_resistance() returns the NEAREST swing-level below (support) and
@@ -74,13 +74,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["level_retest"] = level is not None
     if level is None:
         return None
-    score += 18
+    score += 12
     # correct side of the level (pullback INTO it, not a hopeless chase)
     side_ok = (close >= level - 0.2 * a) if direction == "BUY" else (close <= level + 0.2 * a)
     checks["correct_side"] = side_ok
     if not side_ok:
         return None
-    score += 14
+    score += 8
 
     # 4) candlestick confirmation in the trade direction
     patterns = candle_patterns(candles, limit=3)
@@ -90,7 +90,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["candle_confirm"] = confirm
     if not confirm:
         return None
-    score += 16
+    score += 12
 
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
@@ -106,6 +106,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         stop = max(level, max(float(c["high"]) for c in recent)) + 0.5 * a
     entry = close
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
@@ -115,7 +116,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     tp3 = entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5
     rr = 2.0
     checks["rr_ok"] = True
-    score += 8
+    score += 5
 
     if score < 55:
         return None

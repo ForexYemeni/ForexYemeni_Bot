@@ -70,7 +70,9 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_broadcast_text", "awaiting_support_config", "awaiting_support_field",
               "awaiting_restore", "awaiting_free_quota", "awaiting_demo_balance",
               "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
-              "awaiting_plan_field", "awaiting_plan_custom")
+              "awaiting_plan_field", "awaiting_plan_custom",
+              "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
+              "awaiting_partner_limit")
 
 # v6.10.0 — single-shot text-awaiting flags: a BUTTON PRESS means the admin is
 # navigating, not typing, so any stale one-shot flag left over from a prompt he
@@ -84,7 +86,12 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_demo_balance", "awaiting_expiry_hours", "awaiting_chan_add",
                 "awaiting_usdt_wallet", "awaiting_plan_field", "awaiting_plan_custom",
                 "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
-                "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt")
+                "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt",
+                "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
+                "awaiting_partner_limit",
+                "awaiting_gift_code", "awaiting_aff_wallet",
+                "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct",
+                "awaiting_exch_creds")
 
 
 def clear_flows(ud: dict) -> None:
@@ -98,10 +105,33 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.effective_message.text or "").strip()
     ud = context.user_data
 
+    # ---------- Phase 5 (v6.28.0) Free Crypto Exchange API Credentials ----------
+    if ud.get("awaiting_exch_creds"):
+        from fysb.handlers import crypto_api
+        if await crypto_api.handle_crypto_text_input(update, context, uid, text):
+            return
+
+    # ---------- Phase 4 (v6.27.0) Academy / Gift Codes / Affiliate Payouts ----------
+    if any(ud.get(k) for k in ("awaiting_gift_code", "awaiting_aff_wallet",
+                               "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct")):
+        from fysb.handlers import academy_growth
+        if await academy_growth.handle_growth_text_input(update, context, uid, text):
+            return
+
     # ---------- Admin flows ----------
     if uid == config.ADMIN_ID:
         handled = await _admin_text(update, context, uid, text)
         if handled:
+            return
+
+    # ---------- Partner private flows (v6.21.0) ----------
+    if ud.get("awaiting_partner_channel"):
+        from fysb.handlers import admin_partners
+        if await admin_partners.handle_partner_channel_input(update, context, uid, text):
+            return
+    if ud.get("awaiting_partner_brand"):
+        from fysb.handlers import admin_partners
+        if await admin_partners.handle_partner_brand_input(update, context, uid, text):
             return
 
     # ---------- User: own demo balance ----------
@@ -145,8 +175,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⛓ لم يُضبَط عنوان محفظة USDT على شبكة {chain} بعد — أرسل صورة الإيصال للمراجعة اليدوية أو تواصل مع الدعم.")
             return
         await update.effective_message.reply_text(f"⛓ جارٍ فحص المعاملة على شبكة {chain} (التأكيد + العنوان + المبلغ)…")
+        # Allow a 5-minute grace window before payment creation for users who transferred
+        # just before tapping the button, while blocking historical TXID replay attacks.
+        min_ts = max(0.0, float(req.get("created_at") or 0) - 300.0)
         res = await asyncio.to_thread(chain_verify.verify_usdt,
-                                      text.strip(), wallet, float(req["amount"] or 0), chain)
+                                      text.strip(), wallet, float(req["amount"] or 0), chain,
+                                      20.0, min_ts)
         if not res.get("ok"):
             ud["awaiting_usdt_txid"] = pid
             ud["usdt_chain"] = chain
@@ -180,6 +214,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▎🚀 كل مزايا الباقة تعمل الآن — افتح /menu وابدأ"
             "</blockquote>",
             parse_mode="HTML")
+        try:
+            from fysb.services import partners as partners_svc
+            await partners_svc.notify_commission_and_vip(
+                update.get_bot(), uid, req["plan_code"], appr.get("commission")
+            )
+        except Exception:
+            pass
         if config.ADMIN_ID:
             try:
                 await update.get_bot().send_message(
@@ -472,7 +513,8 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             ud["broadcast_draft"] = bid
             ud["awaiting_broadcast_photo"] = True   # a photo may now follow
             targets = broadcast_service.audience_ids(audience, plan)
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb
             # v6.8.1 — the preview IS the final look: the plain text is wrapped
             # in the royal announcement frame (never parsed as the admin's own
             # HTML), so what the admin confirms is exactly what users receive.
@@ -484,9 +526,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 "🖼 أرسل صورة الآن لإرفاقها بالإعلان (اختيارية)، أو أكد الإرسال.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=f"a:bcgo:{bid}")],
-                    [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
+                    [kb.btn("✅ تأكيد الإرسال", f"a:bcgo:{bid}", style="success")],
+                    [kb.btn("🚫 إلغاء", f"a:bccancel:{bid}", style="danger")],
+                    [kb.btn("↩️ الإعلانات", "a:broadcast", style="primary")],
                 ]))
         except Exception as e:
             # The broadcast flow must NEVER die with the generic error card —
@@ -546,6 +588,16 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         await admin_channels.handle_add_input(update, context, uid, text)
         return True
 
+    if ud.get("awaiting_partner_add"):
+        from fysb.handlers import admin_partners
+        await admin_partners.handle_partner_add_input(update, context, uid, text)
+        return True
+
+    if ud.get("awaiting_partner_limit"):
+        from fysb.handlers import admin_partners
+        await admin_partners.handle_partner_limit_input(update, context, uid, text)
+        return True
+
     return False
 
 
@@ -575,10 +627,11 @@ async def _plan_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: in
                 raise ValueError("السعر خارج النطاق")
             d["price"] = price
             d["step"] = "currency"
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(c, callback_data=f"a:plancur:{c}") for c in ("USD", "YER")],
-                                       [InlineKeyboardButton(c, callback_data=f"a:plancur:{c}") for c in ("SAR", "EUR")]])
-            await update.effective_message.reply_text(f"✅ السعر: <b>{price:g}</b>\n💎 اختر <b>العملة</b>:", parse_mode="HTML", reply_markup=kb)
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb_ui
+            kb_mk = InlineKeyboardMarkup([[kb_ui.btn(c, f"a:plancur:{c}", style="primary") for c in ("USD", "YER")],
+                                          [kb_ui.btn(c, f"a:plancur:{c}", style="primary") for c in ("SAR", "EUR")]])
+            await update.effective_message.reply_text(f"✅ السعر: <b>{price:g}</b>\n💎 اختر <b>العملة</b>:", parse_mode="HTML", reply_markup=kb_mk)
         else:
             ud.pop("plan_draft", None)
             await update.effective_message.reply_text("أعد إنشاء الباقة من قسم الباقات.")
@@ -690,15 +743,17 @@ async def _pm_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int,
     elif step == "instructions":
         d["instructions"] = text[:300]
         d["step"] = "plans"
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from telegram import InlineKeyboardMarkup
+        from fysb.ui import keyboards as kb_ui
         plans = await afn.run(_fetch_plans_list)
-        kb = [[InlineKeyboardButton(("✅ " if p["code"] in d.get("linked", []) else "") + p["title"],
-                                    callback_data=f"a:pmplan:{p['code']}")] for p in plans]
-        kb.append([InlineKeyboardButton("💾 حفظ الوسيلة", callback_data="a:pmsave"),
-                   InlineKeyboardButton("🗑 إلغاء", callback_data="a:pmcancel")])
+        kb_rows = [[kb_ui.btn(("✅ " if p["code"] in d.get("linked", []) else "▫️ ") + p["title"],
+                              f"a:pmplan:{p['code']}",
+                              style="success" if p["code"] in d.get("linked", []) else "primary")] for p in plans]
+        kb_rows.append([kb_ui.btn("💾 حفظ الوسيلة", "a:pmsave", style="success"),
+                        kb_ui.btn("🗑 إلغاء", "a:pmcancel", style="danger")])
         await update.effective_message.reply_text(
             f"✅ التعليمات حُفظت.\n💎 اختر <b>الباقات المرتبطة</b> (اضغط للتبديل) ثم احفظ:",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_rows))
     else:
         context.user_data.pop("pm_draft", None)
         await update.effective_message.reply_text("أعد إضافة الوسيلة من قسم وسائل الدفع.")
@@ -728,10 +783,11 @@ async def _broker_step(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: 
             "🆔 أرسل <b>معرّف الحساب</b> (Account ID / Login) — أو <code>-</code> للتخطي:", parse_mode="HTML")
     elif step == "account_id":
         d["account_id"] = "" if text == "-" else text[:60]
-        # Save (credentials stored only in config_json; never rendered)
+        # Save encrypted at rest (ENC1 Encrypt-then-MAC; never rendered)
+        from fysb.services import secrets as secrets_service
         cfg = {"base_url": d.get("base_url", ""), "api_key": d["api_key"],
                "api_secret": d["api_secret"], "account_id": d["account_id"]}
-        bid = await afn.run(_insert_broker, d["type"], d["name"], json.dumps(cfg))
+        bid = await afn.run(_insert_broker, d["type"], d["name"], secrets_service.encrypt_json(cfg))
         context.user_data.pop("broker_draft", None)
         await afn.run(audit_log.log, uid, f"broker_added:{d['type']}:{bid}")
         await update.effective_message.reply_text(
@@ -859,11 +915,13 @@ def _bot_sender(context):
 
 
 def bot_sender_from(bot):
-    """Bot-object variant of _bot_sender (used by signal_now + watchers)."""
+    """Bot-object variant of _bot_sender (used by signal_now + watchers).
+    Carries `_bot` so emit_to_users can broadcast to enabled channels too."""
 
     async def send(uid: int, text: str):
         return await bot.send_message(uid, text, parse_mode="HTML")
 
+    send._bot = bot
     return send
 
 
@@ -882,13 +940,14 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if b:
             await afn.run(_broadcast_set_photo, bid, photo.file_id)
             targets = await afn.run(broadcast_service.audience_ids, b["audience"], b["plan_code"])
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui import keyboards as kb_ui
             await update.effective_message.reply_text(
                 f"✅ أُرفقت الصورة بالإعلان #{bid}.\nعدد المستلمين: {len(targets)}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 إرسال الآن", callback_data=f"a:bcgo:{bid}")],
-                    [InlineKeyboardButton("🚫 إلغاء", callback_data=f"a:bccancel:{bid}")],
-                    [InlineKeyboardButton("↩️ الإعلانات", callback_data="a:broadcast")],
+                    [kb_ui.btn("🚀 إرسال الآن", f"a:bcgo:{bid}", style="success")],
+                    [kb_ui.btn("🚫 إلغاء", f"a:bccancel:{bid}", style="danger")],
+                    [kb_ui.btn("↩️ الإعلانات", "a:broadcast", style="primary")],
                 ]))
         else:
             await update.effective_message.reply_text("⚠️ لا يوجد مسودة إعلان — ابدأ من قسم الإعلانات.")
@@ -899,15 +958,70 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pid:
         ok = await afn.run(payments_service.attach_receipt, int(pid), uid, photo.file_id)
         if ok:
-            await update.effective_message.reply_text(f"✅ استلمنا إيصال الطلب #{pid}. سيظهر للإدارة للمراجعة.")
+            preq = await afn.run(payments_service.get_request, int(pid))
+            plan_code = (preq["plan_code"] if preq else "") or "—"
+            plan_row = await afn.run(_fetch_plan_row, plan_code) if plan_code != "—" else None
+            plan_title = esc(plan_row["title"]) if plan_row else esc(plan_code)
+            plan_cur = esc(plan_row["currency"]) if plan_row else "USD"
+            amt = float(preq["amount"] or 0) if preq else 0.0
+            method_txt = esc((preq["method"] if preq else "") or "MANUAL")
+            tg_u = update.effective_user
+            u_name = esc((tg_u.full_name or tg_u.username or f"User {uid}") if tg_u else f"User {uid}")
+            u_handle = f" (@{esc(tg_u.username)})" if (tg_u and tg_u.username) else ""
+
+            await update.effective_message.reply_text(
+                f"✅ <b><u>تم استلام إيصال الطلب #{pid} بنجاح!</u></b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "<blockquote>"
+                f"▎💎 الباقة: <b>{plan_title}</b>\n"
+                f"▎💰 المبلغ: <b>{amt:g} {plan_cur}</b> · الوسيلة: <b>{method_txt}</b>\n"
+                "▎⏳ تم إرسال الإيصال فوراً إلى الإدارة للمراجعة — سيصلك إشعار لحظي فور الاعتماد والتفعيل."
+                "</blockquote>",
+                parse_mode="HTML",
+            )
             if config.ADMIN_ID:
+                from telegram import InlineKeyboardMarkup
+                from fysb.ui import keyboards as kb_ui
+                adm_caption = (
+                    f"🧾 <b><u>إيصال دفع جديد بانتظار الاعتماد — طلب #{pid}</u></b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "<blockquote>"
+                    f"▎👤 المستخدم: <b>{u_name}</b>{u_handle}\n"
+                    f"▎🆔 المعرّف: <code>{uid}</code>\n"
+                    f"▎💎 الباقة: <b>{plan_title}</b> (<code>{esc(plan_code)}</code>)\n"
+                    f"▎💰 المبلغ: <b>{amt:g} {plan_cur}</b> · الوسيلة: <b>{method_txt}</b>\n"
+                    "▎📌 الحالة: <b>⏳ بانتظار قرارك الفوري</b>"
+                    "</blockquote>"
+                )
+                adm_markup = InlineKeyboardMarkup([
+                    [
+                        kb_ui.btn("✅ قبول وتفعيل الباقة فوراً", f"a:approvepay:{pid}", style="success"),
+                        kb_ui.btn("❌ رفض الطلب", f"a:rejectpay:{pid}", style="danger"),
+                    ],
+                    [
+                        kb_ui.btn(f"🧾 تفاصيل الطلب #{pid}", f"a:paymentdetail:{pid}", style="primary"),
+                        kb_ui.btn("👤 ملف المستخدم", f"a:userdetail:{uid}", style="primary"),
+                    ],
+                ])
                 try:
-                    preq = await afn.run(payments_service.get_request, pid)
-                    await context.bot.send_photo(config.ADMIN_ID, photo.file_id,
-                                                 caption=f"🧾 إيصال دفع جديد #{pid}\nالمستخدم: {uid}\n"
-                                                         f"الباقة: {preq['plan_code']}")
+                    await context.bot.send_photo(
+                        config.ADMIN_ID,
+                        photo.file_id,
+                        caption=adm_caption,
+                        parse_mode="HTML",
+                        reply_markup=adm_markup,
+                    )
                 except Exception:
-                    pass
+                    try:
+                        await context.bot.send_photo(
+                            config.ADMIN_ID,
+                            photo.file_id,
+                            caption=adm_caption,
+                            parse_mode="HTML",
+                            reply_markup=kb_ui.strip_button_styles(adm_markup),
+                        )
+                    except Exception:
+                        pass
         else:
             await update.effective_message.reply_text("⚠️ الطلب غير موجود أو تمت مراجعته مسبقاً.")
         return

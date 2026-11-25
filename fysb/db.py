@@ -10,6 +10,7 @@ Guarantees (both engines):
     is taken automatically when a structural change is applied.
   * All multi-step writes use explicit transactions.
 """
+import json
 import sqlite3
 import threading
 import time
@@ -27,6 +28,8 @@ IntegrityError = pglayer.IntegrityError if config.USE_PG else sqlite3.IntegrityE
 
 _local = threading.local()
 _migration_lock = threading.Lock()
+_wal_ready_paths: set[str] = set()
+_wal_lock = threading.Lock()
 
 
 def now() -> str:
@@ -38,12 +41,16 @@ def day_start_utc() -> str:
 
 
 def conn():
-    """Engine-appropriate connection (PG: pooled session; SQLite: fresh)."""
+    """Engine-appropriate connection (PG: pooled autocommit session; SQLite: fast WAL)."""
     if config.USE_PG:
         return pglayer.conn()
-    c = sqlite3.connect(str(config.DB_FILE), timeout=30)
+    db_path = str(config.DB_FILE)
+    c = sqlite3.connect(db_path, timeout=30)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    if db_path not in _wal_ready_paths:
+        c.execute("PRAGMA journal_mode=WAL")
+        with _wal_lock:
+            _wal_ready_paths.add(db_path)
     c.execute("PRAGMA foreign_keys=ON")
     c.execute("PRAGMA busy_timeout=15000")
     c.execute("PRAGMA synchronous=NORMAL")
@@ -96,9 +103,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', full_name TEXT DEFAULT '',
   joined_at TEXT NOT NULL, is_blocked INTEGER DEFAULT 0,
-  notifications INTEGER DEFAULT 1, timeframe TEXT DEFAULT 'M15',
-  strategy TEXT DEFAULT '', market TEXT DEFAULT 'XAUUSD',
-  min_score INTEGER DEFAULT 80, language TEXT DEFAULT 'ar'
+  notifications INTEGER DEFAULT 1, timeframe TEXT DEFAULT '',
+  strategy TEXT DEFAULT '', market TEXT DEFAULT '',
+  min_score INTEGER DEFAULT 0, language TEXT DEFAULT 'ar'
 );
 CREATE TABLE IF NOT EXISTS plans(
   code TEXT PRIMARY KEY, title TEXT NOT NULL, price REAL DEFAULT 0,
@@ -269,6 +276,200 @@ CREATE TABLE IF NOT EXISTS referrals(
   converted INTEGER NOT NULL DEFAULT 0, converted_at TEXT DEFAULT '',
   plan_code TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS channel_partners(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER UNIQUE NOT NULL,
+  title TEXT DEFAULT '',
+  campaign_code TEXT UNIQUE NOT NULL,
+  commission_pct REAL NOT NULL DEFAULT 25.0,
+  post_mode TEXT NOT NULL DEFAULT 'teaser',
+  sample_daily_limit INTEGER NOT NULL DEFAULT 2,
+  perm_auto_signals INTEGER NOT NULL DEFAULT 1,
+  perm_auto_analysis INTEGER NOT NULL DEFAULT 1,
+  perm_manual_post INTEGER NOT NULL DEFAULT 1,
+  perm_choose_markets INTEGER NOT NULL DEFAULT 1,
+  perm_custom_branding INTEGER NOT NULL DEFAULT 1,
+  perm_vip_gatekeeper INTEGER NOT NULL DEFAULT 1,
+  max_channels INTEGER NOT NULL DEFAULT 2,
+  manual_analysis_limit INTEGER NOT NULL DEFAULT 6,
+  manual_signal_limit INTEGER NOT NULL DEFAULT 6,
+  manual_usage_date TEXT DEFAULT '',
+  manual_analysis_used INTEGER NOT NULL DEFAULT 0,
+  manual_signal_used INTEGER NOT NULL DEFAULT 0,
+  brand_label TEXT DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS partner_commissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  partner_id INTEGER NOT NULL,
+  buyer_user_id INTEGER NOT NULL,
+  plan_code TEXT NOT NULL,
+  payment_id INTEGER DEFAULT 0,
+  gross_amount REAL NOT NULL DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  commission_pct REAL NOT NULL DEFAULT 25.0,
+  commission_amount REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'EARNED',
+  created_at TEXT NOT NULL,
+  paid_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS vip_channel_members(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id INTEGER NOT NULL,
+  chat_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  invite_link TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  granted_at TEXT NOT NULL,
+  removed_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS free_trial_reminders(
+  user_id INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  sent_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, stage)
+);
+CREATE TABLE IF NOT EXISTS user_risk_profiles(
+  user_id INTEGER PRIMARY KEY,
+  balance REAL NOT NULL DEFAULT 1000.0,
+  risk_pct REAL NOT NULL DEFAULT 1.0,
+  leverage INTEGER NOT NULL DEFAULT 100,
+  max_daily_dd_pct REAL NOT NULL DEFAULT 3.0,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trade_journal(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  signal_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  action TEXT NOT NULL,
+  lots REAL NOT NULL DEFAULT 0.01,
+  risk_usd REAL NOT NULL DEFAULT 0.0,
+  realized_pips REAL NOT NULL DEFAULT 0.0,
+  realized_usd REAL NOT NULL DEFAULT 0.0,
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  created_at TEXT NOT NULL,
+  closed_at TEXT DEFAULT '',
+  UNIQUE(user_id, signal_id)
+);
+CREATE TABLE IF NOT EXISTS academy_lessons(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  title TEXT NOT NULL,
+  track TEXT NOT NULL DEFAULT 'FREE',
+  sort_order INTEGER NOT NULL DEFAULT 1,
+  summary TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  quiz_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS academy_enrollments(
+  user_id INTEGER PRIMARY KEY,
+  plan_type TEXT NOT NULL DEFAULT 'PAID',
+  starts_at TEXT NOT NULL,
+  ends_at TEXT DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'MANUAL',
+  granted_by INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS academy_progress(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  lesson_code TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0,
+  quiz_score INTEGER NOT NULL DEFAULT 0,
+  quiz_total INTEGER NOT NULL DEFAULT 0,
+  completed_at TEXT DEFAULT '',
+  UNIQUE(user_id, lesson_code)
+);
+CREATE TABLE IF NOT EXISTS gift_codes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  target_plan TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  max_uses INTEGER NOT NULL DEFAULT 1,
+  uses_count INTEGER NOT NULL DEFAULT 0,
+  note TEXT DEFAULT '',
+  created_by INTEGER DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  expires_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS gift_redemptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  target_plan TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  redeemed_at TEXT NOT NULL,
+  UNIQUE(code_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS affiliate_links(
+  invitee_id INTEGER PRIMARY KEY,
+  referrer_id INTEGER NOT NULL,
+  converted INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affiliate_commissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  referrer_id INTEGER NOT NULL,
+  referred_user_id INTEGER NOT NULL,
+  payment_id INTEGER DEFAULT 0,
+  amount_usd REAL NOT NULL DEFAULT 0.0,
+  rate_pct REAL NOT NULL DEFAULT 15.0,
+  commission_usd REAL NOT NULL DEFAULT 0.0,
+  tier_name TEXT NOT NULL DEFAULT 'BRONZE',
+  status TEXT NOT NULL DEFAULT 'CREDITED',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affiliate_payouts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  amount_usd REAL NOT NULL DEFAULT 0.0,
+  wallet_address TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  admin_note TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  processed_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS user_exchange_keys(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  exchange TEXT NOT NULL,
+  label TEXT DEFAULT '',
+  testnet INTEGER NOT NULL DEFAULT 1,
+  auto_execute INTEGER NOT NULL DEFAULT 0,
+  risk_pct REAL NOT NULL DEFAULT 1.0,
+  max_trade_usd REAL NOT NULL DEFAULT 100.0,
+  creds_enc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  last_check_at TEXT DEFAULT '',
+  last_error TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, exchange)
+);
+CREATE TABLE IF NOT EXISTS exchange_orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  exchange TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  qty REAL NOT NULL DEFAULT 0.0,
+  entry_price REAL NOT NULL DEFAULT 0.0,
+  stop_price REAL NOT NULL DEFAULT 0.0,
+  tp1_price REAL NOT NULL DEFAULT 0.0,
+  testnet INTEGER NOT NULL DEFAULT 1,
+  order_id TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'SUBMITTED',
+  raw_response TEXT DEFAULT '',
+  signal_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -328,9 +529,28 @@ ADD_COLUMNS = {
         "partials_done": "INTEGER DEFAULT 0",
         "initial_lots": "REAL DEFAULT 0",
     },
+    "broadcast_channels": {
+        "owner_partner_id": "INTEGER DEFAULT 0",
+        "post_mode": "TEXT DEFAULT ''",
+        "is_vip_gate": "INTEGER DEFAULT 0",
+        "vip_min_plan": "TEXT DEFAULT ''",
+        "daily_full_date": "TEXT DEFAULT ''",
+        "daily_full_count": "INTEGER DEFAULT 0",
+    },
+    "channel_partners": {
+        "manual_analysis_limit": "INTEGER NOT NULL DEFAULT 6",
+        "manual_signal_limit": "INTEGER NOT NULL DEFAULT 6",
+        "manual_usage_date": "TEXT DEFAULT ''",
+        "manual_analysis_used": "INTEGER NOT NULL DEFAULT 0",
+        "manual_signal_used": "INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_partners_user ON channel_partners(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_partcomm_partner ON partner_commissions(partner_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_vipmem_status ON vip_channel_members(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vipmem_chan ON vip_channel_members(channel_id, user_id)",
     "CREATE INDEX IF NOT EXISTS idx_signals_status_created ON signals(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_signals_source_time ON signals(source, created_at)",
@@ -354,6 +574,14 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_ref_campaign ON referrals(campaign_id, converted)",
     "CREATE INDEX IF NOT EXISTS idx_ref_invitee ON referrals(invitee_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchers_due ON signal_watchers(status, next_run)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_txid_uniq ON payments(LOWER(txid)) WHERE txid IS NOT NULL AND txid != ''",
+    "CREATE INDEX IF NOT EXISTS idx_acad_prog_user ON academy_progress(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_redemp_user ON gift_redemptions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_comm_ref ON affiliate_commissions(referrer_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_links_ref ON affiliate_links(referrer_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_payout_status ON affiliate_payouts(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_exch_keys_user ON user_exchange_keys(user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_exch_orders_user ON exchange_orders(user_id, created_at)",
 ]
 
 DEFAULT_SETTINGS = {
@@ -367,16 +595,19 @@ DEFAULT_SETTINGS = {
     "default_market": "XAUUSD",
     "engine_interval_seconds": "300",
     "engine_min_score": "80",
+    "min_signal_score": "72",
     # Risk engine (policy enforced server-side)
     "risk_per_trade_pct": "1.0",
     "max_daily_risk_pct": "3.0",
     "max_daily_loss_pct": "5.0",
-    "max_open_signals": "3",
+    "max_open_per_symbol": "3",
+    "max_open_signals": "12",
+    "max_correlated_signals": "3",
     "min_rr": "2.0",
     "volatility_filter": "1",
     "atr_pct_max": "6.0",
     # FREE quota (server-enforced, anti-bypass)
-    "free_daily_signals": "2",
+    "free_daily_signals": "1",
     # Subscriptions
     "expiry_remind_days": "3",
     "signal_expiry_hours": "72",
@@ -393,6 +624,29 @@ DEFAULT_SETTINGS = {
     "analytics_enabled": "1",
     # Auto channel posts (Mecca-time scheduler)
     "channels_quiet_hours": "1-7",
+    # UI navigation mode (v6.14.1): "0" = proven FRESH reply_text message on
+    # every button tap (guarantees every page opens visibly right below the
+    # tap); "1" = opt-in in-place edit_text (toggleable live in Admin Settings).
+    "ui_edit_in_place": "0",
+    # Admin personal signal-receive filter (v6.17.0): "" = receive ALL enabled
+    # markets; comma-separated symbols (e.g. "XAUUSD") = Admin receives personal
+    # signal/tracker alerts ONLY for those symbols while users & channels keep
+    # receiving every enabled market allowed by their plan/channel filters.
+    "admin_signal_markets": "",
+    # v6.24.0 Multi-timeframe auto scanner (comma-separated enabled TFs, e.g. M15,H1)
+    "engine_scan_timeframes": "M15,H1",
+    # v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
+    "news_guard_enabled": "1",
+    "news_guard_minutes": "30",
+    # v6.26.0 Local zero-cost institutional charts (Pillow)
+    "charts_enabled": "1",
+    # v6.27.0 Independent Trading Academy + Tiered Affiliates
+    "academy_enabled": "1",
+    "academy_price_usd": "49",
+    "academy_duration_days": "365",
+    "affiliate_min_payout_usd": "20",
+    # v6.28.0 Free Crypto Exchange API Integration (Binance/Bybit/OKX)
+    "crypto_api_enabled": "1",
 }
 
 SEED_MARKETS = [
@@ -443,40 +697,73 @@ SEED_TIMEFRAMES = [("M1", "1min"), ("M5", "5min"), ("M15", "15min"), ("M30", "30
 SEED_TIMEFRAME_AR = {"M1": "1 دقيقة", "M5": "5 دقائق", "M15": "15 دقيقة", "M30": "30 دقيقة",
                      "H1": "ساعة", "H4": "4 ساعات", "D1": "يومي", "W1": "أسبوعي"}
 
+ROYAL_MARKETS = (
+    "XAUUSD,XAGUSD,XPTUSD,"
+    "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,USDCAD,NZDUSD,"
+    "EURJPY,GBPJPY,EURGBP,"
+    "BTCUSD,ETHUSD,SOLUSD,XRPUSD,"
+    "US30,NAS100,SPX500"
+)
+
 SEED_PLANS = [
-    ("FREE", "Free", 0.0, "USD", 0, 80, 0, 1, "XAUUSD", "M15", "ICT,PRICE_ACTION", 2),
-    ("PRO", "Pro", 19.0, "USD", 30, 70, 1, 1, "XAUUSD,EURUSD", "M5,M15,H1,H4", "ICT,SMC,PRICE_ACTION", 15),
-    ("VIP", "VIP", 49.0, "USD", 30, 60, 3, 0, "XAUUSD,EURUSD,GBPUSD", "M5,M15,M30,H1,H4,D1", "ICT,SMC,PRICE_ACTION", 50),
+    ("FREE", "الباقة المجانية — FREE", 0.0, "USD", 7, 80, 0, 1,
+     "XAUUSD", "M15,H1", "CLASSIC,TREND", 1),
+    ("PRO", "الباقة الاحترافية — PRO", 19.0, "USD", 30, 72, 1, 1,
+     "XAUUSD,EURUSD,GBPUSD,USDJPY", "M15,M30,H1,H4",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU", 4),
+    ("VIP", "باقة كبار الشخصيات — VIP", 39.0, "USD", 30, 65, 2, 1,
+     "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,US30,NAS100,BTCUSD",
+     "M5,M15,M30,H1,H4,D1",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF", 10),
+    ("ROYAL", "الباقة الملكية — ROYAL ELITE", 79.0, "USD", 30, 60, 5, 1,
+     ROYAL_MARKETS, "M1,M5,M15,M30,H1,H4,D1",
+     "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP", 25),
 ]
 
 # Daily analyses quota per plan (admin-adjustable; 0 = analytics disabled for the plan)
-DEFAULT_ANALYSES_QUOTA = {"FREE": 3, "PRO": 10, "VIP": 30}
+DEFAULT_ANALYSES_QUOTA = {"FREE": 1, "PRO": 4, "VIP": 10, "ROYAL": 25}
 
 # Strategy codes implemented + covered by the automated test-suite.
 IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
                           "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU",
                           "CLASSIC", "SK", "WYCKOFF"]
 
-# v6.10.0 — LUXURY PLAN DEFAULTS (owner demand: «اضبط انت اعدادات الباقات بشكل
-# فاخر جداً»). A one-time migration stamps FREE/PRO/VIP with these exact
-# values, and the old boot-time force-merge of implemented strategies into
-# every plan is retired — the tiering stays EXACTLY as designed.
-LUXURY_PLANS_V6100 = {
-    "FREE": {"title": "Free", "price": 0.0, "duration_days": 0, "min_score": 80,
-             "max_signals_per_day": 2, "max_analyses_per_day": 3,
-             "markets": "XAUUSD", "timeframes": "M15",
-             "strategies": "ICT,PRICE_ACTION", "enabled": 1},
-    "PRO": {"title": "Pro", "price": 19.0, "duration_days": 30, "min_score": 70,
-            "max_signals_per_day": 5, "max_analyses_per_day": 10,
-            "markets": "XAUUSD,EURUSD,GBPUSD", "timeframes": "M15,M30,H1,H4",
-            "strategies": "ICT,SMC,PRICE_ACTION,CRT,AMD", "enabled": 1},
-    "VIP": {"title": "VIP", "price": 49.0, "duration_days": 30, "min_score": 60,
-            "max_signals_per_day": 12, "max_analyses_per_day": 30,
-            "markets": "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,BTCUSD,ETHUSD",
-            "timeframes": "M5,M15,M30,H1,H4,D1",
-            "strategies": ",".join(IMPLEMENTED_STRATEGIES), "enabled": 1},
+# v6.22.0 — 4-TIER ROYAL PLAN ARCHITECTURE (FREE trial + PRO + VIP + ROYAL ELITE).
+# One-time versioned migration stamps all 4 plans, enables all plan markets and
+# all 13 implemented strategies, and sets FREE's configurable trial duration (7d).
+# Subsequent boots NEVER overwrite Admin's own customizations.
+PLANS_4TIER_V6220 = {
+    "FREE": {
+        "title": "الباقة المجانية — FREE", "price": 0.0, "duration_days": 7, "min_score": 80,
+        "max_signals_per_day": 1, "max_analyses_per_day": 1,
+        "markets": "XAUUSD", "timeframes": "M15,H1",
+        "strategies": "CLASSIC,TREND", "enabled": 1,
+    },
+    "PRO": {
+        "title": "الباقة الاحترافية — PRO", "price": 19.0, "duration_days": 30, "min_score": 72,
+        "max_signals_per_day": 4, "max_analyses_per_day": 4,
+        "markets": "XAUUSD,EURUSD,GBPUSD,USDJPY", "timeframes": "M15,M30,H1,H4",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU", "enabled": 1,
+    },
+    "VIP": {
+        "title": "باقة كبار الشخصيات — VIP", "price": 39.0, "duration_days": 30, "min_score": 65,
+        "max_signals_per_day": 10, "max_analyses_per_day": 10,
+        "markets": "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,US30,NAS100,BTCUSD",
+        "timeframes": "M5,M15,M30,H1,H4,D1",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF", "enabled": 1,
+    },
+    "ROYAL": {
+        "title": "الباقة الملكية — ROYAL ELITE", "price": 79.0, "duration_days": 30, "min_score": 60,
+        "max_signals_per_day": 25, "max_analyses_per_day": 25,
+        "markets": ROYAL_MARKETS, "timeframes": "M1,M5,M15,M30,H1,H4,D1",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP",
+        "enabled": 1,
+    },
 }
+# Legacy alias kept for compatibility with older imports
+LUXURY_PLANS_V6100 = PLANS_4TIER_V6220
 PLANS_LUXURY_FLAG = "plans_luxury_v6100_applied"
+PLANS_4TIER_FLAG = "plans_4tier_v6220_applied"
 
 SEED_MODES = [
     ("A", "SIGNALS ONLY", "تحليل/نشر التوصيات دون تنفيذ صفقات.", 1, 1, "signals"),
@@ -547,6 +834,26 @@ def _normalize_strategy_preference(c) -> bool:
     return changed > 0
 
 
+def _clear_all_caches() -> None:
+    """Reset all process-local TTL caches (called on init_db / DB switches)."""
+    global _settings_bulk_at
+    with _settings_lock:
+        _settings_cache.clear()
+        _settings_bulk_at = 0.0
+    with _wal_lock:
+        _wal_ready_paths.clear()
+    try:
+        from fysb.services import subscriptions as _subs
+        _subs.invalidate_plans_cache()
+    except Exception:
+        pass
+    try:
+        from fysb.services import strategy_stats as _ss
+        _ss.invalidate_leaderboard_cache()
+    except Exception:
+        pass
+
+
 def init_db(snapshot_before_structural: bool = True) -> list[str]:
     """Initialize schema and run additive migrations. Returns log lines.
 
@@ -556,6 +863,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
     """
     log_lines: list[str] = []
     with _migration_lock:
+        _clear_all_caches()
         c = conn()
         try:
             if config.USE_PG:
@@ -593,10 +901,43 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 c.commit()
             _apply_add_columns(c)
             for idx in INDEXES:
-                c.execute(idx)
+                try:
+                    c.execute(idx)
+                except Exception as idx_err:
+                    log_lines.append(f"index warning: {idx_err}")
             _rename_legacy_elite_plan(c)
             for k, v in DEFAULT_SETTINGS.items():
                 c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+            # v6.14.1 one-time hotfix: databases upgraded through v6.13.0/v6.14.0
+            # got ui_edit_in_place='1' which hid pages on scrolled chats. Reset
+            # once to '0' (proven fresh-page delivery); admin can still opt in via Settings.
+            if get_setting("ui_render_reset_v6141", "") != "1":
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES('ui_edit_in_place','0') "
+                    "ON CONFLICT(key) DO UPDATE SET value='0'"
+                )
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('ui_render_reset_v6141','1')")
+                with _settings_lock:
+                    _settings_cache["ui_edit_in_place"] = ("0", time.time())
+                    _settings_cache["ui_render_reset_v6141"] = ("1", time.time())
+            # v6.18.0 one-time multi-market risk upgrade: databases still at the
+            # old single-market default max_open_signals='3' are smoothly raised
+            # to '12' paired with max_open_per_symbol='2' (custom admin values
+            # are preserved untouched).
+            if get_setting("risk_multimarket_v6180", "") != "1":
+                r_cur = c.execute("SELECT value FROM settings WHERE key='max_open_signals'").fetchone()
+                cur_max = (r_cur["value"] if r_cur else "").strip()
+                if cur_max in ("", "3", "3.0"):
+                    c.execute(
+                        "INSERT INTO settings(key,value) VALUES('max_open_signals','12') "
+                        "ON CONFLICT(key) DO UPDATE SET value='12'"
+                    )
+                    with _settings_lock:
+                        _settings_cache["max_open_signals"] = ("12", time.time())
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('max_open_per_symbol','3')")
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('risk_multimarket_v6180','1')")
+                with _settings_lock:
+                    _settings_cache["risk_multimarket_v6180"] = ("1", time.time())
             # Real-Entry protocol epoch (v6.6.4): signals CREATED before this
             # instant were born under the old pipeline that never recorded the
             # birth quote — the tracker may prove their at-birth fill from the
@@ -604,28 +945,50 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             # carry an exact birth status; the heuristic never touches them.
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('real_entry_protocol_since',?)",
                       (config.now(),))
+            # v6.12.0: Seed markets/timeframes/strategies WITHOUT wiping admin
+            # enabled toggles across restarts!
+            # Fresh rows get the GOLD-FIRST defaults (XAUUSD enabled=1, others 0;
+            # metal/forex/crypto verified=1); existing rows keep their admin state.
             for sym, title, provider, cat, pip, digits, contract, spread in SEED_MARKETS:
+                init_verified = 1 if cat in SEED_VERIFIED_CATEGORIES else 0
+                init_enabled = 1 if sym == GOLD_DEFAULT_SYMBOL else 0
                 c.execute(
                     """INSERT INTO market_catalog(symbol,title,provider_symbol,enabled,verified,created_at,updated_at,
                        pip_size,digits,contract_size,category,spread_pips)
-                       VALUES(?,?,?,0,0,?,?,?,?,?,?,?)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(symbol) DO NOTHING""",
-                    (sym, title, provider, config.now(), config.now(), pip, digits, contract, cat, spread))
-            # Fill instrument specs for pre-existing catalog rows (additive).
+                    (sym, title, provider, init_enabled, init_verified, config.now(), config.now(),
+                     pip, digits, contract, cat, spread))
+            # Fill instrument specs & verified coverage for pre-existing catalog rows (never clobbers enabled).
             for sym, _t, _p, cat, pip, digits, contract, spread in SEED_MARKETS:
                 c.execute("""UPDATE market_catalog SET pip_size=?,digits=?,contract_size=?,category=?,spread_pips=?
                              WHERE symbol=? AND (pip_size IS NULL OR pip_size=0)""",
                           (pip, digits, contract, cat, spread, sym))
+                if cat in SEED_VERIFIED_CATEGORIES:
+                    c.execute("UPDATE market_catalog SET verified=1, updated_at=? WHERE symbol=? AND verified=0",
+                              (config.now(), sym))
+            # Self-heal only when literally ZERO markets are enabled (never overrides active choices).
+            if (c.execute("SELECT COUNT(*) n FROM market_catalog WHERE enabled=1").fetchone()["n"] or 0) == 0:
+                c.execute("UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
+                          (config.now(), GOLD_DEFAULT_SYMBOL))
+
             for code, interval in SEED_TIMEFRAMES:
-                c.execute("INSERT OR IGNORE INTO timeframe_catalog(code,provider_interval,enabled,verified,created_at,updated_at) VALUES(?,?,0,0,?,?)",
+                c.execute("INSERT OR IGNORE INTO timeframe_catalog(code,provider_interval,enabled,verified,created_at,updated_at) VALUES(?,?,1,1,?,?)",
                           (code, interval, config.now(), config.now()))
+            if (c.execute("SELECT COUNT(*) n FROM timeframe_catalog WHERE enabled=1").fetchone()["n"] or 0) == 0:
+                for code, _interval in SEED_TIMEFRAMES:
+                    c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                              (config.now(), code))
+
+            # v6.12.0 — ONLY real implemented & automated-tested strategies exist
+            # in the catalog (all 25 empty/unimplemented placeholders purged).
             for code, title, desc in [
                 ("ICT", "ICT", "Liquidity sweeps, FVG, order blocks, displacement, kill zones."),
                 ("SMC", "Smart Money Concepts", "BOS/CHOCH, HH/HL/LH/LL, supply & demand."),
                 ("PRICE_ACTION", "Price Action", "Engulfing, pin bar, breakout/retest, S/R."),
                 ("CRT", "Candle Range Theory", "مدى الشمعة المرجعية، سحب السيولة، إغلاق داخل المدى، دخول CRT 50%."),
                 ("AMD", "Power of Three", "تراكم · تلاعب · توزيع على نطاق الافتتاح (Judas Swing)."),
-                ("TURTLE_SOUP", "Turtle Soup", "فشل كسر قمة/قمة 20 شمعة وانعكاس مضاد (اصطياد السيولة)."),
+                ("TURTLE_SOUP", "Turtle Soup", "فشل كسر قمة/قاع 20 شمعة وانعكاس مضاد (اصطياد السيولة)."),
                 ("SILVER_BULLET", "Silver Bullet", "نوافذ ICT الزمنية (لندن/نيويورك) + استمرار FVG."),
                 ("FIBONACCI", "Fibonacci Golden Pocket", "مستوى ارتداد 61.8–78.6% من الموجة الدافعية مع بنية سليمة (منفذة واختبارة آلياً)."),
                 ("TREND", "Trend Following", "ترتيب المتوسطات 9/21/50 + ارتداد إلى قيمة EMA21 واستئناف الاتجاه (منفذة واختبارة آلياً)."),
@@ -633,89 +996,47 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("CLASSIC", "CLASSIC", "التحليل الكلاسيكي: اتجاه EMA50 + مستوى أفقي حقيقي من القمم والقيعان + تأكيد شمعة ابتلاع/دبوس (منفذة واختبارة آلياً)."),
                 ("SK", "SK", "محرك سكالبينج سريع: مستوى مفتاحي 12 شمعة يُكسر بإغلاق مؤكد + زخم RSI + اتجاه EMA9/21 (منفذة واختبارة آلياً)."),
                 ("WYCKOFF", "Wyckoff", "منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً)."),
-                # --- v6.8.1: مجموعات الاستراتيجيات العالمية الكاملة (كل مدرسة، كلها) ---
-                # كل صف يُولد مغلقاً وغير مختبر (حوكمة صادقة) حتى يُنفذ ويُختبر آلياً.
-                ("ELLIOTT_WAVE", "Elliott Waves",
-                 "عد موجات إليوت: دافعية 1-2-3-4-5 وتصحيحية A-B-C مع مناطق التماثل وقيادة الموجة الثالثة."),
-                ("HARMONIC", "Harmonic Patterns",
-                 "أنماط توافقية بنِسب فيبوناتشي المضبوطة: جارتفلي · بات · كاب · بترفلاي ومنطقة PRZ."),
-                ("VOLUME_PROFILE", "Volume Profile",
-                 "توزيع الحجم بالسعر: POC وحدود منطقة القيمة VAH/VAL ومناطق القيمة العادلة لكل جلسة."),
-                ("VWAP", "VWAP",
-                 "السعر المتوسط المرجح بالحجم: انحرافات ±1/±2 للانضباط المؤسسي وانعكاسات الانحراف."),
-                ("BREAKOUT_RETEST", "Breakout & Retest",
-                 "كسر مستوى هيكلي بإغلاق مؤكد ثم إعادة اختبار ناجحة ودخول مع الاستمرار — الكلاسيك الصلب."),
-                ("SUPPORT_RESISTANCE", "Support & Resistance",
-                 "مناطق دعم/مقاومة محورية مبنية على القمم والقيعان الملموسة وتقاطع الأطر الكبرى."),
-                ("RSI_DIVERGENCE", "RSI Divergence",
-                 "دايفرجنس RSI بين السعر والزخم مع مناطق تشبع 70/30 وفلتر اتجاه الإطار الأعلى."),
-                ("MACD_STRAT", "MACD Momentum",
-                 "تقاطعات MACD ودايفرجنس الهيستوجرام مع فلتر الترند الأعلى ومراكز الصفر."),
-                ("BOLLINGER", "Bollinger Bands",
-                 "انضغاط بولينجر (Squeeze) قبل الانفجار وارتدادات من الحدود مع وسط 20 كمرجع."),
-                ("DONCHIAN", "Donchian Breakout",
-                 "كسر قناة دونشيان 20/55 — قواعد السلاحف الأصلية مع وقف ATR وجني متدرج."),
-                ("MA_CROSS", "MA Crossover",
-                 "تقاطع المتوسطات السريع/البطيء (الذهبي/المميت) مع فلتر اتجاه الأطر الأعلى."),
-                ("SUPERTREND", "Supertrend",
-                 "خط السوبر تريند ATR: تبديل الاتجاه عند كسر الخط والدخول معه بوقف ديناميكي."),
-                ("KELTNER", "Keltner Channels",
-                 "قنوات كلتنر EMA+ATR: اختراقات الامتداد وأهداف القناة المقابلة."),
-                ("ORB", "Opening Range Breakout",
-                 "كسر مدى الافتتاح (أول 15/30 دقيقة من الجلسة) بأهداف ممددة من حجم المدى."),
-                ("ASIA_RANGE", "Asia Range",
-                 "مدى جلسة آسيا: كسر سيولة آسيا في افتتاح لندن — نمط الجلسات الملكية."),
-                ("LONDON_BREAK", "London Breakout",
-                 "كسر قمة/قاع أول ساعتين من لندن مع فلتر اتجاه اليوم وإدارة بنسبة ثابتة."),
-                ("PIVOT_POINTS", "Pivot Points",
-                 "نقاط المحور اليومية الكلاسيكية PP/R1-R3/S1-S3 للانعكاس والاستمرار المؤسسي."),
-                ("CPR", "Central Pivot Range",
-                 "مدى المحور المركزي TC/PIVOT/BC وتصنيف اليوم الضيق/العريض قبل الافتتاح."),
-                ("MARKET_PROFILE", "Market Profile (TPO)",
-                 "ملف السوق TPO: أشكال اليوم البسيطة/المزدوجة ومناطق قبول ورفض السعر."),
-                ("ORDER_FLOW", "Order Flow & Delta",
-                 "تدفق الأوامر والدلتا التراكمية وامتصاص السيولة عند المستويات الكبرى."),
-                ("MEAN_REVERSION", "Mean Reversion",
-                 "الارتداد للمتوسط: Z-Score على النطاقات الملتزمة والأزواج المرتبطة إحصائياً."),
-                ("GAP_TRADE", "Gap Trading",
-                 "فجوات الافتتاح: ملء الفجوة أو الاستمرار بحسب نوعها وحجمها وموقعها من الاتجاه."),
-                ("HEIKIN_ASHI", "Heikin Ashi",
-                 "شموع هيكين آشي الملساء: تلوين الاتجاه وغياب الهيبات العكسية لتصفية الضجيج."),
-                ("MOMENTUM", "Momentum Breakout",
-                 "اندفاعات الزخم: شموع توسع بحجم استثنائي وامتداد مؤكد فوق مستوى المقاومة."),
-                ("ATR_BREAKOUT", "ATR Volatility Break",
-                 "كسر نطاق N×ATR مع وقف ديناميكي وأهداف ممتدة حسب التقلب اللحظي."),
             ]:
-                c.execute("INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,0,0,?,?,60)",
-                          (code, title, desc, config.now(), config.now()))
-            # Implemented + tested strategies are verified & enabled (honest governance:
-            # verification = implementation + automated tests, not marketing).
+                c.execute(
+                    "INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,1,1,?,?,60)",
+                    (code, title, desc, config.now(), config.now()))
+            # Mark implemented strategies as verified (graduating previously-unverified
+            # strategies once without overwriting an admin's enabled=0 decision on
+            # already-verified strategies!).
             for code in IMPLEMENTED_STRATEGIES:
-                c.execute("UPDATE strategy_catalog SET verified=1, enabled=1, updated_at=? WHERE code=?",
+                c.execute("UPDATE strategy_catalog SET verified=1, enabled=1, updated_at=? WHERE code=? AND verified=0",
                           (config.now(), code))
-            # v6.11.0 — WYCKOFF graduation: existing databases still carry the old
-            # «غير معتمد آلياً بعد — مغلق» description; refresh it to the honest
-            # implemented+tested text (new databases already seed the new text).
+            # Purge any legacy unimplemented placeholder rows from strategy_catalog.
+            placeholders = ",".join("?" for _ in IMPLEMENTED_STRATEGIES)
+            purged = c.execute(
+                f"DELETE FROM strategy_catalog WHERE code NOT IN ({placeholders})",
+                tuple(IMPLEMENTED_STRATEGIES),
+            ).rowcount or 0
+            if purged:
+                log_lines.append(f"purged {purged} unimplemented placeholder strategies")
+            # Clear any user preference pointing at a deleted placeholder strategy.
+            c.execute(
+                f"UPDATE users SET strategy='' WHERE strategy IS NOT NULL AND strategy<>'' AND UPPER(strategy) NOT IN ({placeholders})",
+                tuple(IMPLEMENTED_STRATEGIES),
+            )
+            # v6.11.0 — WYCKOFF graduation description refresh.
             c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='WYCKOFF'",
                       ("منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً).",
                        config.now()))
-            # INFRASTRUCTURE SELF-HEAL (picker-empty bug, seen live 2026-11-22):
-            # markets & timeframes were seeded disabled and nothing ever enabled
-            # them, so the user analytics flow rendered the header with ZERO
-            # timeframe buttons. v6.8.0 GOLD-FIRST POLICY (owner's explicit
-            # instruction): GOLD ships OPEN and every other instrument ships
-            # CLOSED — the heal arms gold only; admins open the rest per-market
-            # from the markets center after verifying each provider. Verified
-            # flags reflect real provider coverage (metal/forex/crypto = the
-            # proven FX-grade chain; indices/stocks require per-symbol verify).
-            for sym, _t, _p, cat, _pip, _dig, _con, _sp in SEED_MARKETS:
-                verified = 1 if cat in SEED_VERIFIED_CATEGORIES else 0
-                enabled = 1 if sym == GOLD_DEFAULT_SYMBOL else 0
-                c.execute("UPDATE market_catalog SET enabled=?, verified=?, updated_at=? WHERE symbol=?",
-                          (enabled, verified, config.now(), sym))
-            for code, _interval in SEED_TIMEFRAMES:
-                c.execute("UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
-                          (config.now(), code))
+            # Auto-encrypt any legacy plaintext broker_adapters.config_json rows (ENC1).
+            from fysb.services import secrets as secrets_service
+            for brow in c.execute("SELECT id, config_json FROM broker_adapters").fetchall():
+                raw_cfg = brow["config_json"] or ""
+                if raw_cfg and not secrets_service.is_encrypted(raw_cfg):
+                    try:
+                        parsed = json.loads(raw_cfg)
+                        if isinstance(parsed, dict):
+                            c.execute(
+                                "UPDATE broker_adapters SET config_json=?, updated_at=? WHERE id=?",
+                                (secrets_service.encrypt_json(parsed), config.now(), brow["id"]),
+                            )
+                    except Exception:
+                        pass
             # v6.10.0 — RETIRED: the old force-merge of ALL implemented strategies
             # into every plan destroyed the luxury tiering (FREE ended up with 12
             # methodologies). Now: only plans whose strategies are EMPTY get the
@@ -731,24 +1052,48 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             c.execute("""INSERT OR IGNORE INTO ref_campaigns(code,title,owner_id,target_invited,target_converted,
                          enabled,created_at,updated_at) VALUES('ROYAL','الحملة الملكية الرئيسية',0,50,5,1,?,?)""",
                       (config.now(), config.now()))
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[0])
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[1])
-            c.execute("INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(code) DO NOTHING", SEED_PLANS[2])
-            c.execute("UPDATE plans SET max_signals_per_day=2 WHERE code='FREE' AND max_signals_per_day IS NOT 2 AND max_signals_per_day>2")
-            # v6.10.0 — one-time LUXURY plan stamping (owner-set tiering). Runs
-            # AFTER the seed inserts (a fresh DB has no plan rows before them)
-            # and exactly ONCE — afterwards the admin's own edits are never
-            # overwritten by boots.
-            if get_setting(PLANS_LUXURY_FLAG, "") != "1":
-                for code, fields in LUXURY_PLANS_V6100.items():
+            for sp in SEED_PLANS:
+                c.execute(
+                    "INSERT OR IGNORE INTO plans(code,title,price,currency,duration_days,min_score,max_accounts,enabled,markets,timeframes,strategies,max_signals_per_day) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO NOTHING",
+                    sp,
+                )
+            # v6.22.0 — one-time 4-TIER ROYAL PLAN & CATALOG ACTIVATION.
+            # Stamps FREE (7-day configurable trial) + PRO + VIP + ROYAL ELITE,
+            # activates all plan markets/timeframes/strategies once, and syncs
+            # free_daily_signals=1. Subsequent boots NEVER overwrite admin edits.
+            if get_setting(PLANS_4TIER_FLAG, "") != "1":
+                for code, fields in PLANS_4TIER_V6220.items():
                     sets = ", ".join(f"{k}=?" for k in fields)
                     c.execute(f"UPDATE plans SET {sets} WHERE code=?",
                               (*fields.values(), code))
-                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')",
-                          (PLANS_LUXURY_FLAG,))
+                # Activate all markets included in the 4-tier plan catalog
+                for m_sym in [x.strip().upper() for x in ROYAL_MARKETS.split(",") if x.strip()]:
+                    c.execute(
+                        "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
+                        (config.now(), m_sym),
+                    )
+                # Ensure all 13 implemented strategies & M1..D1 timeframes are enabled
+                for s_code in IMPLEMENTED_STRATEGIES:
+                    c.execute(
+                        "UPDATE strategy_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                        (config.now(), s_code),
+                    )
+                for tf_code in ("M1", "M5", "M15", "M30", "H1", "H4", "D1"):
+                    c.execute(
+                        "UPDATE timeframe_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",
+                        (config.now(), tf_code),
+                    )
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES('free_daily_signals','1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'"
+                )
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')", (PLANS_LUXURY_FLAG,))
+                c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '1')", (PLANS_4TIER_FLAG,))
+                with _settings_lock:
+                    _settings_cache["free_daily_signals"] = ("1", time.time())
+                    _settings_cache[PLANS_LUXURY_FLAG] = ("1", time.time())
+                    _settings_cache[PLANS_4TIER_FLAG] = ("1", time.time())
             # Analyses quota defaults (additive — only fills unset/zero values)
             for code, quota in DEFAULT_ANALYSES_QUOTA.items():
                 c.execute("UPDATE plans SET max_analyses_per_day=? WHERE code=? AND (max_analyses_per_day IS NULL OR max_analyses_per_day=0)",
@@ -783,24 +1128,50 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
             c.commit()
         finally:
             c.close()
+        # Reset bulk-preload timestamp after commit so the first read warms all
+        # committed DEFAULT_SETTINGS cleanly in 1 query.
+        with _settings_lock:
+            _settings_cache.clear()
+            globals()["_settings_bulk_at"] = 0.0
     return log_lines
 
 
-# --- Settings fast-path cache (v6.8.1 button-latency fix) --------------------
-# get_setting() runs on EVERY button press (maintenance gate, kill-switch,
-# quotas, push flag...). Over WAN PostgreSQL each call is a network round trip;
-# a tiny process-local cache with a short TTL removes most of them. Correctness:
-# the only writer is this process, and set_setting()/set_settings_bulk() update
-# the cache write-through, so a toggle is visible on the very next read.
-_SETTINGS_TTL = 5.0
+# --- Settings fast-path cache (v6.20.1 bulk preload, 0ms hot reads) ----------
+# get_setting() runs on EVERY button press (maintenance gate, ui_edit_in_place,
+# kill-switch, quotas, trading_mode...). Over WAN PostgreSQL each uncached call
+# costs 150-400ms; a single bulk SELECT preloads ALL ~45 settings for 30s and
+# set_setting()/set_settings_bulk() update write-through immediately.
+_SETTINGS_TTL = 30.0
 _settings_cache: dict[str, tuple[str, float]] = {}
+_settings_bulk_at: float = 0.0
 _settings_lock = threading.Lock()
 
 
+def _preload_settings() -> None:
+    global _settings_bulk_at
+    now_ts = time.time()
+    try:
+        with conn() as c:
+            rows = c.execute("SELECT key, value FROM settings").fetchall()
+        if rows:
+            with _settings_lock:
+                for r in rows:
+                    _settings_cache[r["key"]] = (r["value"], now_ts)
+                _settings_bulk_at = now_ts
+    except Exception:
+        pass
+
+
 def get_setting(key: str, default: str = "") -> str:
+    now_ts = time.time()
     ent = _settings_cache.get(key)
-    if ent is not None and (time.time() - ent[1]) < _SETTINGS_TTL:
+    if ent is not None and (now_ts - ent[1]) < _SETTINGS_TTL:
         return ent[0]
+    if (now_ts - _settings_bulk_at) >= _SETTINGS_TTL:
+        _preload_settings()
+        ent = _settings_cache.get(key)
+        if ent is not None and (time.time() - ent[1]) < _SETTINGS_TTL:
+            return ent[0]
     with conn() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     if r is None:

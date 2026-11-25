@@ -167,6 +167,25 @@ def _enabled_timeframes() -> set:
 # Staged flow (callback-driven; the draft lives in context.user_data)
 # ---------------------------------------------------------------------------
 async def open_flow(q, uid: int, context, bot, is_admin: bool) -> None:
+    if not is_admin:
+        trial = await afn.run(subs.free_trial_status, uid)
+        if trial.get("expired"):
+            from fysb.handlers.user_pages import _upsell
+            await _upsell(
+                q, uid, bot,
+                f"انتهت فترتك المجانية ({trial.get('trial_days', 7)} أيام) — قم بالترقية للاستمرار في «إشارة الآن»",
+                trial_expired=True,
+            )
+            return
+        qst = await afn.run(subs.quota_state, uid)
+        if qst.get("remaining", 0) <= 0:
+            from fysb.handlers.user_pages import _upsell
+            await _upsell(
+                q, uid, bot,
+                f"انتهت حصة الإشارات اليومية ({qst['used']}/{qst['quota']}) — تتجدد يومياً",
+                quota_exhausted=True,
+            )
+            return
     context.user_data[DRAFT_KEY] = {"stage": "style", "is_admin": is_admin}
     rows = [[kb.btn(label, f"{'a' if is_admin else 'u'}:signowstyle:{code}")] for code, label in STYLE_STAGES]
     body = ("🚀 <b><u>إشارة الآن — التدفق الملكي بمراحل حقيقية 100%</u></b>\n"
@@ -188,6 +207,12 @@ async def _render(q, text, markup, bot):
 
 def _prefix(is_admin: bool) -> str:
     return "a" if is_admin else "u"
+
+
+def _strat_label(code: str) -> str:
+    """v6.17.0: luxury Arabic label for strategy code, including 'ALL'."""
+    c = (code or "").strip().upper()
+    return "جميع المنهجيات (أقوى فرصة)" if c == "ALL" else c
 
 
 async def pick_style(q, uid: int, context, bot, style: str) -> None:
@@ -254,86 +279,168 @@ async def pick_tf(q, uid: int, context, bot, tf: str) -> None:
         return
     d["strategies"] = strategies
     context.user_data[DRAFT_KEY] = d
-    rows = [[kb.btn(f"🧠 {s}", f"{_prefix(d['is_admin'])}:signowstrat:{s}") for s in strategies[i:i + 3]]
-            for i in range(0, len(strategies), 3)]
-    body = (f"✅ {esc(d.get('symbol', ''))} · ⏱ {tf_name(tf)} · {STYLE_AR.get(d.get('style', ''), '')}\n"
-            f"🧠 <b>المرحلة 4/4 — اختر المنهجية (المفعلة والمختبرة فعلاً):</b>")
+    rows = [[kb.btn(
+        f"✨ جميع المنهجيات — أقوى فرصة تلقائياً ({len(strategies)})",
+        f"{_prefix(d['is_admin'])}:signowstrat:ALL",
+        style="success",
+    )]]
+    rows += [[kb.btn(f"🧠 {s}", f"{_prefix(d['is_admin'])}:signowstrat:{s}") for s in strategies[i:i + 3]]
+             for i in range(0, len(strategies), 3)]
+    body = (f"✅ <b>{esc(d.get('symbol', ''))}</b> · ⏱ <b>{tf_name(tf)}</b> · <b>{STYLE_AR.get(d.get('style', ''), '')}</b>\n"
+            "🧠 <b><u>المرحلة 4/4 — اختر المنهجية (المفعلة والمختبرة فعلاً):</u></b>\n"
+            "<blockquote>"
+            "▎✨ <b>جميع المنهجيات:</b> يفحص المحرك كل المنهجيات المفعّلة والمسموحة في باقتك معاً ويختار أقوى فرصة بأعلى جودة تلقائياً.\n"
+            "▎🎯 أو اختر منهجية محددة من الأسفل للفحص الدقيق عليها فقط."
+            "</blockquote>")
     await _render(q, body, kb.user_nav(rows) if not d.get("is_admin") else kb.admin_nav(rows), bot)
+
+
+async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
+    """Deliver a private SIGNAL_NOW signal ONLY to its requester (uid), consume
+    their daily quota, pin delivery refs for live tracker edits, and run demo
+    auto-execute if armed."""
+    from fysb.engines.entry_state import birth_pulse_line
+    from fysb.engines.signal_engine import record_delivery_refs
+    from fysb.services import user_trade
+    from fysb.ui.cards import render_signal_card
+
+    got = await afn.run(_delivery_exists, uid, sig["id"])
+    if not got:
+        if not await afn.run(subs.try_consume_signal, uid, sig):
+            return False
+    row = await afn.run(_fetch_market_row, sig["symbol"])
+    text = render_signal_card(sig, user_view=True, row=row)
+    pulse = birth_pulse_line(sig, row)
+    if pulse:
+        text += "\n\n<blockquote>" + pulse + "</blockquote>"
+    personal = await afn.run(user_trade.personal_block, sig, uid)
+    if personal:
+        text += "\n\n<blockquote>" + personal + "</blockquote>"
+    try:
+        msg = await bot.send_message(uid, text, parse_mode="HTML")
+        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
+        if exec_res and exec_res.get("ok"):
+            await bot.send_message(uid, user_trade.execution_card(exec_res, sig), parse_mode="HTML")
+        return True
+    except Exception:
+        if not got:
+            await afn.run(subs.release_signal, uid, sig["id"])
+        return False
 
 
 async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
     d = context.user_data.get(DRAFT_KEY) or {}
-    if not d or d.get("stage") != "strategy" or strategy.upper() not in (d.get("strategies") or []):
+    allowed_strats = list(d.get("strategies") or [])
+    strat_u = (strategy or "").strip().upper()
+    if not d or d.get("stage") != "strategy" or (strat_u != "ALL" and strat_u not in allowed_strats):
         return await open_flow(q, uid, context, bot, uid == config.ADMIN_ID)
-    strategy = strategy.upper()
+    strategy = strat_u
     is_admin = bool(d.get("is_admin"))
     symbol, tf = d["symbol"], d["tf"]
     style = d.get("style", "")
-    context.user_data.pop(DRAFT_KEY, None)
-    await _render(q, "🚀 <b>جارٍ تشغيل المحرك الحقيقي على اختيارك…</b>\n"
+    # v6.17.0: 'ALL' scans ALL enabled+verified methodologies allowed by the
+    # user's plan (or all enabled+verified for admin) and picks the strongest.
+    only_strats = allowed_strats if strategy == "ALL" else [strategy]
+    # v6.14.0 FIX: preserve DRAFT_KEY with the chosen strategy so that when
+    # NO_SETUP occurs, tapping «بحث تلقائي» immediately creates the watcher!
+    d["strategy"] = strategy
+    d["stage"] = "ready_watch"
+    context.user_data[DRAFT_KEY] = d
+    scan_desc = (
+        f"جميع المنهجيات ({len(only_strats)} منهجية) لاختيار أقوى فرصة…"
+        if strategy == "ALL" else f"منهجية {esc(strategy)}…"
+    )
+    await _render(q, f"🚀 <b>جارٍ تشغيل المحرك الحقيقي على {scan_desc}</b>\n"
                      "<i>السوق والمنهجية والإطار تُفحص فعلياً — لا إشارات مصطنعة أبداً.</i>", None, bot)
+    sig_source = "ADMIN_SIGNAL_NOW" if is_admin else "SIGNAL_NOW"
     try:
-        res = await asyncio.to_thread(generate_signal, symbol, tf, False, [strategy])
+        res = await asyncio.to_thread(
+            generate_signal, symbol, tf, False, only_strats, sig_source, uid
+        )
     except Exception as e:
         log.warning("signow generate failed: %s", type(e).__name__)
         res = {"status": "ERROR", "reason": type(e).__name__}
     if res.get("status") == "SIGNAL_CREATED":
+        context.user_data.pop(DRAFT_KEY, None)
         from fysb.engines.signal_engine import emit_to_users
         from fysb.engines.tracker import seq_of
         sig = await afn.run(_fetch_signal_by_id, res["signal_id"])
         sig = dict(sig) if sig else {}
-        stats = {"sent": 0, "skipped_quota": 0, "failed": 0}
-        if sig:
-            from fysb.handlers.inputs import bot_sender_from
-            stats = await emit_to_users(sig, bot_sender_from(bot))
-            # The requester MUST hold his own copy too (quota consumed like any
-            # delivery) — even if his notifications toggle or plan gate skipped him.
-            got = await afn.run(_delivery_exists, uid, sig["id"])
-            if not got:
-                from fysb.services import user_trade
+        if is_admin:
+            stats = {"sent": 0, "channels_sent": 0, "skipped_quota": 0, "failed": 0}
+            if sig:
+                from fysb.engines.entry_state import birth_pulse_line
+                from fysb.engines.signal_engine import record_delivery_refs
+                from fysb.handlers.inputs import bot_sender_from
                 from fysb.ui.cards import render_signal_card
-                if await afn.run(subs.try_consume_signal, uid, sig):
-                    row = await afn.run(_fetch_market_row, sig["symbol"])
-                    text = render_signal_card(sig, user_view=True, row=row)
-                    personal = user_trade.personal_block(sig, uid)
-                    if personal:
-                        text += "\n\n<blockquote>" + personal + "</blockquote>"
+                stats = await emit_to_users(sig, bot_sender_from(bot), bot=bot, include_channels=True)
+                # v6.20.0: Always deliver the FULL live signal card to Admin and pin
+                # its (uid, sid, chat_id, message_id) so tracker updates edit it live!
+                if not await afn.run(_delivery_exists, uid, sig["id"]):
                     try:
-                        msg = await bot.send_message(uid, text, parse_mode="HTML")
-                        from fysb.engines.signal_engine import record_delivery_refs
+                        row = await afn.run(_fetch_market_row, sig["symbol"])
+                        card = render_signal_card(sig, user_view=True, row=row)
+                        pulse = birth_pulse_line(sig, row)
+                        if pulse:
+                            card += "\n\n<blockquote>" + pulse + "</blockquote>"
+                        msg = await bot.send_message(uid, card, parse_mode="HTML")
                         await afn.run(record_delivery_refs, uid, sig["id"], msg)
-                        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
-                        if exec_res and exec_res.get("ok"):
-                            await bot.send_message(uid, user_trade.execution_card(exec_res, sig),
-                                                   parse_mode="HTML")
                     except Exception:
                         pass
+            delivery_line = (
+                f"▎📤 وصلت لـ <b>{stats['sent']}</b> مستلم مؤهل"
+                + (f" · قنوات: <b>{stats.get('channels_sent', 0)}</b>" if stats.get("channels_sent") else "")
+            )
+        else:
+            # v6.14.0 PRIVACY: regular user's Signal-Now is delivered PRIVATELY
+            # to the requester only — never broadcast publicly to other users/channels.
+            delivered = await _deliver_private_signal(bot, uid, sig) if sig else False
+            delivery_line = (
+                "▎🔒 إشارة خاصة لك وحدك — وصلتك أعلاه (استُهلكت من حدك اليومي)"
+                if delivered else
+                "▎⚠️ تعذر تسليم الإشارة (تأكد من توفر رصيد في حدك اليومي)"
+            )
+        win_strat = sig.get("strategy") or strategy
+        strat_disp = (
+            f"جميع المنهجيات ← الفائزة: {esc(win_strat)}"
+            if strategy == "ALL" else esc(win_strat)
+        )
         note = (f"✅ <b><u>ولدت إشارة حقيقية 100% — الإشارة #{seq_of(sig['id'])}</u></b>\n"
                 "<blockquote>"
-                f"▎🌐 {esc(symbol)} · ⏱ {tf_name(tf)} · 🧠 {esc(strategy)} · {STYLE_AR.get(style, '')}\n"
+                f"▎🌐 {esc(symbol)} · ⏱ {tf_name(tf)} · 🧠 {strat_disp} · {STYLE_AR.get(style, '')}\n"
                 f"▎⭐ الجودة: <b>{res.get('score', 0)}/100</b>\n"
-                f"▎📤 وصلت لـ <b>{stats['sent']}</b> مستلم مؤهل (حدك اليومي استُهلك كأي إشارة)\n"
+                f"{delivery_line}\n"
                 "▎📡 التتبع اللحظي بدأ من الآن حتى الأهداف أو الوقف — أول بطاقة وصلتك تُحدَّث حية"
                 "</blockquote>")
-        rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals")]]
+        rows = [[kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="success")]]
+        if not is_admin and not delivered:
+            rows.insert(0, [kb.btn("🚀 الترقية للخطة التالية الآن", "u:plans", style="success")])
         await _render(q, note, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
         return
-    if res.get("status") == "NO_SETUP":
-        rows = [[kb.btn(f"⏰ بحث تلقائي كل {p} دقيقة", f"{_prefix(is_admin)}:signowwatch:{p}")]
-                for p in WATCH_PERIODS]
-        body = ("⛔ <b>لا توجد إشارة مؤهلة الآن — ظروف السوق لم تحقق " + esc(strategy) + "</b>\n"
-                "<blockquote>"
-                "▎🚫 المحرك يرفض تصنيع إشارات — هذه أمينة المنصة 100%.\n"
-                "▎🔔 <b>البحث التلقائي الملكي:</b> اختر الفترة بالأسفل وسيبقى المحرك يفحص "
-                f"<b>{esc(symbol)} · {tf_name(tf)} · {esc(strategy)}</b> كل مرة حتى تصدر إشارة حقيقية، "
-                "ثم يوقف البحث ويرسلها لك مباشرة.\n"
-                "▎⌛ البحث التلقائي يعمل حتى 24 ساعة كحد أقصى ثم يتوقف بأدب، ويمكنك إلغاؤه في أي لحظة."
-                "</blockquote>")
-        await _render(q, body, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
-        return
-    reason = res.get("reason") or res.get("status", "")
-    await _render(q, f"⛔ لم تُولد إشارة: <b>{esc(reason)}</b>\n<i>(سوق مغلق / بيانات غير متاحة / حد وقف محرك المخاطر)</i>",
-                  kb.user_nav() if not is_admin else kb.admin_nav(), bot)
+    from fysb.ui.cards import render_no_signal_card
+    status = res.get("status") or "NO_SETUP"
+    reason = res.get("reason") or ""
+    strat_ar = _strat_label(strategy)
+    style_ar = STYLE_AR.get(style, "")
+    body = render_no_signal_card(
+        symbol=symbol,
+        timeframe=tf,
+        strategy_label=strat_ar,
+        style_label=style_ar,
+        status=status,
+        reason=reason,
+        show_watch_hint=True,
+    )
+    pref = _prefix(is_admin)
+    rows = [
+        [kb.btn(f"⏰ كل {p} د", f"{pref}:signowwatch:{p}", style="success") for p in WATCH_PERIODS],
+        [
+            kb.btn("⚡ سوق / فريم آخر", f"{pref}:signow", style="primary"),
+            kb.btn("📡 الإشارات المباشرة", "u:signals" if not is_admin else "a:signals", style="primary"),
+        ],
+    ]
+    await _render(q, body, kb.user_nav(rows) if not is_admin else kb.admin_nav(rows), bot)
 
 
 async def start_watch(q, uid: int, context, bot, minutes: int) -> None:
@@ -349,7 +456,7 @@ async def start_watch(q, uid: int, context, bot, minutes: int) -> None:
     w = await afn.run(active_watcher, uid)
     body = ("⏰ <b><u>البحث التلقائي الملكي مفعّل</u></b>\n"
             "<blockquote>"
-            f"▎🎯 الهدف: إشارة حقيقية على <b>{esc(symbol)} · {tf_name(tf)} · {esc(strategy)}</b>\n"
+            f"▎🎯 الهدف: إشارة حقيقية على <b>{esc(symbol)} · {tf_name(tf)} · {esc(_strat_label(strategy))}</b>\n"
             f"▎⏲ الفترة: كل <b>{minutes} دقيقة</b> يفحص المحرك السوق فعلياً\n"
             f"▎⌛ يتوقف تلقائياً بعد {WATCH_MAX_HOURS} ساعة أو فور صدور الإشارة\n"
             f"▎🚫 لا تصنيع — إن لم تتحقق الشروط يبقى الصمت أمانة"
@@ -380,8 +487,20 @@ async def run_due_watchers(app) -> None:
             except Exception:
                 pass
             continue
+        is_admin_w = (uid == config.ADMIN_ID)
+        sig_source = "ADMIN_SIGNAL_NOW" if is_admin_w else "SIGNAL_NOW"
+        w_strat = (w["strategy"] or "").strip().upper()
+        if w_strat == "ALL":
+            only_strats = (await afn.run(choices_for, uid, is_admin_w))["strategies"]
+            if not only_strats:
+                await afn.run(reschedule_watcher, w["id"], w["interval_minutes"])
+                continue
+        else:
+            only_strats = [w_strat]
         try:
-            res = await asyncio.to_thread(generate_signal, w["symbol"], w["timeframe"], False, [w["strategy"]])
+            res = await asyncio.to_thread(
+                generate_signal, w["symbol"], w["timeframe"], False, only_strats, sig_source, uid
+            )
         except Exception as e:
             log.warning("watcher %s generation failed: %s", w["id"], type(e).__name__)
             res = {"status": "ERROR"}
@@ -391,27 +510,15 @@ async def run_due_watchers(app) -> None:
             sig = dict(sig) if sig else {}
             if not sig:
                 continue
-            from fysb.engines.signal_engine import emit_to_users, record_delivery_refs
+            from fysb.engines.signal_engine import emit_to_users
             from fysb.engines.tracker import seq_of
             from fysb.handlers.inputs import bot_sender_from
-            stats = await emit_to_users(sig, bot_sender_from(app.bot))
-            got = await afn.run(_delivery_exists, uid, sig["id"])
-            if not got and await afn.run(subs.try_consume_signal, uid, sig):
-                row = await afn.run(_fetch_market_row, sig["symbol"])
-                from fysb.services import user_trade
-                text = render_signal_card(sig, user_view=True, row=row)
-                personal = user_trade.personal_block(sig, uid)
-                if personal:
-                    text += "\n\n<blockquote>" + personal + "</blockquote>"
-                try:
-                    msg = await app.bot.send_message(uid, text, parse_mode="HTML")
-                    await afn.run(record_delivery_refs, uid, sig["id"], msg)
-                    exec_res = await afn.run(user_trade.auto_execute, sig, uid)
-                    if exec_res and exec_res.get("ok"):
-                        await app.bot.send_message(uid, user_trade.execution_card(exec_res, sig),
-                                                   parse_mode="HTML")
-                except Exception:
-                    pass
+            if is_admin_w:
+                stats = await emit_to_users(sig, bot_sender_from(app.bot), bot=app.bot, include_channels=True)
+                sent_n = stats.get("sent", 0)
+            else:
+                ok_priv = await _deliver_private_signal(app.bot, uid, sig)
+                sent_n = 1 if ok_priv else 0
             try:
                 await app.bot.send_message(uid,
                     f"🔔 <b>البحث التلقائي أثمر — صدرت الإشارة الحقيقية #{seq_of(sig['id'])}</b> "
@@ -419,6 +526,6 @@ async def run_due_watchers(app) -> None:
                     parse_mode="HTML")
             except Exception:
                 pass
-            log.info("watcher %s FOUND signal #%s (sent=%s)", w["id"], sig["id"], stats.get("sent"))
+            log.info("watcher %s FOUND signal #%s (sent=%s)", w["id"], sig["id"], sent_n)
         elif res.get("status") in ("NO_SETUP", "REJECTED", "DUPLICATE", "ERROR"):
             await afn.run(reschedule_watcher, w["id"], w["interval_minutes"])

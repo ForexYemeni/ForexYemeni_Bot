@@ -53,3 +53,43 @@ def safe_rr(entry: float, stop: float, tp: float, direction: str) -> float:
     if direction == "SELL" and tp >= entry:
         return 0.0
     return reward / risk
+
+
+def cap_stop(
+    entry: float,
+    stop: float,
+    direction: str,
+    atr_val: float,
+    *,
+    min_atr: float = 0.8,
+    fallback_atr: float = 1.6,
+    max_atr: float = 2.6,
+    cap_atr: float = 2.4,
+) -> float:
+    """v6.24.0 Universal stop sanitizer shared across all 13 strategies.
+
+    * Guarantees strict directional side (BUY: stop < entry; SELL: stop > entry).
+    * Prevents ultra-tight stops (< min_atr * ATR) from noise stop-outs.
+    * Caps abnormal news-spike wick stops (> max_atr * ATR) to cap_atr * ATR
+      so high-quality setups are preserved with institutional risk sizing instead
+      of blowing out to 888-pip stops or getting rejected unnecessarily.
+    """
+    a = float(atr_val or 0.0)
+    if a <= 0:
+        return float(stop)
+    d = (direction or "").upper()
+    e = float(entry)
+    s = float(stop)
+    if d == "BUY":
+        if s >= e or (e - s) < min_atr * a:
+            return e - fallback_atr * a
+        if (e - s) > max_atr * a:
+            return e - cap_atr * a
+        return s
+    if d == "SELL":
+        if s <= e or (s - e) < min_atr * a:
+            return e + fallback_atr * a
+        if (s - e) > max_atr * a:
+            return e + cap_atr * a
+        return s
+    return s

@@ -15,6 +15,7 @@ Added hardening:
   * v6.8.2: every button logs its total handling time (BUTTON DONE) so the
     owner can prove latency from the log alone
 """
+import asyncio
 import time
 
 from telegram import Update
@@ -22,13 +23,20 @@ from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
 from fysb.config import log
-from fysb.handlers import admin_channels, admin_core, admin_referrals, admin_system, admin_trading, user_pages
+from fysb.handlers import admin_channels, admin_core, admin_partners, admin_referrals, admin_system, admin_trading, user_pages
 from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
 
 BOT_REF = None  # set in post_init for background tasks
+
+
+async def _quiet_answer(q) -> None:
+    try:
+        await q.answer()
+    except Exception:
+        pass  # stale/timeout answers must not block the action
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,27 +49,43 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     t0 = time.monotonic()
     log.info("BUTTON RECEIVED | user_id=%s | data=%s", uid, data[:64])
-    try:
-        await q.answer()  # immediate visual acknowledgement — always first
-    except Exception:
-        pass  # stale/timeout answers must not block the action
+    # v6.20.1 latency upgrade: acknowledge callback IN PARALLEL with DB/render
+    # instead of stalling 150-400ms before even starting work!
+    ans_task = asyncio.create_task(_quiet_answer(q))
 
     try:
         if data.startswith("u:"):
             await _route_user(q, context, uid, data[2:])
         elif data.startswith("a:"):
             await _route_admin(q, context, uid, data[2:])
+        elif data.startswith("p:"):
+            for k in CLEAR_ON_NAV:
+                context.user_data.pop(k, None)
+            await admin_partners.handle_partner_callback(q, uid, context, context.bot, data[2:])
         else:
-            from fysb.handlers.common import render
-            await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
+            from fysb.services import partners as partners_svc
+            active_p = (
+                await afn.run(partners_svc.get_partner_by_user, uid)
+                if uid != config.ADMIN_ID else None
+            )
+            if active_p and active_p.get("enabled"):
+                await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
+            else:
+                from fysb.handlers.common import render
+                await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
             await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
-    except Exception:
+    except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
         try:
-            await q.message.reply_text("⚠️ حدث خطأ أثناء تنفيذ الزر. أعد المحاولة أو راجع سجل الإدارة.")
+            detail = f" ({type(exc).__name__})" if uid == config.ADMIN_ID else ""
+            await q.message.reply_text(f"⚠️ حدث خطأ أثناء تنفيذ الزر{detail}. أعد المحاولة أو راجع سجل الإدارة.")
         except Exception:
             pass
     finally:
+        try:
+            await ans_task
+        except Exception:
+            pass
         log.info("BUTTON DONE | %.0fms | data=%s",
                  (time.monotonic() - t0) * 1000, data[:32])
 
@@ -69,9 +93,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------- user routing
 async def _route_user(q, context, uid: int, action: str):
     # ONE pooled round trip: throttled last_seen write + profile read.
-    # (was: get_user + touch + is_blocked = 3 sequential WAN queries)
-    # v6.11.0: every blocking call runs in the worker pool — the loop never
-    # waits on WAN, so buttons stay instant even while Supabase is slow.
+    # v6.20.1: pass preloaded_u straight into user_page() so the user row is
+    # NEVER fetched twice on a single button tap!
     u = await afn.run(users_service.touch_and_get, uid)
     if u is None:
         try:
@@ -89,14 +112,34 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "🔧 المنصة في وضع الصيانة مؤقتاً. حاول بعد قليل.", None, context.bot)
         return
+    # v6.21.2 Strict Partner-Only Mode: active partners cannot access regular
+    # user menus (`u:*`) — any stale user button redirects straight to their
+    # Partner Command Panel until Admin disables or removes them.
+    # Piggybacks on touch_and_get's EXISTS subquery -> ZERO extra DB round trips!
+    if uid != config.ADMIN_ID and u and u.get("is_active_partner"):
+        await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
+        return
     # Ticket replies: route the text flow (handled in inputs module)
     if action.startswith("ticketreply:"):
         context.user_data["ticket_reply_to"] = int(action.split(":", 1)[1])
         from fysb.handlers.common import render
         await render(q, "💬 أرسل رسالتك الآن — ستُسجل في التذكرة.", None, context.bot)
         return
-    # (v6.11.0: user_page performs its own blocking calls through afn.run)
-    await user_pages.user_page(q, action, uid, context)
+    # Phase 4 (v6.27.0): Independent Academy, Gift Code Redeem, Tiered Affiliates
+    if action in ("academy", "acadbuy", "redeem", "affiliate", "affpayout") or action.startswith(
+        ("acadtrack:", "acadles:", "acadquiz:", "acadcert:")
+    ):
+        from fysb.handlers import academy_growth
+        if await academy_growth.handle_user_growth(q, uid, action, context, context.bot):
+            return
+    # Phase 5 (v6.28.0): Free Crypto Exchange API Integration (Binance/Bybit/OKX)
+    if action in ("exchange", "exchorders") or action.startswith(
+        ("exchadd:", "exchtest:", "exchtoglive:", "exchdel:", "exchexec:")
+    ):
+        from fysb.handlers import crypto_api
+        if await crypto_api.handle_user_crypto_api(q, uid, action, context, context.bot):
+            return
+    await user_pages.user_page(q, action, uid, context, preloaded_u=u)
 
 
 # --------------------------------------------------------------- admin routing
@@ -121,7 +164,15 @@ async def _route_admin(q, context, uid: int, action: str):
 
     if act == "home":
         from fysb.handlers.common import render
-        await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر وحدة الإدارة من الأزرار:", kb.admin_menu(), bot)
+        await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
+    elif act == "hub":
+        from fysb.handlers.common import render
+        hub = kb.ADMIN_HUBS.get(arg)
+        if hub:
+            title, builder = hub
+            await render(q, title, builder(), bot)
+        else:
+            await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
     # --- core ---
     elif act == "stats":
         await admin_core.admin_stats(q, uid, context, bot)
@@ -192,6 +243,8 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "planfield":
         code, field = arg, arg2
         await admin_core.admin_plan_field(q, uid, context, bot, code, field)
+    elif act == "plantrial":
+        await admin_core.admin_plan_days_preset(q, uid, context, bot, arg, int(arg2 or 0))
     elif act == "planedit":
         await admin_core.admin_plan_edit(q, uid, context, bot, arg)
     elif act == "planadj":
@@ -234,6 +287,41 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_channels.admin_chan_cancel(q, uid, context, bot)
     elif act == "chanview":
         await admin_channels.admin_chan_view(q, uid, context, bot, int(arg))
+    elif act == "chanall":
+        await admin_channels.admin_chan_enable_all(q, uid, context, bot, int(arg))
+    elif act == "chanvip":
+        await admin_channels.admin_chan_toggle_vip(q, uid, context, bot, int(arg))
+    elif act == "partners":
+        await admin_partners.admin_partners(q, uid, context, bot)
+    elif act == "partadd":
+        await admin_partners.admin_partner_add(q, uid, context, bot)
+    elif act == "partcancel":
+        await admin_partners.admin_partner_cancel(q, uid, context, bot)
+    elif act == "partview":
+        await admin_partners.admin_partner_view(q, uid, context, bot, int(arg))
+    elif act == "parttoggle":
+        await admin_partners.admin_partner_toggle(q, uid, context, bot, int(arg))
+    elif act == "partpct":
+        await admin_partners.admin_partner_pct(q, uid, context, bot, int(arg), int(arg2))
+    elif act == "partmode":
+        await admin_partners.admin_partner_mode(q, uid, context, bot, int(arg), arg2)
+    elif act == "partperm":
+        await admin_partners.admin_partner_perm(q, uid, context, bot, int(arg), arg2)
+    elif act == "partlim":
+        await admin_partners.admin_partner_limits(q, uid, context, bot, int(arg))
+    elif act == "partlimset":
+        kind, val = (arg2.split(":", 1) + ["6"])[:2]
+        await admin_partners.admin_partner_limit_set(q, uid, context, bot, int(arg), kind, int(val))
+    elif act == "partlimask":
+        await admin_partners.admin_partner_limit_ask(q, uid, context, bot, int(arg), arg2)
+    elif act == "partlimreset":
+        await admin_partners.admin_partner_limit_reset(q, uid, context, bot, int(arg))
+    elif act == "partsettle":
+        await admin_partners.admin_partner_settle(q, uid, context, bot, int(arg))
+    elif act == "partdel":
+        await admin_partners.admin_partner_delete(q, uid, context, bot, int(arg))
+    elif act == "vipsweep":
+        await admin_partners.admin_vip_sweep(q, uid, context, bot)
     elif act == "chantoggle":
         await admin_channels.admin_chan_toggle(q, uid, context, bot, int(arg))
     elif act == "chanmode":
@@ -294,8 +382,24 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signals(q, uid, context, bot, int(arg or 0))
     elif act == "sigcat":
         await admin_trading.admin_signals_cat(q, uid, context, bot, arg, int(arg2 or 0))
+    elif act == "sigday":
+        # a:sigday:<scope>:<cat>:<page>
+        day_cat = "all"
+        day_page = 0
+        if arg2:
+            sub = arg2.split(":", 1)
+            day_cat = sub[0] or "all"
+            if len(sub) > 1 and sub[1].isdigit():
+                day_page = int(sub[1])
+        await admin_trading.admin_signals_day(q, uid, context, bot, arg or "today", day_cat, day_page)
+    elif act == "sigdates":
+        await admin_trading.admin_signals_dates(q, uid, context, bot, int(arg or 0))
     elif act == "sigpl":
-        await admin_trading.admin_signal_pl(q, uid, context, bot)
+        await admin_trading.admin_signal_pl(q, uid, context, bot, arg or "all")
+    elif act == "sigplcat":
+        await admin_trading.admin_signal_pl_sector(q, uid, context, bot, arg or "metal", arg2 or "all")
+    elif act == "sigplsym":
+        await admin_trading.admin_signal_pl_symbol(q, uid, context, bot, arg, arg2 or "all")
     elif act == "signow":
         from fysb.handlers import signal_now
         await signal_now.open_flow(q, uid, context, bot, is_admin=True)
@@ -345,6 +449,34 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_engine_now(q, uid, context, bot)
     elif act == "engineclean":
         await admin_trading.admin_engine_clean(q, uid, context, bot)
+    elif act == "scantfs":
+        await admin_trading.admin_scan_tfs(q, uid, context, bot)
+    elif act == "togglescantf":
+        await admin_trading.admin_scan_tf_toggle(q, uid, context, bot, arg)
+    elif act == "newsguard":
+        await admin_trading.admin_news_guard(q, uid, context, bot)
+    elif act == "newsguardtoggle":
+        await admin_trading.admin_news_guard_toggle(q, uid, context, bot)
+    elif act == "newsguardwin":
+        await admin_trading.admin_news_guard_win(q, uid, context, bot, int(arg or 30))
+    elif act == "leaderboard":
+        await admin_trading.admin_leaderboard(q, uid, context, bot, "30d")
+    elif act == "lb":
+        await admin_trading.admin_leaderboard(q, uid, context, bot, arg or "30d")
+    elif act == "lbpublish":
+        await admin_trading.admin_leaderboard_publish(q, uid, context, bot, arg or "30d")
+    elif act == "strength":
+        await admin_trading.admin_strength(q, uid, context, bot)
+    elif act == "chartstoggle":
+        await admin_trading.admin_charts_toggle(q, uid, context, bot)
+    elif act == "sigchart":
+        await admin_trading.admin_signal_chart(q, uid, context, bot, int(arg or 0))
+    elif act == "sigproof":
+        await admin_trading.admin_signal_proof_publish(q, uid, context, bot, int(arg or 0))
+    elif act == "backtest":
+        await admin_trading.admin_backtest(q, uid, context, bot)
+    elif act == "btrun":
+        await admin_trading.admin_backtest_run(q, uid, context, bot, arg, arg2)
     elif act == "strategies":
         await admin_trading.admin_strategies(q, uid, context, bot, int(arg or 0))
     elif act == "strategyinfo":
@@ -371,6 +503,14 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_market_toggle(q, uid, context, bot, arg)
     elif act == "market_verify":
         await admin_trading.admin_market_verify(q, uid, context, bot, arg)
+    elif act == "adminmkts":
+        await admin_trading.admin_signal_markets(q, uid, context, bot)
+    elif act == "adminmktstog":
+        await admin_trading.admin_signal_markets_toggle(q, uid, context, bot, arg)
+    elif act == "adminmktsonly":
+        await admin_trading.admin_signal_markets_only(q, uid, context, bot, arg)
+    elif act == "adminmktsall":
+        await admin_trading.admin_signal_markets_all(q, uid, context, bot)
     elif act == "market_add":
         await admin_trading.admin_market_add(q, uid, context, bot)
     elif act == "timeframes":
@@ -466,6 +606,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_backup_restore(q, uid, context, bot)
     elif act == "settings":
         await admin_system.admin_settings(q, uid, context, bot)
+    elif act == "toggleuimode":
+        await admin_system.admin_toggle_ui_mode(q, uid, context, bot)
     elif act == "freeset":
         await admin_system.admin_free_set(q, uid, context, bot)
     elif act == "demobalset":
@@ -478,6 +620,20 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_audit(q, uid, context, bot, int(arg or 0))
     elif act == "health":
         await admin_system.admin_health(q, uid, context, bot)
+    elif act == "webapp":
+        await admin_system.admin_webapp_info(q, uid, context, bot)
+    elif act == "updates":
+        await admin_system.admin_updates(q, uid, context, bot)
+    elif act == "updlatest":
+        await admin_system.admin_update_latest(q, uid, context, bot)
+    elif act == "updver":
+        await admin_system.admin_update_ver_confirm(q, uid, context, bot, arg)
+    elif act == "updvergo":
+        await admin_system.admin_update_ver_go(q, uid, context, bot, arg)
+    elif act == "updrollback":
+        await admin_system.admin_update_rollback_confirm(q, uid, context, bot)
+    elif act == "updrollbackgo":
+        await admin_system.admin_update_rollback_go(q, uid, context, bot)
     elif act == "analytics":
         await admin_system.admin_analytics(q, uid, context, bot)
     elif act == "anladj":
@@ -486,6 +642,15 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_anl_global(q, uid, context, bot)
     elif act == "repanal":
         await admin_system.admin_rep_anal(q, uid, context, bot)
+    elif act in ("academy", "acadtoggle", "acadprice", "acaddur", "acadlessons",
+                 "acadles_track", "acadles_tog", "acadgrant",
+                 "gifts", "giftgen", "giftcustom", "giftdirect",
+                 "affiliates", "affapprove", "affreject"):
+        from fysb.handlers import academy_growth
+        await academy_growth.handle_admin_growth(q, uid, act, arg, arg2, context, bot)
+    elif act in ("cryptoapi", "cryptoapitoggle"):
+        from fysb.handlers import crypto_api
+        await crypto_api.handle_admin_crypto_api(q, uid, act, arg, context, bot)
     else:
         from fysb.handlers.common import render
         await render(q, "إجراء إداري غير معروف. حدّث القائمة عبر /start.", kb.admin_menu(), bot)

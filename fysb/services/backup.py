@@ -110,17 +110,21 @@ def settings_export() -> Path:
     return dest
 
 
-def full_project_archive() -> Path:
-    """Real ZIP of the whole project: code + docs + database snapshot + .env.
+def full_project_archive(include_env: bool = False) -> Path:
+    """Real ZIP of the whole project: code + docs + consistent DB snapshot.
 
-    The admin explicitly requested the .env inside the archive (their own bot,
-    their own token, delivered to their own chat) so the archive can restore a
-    working copy anywhere. Excludes generated junk (venv/__pycache__/logs/backups).
+    Security (v6.12.0): `.env` (which holds BOT_TOKEN, DATABASE_URL, and
+    BROKER_SECRET_KEY) is EXCLUDED by default so secrets are never leaked into
+    unencrypted ZIP archives sent over Telegram. Pass `include_env=True` only
+    for strictly local/offline archival.
     """
     snap = quick_db_snapshot("archived")  # may be None — archive still builds
     ts = time.strftime("%Y%m%d_%H%M%S")
     dest = config.BACKUP_DIR / f"FYSB_PROJECT_BACKUP_{ts}.zip"
-    skip_dirs = {"venv", ".venv", "__pycache__", "node_modules", ".git", "logs", "backups"}
+    skip_dirs = {
+        "venv", ".venv", "__pycache__", "node_modules", ".git", "logs", "backups",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".arena",
+    }
     base = config.BASE_DIR
     with zipfile.ZipFile(str(dest), "w", zipfile.ZIP_DEFLATED) as z:
         for path in sorted(base.rglob("*")):
@@ -133,8 +137,9 @@ def full_project_archive() -> Path:
                 continue
             if path.name == "fysb.lock":
                 continue
-            if path == (base / ".env"):
-                continue  # added explicitly below (avoid duplicate zip entry)
+            # Never bundle .env or secret env overrides in the main walk (.env.example stays)
+            if path.name == ".env" or (path.name.startswith(".env.") and path.name != ".env.example"):
+                continue
             try:
                 z.write(str(path), arcname=str(rel))
             except (OSError, PermissionError):
@@ -148,10 +153,14 @@ def full_project_archive() -> Path:
                 "النسخة اللحظية لقاعدة البيانات لم تكن متاحة لحظة إنشاء الأرشيف "
                 "(قاعدة البيانات مشغولة / تجاوز ميزانية الزمن). الأرشيف يحتوي كامل "
                 "الكود؛ خُذ نسخة قاعدة بيانات منفصلة عبر /backup أو زر «نسخة قاعدة بيانات الآن».")
-        # .env explicitly (never silently omitted) — skipped in the loop above
         env_file = base / ".env"
-        if env_file.is_file():
+        if include_env and env_file.is_file():
             z.write(str(env_file), arcname=".env")
+        elif not include_env:
+            z.writestr(
+                "ENV_EXCLUDED_FOR_SECURITY.txt",
+                "تم استثناء ملف .env تلقائياً لحماية توكن البوت وكلمات المرور ومفتاح التشفير "
+                "BROKER_SECRET_KEY. استخدم .env.example كقالب عند النقل لسيرفر جديد.\n")
     if snap is not None:
         snap.unlink(missing_ok=True)
     return dest

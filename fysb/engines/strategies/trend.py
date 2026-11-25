@@ -22,7 +22,7 @@ pullback visit +16 · resumption candle +14 · momentum (close vs EMA9) +6 ·
 kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 STACK_ATR = 0.25      # each EMA layer must be separated by >= 0.25 ATR —
                       # an EMAs-equal market is NOT a trend, never chase noise
@@ -46,7 +46,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     e9, e21, e50 = _stack(candles)
     checks: dict = {}
-    score = 40.0
+    score = 32.0
 
     # 1) entry-TF stack — real separation, both directions, exactly one wins
     direction = ""
@@ -57,7 +57,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["stack"] = bool(direction)
     if not direction:
         return None
-    score += 18
+    score += 14
 
     # 2) HTF bias with the same stack rule (trend-with-trend only)
     b9, b21, b50 = _stack(ctx.bias_candles)
@@ -65,7 +65,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["htf_bias"] = bias_ok
     if not bias_ok:
         return None
-    score += 12
+    score += 10
 
     # 3) pullback visit: last 6 candles touched the EMA21 value zone
     visited = False
@@ -81,7 +81,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["pullback"] = visited
     if not visited:
         return None
-    score += 16
+    score += 12
 
     # 4) resumption candle: closes back in the trend direction, past EMA9
     resumed = (close > e9 and float(last["close"]) > float(last["open"])) if direction == "BUY" \
@@ -89,7 +89,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["resumption"] = resumed
     if not resumed:
         return None
-    score += 14
+    score += 10
 
     # 5) momentum bonus: distance travelled away from the value zone
     momentum = abs(close - e21) >= 0.25 * a
@@ -110,6 +110,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         stop = max(float(c["high"]) for c in recent) + 0.5 * a
     entry = close
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
@@ -120,7 +121,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     tp3 = entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0
     rr = 2.0
     checks["rr_ok"] = True
-    score += 8
+    score += 5
 
     if score < 55:
         return None

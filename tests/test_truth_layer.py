@@ -74,6 +74,7 @@ class TestGoldCalibration(unittest.TestCase):
         self.assertEqual(payload["source"], "LIVE")
 
     def test_gold_price_prefers_real_spot_reference(self):
+        md._cache.clear()
         md._fail_streak.clear()
         with patch.object(md, "_fetch_goldapi_price", return_value={"price": 3539.0, "updated": "now"}):
             ref = md.fetch_price("XAUUSD", "")
@@ -81,6 +82,7 @@ class TestGoldCalibration(unittest.TestCase):
         self.assertTrue(ref.get("spot_ref"))
 
     def test_gold_price_fallback_calibrated_venue(self):
+        md._cache.clear()
         md._fail_streak.clear()
         with patch.object(md, "_fetch_goldapi_price", side_effect=RuntimeError("down")), \
              patch.object(md, "_fetch_binance_price", return_value=3552.49), \

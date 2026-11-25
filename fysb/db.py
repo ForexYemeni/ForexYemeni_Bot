@@ -504,6 +504,62 @@ CREATE TABLE IF NOT EXISTS promo_redemptions(
   saved_amount REAL NOT NULL DEFAULT 0,
   redeemed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bridge_connections(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  platform TEXT NOT NULL,
+  account_mode TEXT NOT NULL DEFAULT 'DEMO',
+  label TEXT NOT NULL DEFAULT '',
+  bridge_key TEXT NOT NULL DEFAULT '',
+  creds_enc TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  admin_frozen INTEGER NOT NULL DEFAULT 0,
+  risk_pct REAL NOT NULL DEFAULT 1.0,
+  lot_mode TEXT NOT NULL DEFAULT 'auto',
+  fixed_lot REAL NOT NULL DEFAULT 0.01,
+  max_daily_dd_pct REAL NOT NULL DEFAULT 3.0,
+  max_open_trades INTEGER NOT NULL DEFAULT 3,
+  partial_tp_be INTEGER NOT NULL DEFAULT 1,
+  markets TEXT NOT NULL DEFAULT 'ALL',
+  symbol_suffix TEXT NOT NULL DEFAULT '',
+  last_balance REAL NOT NULL DEFAULT 0.0,
+  last_equity REAL NOT NULL DEFAULT 0.0,
+  last_heartbeat TEXT NOT NULL DEFAULT '',
+  last_status TEXT NOT NULL DEFAULT 'READY',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, platform, account_mode)
+);
+CREATE TABLE IF NOT EXISTS bridge_user_rules(
+  user_id INTEGER PRIMARY KEY,
+  override_mode TEXT NOT NULL DEFAULT 'AUTO',
+  note TEXT NOT NULL DEFAULT '',
+  updated_by INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bridge_orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  platform TEXT NOT NULL,
+  account_mode TEXT NOT NULL DEFAULT 'DEMO',
+  signal_id INTEGER NOT NULL DEFAULT 0,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  action_type TEXT NOT NULL DEFAULT 'OPEN',
+  lots REAL NOT NULL DEFAULT 0.01,
+  entry_price REAL NOT NULL DEFAULT 0.0,
+  stop_price REAL NOT NULL DEFAULT 0.0,
+  tp1_price REAL NOT NULL DEFAULT 0.0,
+  tp2_price REAL NOT NULL DEFAULT 0.0,
+  tp3_price REAL NOT NULL DEFAULT 0.0,
+  status TEXT NOT NULL DEFAULT 'QUEUED',
+  external_order_id TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  pnl_usd REAL NOT NULL DEFAULT 0.0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}

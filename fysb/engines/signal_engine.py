@@ -1009,4 +1009,13 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     # 6) offloaded demo auto-execution (bounded thread pool, non-blocking loop)
     if auto_exec_queue:
         stats["auto_executed"] = await _offload_auto_executes(sig, auto_exec_queue, bot_send)
+
+    # 7) v7.7.0 Royal Auto-Bridge dispatch (Broker Demo & Live connections, policy-gated)
+    try:
+        import asyncio as _asyncio
+        from fysb.services import auto_bridge as _ab
+        br_res = await _asyncio.to_thread(_ab.dispatch_signal_to_bridges, dict(sig))
+        stats["bridge_queued"] = int(br_res.get("queued") or 0)
+    except Exception as e:
+        log.debug("auto_bridge dispatch skipped for signal #%s: %s", sig.get("id"), e)
     return stats

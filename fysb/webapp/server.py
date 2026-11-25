@@ -47,6 +47,9 @@ ALLOWED_ADMIN_TOGGLES = (
     "crypto_api_enabled",
     "auto_digest_enabled",
     "stars_enabled",
+    "bridge_enabled",
+    "bridge_kill_switch",
+    "bridge_allow_live",
 )
 
 
@@ -102,6 +105,32 @@ def dispatch_request(
         return st, ct, (b"" if m == "HEAD" else body_b)
     if m == "GET" and path == "/favicon.ico":
         return 204, "image/x-icon", b""
+
+    # 1.5) v7.7.0 MT5 Royal Bridge EA endpoints (authenticated by per-user secret bridge_key)
+    if m == "GET" and path == "/api/bridge/poll":
+        from fysb.services import auto_bridge as _ab
+        bkey = qs.get("key") or hdrs.get("x-bridge-key") or ""
+        bal = float(qs.get("balance") or 0.0)
+        eq = float(qs.get("equity") or 0.0)
+        res = _ab.poll_mt5_orders(bkey, balance=bal, equity=eq)
+        return _json_resp(200 if res.get("ok") else 401, res)
+
+    if m == "POST" and path == "/api/bridge/ack":
+        from fysb.services import auto_bridge as _ab
+        try:
+            ack_body = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            return _json_resp(400, {"ok": False, "error": "Invalid JSON"})
+        bkey = str(ack_body.get("key") or hdrs.get("x-bridge-key") or "")
+        res = _ab.ack_mt5_order(
+            bkey,
+            int(ack_body.get("order_id") or 0),
+            str(ack_body.get("status") or "EXECUTED"),
+            ticket=str(ack_body.get("ticket") or ""),
+            detail=str(ack_body.get("detail") or ""),
+            pnl_usd=float(ack_body.get("pnl_usd") or 0.0),
+        )
+        return _json_resp(200 if res.get("ok") else 400, res)
 
     # 2) Authenticated API routes require valid Telegram WebApp initData HMAC
     if path.startswith("/api/"):
@@ -159,7 +188,7 @@ def dispatch_request(
                     r["deliveries"] = deliv_cnt.get(sid_i, 0)
                     recent_signals.append(r)
                 toggles = {k: (db.get_setting(k, "0") == "1") for k in ALLOWED_ADMIN_TOGGLES}
-                from fysb.services import digest as _digest, promos as _promos
+                from fysb.services import auto_bridge as _ab, digest as _digest, promos as _promos
                 with db.conn() as c:
                     plans_list = [dict(r) for r in c.execute("SELECT code, title, price, duration_days FROM plans WHERE enabled=1 ORDER BY price ASC").fetchall()]
                 return _json_resp(200, {
@@ -185,7 +214,62 @@ def dispatch_request(
                     "stars_per_usd": _promos.stars_per_usd(),
                     "plans": plans_list,
                     "digest_7d": _digest.build_digest_data(7),
+                    "bridge_policy": _ab.get_policy(),
+                    "bridge_connections_count": len(_ab.list_connections(None, 200)),
                 })
+
+            if m == "GET" and path == "/api/admin/bridge/overview":
+                from fysb.services import auto_bridge as _ab
+                return _json_resp(200, {
+                    "ok": True,
+                    "policy": _ab.get_policy(),
+                    "overrides": _ab.list_user_overrides(),
+                    "connections": _ab.list_connections(None, 100),
+                    "orders": _ab.list_orders(None, 40),
+                })
+
+            if m == "POST" and path == "/api/admin/bridge/policy":
+                from fysb.services import auto_bridge as _ab
+                pol = _ab.update_policy(
+                    enabled=payload.get("enabled") if "enabled" in payload else None,
+                    kill_switch=payload.get("kill_switch") if "kill_switch" in payload else None,
+                    allow_live=payload.get("allow_live") if "allow_live" in payload else None,
+                    access_mode=payload.get("access_mode") if "access_mode" in payload else None,
+                    allowed_plans=payload.get("allowed_plans") if "allowed_plans" in payload else None,
+                )
+                audit_log.log(uid, f"webapp_bridge_policy:{pol['access_mode']}:en={int(pol['enabled'])}:ks={int(pol['kill_switch'])}")
+                return _json_resp(200, {"ok": True, "policy": pol})
+
+            if m == "POST" and path == "/api/admin/bridge/user-rule":
+                from fysb.services import auto_bridge as _ab
+                t_uid = int(payload.get("user_id") or 0)
+                if t_uid <= 0:
+                    return _json_resp(400, {"ok": False, "error": "user_id required"})
+                res = _ab.set_user_override(
+                    t_uid,
+                    str(payload.get("override_mode") or "AUTO"),
+                    note=str(payload.get("note") or ""),
+                    actor=uid,
+                )
+                if res.get("ok"):
+                    audit_log.log(uid, f"webapp_bridge_user_rule:{t_uid}:{res['override_mode']}")
+                return _json_resp(200 if res.get("ok") else 400, res)
+
+            if m == "POST" and path == "/api/admin/bridge/connection":
+                from fysb.services import auto_bridge as _ab
+                cid = int(payload.get("connection_id") or 0)
+                op = str(payload.get("op") or "").lower()
+                if op in ("freeze", "unfreeze"):
+                    res = _ab.admin_freeze_connection(cid, frozen=(op == "freeze"))
+                elif op == "toggle":
+                    res = _ab.toggle_connection(cid, is_admin=True)
+                elif op == "delete":
+                    res = _ab.delete_connection(cid, is_admin=True)
+                elif op == "test":
+                    res = _ab.test_connection(cid, is_admin=True)
+                else:
+                    return _json_resp(400, {"ok": False, "error": "Unsupported op"})
+                return _json_resp(200 if res.get("ok") else 400, res)
 
             if m == "GET" and path == "/api/admin/users":
                 q_str = (qs.get("q") or "").strip()
@@ -220,6 +304,8 @@ def dispatch_request(
                     uids = [int(r["user_id"]) for r in rows]
                     used_map: dict[int, int] = {}
                     paid_map: dict[int, float] = {}
+                    br_ov_map: dict[int, str] = {}
+                    br_cnt_map: dict[int, int] = {}
                     if uids:
                         ph = ",".join("?" * len(uids))
                         for rr in c.execute(
@@ -232,6 +318,16 @@ def dispatch_request(
                             tuple(uids),
                         ).fetchall():
                             paid_map[int(rr["user_id"])] = round(float(rr["s"] or 0.0), 2)
+                        for rr in c.execute(
+                            f"SELECT user_id, override_mode FROM bridge_user_rules WHERE user_id IN ({ph})",
+                            tuple(uids),
+                        ).fetchall():
+                            br_ov_map[int(rr["user_id"])] = str(rr["override_mode"] or "AUTO").upper()
+                        for rr in c.execute(
+                            f"SELECT user_id, COUNT(*) n FROM bridge_connections WHERE user_id IN ({ph}) GROUP BY user_id",
+                            tuple(uids),
+                        ).fetchall():
+                            br_cnt_map[int(rr["user_id"])] = int(rr["n"])
                 for r in rows:
                     u_i = int(r["user_id"])
                     r["used_today"] = used_map.get(u_i, 0)
@@ -239,6 +335,8 @@ def dispatch_request(
                     r["auto_signals"] = bool(r.get("notifications"))
                     r["demo_auto_copy"] = bool(r.get("demo_auto_copy"))
                     r["is_blocked"] = bool(r.get("is_blocked"))
+                    r["bridge_override"] = br_ov_map.get(u_i, "AUTO")
+                    r["bridge_connections"] = br_cnt_map.get(u_i, 0)
                 return _json_resp(200, {"ok": True, "users": rows, "count": len(rows)})
 
             if m == "POST" and path == "/api/admin/user-action":
@@ -417,6 +515,8 @@ def dispatch_request(
                     sid = int(cur.lastrowid)
                     sig_row = dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
                 copied = demo_engine.auto_copy_signal_for_subscribers(sig_row, config.market_api_key())
+                from fysb.services import auto_bridge as _ab
+                br_res = _ab.dispatch_signal_to_bridges(sig_row)
                 bot_obj = _BOT_RUNTIME.get("bot")
                 loop_obj = _BOT_RUNTIME.get("loop")
                 broadcasted = False
@@ -435,6 +535,7 @@ def dispatch_request(
                     "ok": True,
                     "signal": sig_row,
                     "auto_copied_count": len(copied),
+                    "bridge_queued_count": int(br_res.get("queued") or 0),
                     "broadcasted": broadcasted,
                 })
 
@@ -811,6 +912,68 @@ def dispatch_request(
             if not png:
                 return _json_resp(503, {"ok": False, "error": "Pillow unavailable"})
             return _png_resp(png)
+
+        # --- v7.7.0 USER ROYAL AUTO-BRIDGE APIs ---
+        if m == "GET" and path == "/api/bridge/overview":
+            from fysb.services import auto_bridge as _ab
+            can_demo, reason_demo = _ab.user_can_copy(uid, "DEMO")
+            can_live, reason_live = _ab.user_can_copy(uid, "LIVE")
+            return _json_resp(200, {
+                "ok": True,
+                "can_copy_demo": can_demo,
+                "reason_demo": reason_demo,
+                "can_copy_live": can_live,
+                "reason_live": reason_live,
+                "policy": _ab.get_policy(),
+                "platforms": {k: {"name": v["name"], "badge": v["badge"], "desc": v["desc"]} for k, v in _ab.PLATFORMS.items()},
+                "connections": _ab.list_connections(uid, 20),
+                "orders": _ab.list_orders(uid, 25),
+                "server_url": config.WEBAPP_URL or "",
+            })
+
+        if m == "POST" and path == "/api/bridge/connect":
+            from fysb.services import auto_bridge as _ab
+            res = _ab.save_connection(
+                uid,
+                str(payload.get("platform") or ""),
+                str(payload.get("account_mode") or "DEMO"),
+                label=str(payload.get("label") or ""),
+                creds=payload.get("creds") if isinstance(payload.get("creds"), dict) else {},
+                risk_pct=float(payload.get("risk_pct") or 1.0),
+                lot_mode=str(payload.get("lot_mode") or "auto"),
+                fixed_lot=float(payload.get("fixed_lot") or 0.01),
+                max_daily_dd_pct=float(payload.get("max_daily_dd_pct") or 3.0),
+                max_open_trades=int(payload.get("max_open_trades") or 3),
+                partial_tp_be=bool(payload.get("partial_tp_be", True)),
+                markets=str(payload.get("markets") or "ALL"),
+                symbol_suffix=str(payload.get("symbol_suffix") or ""),
+            )
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "POST" and path == "/api/bridge/test":
+            from fysb.services import auto_bridge as _ab
+            res = _ab.test_connection(int(payload.get("connection_id") or 0), user_id=uid, is_admin=principal["is_admin"])
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "POST" and path == "/api/bridge/toggle":
+            from fysb.services import auto_bridge as _ab
+            res = _ab.toggle_connection(int(payload.get("connection_id") or 0), user_id=uid, is_admin=principal["is_admin"])
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "POST" and path == "/api/bridge/delete":
+            from fysb.services import auto_bridge as _ab
+            res = _ab.delete_connection(int(payload.get("connection_id") or 0), user_id=uid, is_admin=principal["is_admin"])
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "GET" and path == "/api/bridge/ea-download":
+            from fysb.services import auto_bridge as _ab
+            cid = int(qs.get("id") or 0)
+            conns = _ab.list_connections(uid, 20)
+            target = next((c for c in conns if int(c["id"]) == cid), None)
+            if not target:
+                return _json_resp(404, {"ok": False, "error": "MT5 connection not found"})
+            src = _ab.render_mt5_ea_source(target, config.WEBAPP_URL or "https://YOUR-BOT-URL")
+            return 200, "text/plain; charset=utf-8", src.encode("utf-8")
 
         if m == "POST" and path == "/api/partner/payout":
             wallet = str(payload.get("wallet_address") or "").strip()

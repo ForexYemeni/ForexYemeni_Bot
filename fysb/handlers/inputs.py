@@ -104,6 +104,9 @@ def clear_flows(ud: dict) -> None:
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from fysb.handlers.common import is_private_user_update
+    if not is_private_user_update(update) or not getattr(update, "effective_message", None):
+        return
     uid = update.effective_user.id
     text = (update.effective_message.text or "").strip()
     ud = context.user_data
@@ -1137,6 +1140,9 @@ def bot_sender_from(bot):
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from fysb.handlers.common import is_private_user_update
+    if not is_private_user_update(update) or not getattr(update, "effective_message", None):
+        return
     uid = update.effective_user.id
     ud = context.user_data
     photo = update.effective_message.photo[-1]
@@ -1266,6 +1272,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v7.1.0 — Handle Admin Video / Audio / Voice / PDF (Document) uploads for Academy lessons."""
+    from fysb.handlers.common import is_private_user_update
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     if uid == config.ADMIN_ID:
         from fysb.handlers import academy_growth

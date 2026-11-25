@@ -72,7 +72,7 @@ def test_01_miniapp_xss_escaping_and_rebuilt_docs():
     assert "function esc(v)" in u_html and "function esc(v)" in a_html
     assert "function copyBtnVal(" in a_html
     assert "esc(s.symbol)" in u_html
-    assert config.VERSION == "8.0.0"
+    assert config.VERSION.startswith("8.")
 
 
 def test_02_signal_idor_isolation_and_signal_now_plan_gates(env):

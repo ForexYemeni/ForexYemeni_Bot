@@ -887,6 +887,7 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     plans_map = plans_for_users(candidate_uids)
     demo_map = _preload_demo_accounts(candidate_uids)
     auto_exec_queue: list[tuple[int, dict | None]] = []
+    delivered_uids: list[int] = []
     sig_created_dt = _parse_iso_utc(sig.get("created_at") or "")
     is_free_only = str(sig.get("source") or "").upper() == "AUTO_FREE"
     if is_free_only:
@@ -950,6 +951,7 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             except TypeError:
                 msg = await bot_send(uid, text)
             stats["sent"] += 1
+            delivered_uids.append(uid)
             record_delivery_refs(uid, sig["id"], msg)
         except Exception:
             stats["failed"] += 1
@@ -970,6 +972,39 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             stats["channels_failed"] = ch_stats.get("channels_failed", 0)
         except Exception as e:
             log.warning("emit_to_channels failed for signal #%s: %s", sig.get("id"), type(e).__name__)
+
+    # 5.5) v7.3.0 Auto-send luxury signal chart to delivered users + matching chart-only channels
+    if real_bot is not None and hasattr(real_bot, "send_photo"):
+        try:
+            from fysb.ui import charts as _charts
+            from fysb.services import chart_channels as _cch
+            has_chart_chs = bool(include_channels and _cch.matching_channels(sig_symbol, mode="signal"))
+            if _charts.charts_enabled() and (delivered_uids or has_chart_chs):
+                import asyncio as _asyncio
+                import io as _io
+                from fysb.engines.tracker import seq_of
+                from fysb.handlers.user_pages import build_signal_chart_bundle
+                bundle = await _asyncio.to_thread(build_signal_chart_bundle, dict(sig), False)
+                if bundle and bundle.get("png"):
+                    png_b = bundle["png"]
+                    cap = _cch.build_luxury_signal_chart_caption(sig, bundle.get("metrics"), seq=seq_of(sig["id"]))
+                    for duid in delivered_uids:
+                        try:
+                            await real_bot.send_photo(
+                                chat_id=duid,
+                                photo=_io.BytesIO(png_b),
+                                caption=cap,
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
+                    if has_chart_chs:
+                        ch_chart_n = await _cch.deliver_chart_to_matching_channels(
+                            real_bot, sig, png_b, cap, mode="signal"
+                        )
+                        stats["chart_channels_sent"] = ch_chart_n
+        except Exception as e:
+            log.debug("auto chart broadcast skipped for signal #%s: %s", sig.get("id"), type(e).__name__)
 
     # 6) offloaded demo auto-execution (bounded thread pool, non-blocking loop)
     if auto_exec_queue:

@@ -93,7 +93,8 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_acad_grant", "awaiting_acad_price", "awaiting_acad_dur",
                 "awaiting_acad_media_for", "awaiting_acad_edit_for", "awaiting_acad_quiz_for",
                 "awaiting_gift_custom", "awaiting_gift_direct",
-                "awaiting_exch_creds", "awaiting_ngrok_token", "awaiting_webapp_url")
+                "awaiting_exch_creds", "awaiting_ngrok_token", "awaiting_webapp_url",
+                "awaiting_chart_channel_add")
 
 
 def clear_flows(ud: dict) -> None:
@@ -290,6 +291,50 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================================
 async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, text: str) -> bool:
     ud = context.user_data
+
+    # ---------- v7.3.0 Admin: Add Market-Filtered Chart-Only Channel ----------
+    if ud.pop("awaiting_chart_channel_add", False):
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        raw_cid = lines[0] if lines else ""
+        custom_title = lines[1] if len(lines) > 1 else ""
+        if not raw_cid or (not raw_cid.startswith("@") and not raw_cid.lstrip("-").isdigit()):
+            ud["awaiting_chart_channel_add"] = True
+            await update.effective_message.reply_text(
+                "❌ المعرّف غير صحيح — أرسل معرف القناة مثل <code>@MyCharts</code> أو <code>-1001234567890</code>.",
+                parse_mode="HTML",
+            )
+            return True
+        from fysb.services import chart_channels as _cch
+        from fysb.ui import keyboards as kb_ui
+        title = custom_title
+        if not title:
+            try:
+                tgt = int(raw_cid) if raw_cid.lstrip("-").isdigit() else raw_cid
+                chat_obj = await context.bot.get_chat(tgt)
+                title = getattr(chat_obj, "title", "") or getattr(chat_obj, "username", "") or raw_cid
+            except Exception:
+                title = raw_cid
+        cid = await afn.run(_cch.add_channel, raw_cid, title, "ALL")
+        await afn.run(audit_log.log, uid, f"chart_channel_added:{cid}:{raw_cid}")
+        all_mkts = await afn.run(_cch.available_markets)
+        rows_kb = [[kb_ui.btn("✅ 🌐 جميع الأسواق (ALL)", f"a:chartch_mkt:{cid}:ALL", style="success")]]
+        row_buf = []
+        for sym in all_mkts:
+            row_buf.append(kb_ui.btn(sym, f"a:chartch_mkt:{cid}:{sym}", style="primary"))
+            if len(row_buf) == 3:
+                rows_kb.append(row_buf)
+                row_buf = []
+        if row_buf:
+            rows_kb.append(row_buf)
+        rows_kb.append([kb_ui.btn("✔️ عرض إعدادات القناة", f"a:chartch:{cid}", style="success")])
+        await update.effective_message.reply_text(
+            f"✅ <b><u>تمت إضافة قناة الشارت بنجاح — {esc(title)}</u></b>\n"
+            f"<blockquote>▎🆔 المعرّف: <code>{esc(raw_cid)}</code>\n"
+            f"▎🌐 اختر الآن <b>السوق (أو الأسواق)</b> التي ستستقبل هذه القناة شارتاتها فقط:</blockquote>",
+            reply_markup=kb_ui.admin_nav(rows_kb),
+            parse_mode="HTML",
+        )
+        return True
 
     # ---------- v7.2.2 Admin: Ngrok-443 Authtoken & Custom HTTPS WebApp URL ----------
     if ud.pop("awaiting_ngrok_token", False):

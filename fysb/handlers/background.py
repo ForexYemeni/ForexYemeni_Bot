@@ -443,16 +443,77 @@ async def tracker_loop(app):
                 await _safe_send(app.bot, uid, text)
             for uid, chat_id, message_id, text in result.get("edits", []):
                 await _safe_edit(app.bot, chat_id, message_id, text)
-            # v6.26.0 (#14): Auto Before/After Verified Proof Chart on TP2_HIT / TP3_HIT
+            # v7.3.0: Ultra-Luxury Live Tracking Charts for users & market-filtered Chart-Only Channels
+            admin_proof_sent_sids: set[int] = set()
+            if result.get("chart_events"):
+                try:
+                    import io as _io
+                    from fysb.services import chart_channels as _cch
+                    from fysb.ui import charts as _charts
+                    from fysb.ui import keyboards as _kb
+                    if await afn.run(_charts.charts_enabled):
+                        for ev in result["chart_events"]:
+                            try:
+                                esig = ev["sig"]
+                                ev_name = str(ev.get("event") or "").upper()
+                                png = await asyncio.to_thread(
+                                    _charts.render_tracking_chart,
+                                    esig,
+                                    ev.get("candles") or [],
+                                    ev_name,
+                                )
+                                if not png:
+                                    continue
+                                sid = int(esig["id"])
+                                seq = await afn.run(tracker.seq_of, sid)
+                                cap = _cch.build_luxury_tracking_chart_caption(
+                                    esig,
+                                    ev_name,
+                                    live_px=float(ev.get("live_px") or 0.0),
+                                    pips=float(ev.get("pips") or 0.0),
+                                    seq=seq,
+                                )
+                                pub_kb = (
+                                    _kb.InlineKeyboardMarkup([[
+                                        _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sid}", style="success"),
+                                    ]])
+                                    if ev_name in ("TP2_HIT", "TP3_HIT") else None
+                                )
+                                for tgt in ev.get("targets") or []:
+                                    try:
+                                        norm_t = _norm_chat_id(tgt)
+                                        is_adm_t = bool(config.ADMIN_ID and str(norm_t) == str(config.ADMIN_ID))
+                                        await app.bot.send_photo(
+                                            chat_id=norm_t,
+                                            photo=_io.BytesIO(png),
+                                            caption=cap,
+                                            reply_markup=(pub_kb if is_adm_t else None),
+                                            parse_mode="HTML",
+                                        )
+                                        if is_adm_t and ev_name in ("TP2_HIT", "TP3_HIT"):
+                                            admin_proof_sent_sids.add(sid)
+                                    except Exception:
+                                        pass
+                                # Route ONLY the chart to matching market-filtered Chart-Only Channels
+                                await _cch.deliver_chart_to_matching_channels(
+                                    app.bot, esig, png, cap, mode="tracking", skip_private=True
+                                )
+                            except Exception:
+                                log.debug("tracking chart send failed for sig #%s", ev.get("sig", {}).get("id"))
+                except Exception:
+                    pass
+            # v6.26.0 (#14): Fallback Before/After Proof Chart to Admin if not already sent above
             for ps in result.get("proof_signals", []):
                 try:
+                    sid = int(ps["id"])
+                    if sid in admin_proof_sent_sids:
+                        continue
                     from fysb.ui import charts as _charts
                     from fysb.ui import keyboards as _kb
                     if config.ADMIN_ID and await afn.run(_charts.charts_enabled):
                         png = await asyncio.to_thread(_charts.render_proof_chart, ps, ps.get("candles") or [])
                         if png:
                             import io as _io
-                            sid = int(ps["id"])
                             pips = float(ps.get("pips_result") or 0.0)
                             cap = (
                                 f"🏆 <b>شارت إثبات صفقة رابحة #{sid}</b> — "
@@ -653,12 +714,14 @@ async def watchers_loop(app):
 
 
 async def scheduled_charts_loop(app):
-    """v7.0.2: Periodic live candlestick chart updates for open RUNNING/TP1/TP2 trades
-    every N minutes (5 / 10 / 15 / 30 / 60 min) as configured by Admin."""
+    """v7.0.2 / v7.3.0: Periodic live candlestick chart updates for open RUNNING/TP1/TP2 trades
+    every N minutes (5 / 10 / 15 / 30 / 60 min) as configured by Admin, routing
+    to Admin, broadcast channels (if enabled), AND market-filtered Chart-Only Channels."""
     import io as _io
     import time as _time
     from fysb.handlers.admin_trading import _active_channel_chat_ids, _open_running_signals_sync
     from fysb.handlers.user_pages import build_signal_chart_bundle
+    from fysb.services import chart_channels as _cch
     from fysb.theme import esc
     from fysb.ui import charts as _charts
     from fysb.ui import keyboards as _kb
@@ -671,10 +734,11 @@ async def scheduled_charts_loop(app):
             now_m = _time.monotonic()
             if enabled and sched_min >= 5 and (now_m - last_sent_ts) >= (sched_min * 60):
                 last_sent_ts = now_m
-                sigs = await afn.run(_open_running_signals_sync, 3)
-                if sigs and config.ADMIN_ID:
+                sigs = await afn.run(_open_running_signals_sync, 10)
+                if sigs:
                     to_ch = (await afn.run(db.get_setting, "chart_schedule_channels", "0") or "0") == "1"
                     chat_ids = await afn.run(_active_channel_chat_ids) if to_ch else []
+                    admin_sent = 0
                     for sig in sigs:
                         try:
                             b = await asyncio.to_thread(build_signal_chart_bundle, sig, False)
@@ -684,21 +748,23 @@ async def scheduled_charts_loop(app):
                             if b["pips"] >= 20.0 and not b["is_proof"]:
                                 b = await asyncio.to_thread(build_signal_chart_bundle, sig, True)
                             cap = (
-                                f"📊 <b><u>تحديث شارت دوري (كل {sched_min}د) — {esc(sig['symbol'])} {sig['direction']}</u></b>\n"
+                                f"📊 <b><u>تحديث شارت ملكي دوري (كل {sched_min}د) — {esc(sig['symbol'])} {sig['direction']}</u></b>\n"
                                 f"▎⏱ {esc(sig['timeframe'])} · 🧠 {esc(sig['strategy'])}\n"
                                 f"{b['pips_line']}\n"
                                 f"▎🛡 متابعة حية تلقائية من محرك ForexYemeni Royal."
                             )
-                            pub_kb = _kb.InlineKeyboardMarkup([[
-                                _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
-                            ]])
-                            await app.bot.send_photo(
-                                chat_id=config.ADMIN_ID,
-                                photo=_io.BytesIO(b["png"]),
-                                caption=cap,
-                                reply_markup=pub_kb,
-                                parse_mode="HTML",
-                            )
+                            if config.ADMIN_ID and admin_sent < 5:
+                                pub_kb = _kb.InlineKeyboardMarkup([[
+                                    _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
+                                ]])
+                                await app.bot.send_photo(
+                                    chat_id=config.ADMIN_ID,
+                                    photo=_io.BytesIO(b["png"]),
+                                    caption=cap,
+                                    reply_markup=pub_kb,
+                                    parse_mode="HTML",
+                                )
+                                admin_sent += 1
                             for cid in chat_ids:
                                 try:
                                     target = int(cid) if cid.lstrip("-").isdigit() else cid
@@ -710,6 +776,10 @@ async def scheduled_charts_loop(app):
                                     )
                                 except Exception:
                                     pass
+                            # v7.3.0: Always route chart-only photo to matching market-filtered Chart-Only Channels
+                            await _cch.deliver_chart_to_matching_channels(
+                                app.bot, sig, b["png"], cap, mode="schedule", skip_private=True
+                            )
                         except Exception:
                             log.exception("scheduled chart send failed for signal #%s", sig.get("id"))
         except asyncio.CancelledError:

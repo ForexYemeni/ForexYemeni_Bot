@@ -477,6 +477,24 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_chart_sched_ch_toggle(q, uid, context, bot)
     elif act == "chartsendnow":
         await admin_trading.admin_chart_send_now(q, uid, context, bot)
+    elif act == "chartchs":
+        await admin_trading.admin_chart_channels_menu(q, uid, context, bot)
+    elif act == "chartch_add":
+        await admin_trading.admin_chart_channel_add_prompt(q, uid, context, bot)
+    elif act == "chartch":
+        await admin_trading.admin_chart_channel_view(q, uid, context, bot, int(arg or 0))
+    elif act == "chartch_tog":
+        await admin_trading.admin_chart_channel_toggle(q, uid, context, bot, int(arg or 0))
+    elif act == "chartch_flg":
+        await admin_trading.admin_chart_channel_flag_toggle(q, uid, context, bot, int(arg or 0), arg2)
+    elif act == "chartch_mkts":
+        await admin_trading.admin_chart_channel_markets(q, uid, context, bot, int(arg or 0))
+    elif act == "chartch_mkt":
+        await admin_trading.admin_chart_channel_market_toggle(q, uid, context, bot, int(arg or 0), arg2)
+    elif act == "chartch_test":
+        await admin_trading.admin_chart_channel_test(q, uid, context, bot, int(arg or 0))
+    elif act == "chartch_del":
+        await admin_trading.admin_chart_channel_delete(q, uid, context, bot, int(arg or 0))
     elif act == "sigchart":
         await admin_trading.admin_signal_chart(q, uid, context, bot, int(arg or 0))
     elif act == "sigproof":

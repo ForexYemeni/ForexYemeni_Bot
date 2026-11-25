@@ -60,7 +60,7 @@ _FONT_CANDIDATES_MONO = (
 
 
 def charts_enabled() -> bool:
-    return PIL_AVAILABLE and (db.get_setting("charts_enabled", "1") or "1") == "1"
+    return (db.get_setting("charts_enabled", "1") or "1") == "1"
 
 
 def _load_font(size: int, kind: str = "bold"):
@@ -98,11 +98,13 @@ def _draw_pill(draw, x: int, y: int, text: str, bg, fg, font, pad_x: int = 10, p
 
 
 def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = False) -> bytes | None:
-    if not PIL_AVAILABLE or not sig:
+    if not sig:
         return None
     bars = list(candles or [])[-48:]
     if len(bars) < 5:
         return None
+    if not PIL_AVAILABLE:
+        return _render_board_stdlib(sig, bars, row=row, proof_mode=proof_mode)
 
     W, H = 1200, 680
     img = Image.new("RGBA", (W, H), BG_DARK)
@@ -276,3 +278,183 @@ def render_signal_chart(sig: dict, candles: list[dict], row=None) -> bytes | Non
 def render_proof_chart(sig: dict, candles: list[dict], row=None) -> bytes | None:
     """#14 Render verified BEFORE -> AFTER TP2/TP3 victory proof chart PNG."""
     return _render_board(sig, candles, row=row, proof_mode=True)
+
+
+# --- Zero-Dependency Pure-Python Stdlib PNG Fallback (works even without Pillow) ---
+_FONT5X7: dict[str, tuple[str, ...]] = {
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
+    "D": ("11100", "10010", "10001", "10001", "10001", "10010", "11100"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "G": ("01110", "10001", "10000", "10111", "10001", "10001", "01110"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "J": ("00111", "00010", "00010", "00010", "10010", "10010", "01100"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "W": ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
+    "6": ("01110", "10000", "11110", "10001", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
+    ":": ("00000", "01100", "01100", "00000", "01100", "01100", "00000"),
+    "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
+    "+": ("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
+    "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
+    "|": ("00100", "00100", "00100", "00100", "00100", "00100", "00100"),
+    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
+}
+
+
+def _encode_png_rgb(w: int, h: int, buf: bytearray) -> bytes:
+    import struct
+    import zlib
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    stride = w * 3
+    raw = bytearray((stride + 1) * h)
+    for y in range(h):
+        dst = y * (stride + 1)
+        raw[dst] = 0
+        src = y * stride
+        raw[dst + 1:dst + 1 + stride] = buf[src:src + stride]
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + _chunk(b"IEND", b"")
+
+
+def _render_board_stdlib(sig: dict, bars: list[dict], row=None, proof_mode: bool = False) -> bytes:
+    """Pure-Python dark-gold candlestick PNG renderer (zero external deps)."""
+    W, H = 960, 560
+    buf = bytearray(W * H * 3)
+
+    def _fill_rect(x0: int, y0: int, x1: int, y1: int, rgb: tuple[int, int, int]) -> None:
+        r, g, b = rgb
+        xa, xb = max(0, x0), min(W, x1)
+        ya, yb = max(0, y0), min(H, y1)
+        if xa >= xb or ya >= yb:
+            return
+        row_bytes = bytes((r, g, b)) * (xb - xa)
+        for y in range(ya, yb):
+            off = (y * W + xa) * 3
+            buf[off:off + len(row_bytes)] = row_bytes
+
+    def _draw_text(x: int, y: int, txt: str, rgb: tuple[int, int, int], scale: int = 2) -> None:
+        cx = x
+        for ch in txt.upper():
+            glyph = _FONT5X7.get(ch, _FONT5X7[" "])
+            for gy, line in enumerate(glyph):
+                for gx, bit in enumerate(line):
+                    if bit == "1":
+                        _fill_rect(cx + gx * scale, y + gy * scale, cx + (gx + 1) * scale, y + (gy + 1) * scale, rgb)
+            cx += 6 * scale
+
+    _fill_rect(0, 0, W, H, BG_DARK[:3])
+    _fill_rect(8, 8, W - 8, 74, HEADER_BG[:3])
+    _fill_rect(8, 72, W - 8, 74, BORDER_GOLD[:3])
+
+    plot_l, plot_t, plot_r, plot_b = 26, 92, W - 210, H - 44
+    _fill_rect(plot_l, plot_t, plot_r, plot_b, PANEL_BG[:3])
+
+    symbol = str(sig.get("symbol") or "XAUUSD").upper()
+    direction = str(sig.get("direction") or "BUY").upper()
+    tf = str(sig.get("timeframe") or "M15").upper()
+    strat = str(sig.get("strategy") or "INSTITUTIONAL").upper()
+    score = int(sig.get("score") or 0)
+    entry = float(sig.get("entry") or 0.0)
+    sl = float(sig.get("stop") or 0.0)
+    tp1 = float(sig.get("tp1") or 0.0)
+    tp2 = float(sig.get("tp2") or 0.0)
+    tp3 = float(sig.get("tp3") or 0.0)
+
+    hdr = f"FOREXYEMENI | {symbol} {direction} {tf} | {strat} {score}/100"
+    _draw_text(22, 26, hdr[:52], GOLD_SOFT[:3], scale=2)
+    if proof_mode:
+        _draw_text(22, 50, f"VERIFIED PROOF | {sig.get('status','')} {float(sig.get('pips_result') or 0):+.1f}P", TP_COLOR[:3], scale=2)
+
+    highs = [float(b["high"]) for b in bars]
+    lows = [float(b["low"]) for b in bars]
+    for lv in (entry, sl, tp1, tp2, tp3):
+        if lv > 0:
+            highs.append(lv)
+            lows.append(lv)
+    p_hi, p_lo = max(highs), min(lows)
+    pad = max((p_hi - p_lo) * 0.08, 1e-6)
+    p_hi += pad
+    p_lo -= pad
+
+    def y_of(price: float) -> int:
+        ratio = (p_hi - price) / (p_hi - p_lo)
+        return int(plot_t + ratio * (plot_b - plot_t))
+
+    # Grid lines
+    for i in range(1, 5):
+        gy = plot_t + int((plot_b - plot_t) * i / 5)
+        _fill_rect(plot_l, gy, plot_r, gy + 1, GRID_COLOR[:3])
+
+    # Candlesticks
+    n = len(bars)
+    step = (plot_r - plot_l - 16) / max(n, 1)
+    cw = max(3, int(step * 0.6))
+    for idx, b in enumerate(bars):
+        o, h, l, c = float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])
+        cx = int(plot_l + 8 + idx * step + step / 2)
+        col = BULL_COLOR[:3] if c >= o else BEAR_COLOR[:3]
+        _fill_rect(cx, y_of(h), cx + 1, y_of(l) + 1, col)
+        yt, yb = min(y_of(o), y_of(c)), max(y_of(o), y_of(c))
+        if yb - yt < 2:
+            yb = yt + 2
+        _fill_rect(cx - cw // 2, yt, cx + cw // 2 + 1, yb, col)
+
+    # Levels & right-axis labels
+    used_y: list[int] = []
+    for tag, lv, col in (
+        ("ENTRY", entry, ENTRY_COLOR[:3]),
+        ("SL", sl, SL_COLOR[:3]),
+        ("TP1", tp1, TP_COLOR[:3]),
+        ("TP2", tp2, TP2_COLOR[:3]),
+        ("TP3", tp3, TP3_COLOR[:3]),
+    ):
+        if lv <= 0 or not (p_lo <= lv <= p_hi):
+            continue
+        ly = y_of(lv)
+        if tag == "ENTRY":
+            _fill_rect(plot_l + 2, ly, plot_r - 2, ly + 2, col)
+        else:
+            for dx in range(plot_l + 2, plot_r - 2, 14):
+                _fill_rect(dx, ly, min(dx + 8, plot_r - 2), ly + 2, col)
+        lbl_y = ly - 10
+        for py in used_y:
+            if abs(lbl_y - py) < 22:
+                lbl_y = py + 22
+        lbl_y = max(plot_t + 2, min(plot_b - 20, lbl_y))
+        used_y.append(lbl_y)
+        _fill_rect(plot_r + 6, lbl_y, W - 12, lbl_y + 20, col)
+        px_str = instruments.fmt_price(symbol, lv, row)
+        _draw_text(plot_r + 12, lbl_y + 3, f"{tag} {px_str}"[:16], BG_DARK[:3], scale=2)
+
+    _draw_text(26, H - 28, f"REAL OHLC | FOREXYEMENI ROYAL V{config.VERSION}", TEXT_MUTED[:3], scale=2)
+    return _encode_png_rgb(W, H, buf)

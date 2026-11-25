@@ -1684,10 +1684,23 @@ def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes
     sym = str(sig.get("symbol") or "XAUUSD")
     tf = str(sig.get("timeframe") or "H1")
     row = _market_row(sym)
-    try:
-        candles, _src = market_data.fetch_candles(sym, tf, count=72)
-    except Exception:
-        candles = []
+    prov_sym = (row.get("provider_symbol") if row and row.get("provider_symbol") else sym)
+    api_key = config.market_api_key()
+    candles: list[dict] = []
+    tried: list[str] = []
+    for candidate_tf in (tf, "M15", "H1"):
+        interval = market_data.parse_interval(candidate_tf)
+        if interval in tried:
+            continue
+        tried.append(interval)
+        try:
+            payload = market_data.fetch_candles(prov_sym, interval, api_key=api_key, outputsize=72)
+            vals = list((payload or {}).get("values") or [])
+            if len(vals) >= 5:
+                candles = vals
+                break
+        except Exception as exc:
+            log.warning("chart fetch_candles failed sym=%s interval=%s: %s", prov_sym, interval, exc)
     st = str(sig.get("status") or "").upper()
     is_proof = force_proof or st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "CLOSED")
     if is_proof:

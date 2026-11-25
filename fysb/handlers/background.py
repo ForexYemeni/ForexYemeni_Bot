@@ -802,16 +802,20 @@ async def webapp_tunnel_loop(app):
     fail_backoff = 0
     while True:
         try:
-            custom_db = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip()
-            if custom_db.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:
-                if config.WEBAPP_URL != custom_db:
-                    config.set_runtime_webapp_url(custom_db, source="db_custom")
-                if _tun.is_tunnel_alive():
-                    await _tun.stop_tunnel()
-                await asyncio.sleep(30)
-                continue
-
+            custom_db = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip().rstrip("/")
             auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+            is_frontdoor = bool(custom_db and await afn.run(_tun.is_proxy_frontdoor_url, custom_db))
+
+            if custom_db.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:
+                src_tag = "worker_proxy" if is_frontdoor else "db_custom"
+                if config.WEBAPP_URL != custom_db:
+                    config.set_runtime_webapp_url(custom_db, source=src_tag)
+                if not is_frontdoor:
+                    if _tun.is_tunnel_alive():
+                        await _tun.stop_tunnel()
+                    await asyncio.sleep(30)
+                    continue
+
             should_run = bool(
                 config.WEBAPP_ENABLED
                 and config.WEBAPP_AUTO_TUNNEL
@@ -842,21 +846,22 @@ async def webapp_tunnel_loop(app):
                         url = await _tun.start_tunnel(port=config.WEBAPP_PORT)
                         if url:
                             fail_backoff = 0
-                            if url != notified_url and config.ADMIN_ID:
-                                notified_url = url
+                            display_url = config.WEBAPP_URL or url
+                            if display_url != notified_url and config.ADMIN_ID:
+                                notified_url = display_url
                                 prov = _tun.tunnel_status().get("provider") or "HTTPS"
                                 try:
                                     await app.bot.send_message(
                                         config.ADMIN_ID,
                                         "🌐 <b><u>التطبيق المصغّر الملكي جاهز ومفحوص 100% (HTTP 200)!</u></b>\n"
                                         "<blockquote>"
-                                        f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
+                                        f"▎🟢 الرابط المباشر (HTTPS): <code>{display_url}</code>\n"
                                         f"▎🛰 المزوّد النشط: <b>{prov}</b> (تم التحقق الحي قبل الإرسال)\n"
                                         "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
                                         "</blockquote>",
                                         reply_markup=_kb.InlineKeyboardMarkup([
-                                            [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
-                                            [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
+                                            [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{display_url}/admin", style="success")],
+                                            [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{display_url}/", style="primary")],
                                         ]),
                                         parse_mode="HTML",
                                     )

@@ -33,7 +33,7 @@ def _add_user(uid: int, name: str = "Trader"):
 
 
 def test_version_menus_and_phase4_schema(isolated_db):
-    assert config.VERSION == "6.27.0"
+    assert tuple(int(x) for x in config.VERSION.split(".")) >= (6, 27, 0)
     assert len(kb.user_menu().inline_keyboard) <= 6
     assert len(kb.admin_menu().inline_keyboard) == 4
     with db.conn() as c:

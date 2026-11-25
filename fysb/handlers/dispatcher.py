@@ -132,6 +132,13 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers import academy_growth
         if await academy_growth.handle_user_growth(q, uid, action, context, context.bot):
             return
+    # Phase 5 (v6.28.0): Free Crypto Exchange API Integration (Binance/Bybit/OKX)
+    if action in ("exchange", "exchorders") or action.startswith(
+        ("exchadd:", "exchtest:", "exchtoglive:", "exchdel:", "exchexec:")
+    ):
+        from fysb.handlers import crypto_api
+        if await crypto_api.handle_user_crypto_api(q, uid, action, context, context.bot):
+            return
     await user_pages.user_page(q, action, uid, context, preloaded_u=u)
 
 
@@ -639,6 +646,9 @@ async def _route_admin(q, context, uid: int, action: str):
                  "affiliates", "affapprove", "affreject"):
         from fysb.handlers import academy_growth
         await academy_growth.handle_admin_growth(q, uid, act, arg, arg2, context, bot)
+    elif act in ("cryptoapi", "cryptoapitoggle"):
+        from fysb.handlers import crypto_api
+        await crypto_api.handle_admin_crypto_api(q, uid, act, arg, context, bot)
     else:
         from fysb.handlers.common import render
         await render(q, "إجراء إداري غير معروف. حدّث القائمة عبر /start.", kb.admin_menu(), bot)

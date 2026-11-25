@@ -283,6 +283,7 @@ def admin_hub_execution() -> InlineKeyboardMarkup:
     return admin_nav([
         [btn("🏦 الوسطاء", "a:brokers", style="primary"),
          btn("🔗 حسابات التداول", "a:accounts", style="primary")],
+        [btn("🟡 منصات الكريبتو API (مجاني)", "a:cryptoapi", style="success")],
         [btn("🧪 التداول التجريبي", "a:demo", style="success"),
          btn("🔒 التداول الحقيقي", "a:live", style="danger")],
     ])

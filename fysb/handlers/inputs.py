@@ -90,7 +90,8 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
                 "awaiting_partner_limit",
                 "awaiting_gift_code", "awaiting_aff_wallet",
-                "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct")
+                "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct",
+                "awaiting_exch_creds")
 
 
 def clear_flows(ud: dict) -> None:
@@ -103,6 +104,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.effective_message.text or "").strip()
     ud = context.user_data
+
+    # ---------- Phase 5 (v6.28.0) Free Crypto Exchange API Credentials ----------
+    if ud.get("awaiting_exch_creds"):
+        from fysb.handlers import crypto_api
+        if await crypto_api.handle_crypto_text_input(update, context, uid, text):
+            return
 
     # ---------- Phase 4 (v6.27.0) Academy / Gift Codes / Affiliate Payouts ----------
     if any(ud.get(k) for k in ("awaiting_gift_code", "awaiting_aff_wallet",

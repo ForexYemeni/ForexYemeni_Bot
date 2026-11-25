@@ -436,6 +436,40 @@ CREATE TABLE IF NOT EXISTS affiliate_payouts(
   created_at TEXT NOT NULL,
   processed_at TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS user_exchange_keys(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  exchange TEXT NOT NULL,
+  label TEXT DEFAULT '',
+  testnet INTEGER NOT NULL DEFAULT 1,
+  auto_execute INTEGER NOT NULL DEFAULT 0,
+  risk_pct REAL NOT NULL DEFAULT 1.0,
+  max_trade_usd REAL NOT NULL DEFAULT 100.0,
+  creds_enc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  last_check_at TEXT DEFAULT '',
+  last_error TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, exchange)
+);
+CREATE TABLE IF NOT EXISTS exchange_orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  exchange TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  qty REAL NOT NULL DEFAULT 0.0,
+  entry_price REAL NOT NULL DEFAULT 0.0,
+  stop_price REAL NOT NULL DEFAULT 0.0,
+  tp1_price REAL NOT NULL DEFAULT 0.0,
+  testnet INTEGER NOT NULL DEFAULT 1,
+  order_id TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'SUBMITTED',
+  raw_response TEXT DEFAULT '',
+  signal_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -546,6 +580,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_aff_comm_ref ON affiliate_commissions(referrer_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_aff_links_ref ON affiliate_links(referrer_id)",
     "CREATE INDEX IF NOT EXISTS idx_aff_payout_status ON affiliate_payouts(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_exch_keys_user ON user_exchange_keys(user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_exch_orders_user ON exchange_orders(user_id, created_at)",
 ]
 
 DEFAULT_SETTINGS = {
@@ -609,6 +645,8 @@ DEFAULT_SETTINGS = {
     "academy_price_usd": "49",
     "academy_duration_days": "365",
     "affiliate_min_payout_usd": "20",
+    # v6.28.0 Free Crypto Exchange API Integration (Binance/Bybit/OKX)
+    "crypto_api_enabled": "1",
 }
 
 SEED_MARKETS = [

@@ -97,6 +97,53 @@ def get_ngrok_token() -> str:
         return ""
 
 
+def get_ngrok_domain() -> str:
+    """Optional Ngrok free static domain (e.g. `my-bot.ngrok-free.app`)."""
+    raw = os.getenv("NGROK_DOMAIN", "").strip()
+    if not raw:
+        try:
+            raw = (db.get_setting("ngrok_domain", "") or "").strip()
+        except Exception:
+            raw = ""
+    raw = raw.replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
+    return raw
+
+
+def is_proxy_frontdoor_url(url: str) -> bool:
+    """True when custom URL is a Cloudflare Worker / reverse-proxy front door that needs the local tunnel alive behind it."""
+    u = (url or "").strip().lower()
+    if not u.startswith("https://"):
+        return False
+    if ".workers.dev" in u or ".pages.dev" in u:
+        return True
+    return bool(get_ngrok_token() and get_ngrok_domain())
+
+
+def build_cloudflare_worker_code(origin_url: str = "") -> str:
+    """Return copy-paste Cloudflare Worker JS that hides Ngrok/Pinggy warning screens permanently."""
+    orig = (origin_url or "https://YOUR-STATIC-DOMAIN.ngrok-free.app").strip().rstrip("/")
+    return (
+        f'const ORIGIN = "{orig}";\n'
+        "export default {\n"
+        "  async fetch(request) {\n"
+        "    const u = new URL(request.url);\n"
+        "    const headers = new Headers(request.headers);\n"
+        '    headers.set("ngrok-skip-browser-warning", "1");\n'
+        '    headers.set("X-Pinggy-No-Screen", "1");\n'
+        '    headers.delete("host");\n'
+        '    const hasBody = request.method !== "GET" && request.method !== "HEAD";\n'
+        "    const body = hasBody ? await request.arrayBuffer() : undefined;\n"
+        "    const r = await fetch(ORIGIN + u.pathname + u.search, {\n"
+        '      method: request.method, headers, body, redirect: "manual"\n'
+        "    });\n"
+        "    const rh = new Headers(r.headers);\n"
+        '    rh.set("Cache-Control", "no-store");\n'
+        "    return new Response(r.body, { status: r.status, headers: rh });\n"
+        "  }\n"
+        "};"
+    )
+
+
 def _is_executable(path: Path) -> bool:
     try:
         return path.is_file() and path.stat().st_size > 1_000_000 and os.access(path, os.X_OK)
@@ -215,7 +262,9 @@ def _probe_health_once(url: str, timeout: float = 8.0) -> tuple[bool, str]:
                     return True, "OK"
             except Exception:
                 pass
-            return False, "استجابة غير متوقعة (ليست JSON من الخادم)"
+            if "hello world" in raw.lower():
+                return False, "الرابط يعيد صفحة Hello World الافتراضية من Cloudflare Worker — لم يتم لصق كود البروكسي بعد"
+            return False, "استجابة غير متوقعة (ليست JSON من خادم التطبيق)"
     except urllib.error.HTTPError as exc:
         body = ""
         try:
@@ -372,7 +421,15 @@ async def _try_spawn_provider(
     _STATE["url"] = url
     _STATE["provider"] = provider_name
     _STATE["last_error"] = ""
-    config.set_runtime_webapp_url(url, source="auto_tunnel")
+    # Preserve Cloudflare Worker front-door URL when configured (tunnel runs cleanly as its backend!)
+    try:
+        custom_db = (db.get_setting("webapp_custom_url", "") or "").strip().rstrip("/")
+    except Exception:
+        custom_db = ""
+    if custom_db.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:
+        config.set_runtime_webapp_url(custom_db, source="worker_proxy")
+    else:
+        config.set_runtime_webapp_url(url, source="auto_tunnel")
     log.info("WEBAPP TUNNEL VERIFIED & READY [%s]: %s -> http://127.0.0.1:%s", provider_name, url, target_port)
     return url, ""
 
@@ -391,24 +448,28 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
         _LOGS.clear()
         errors: list[str] = []
 
-        # 1) PRIORITY: Ngrok v3 over PURE TLS port 443 (if authtoken configured)
+        # 1) PRIORITY: Ngrok v3 over PURE TLS port 443 (with optional free permanent --domain)
         ngrok_tok = await asyncio.to_thread(get_ngrok_token)
         if ngrok_tok:
             ng_bin = await asyncio.to_thread(ensure_ngrok_binary)
             if ng_bin:
+                ng_dom = await asyncio.to_thread(get_ngrok_domain)
+                ng_cmd = [
+                    str(ng_bin),
+                    "http",
+                    f"http://127.0.0.1:{target_port}",
+                    "--authtoken",
+                    ngrok_tok,
+                    "--log",
+                    "stdout",
+                    "--log-format",
+                    "logfmt",
+                ]
+                if ng_dom:
+                    ng_cmd.extend(["--domain", ng_dom])
                 url, err = await _try_spawn_provider(
                     "Ngrok-443",
-                    [
-                        str(ng_bin),
-                        "http",
-                        f"http://127.0.0.1:{target_port}",
-                        "--authtoken",
-                        ngrok_tok,
-                        "--log",
-                        "stdout",
-                        "--log-format",
-                        "logfmt",
-                    ],
+                    ng_cmd,
                     _NGROK_RE,
                     require_cf_register=False,
                     target_port=target_port,
@@ -421,7 +482,7 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
             else:
                 errors.append("Ngrok-443: تعذر تحميل أداة ngrok")
 
-        # 2) Zero-account SSH HTTPS tunnels on TCP port 443 (non-interactive, stdin=DEVNULL)
+        # 2) Zero-account SSH HTTPS tunnels on TCP port 443 (Serveo & LocalhostRun FIRST — NO warning screen!)
         ssh_bin = shutil.which("ssh")
         if ssh_bin:
             ssh_base = [
@@ -438,9 +499,9 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
                 "-o", "ExitOnForwardFailure=yes",
             ]
             for name, host_args, rx in (
-                ("Pinggy-443", ["-p", "443", "-R", f"0:127.0.0.1:{target_port}", "a.pinggy.io"], _PINGGY_RE),
                 ("Serveo-443", ["-p", "443", "-R", f"80:127.0.0.1:{target_port}", "serveo.net"], _SERVEO_RE),
                 ("LocalhostRun-443", ["-p", "443", "-R", f"80:127.0.0.1:{target_port}", "nokey@localhost.run"], _LHR_RE),
+                ("Pinggy-443", ["-p", "443", "-R", f"0:127.0.0.1:{target_port}", "a.pinggy.io"], _PINGGY_RE),
             ):
                 url, err = await _try_spawn_provider(
                     name,

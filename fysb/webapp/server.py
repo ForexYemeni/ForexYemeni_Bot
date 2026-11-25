@@ -77,7 +77,8 @@ def dispatch_request(
     """Pure synchronous request dispatcher (executed via `asyncio.to_thread` in live server)."""
     m = (method or "GET").upper()
     parsed = urllib.parse.urlsplit(target or "/")
-    path = parsed.path or "/"
+    raw_path = parsed.path or "/"
+    path = raw_path.rstrip("/") or "/"
     qs = dict(urllib.parse.parse_qsl(parsed.query))
     hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
@@ -444,6 +445,35 @@ _STATUS_TEXT = {
 }
 
 
+async def _read_chunked_body(reader: asyncio.StreamReader, max_bytes: int = 262_144) -> bytes:
+    """Decode HTTP/1.1 Transfer-Encoding: chunked bodies (used by Cloudflare Workers proxies)."""
+    out = bytearray()
+    while True:
+        size_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
+        if not size_line:
+            break
+        size_hex = size_line.split(b";", 1)[0].strip()
+        try:
+            n = int(size_hex, 16)
+        except ValueError:
+            break
+        if n <= 0:
+            # consume trailing CRLF / optional trailers
+            try:
+                await asyncio.wait_for(reader.readline(), timeout=2.0)
+            except Exception:
+                pass
+            break
+        if len(out) + n > max_bytes:
+            n = max(0, max_bytes - len(out))
+        if n > 0:
+            out.extend(await asyncio.wait_for(reader.readexactly(n), timeout=10.0))
+        await asyncio.wait_for(reader.readexactly(2), timeout=5.0)  # chunk CRLF
+        if len(out) >= max_bytes:
+            break
+    return bytes(out)
+
+
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         raw_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
@@ -456,14 +486,20 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             if ":" in line:
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
-        clen = min(262_144, max(0, int(headers.get("content-length") or "0")))
-        body = await asyncio.wait_for(reader.readexactly(clen), timeout=10.0) if clen else b""
+        if "chunked" in (headers.get("transfer-encoding") or "").lower():
+            body = await _read_chunked_body(reader)
+        else:
+            clen = min(262_144, max(0, int(headers.get("content-length") or "0")))
+            body = await asyncio.wait_for(reader.readexactly(clen), timeout=10.0) if clen else b""
         status, ctype, data = await asyncio.to_thread(dispatch_request, method, target, headers, body)
         resp = (
             f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'OK')}\r\n"
             f"Content-Type: {ctype}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: no-store\r\n"
+            f"Access-Control-Allow-Origin: *\r\n"
+            f"Access-Control-Allow-Methods: GET, POST, OPTIONS, HEAD\r\n"
+            f"Access-Control-Allow-Headers: Content-Type, X-Telegram-Init-Data, ngrok-skip-browser-warning\r\n"
             f"Connection: close\r\n\r\n"
         ).encode("ascii") + data
         writer.write(resp)

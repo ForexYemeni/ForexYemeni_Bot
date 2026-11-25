@@ -665,6 +665,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_webapp_tunnel_restart(q, uid, context, bot)
     elif act == "webapp_setngrok":
         await admin_system.admin_webapp_set_ngrok(q, uid, context, bot)
+    elif act == "webapp_worker":
+        await admin_system.admin_webapp_worker_guide(q, uid, context, bot)
     elif act == "webapp_seturl":
         await admin_system.admin_webapp_set_url(q, uid, context, bot)
     elif act == "updates":

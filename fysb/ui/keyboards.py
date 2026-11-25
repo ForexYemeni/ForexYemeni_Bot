@@ -253,7 +253,9 @@ def signal_action_keyboard(signal_id: int) -> InlineKeyboardMarkup:
 
 # --- Admin Command Center (clean 4-row Home + 5 focused sub-hubs, 100% styled)
 def admin_menu() -> InlineKeyboardMarkup:
-    """Luxury Admin Command Center — 4 crisp rows, 100% native Bot API 9.4 colors."""
+    """Luxury Admin Command Center — 4 crisp rows, 100% native Bot API 9.4 colors.
+    When Mini App HTTPS URL is live, prepends a 1-tap Royal Admin WebApp button right on Home."""
+    from fysb import config as _cfg
     rows = [
         [btn("📊 لوحة المعلومات", "a:stats", style="primary"),
          btn("📡 الإشارات والمحرك", "a:hub:trading", style="success")],
@@ -264,6 +266,8 @@ def admin_menu() -> InlineKeyboardMarkup:
         [btn("💳 المدفوعات", "a:payments", style="success"),
          btn("🖥 حالة النظام", "a:health", style="success")],
     ]
+    if _cfg.webapp_ready():
+        rows.insert(0, [webapp_btn("👑 فتح لوحة الإدارة الملكية (WebApp)", _cfg.webapp_page_url("/admin"), style="success")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -291,6 +295,8 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
          btn("💎 الاشتراكات", "a:subscriptions", style="success")],
         [btn("💳 المدفوعات", "a:payments", style="success"),
          btn("💠 الباقات", "a:plans", style="primary")],
+        [btn("🎟 أكواد الخصم (Promo)", "a:promos", style="success"),
+         btn("📊 بث تقرير الأداء الآن", "a:digest_now", style="primary")],
         [btn("🏦 وسائل الدفع", "a:paymethods", style="primary"),
          btn("🤝 نظام الإحالات", "a:refs", style="success")],
         [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),
@@ -314,6 +320,7 @@ def admin_hub_comms() -> InlineKeyboardMarkup:
 
 def admin_hub_execution() -> InlineKeyboardMarkup:
     return admin_nav([
+        [btn("⚡ جسر النسخ الملكي (cTrader / Demo / Live)", "a:bridge", style="success")],
         [btn("🏦 الوسطاء", "a:brokers", style="primary"),
          btn("🔗 حسابات التداول", "a:accounts", style="primary")],
         [btn("🟡 منصات الكريبتو API (مجاني)", "a:cryptoapi", style="success")],

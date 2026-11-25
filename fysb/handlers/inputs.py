@@ -72,7 +72,7 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
               "awaiting_plan_field", "awaiting_plan_custom",
               "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
-              "awaiting_partner_limit")
+              "awaiting_partner_limit", "bridge_draft", "admin_bridge_input")
 
 # v6.10.0 — single-shot text-awaiting flags: a BUTTON PRESS means the admin is
 # navigating, not typing, so any stale one-shot flag left over from a prompt he
@@ -107,6 +107,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.effective_message.text or "").strip()
     ud = context.user_data
+
+    # ---------- v7.7.2 Native Telegram Royal Auto-Bridge (User & Admin Guided Flows) ----------
+    if ud.get("bridge_draft") or ud.get("admin_bridge_input"):
+        from fysb.handlers import auto_bridge_bot
+        if await auto_bridge_bot.handle_bridge_text_input(update, context, uid, text):
+            return
 
     # ---------- Phase 5 (v6.28.0) Free Crypto Exchange API Credentials ----------
     if ud.get("awaiting_exch_creds"):

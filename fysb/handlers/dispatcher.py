@@ -139,6 +139,11 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers import crypto_api
         if await crypto_api.handle_user_crypto_api(q, uid, action, context, context.bot):
             return
+    # v7.7.2: Native Telegram Royal Auto-Bridge (cTrader / TradeLocker / Deriv / MT5 EA)
+    if action == "bridge" or action.startswith("br_"):
+        from fysb.handlers import auto_bridge_bot
+        if await auto_bridge_bot.handle_user_bridge(q, uid, action, context, context.bot):
+            return
     await user_pages.user_page(q, action, uid, context, preloaded_u=u)
 
 
@@ -165,6 +170,9 @@ async def _route_admin(q, context, uid: int, action: str):
     if act == "home":
         from fysb.handlers.common import render
         await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
+    elif act in ("bridge", "promos", "promo_new", "digest_now") or act.startswith("br_"):
+        from fysb.handlers import auto_bridge_bot
+        await auto_bridge_bot.handle_admin_bridge(q, uid, act, arg, arg2, context, bot)
     elif act == "hub":
         from fysb.handlers.common import render
         hub = kb.ADMIN_HUBS.get(arg)

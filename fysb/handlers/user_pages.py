@@ -241,7 +241,11 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     # ---------- Home / profile ----------
     if action == "home":
         home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
-        await render(q, home_text, kb.user_menu(auto_signals_on=bool(u["notifications"])), bot)
+        menu = kb.user_menu(auto_signals_on=bool(u["notifications"]))
+        if uid == config.ADMIN_ID:
+            from telegram import InlineKeyboardMarkup as _IKM
+            menu = _IKM([[kb.btn("👑 العودة إلى لوحة الإدارة", "a:home", style="danger")]] + [list(r) for r in menu.inline_keyboard])
+        await render(q, home_text, menu, bot)
 
     elif action == "autosig_toggle":
         new_val = 0 if u["notifications"] else 1
@@ -258,7 +262,11 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         except Exception:
             pass
         home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
-        await render(q, home_text, kb.user_menu(auto_signals_on=bool(new_val)), bot)
+        menu = kb.user_menu(auto_signals_on=bool(new_val))
+        if uid == config.ADMIN_ID:
+            from telegram import InlineKeyboardMarkup as _IKM
+            menu = _IKM([[kb.btn("👑 العودة إلى لوحة الإدارة", "a:home", style="danger")]] + [list(r) for r in menu.inline_keyboard])
+        await render(q, home_text, menu, bot)
 
     elif action == "profile":
         profile = await afn.run(users_service.profile_summary, uid, u)
@@ -1403,6 +1411,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     f"<b>{lot_word}</b> · "
                     f"التنفيذ التلقائي: <b>{'مفعل 🤖' if s['auto_trade'] else 'متوقف'}</b>")
         demo_rows = [
+            [kb.btn("⚡ جسر النسخ للمنصات (cTrader / TradeLocker / Deriv / MT5)", "u:bridge", style="success")],
             [kb.btn("🚀 فتح صفقة تجريبية", "u:demopick"), kb.btn("📂 الصفقات المفتوحة", "u:demoopen_list")],
             [kb.btn("📜 سجل الصفقات", "u:demohistory"), kb.btn("🔄 تصفير الحساب", "u:demoreset")],
             [kb.btn("⚙️ إعدادات حسابي التجريبي", "u:demoset")],

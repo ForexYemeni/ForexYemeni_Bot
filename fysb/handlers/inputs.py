@@ -93,7 +93,7 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_acad_grant", "awaiting_acad_price", "awaiting_acad_dur",
                 "awaiting_acad_media_for", "awaiting_acad_edit_for", "awaiting_acad_quiz_for",
                 "awaiting_gift_custom", "awaiting_gift_direct",
-                "awaiting_exch_creds")
+                "awaiting_exch_creds", "awaiting_ngrok_token", "awaiting_webapp_url")
 
 
 def clear_flows(ud: dict) -> None:
@@ -290,6 +290,84 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================================
 async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, text: str) -> bool:
     ud = context.user_data
+
+    # ---------- v7.2.2 Admin: Ngrok-443 Authtoken & Custom HTTPS WebApp URL ----------
+    if ud.pop("awaiting_ngrok_token", False):
+        tok = text.strip()
+        from fysb.handlers import background as _bg
+        from fysb.ui import keyboards as kb_ui
+        from fysb.webapp import server as _wsrv
+        from fysb.webapp import tunnel as _tun
+        if tok.lower() in ("clear", "off", "delete", "مسح"):
+            await afn.run(db.set_setting, "ngrok_authtoken", "")
+            await _tun.stop_tunnel()
+            await update.effective_message.reply_text(
+                "✅ تمت إزالة توكن Ngrok.",
+                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
+            )
+            return True
+        if len(tok) < 20 or " " in tok:
+            ud["awaiting_ngrok_token"] = True
+            await update.effective_message.reply_text("❌ صيغة التوكن غير صحيحة — انسخ Authtoken بالكامل من dashboard.ngrok.com وأرسله هنا.")
+            return True
+        await afn.run(db.set_setting, "ngrok_authtoken", tok)
+        await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
+        await afn.run(audit_log.log, uid, "ngrok_authtoken_set")
+        await update.effective_message.reply_text("⏳ جاري تشغيل Ngrok على بورت 443 والتحقق الحي من التطبيق (10-20 ثانية)...")
+        if getattr(_bg.post_init, "_webapp_srv", None) is None:
+            _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
+        await _tun.stop_tunnel()
+        url = await _tun.start_tunnel(port=config.WEBAPP_PORT, timeout=35.0)
+        if url:
+            await update.effective_message.reply_text(
+                "🎉 <b><u>تم تشغيل التطبيق المصغّر ولوحة الإدارة عبر Ngrok-443 بنجاح!</u></b>\n"
+                f"<blockquote>▎🟢 الرابط المباشر (HTTPS): <code>{esc(url)}</code>\n"
+                "▎✅ تم الفحص الحي (HTTP 200) وأصبح الزر ظاهراً للجميع الآن!</blockquote>",
+                reply_markup=kb_ui.admin_nav([
+                    [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
+                    [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{url}/", style="primary")],
+                    [kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")],
+                ]),
+                parse_mode="HTML",
+            )
+        else:
+            err = _tun.tunnel_status().get("last_error") or "تعذر تشغيل Ngrok"
+            await update.effective_message.reply_text(
+                f"⚠️ تم حفظ التوكن لكن فشل البدء الفوري:\n<code>{esc(err)}</code>",
+                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
+                parse_mode="HTML",
+            )
+        return True
+
+    if ud.pop("awaiting_webapp_url", False):
+        u_txt = text.strip().rstrip("/")
+        from fysb.ui import keyboards as kb_ui
+        from fysb.webapp import tunnel as _tun
+        if u_txt.lower() in ("clear", "off", "delete", "مسح"):
+            await afn.run(db.set_setting, "webapp_custom_url", "")
+            config.set_runtime_webapp_url("", source="")
+            await update.effective_message.reply_text(
+                "✅ تمت إزالة الرابط المخصص والعودة للوضع التلقائي.",
+                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
+            )
+            return True
+        if not u_txt.lower().startswith("https://"):
+            ud["awaiting_webapp_url"] = True
+            await update.effective_message.reply_text("❌ يجب أن يبدأ الرابط بـ <code>https://</code> (متطلب رسمي من تيليجرام).", parse_mode="HTML")
+            return True
+        await afn.run(db.set_setting, "webapp_custom_url", u_txt)
+        await _tun.stop_tunnel()
+        config.set_runtime_webapp_url(u_txt, source="db_custom")
+        await afn.run(audit_log.log, uid, f"webapp_custom_url:{u_txt}")
+        await update.effective_message.reply_text(
+            f"✅ <b>تم تفعيل رابط التطبيق المصغّر بنجاح!</b>\n<code>{esc(u_txt)}</code>",
+            reply_markup=kb_ui.admin_nav([
+                [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{u_txt}/admin", style="success")],
+                [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{u_txt}/", style="primary")],
+            ]),
+            parse_mode="HTML",
+        )
+        return True
 
     # ---------- Restore .db file ----------
     if ud.pop("awaiting_restore", False):

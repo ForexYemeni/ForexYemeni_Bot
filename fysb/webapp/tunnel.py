@@ -1,18 +1,16 @@
-"""Zero-Config Verified Auto-HTTPS Tunnel for Bot-Hosting / VPS / Local (v7.2.1).
+"""Zero-Config Verified Auto-HTTPS Tunnel for Bot-Hosting / VPS / Local (v7.2.2).
 
-Guarantees ZERO Error 1033 broken links:
-  1. Never activates or notifies a URL just because a tunnel printed it!
-  2. For Cloudflare (`cloudflared`), waits for BOTH the `trycloudflare.com` URL
-     AND `"Registered tunnel connection"` in stderr, trying IPv4 `http2` first
-     and `quic` second.
-  3. Performs a REAL end-to-end HTTPS self-test (`GET {url}/health` -> HTTP 200
-     JSON `{"ok": true}`) proving traffic actually traverses the internet edge
-     all the way back into our embedded Python HTTP server!
-  4. If Bot-Hosting's firewall blocks Cloudflare's port 7844, automatically fails
-     over to port-443 SSH HTTPS tunnels (`serveo.net` on TCP 443 -> `localhost.run`)
-     when `ssh` is available, verifying each with `GET {url}/health`!
-  5. Records real diagnostic log lines in `tunnel_status()["logs"]` so Admin
-     always sees the exact reason if the host blocks all outbound tunnels.
+Provider priority chain (ALL end-to-end verified via `GET {url}/health -> HTTP 200`):
+  1. **Ngrok-443** (if Admin set a free Ngrok authtoken via Telegram or `NGROK_AUTHTOKEN`):
+     Uses PURE TLS port 443 (`connect.ngrok-agent.com:443`) — indistinguishable from
+     regular HTTPS traffic, so Bot-Hosting / Pterodactyl firewalls CANNOT block it!
+  2. **Pinggy-443 / Serveo-443 / LocalhostRun-443** (zero-account SSH over TCP port 443
+     with proper `stdin=DEVNULL`, `-T`, non-interactive flags, and ANSI stripping).
+  3. **Cloudflare `cloudflared`** (IPv4 `http2` -> `quic`, waiting for BOTH the URL AND
+     `"Registered tunnel connection"` to prevent Error 1033).
+
+Guarantees ZERO broken Error 1033 links: a URL is ONLY activated and sent to Admin
+after real public HTTPS `GET {url}/health` returns HTTP 200 JSON `{"ok": true}`.
 """
 from __future__ import annotations
 
@@ -23,25 +21,38 @@ import platform
 import re
 import shutil
 import stat
+import tarfile
 import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
 
-from fysb import config
+from fysb import config, db
 from fysb.config import log
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _TRYCF_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+_PINGGY_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.pinggy\.(?:link|io|online)")
 _SERVEO_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.(?:serveo\.net|serveousercontent\.com)")
 _LHR_RE = re.compile(r"https://[a-zA-Z0-9-]+\.lhr\.life")
+_NGROK_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.ngrok(?:-free)?\.(?:app|dev|io)")
 
-_BIN_URLS = {
+_CF_BIN_URLS = {
     ("linux", "x86_64"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     ("linux", "amd64"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     ("linux", "aarch64"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64",
     ("linux", "arm64"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64",
     ("linux", "armv7l"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm",
     ("linux", "arm"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm",
+}
+
+_NGROK_TGZ_URLS = {
+    ("linux", "x86_64"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz",
+    ("linux", "amd64"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz",
+    ("linux", "aarch64"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz",
+    ("linux", "arm64"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz",
+    ("linux", "armv7l"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm.tgz",
+    ("linux", "arm"): "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm.tgz",
 }
 
 _STATE: dict = {
@@ -55,7 +66,7 @@ _STATE: dict = {
     "last_error": "",
     "restarts": 0,
 }
-_LOGS: deque[str] = deque(maxlen=15)
+_LOGS: deque[str] = deque(maxlen=20)
 
 _PROC: asyncio.subprocess.Process | None = None
 _READERS: list[asyncio.Task] = []
@@ -76,8 +87,14 @@ def tunnel_status() -> dict:
     return out
 
 
-def _download_url_for_host() -> str | None:
-    return _BIN_URLS.get((platform.system().lower(), platform.machine().lower()))
+def get_ngrok_token() -> str:
+    env_tok = os.getenv("NGROK_AUTHTOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    try:
+        return (db.get_setting("ngrok_authtoken", "") or "").strip()
+    except Exception:
+        return ""
 
 
 def _is_executable(path: Path) -> bool:
@@ -104,16 +121,14 @@ def ensure_cloudflared_binary() -> Path | None:
             _STATE["binary"] = str(cand)
             return cand
 
-    url = _download_url_for_host()
+    url = _CF_BIN_URLS.get((platform.system().lower(), platform.machine().lower()))
     if not url:
-        _STATE["last_error"] = f"منصة غير مدعومة للنفق التلقائي ({platform.system()}/{platform.machine()})"
         return None
 
     for target in candidates:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_suffix(".tmp")
-            log.info("WEBAPP TUNNEL: downloading cloudflared from %s -> %s", url, target)
             req = urllib.request.Request(url, headers={"User-Agent": f"ForexYemeni/{config.VERSION}"})
             with urllib.request.urlopen(req, timeout=90) as resp, open(tmp, "wb") as out:
                 shutil.copyfileobj(resp, out, length=256 * 1024)
@@ -121,12 +136,58 @@ def ensure_cloudflared_binary() -> Path | None:
             tmp.replace(target)
             if _is_executable(target):
                 _STATE["binary"] = str(target)
-                _STATE["last_error"] = ""
-                log.info("WEBAPP TUNNEL: cloudflared ready (%s, %d bytes)", target, target.stat().st_size)
                 return target
         except Exception as exc:
-            _STATE["last_error"] = f"فشل تحميل cloudflared: {type(exc).__name__}"
-            log.warning("WEBAPP TUNNEL: download to %s failed: %s", target, exc)
+            log.warning("WEBAPP TUNNEL: cloudflared download to %s failed: %s", target, exc)
+    return None
+
+
+def ensure_ngrok_binary() -> Path | None:
+    """Locate or download official ngrok v3 static binary (TLS port 443 — bypasses container firewalls)."""
+    existing = shutil.which("ngrok")
+    if existing:
+        return Path(existing)
+
+    candidates = [
+        config.BASE_DIR / ".bin" / "ngrok",
+        Path("/tmp/fysb_ngrok"),
+    ]
+    for cand in candidates:
+        if _is_executable(cand):
+            return cand
+
+    url = _NGROK_TGZ_URLS.get((platform.system().lower(), platform.machine().lower()))
+    if not url:
+        return None
+
+    for target in candidates:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tgz_path = target.with_suffix(".tgz")
+            req = urllib.request.Request(url, headers={"User-Agent": f"ForexYemeni/{config.VERSION}"})
+            with urllib.request.urlopen(req, timeout=90) as resp, open(tgz_path, "wb") as out:
+                shutil.copyfileobj(resp, out, length=256 * 1024)
+            with tarfile.open(tgz_path, "r:gz") as tf:
+                member = next((m for m in tf.getmembers() if m.name.endswith("ngrok")), None)
+                if member is None:
+                    continue
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                tmp = target.with_suffix(".tmp")
+                with open(tmp, "wb") as out:
+                    shutil.copyfileobj(src, out, length=256 * 1024)
+            try:
+                tgz_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            tmp.chmod(tmp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            tmp.replace(target)
+            if _is_executable(target):
+                log.info("WEBAPP TUNNEL: ngrok v3 ready (%s)", target)
+                return target
+        except Exception as exc:
+            log.warning("WEBAPP TUNNEL: ngrok download to %s failed: %s", target, exc)
     return None
 
 
@@ -138,6 +199,8 @@ def _probe_health_once(url: str, timeout: float = 8.0) -> tuple[bool, str]:
         headers={
             "User-Agent": f"ForexYemeni-HealthCheck/{config.VERSION}",
             "Accept": "application/json",
+            "ngrok-skip-browser-warning": "1",
+            "X-Pinggy-No-Screen": "1",
         },
     )
     try:
@@ -160,13 +223,13 @@ def _probe_health_once(url: str, timeout: float = 8.0) -> tuple[bool, str]:
         except Exception:
             pass
         if "1033" in body:
-            return False, "Cloudflare Error 1033 (النفق لم يسجّل اتصاله)"
+            return False, "Cloudflare Error 1033"
         return False, f"HTTP {exc.code}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {str(exc)[:80]}"
 
 
-async def verify_https_health(url: str, retries: int = 7, delay: float = 2.0) -> tuple[bool, str]:
+async def verify_https_health(url: str, retries: int = 6, delay: float = 2.0) -> tuple[bool, str]:
     """Verify end-to-end public HTTPS reachability (allows DNS propagation time)."""
     last_err = ""
     for attempt in range(max(1, int(retries))):
@@ -215,23 +278,23 @@ async def _drain_tunnel_stream(
     url_re: re.Pattern,
     url_future: asyncio.Future,
     reg_future: asyncio.Future | None = None,
+    tag: str = "",
 ) -> None:
-    """Stream tunnel stdout/stderr, recording recent logs and resolving URL & registration."""
+    """Stream tunnel stdout/stderr, stripping ANSI codes, logging diagnostics, and capturing URL."""
     try:
         while True:
             raw = await stream.readline()
             if not raw:
                 break
-            line = raw.decode("utf-8", errors="ignore").strip()
+            line = _ANSI_RE.sub("", raw.decode("utf-8", errors="ignore")).strip()
             if not line:
                 continue
-            _LOGS.append(line[:200])
+            _LOGS.append(f"[{tag}] {line[:180]}" if tag else line[:180])
             m = url_re.search(line)
             if m and not url_future.done():
                 url_future.set_result(m.group(0))
             if reg_future is not None and not reg_future.done():
-                low = line.lower()
-                if "registered tunnel connection" in low:
+                if "registered tunnel connection" in line.lower():
                     reg_future.set_result(True)
     except asyncio.CancelledError:
         raise
@@ -248,15 +311,15 @@ async def _try_spawn_provider(
     timeout: float,
     verify: bool = True,
 ) -> tuple[str | None, str]:
-    """Spawn one tunnel provider, wait for URL (+ registration if Cloudflare), and
-    end-to-end verify `GET {url}/health == 200` before accepting."""
+    """Spawn one tunnel provider with `stdin=DEVNULL`, wait for URL (+ registration if CF),
+    and end-to-end verify `GET {url}/health == 200` before accepting."""
     global _PROC
     await stop_tunnel()
-    _LOGS.clear()
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -273,41 +336,36 @@ async def _try_spawn_provider(
     reg_future: asyncio.Future | None = loop.create_future() if require_cf_register else None
     readers = []
     if proc.stderr:
-        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stderr, url_re, url_future, reg_future)))
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stderr, url_re, url_future, reg_future, provider_name)))
     if proc.stdout:
-        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stdout, url_re, url_future, reg_future)))
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stdout, url_re, url_future, reg_future, provider_name)))
     _READERS.extend(readers)
 
     try:
-        url = await asyncio.wait_for(url_future, timeout=min(timeout, 22.0))
+        url = await asyncio.wait_for(url_future, timeout=min(timeout, 18.0))
     except asyncio.TimeoutError:
         await stop_tunnel()
-        return None, f"{provider_name}: انتهت مهلة الحصول على الرابط"
+        return None, f"{provider_name}: انتهت المهلة"
     except Exception as exc:
         await stop_tunnel()
         return None, f"{provider_name}: {type(exc).__name__}"
 
-    # CRITICAL FIX for Cloudflare Error 1033: wait for actual edge registration!
     if reg_future is not None:
         try:
-            await asyncio.wait_for(reg_future, timeout=min(timeout, 20.0))
+            await asyncio.wait_for(reg_future, timeout=min(timeout, 16.0))
         except asyncio.TimeoutError:
-            log.warning("WEBAPP TUNNEL (%s): got %s but edge registration timed out (port 7844 likely blocked)", provider_name, url)
             await stop_tunnel()
-            return None, f"{provider_name}: فشل تسجيل اتصال الحافة (غالبًا بورت 7844 محجوب)"
+            return None, f"{provider_name}: بورت 7844 محجوب"
 
-    # Ensure process is still alive right after registration
     if proc.returncode is not None:
         await stop_tunnel()
-        return None, f"{provider_name}: توقفت العملية فجأة (code={proc.returncode})"
+        return None, f"{provider_name}: توقف مبكر (code={proc.returncode})"
 
-    # End-to-End Self-Test: actually fetch GET {url}/health through the public internet!
     if verify:
-        ok, vmsg = await verify_https_health(url, retries=7, delay=2.0)
+        ok, vmsg = await verify_https_health(url, retries=6, delay=2.0)
         if not ok:
-            log.warning("WEBAPP TUNNEL (%s): health check failed for %s (%s)", provider_name, url, vmsg)
             await stop_tunnel()
-            return None, f"{provider_name}: فشل الفحص الحي ({vmsg})"
+            return None, f"{provider_name}: فشل الفحص ({vmsg})"
 
     _STATE["active"] = True
     _STATE["verified"] = True
@@ -320,10 +378,7 @@ async def _try_spawn_provider(
 
 
 async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: bool = True) -> str | None:
-    """Start a verified free HTTPS tunnel pointing to `http://127.0.0.1:<port>`.
-    Tries Cloudflare (http2 -> quic), then automatically fails over to port-443
-    SSH HTTPS tunnels (`serveo.net` -> `localhost.run`) if Cloudflare's port 7844
-    is blocked on Bot-Hosting."""
+    """Start a verified free HTTPS tunnel pointing to `http://127.0.0.1:<port>`."""
     async with _get_lock():
         target_port = int(port if port is not None else config.WEBAPP_PORT)
         if target_port <= 0:
@@ -333,9 +388,74 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
         if is_tunnel_alive() and _STATE.get("port") == target_port:
             return _STATE["url"]
 
+        _LOGS.clear()
         errors: list[str] = []
 
-        # 1) Primary: Cloudflare cloudflared (IPv4 http2, then IPv4 quic)
+        # 1) PRIORITY: Ngrok v3 over PURE TLS port 443 (if authtoken configured)
+        ngrok_tok = await asyncio.to_thread(get_ngrok_token)
+        if ngrok_tok:
+            ng_bin = await asyncio.to_thread(ensure_ngrok_binary)
+            if ng_bin:
+                url, err = await _try_spawn_provider(
+                    "Ngrok-443",
+                    [
+                        str(ng_bin),
+                        "http",
+                        f"http://127.0.0.1:{target_port}",
+                        "--authtoken",
+                        ngrok_tok,
+                        "--log",
+                        "stdout",
+                        "--log-format",
+                        "logfmt",
+                    ],
+                    _NGROK_RE,
+                    require_cf_register=False,
+                    target_port=target_port,
+                    timeout=timeout,
+                    verify=verify,
+                )
+                if url:
+                    return url
+                errors.append(err)
+            else:
+                errors.append("Ngrok-443: تعذر تحميل أداة ngrok")
+
+        # 2) Zero-account SSH HTTPS tunnels on TCP port 443 (non-interactive, stdin=DEVNULL)
+        ssh_bin = shutil.which("ssh")
+        if ssh_bin:
+            ssh_base = [
+                ssh_bin,
+                "-T",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PreferredAuthentications=none,keyboard-interactive,password",
+                "-o", "NumberOfPasswordPrompts=0",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-o", "ConnectTimeout=10",
+                "-o", "ExitOnForwardFailure=yes",
+            ]
+            for name, host_args, rx in (
+                ("Pinggy-443", ["-p", "443", "-R", f"0:127.0.0.1:{target_port}", "a.pinggy.io"], _PINGGY_RE),
+                ("Serveo-443", ["-p", "443", "-R", f"80:127.0.0.1:{target_port}", "serveo.net"], _SERVEO_RE),
+                ("LocalhostRun-443", ["-p", "443", "-R", f"80:127.0.0.1:{target_port}", "nokey@localhost.run"], _LHR_RE),
+            ):
+                url, err = await _try_spawn_provider(
+                    name,
+                    [*ssh_base, *host_args],
+                    rx,
+                    require_cf_register=False,
+                    target_port=target_port,
+                    timeout=min(timeout, 15.0),
+                    verify=verify,
+                )
+                if url:
+                    return url
+                errors.append(err)
+
+        # 3) Cloudflare cloudflared (works wherever port 7844 is open)
         bin_path = await asyncio.to_thread(ensure_cloudflared_binary)
         if bin_path:
             for proto in ("http2", "quic"):
@@ -356,58 +476,14 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
                     _TRYCF_RE,
                     require_cf_register=True,
                     target_port=target_port,
-                    timeout=timeout,
+                    timeout=min(timeout, 18.0),
                     verify=verify,
                 )
                 if url:
                     return url
                 errors.append(err)
-        else:
-            if _STATE.get("last_error"):
-                errors.append(_STATE["last_error"])
 
-        # 2) Fallback for Bot-Hosting containers that block port 7844:
-        #    SSH reverse HTTPS tunnels over standard TCP port 443 / 22!
-        ssh_bin = shutil.which("ssh")
-        if ssh_bin:
-            ssh_base = [
-                ssh_bin,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "ServerAliveInterval=30",
-                "-o", "ServerAliveCountMax=3",
-                "-o", "ConnectTimeout=12",
-                "-o", "ExitOnForwardFailure=yes",
-            ]
-            # Serveo on TCP port 443 (bypasses port 7844 & port 22 firewalls!)
-            url, err = await _try_spawn_provider(
-                "Serveo-443",
-                [*ssh_base, "-p", "443", "-R", f"80:127.0.0.1:{target_port}", "serveo.net"],
-                _SERVEO_RE,
-                require_cf_register=False,
-                target_port=target_port,
-                timeout=timeout,
-                verify=verify,
-            )
-            if url:
-                return url
-            errors.append(err)
-
-            # localhost.run fallback
-            url, err = await _try_spawn_provider(
-                "LocalhostRun",
-                [*ssh_base, "-R", f"80:127.0.0.1:{target_port}", "nokey@localhost.run"],
-                _LHR_RE,
-                require_cf_register=False,
-                target_port=target_port,
-                timeout=timeout,
-                verify=verify,
-            )
-            if url:
-                return url
-            errors.append(err)
-
-        _STATE["last_error"] = " · ".join(e for e in errors if e)[:280] or "تعذر فتح نفق HTTPS تلقائي"
+        _STATE["last_error"] = " · ".join(e for e in errors if e)[:320] or "تعذر فتح نفق HTTPS تلقائي"
         return None
 
 

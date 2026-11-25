@@ -167,17 +167,21 @@ def approve_request(pid: int, actor: int) -> dict:
             amount=float(p_dict.get("amount") or 0),
             currency=p_dict.get("currency") or pl_dict.get("currency") or "USD",
         )
-    # v6.27.0: Tiered Affiliate Commission (15% -> 20% -> 25% -> 35%) on any paid approval
+    # v8.0.0 (PAY-2): Tiered Affiliate Commission — NEVER double-credit if a Channel Partner
+    # commission was already credited for this exact payment!
     aff_comm = None
-    try:
-        from fysb.services import affiliates as _aff
-        aff_comm = _aff.record_commission_on_payment(
-            int(p_dict["user_id"]),
-            float(p_dict.get("amount") or 0),
-            payment_id=pid,
-        )
-    except Exception:
-        pass
+    partner_credited = bool(isinstance(grant_res, dict) and grant_res.get("commission"))
+    if not partner_credited:
+        try:
+            from fysb.services import affiliates as _aff
+            aff_comm = _aff.record_commission_on_payment(
+                int(p_dict["user_id"]),
+                float(p_dict.get("amount") or 0),
+                payment_id=pid,
+            )
+        except Exception as exc:
+            from fysb.config import log
+            log.debug("affiliate commission skipped for payment #%s: %s", pid, exc)
     # v7.6.0: Redeem attached promo code (if any) atomically on approval
     try:
         pr_code = str(p_dict.get("promo_code") or "").strip()

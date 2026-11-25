@@ -143,6 +143,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
     if not analytics_enabled():
         return {"ok": False, "error": "قسم التحليلات معطل حالياً من الإدارة"}
     symbol = instruments.normalize(symbol)
+    p_tfs: list[str] = []
     if enforce_plan:
         # Real-user path: server-side package gate + atomic daily quota.
         state = quota_state(user_id)
@@ -167,18 +168,41 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
 
     row = _market_row(symbol)
     multi_tf = (timeframe or "").upper() == "ALL"
+    allowed_tfs = list(ALL_TF_ORDER[:4])
+    if enforce_plan and multi_tf and p_tfs:
+        # v8.0.0 (SIG-2): Respect user's plan timeframes when timeframe == "ALL"
+        plan_tf_set = {t.upper() for t in p_tfs}
+        filtered_tfs = [t for t in ALL_TF_ORDER if t in plan_tf_set]
+        if filtered_tfs:
+            allowed_tfs = filtered_tfs[:4]
     try:
         if multi_tf:
-            frames = [_one_frame_reading(symbol, tf, row) for tf in ALL_TF_ORDER[:4]]
+            frames = [_one_frame_reading(symbol, tf, row) for tf in allowed_tfs]
         else:
             frames = [_one_frame_reading(symbol, timeframe, row)]
     except RuntimeError as e:
         return {"ok": False, "error": f"تعذر جلب بيانات السوق: {e}"}
 
+    from fysb.engines.analysis import confirmed_candles as _confirmed_candles
     main = frames[-1]          # the highest requested TF drives the card levels
-    candles = main["candles"]
+    # v8.0.0 (SIG-2): Strip forming unclosed candle AND resolve real HTF bias_candles!
+    candles = _confirmed_candles(main["candles"], main["tf"]) or main["candles"]
     if len(candles) < 40:
         return {"ok": False, "error": f"بيانات غير كافية ({len(candles)} شمعة)"}
+
+    bias_tf_map = {"M5": "H1", "M15": "H1", "M30": "H4", "H1": "H4", "H4": "D1", "D1": "D1"}
+    bias_tf = bias_tf_map.get(main["tf"].upper(), "H4")
+    bias_candles = candles
+    if len(frames) > 1 and frames[-1]["tf"] != frames[0]["tf"]:
+        bias_candles = _confirmed_candles(frames[-1]["candles"], frames[-1]["tf"]) or frames[-1]["candles"]
+        candles = _confirmed_candles(frames[0]["candles"], frames[0]["tf"]) or frames[0]["candles"]
+    elif bias_tf != main["tf"].upper():
+        try:
+            htf_fr = _one_frame_reading(symbol, bias_tf, row)
+            if len(htf_fr["candles"]) >= 30:
+                bias_candles = _confirmed_candles(htf_fr["candles"], bias_tf) or htf_fr["candles"]
+        except Exception:
+            bias_candles = candles
 
     payload = main["payload"]
     market_open = market_data.market_state((row or {}).get("category") if row else instruments.spec(symbol).category)
@@ -198,24 +222,23 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         direction = "NEUTRAL"
     quality = int(min(95, 45 + max(bull, bear) * 6))
 
-    # --- strategy lens (plan-gated; ALL = evaluate every allowed methodology) ---
+    # --- strategy lens (plan-gated; ALL = evaluate every allowed methodology + consensus_filter) ---
     lens_result = None
     lens_name = strategy_name(strategy) if strategy else ""
     if (strategy or "").upper() == "ALL":
-        from fysb.engines.strategies import VERIFIABLE
+        from fysb.engines.strategies import VERIFIABLE, consensus_filter
         from fysb.db import IMPLEMENTED_STRATEGIES
         with db.conn() as c:
             ok_strats = [r["code"] for r in c.execute(
                 "SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchall()]
         if not ok_strats:
-            # Legacy-dead catalog fallback — the composite lens still runs on
-            # the implemented (tested) methodologies instead of degrading.
             ok_strats = list(IMPLEMENTED_STRATEGIES)
         allowed = [s for s in ok_strats if s in VERIFIABLE]
         ctx = Ctx(symbol=symbol, timeframe=main["tf"], candles=candles,
-                  bias_candles=candles, market_row=row, kill_zone=main["kz"])
+                  bias_candles=bias_candles, market_row=row, kill_zone=main["kz"])
         try:
-            results = evaluate_all(ctx, allowed)
+            raw_res = evaluate_all(ctx, allowed)
+            results, _cnote = consensus_filter(raw_res)
             if results:
                 lens_result = results[0]
                 lens_name = "منظومة مؤسسية مركبة"
@@ -226,7 +249,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         if module is not None:
             try:
                 ctx = Ctx(symbol=symbol, timeframe=main["tf"], candles=candles,
-                          bias_candles=candles, market_row=row, kill_zone=main["kz"])
+                          bias_candles=bias_candles, market_row=row, kill_zone=main["kz"])
                 lens_result = module.evaluate(ctx)
             except Exception:
                 lens_result = None

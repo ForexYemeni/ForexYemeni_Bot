@@ -26,7 +26,9 @@ Score weights (deterministic, auditable):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 IMPULSE_ATR = 2.5
 POCKET_LO, POCKET_HI = 0.618, 0.786
@@ -74,30 +76,26 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     extreme_px = float(window[e_idx]["high"] if direction == "BUY" else window[e_idx]["low"])
 
     checks = {}
-    score = 40.0
+    earned = 0.0
+    max_pts = 76.0
     checks["impulse"] = impulse >= IMPULSE_ATR * a
     if not checks["impulse"]:
         return None
-    score += 12
+    earned += 12
 
-    # Retrace depth measured from the extreme back toward the origin
     depth = (extreme_px - close) / impulse if direction == "BUY" else (close - extreme_px) / impulse
     in_pocket = POCKET_LO <= depth <= POCKET_HI
     checks["golden_pocket"] = in_pocket
     if not in_pocket:
         return None
-    score += 18
+    earned += 18
 
-    # Orderly retrace: structure intact (close never beyond the origin)
     orderly = (close > origin_px) if direction == "BUY" else (close < origin_px)
     checks["orderly"] = orderly
     if not orderly:
         return None
-    score += 8
+    earned += 8
 
-    # Pocket wick sweep: pierced 78.6% then closed back above 61.8%
-    pocket_hi_px = extreme_px - POCKET_HI * impulse if direction == "BUY" else extreme_px + POCKET_HI * impulse
-    pocket_lo_px = extreme_px - POCKET_LO * impulse if direction == "BUY" else extreme_px + POCKET_LO * impulse
     if direction == "BUY":
         swept = any(float(c["low"]) <= extreme_px - POCKET_HI * impulse
                     and float(c["close"]) >= extreme_px - POCKET_LO * impulse
@@ -107,7 +105,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
                     and float(c["close"]) <= extreme_px + POCKET_LO * impulse
                     for c in window[e_idx:])
     checks["pocket_sweep"] = swept
-    score += 8 if swept else 0
+    checks["sweep"] = swept
+    earned += 8 if swept else 0
 
     bias = structure_labels(ctx.bias_candles)
     mss = structure_labels(candles)
@@ -115,14 +114,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
               (bias["trend"] == "down" and direction == "SELL") or \
               (mss["choch"] and mss["bos_dir"] == ("up" if direction == "BUY" else "down"))
     checks["htf_bias"] = bias_ok
-    score += 12 if bias_ok else 0
+    earned += 12 if bias_ok else 0
 
     kz = ctx.kill_zone or (kill_zone(candles[-1]["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
 
     entry = close
     stop = (origin_px - 0.5 * a) if direction == "BUY" else (origin_px + 0.5 * a)
@@ -131,21 +130,20 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    # Targets: swing extreme first (floored at the platform's 2R minimum),
-    # then the Fib extensions beyond it.
     if direction == "BUY":
-        tp1 = max(extreme_px, entry + risk * 2.0)
-        tp2 = tp1 + 0.272 * impulse
-        tp3 = tp1 + 0.618 * impulse
+        raw_tp1 = max(extreme_px, entry + risk * 2.0)
+        raw_tp2 = raw_tp1 + 0.272 * impulse
+        raw_tp3 = raw_tp1 + 0.618 * impulse
     else:
-        tp1 = min(extreme_px, entry - risk * 2.0)
-        tp2 = tp1 - 0.272 * impulse
-        tp3 = tp1 - 0.618 * impulse
-    rr = abs(tp1 - entry) / risk
+        raw_tp1 = min(extreme_px, entry - risk * 2.0)
+        raw_tp2 = raw_tp1 - 0.272 * impulse
+        raw_tp3 = raw_tp1 - 0.618 * impulse
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(entry, stop, raw_tp1, raw_tp2, raw_tp3, direction)
     checks["rr_ok"] = rr >= 2.0
-    score += 8 if checks["rr_ok"] else 0
+    earned += 8 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
@@ -160,5 +158,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="FIBONACCI", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

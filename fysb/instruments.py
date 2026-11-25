@@ -178,6 +178,44 @@ def notional_usd(symbol: str, lots: float, price: float, row=None) -> float:
     return abs(float(price)) * abs(float(lots)) * s.contract_size
 
 
+def typical_spread_pips(symbol: str, row=None) -> float:
+    """v8.0.0: Realistic per-asset broker spread in pips (used by Tracker & Backtest)."""
+    if row and row.get("spread_pips") is not None:
+        try:
+            sp = float(row["spread_pips"])
+            if sp > 0:
+                return sp
+        except (TypeError, ValueError):
+            pass
+    s = spec(symbol, row)
+    sym = s.symbol
+    if sym == "XAUUSD":
+        return 2.5
+    if sym == "XAGUSD":
+        return 2.0
+    if s.category == "crypto":
+        return 12.0 if sym in ("BTCUSD", "ETHUSD") else 4.0
+    if sym in ("EURUSD", "USDJPY", "GBPUSD", "USDCHF", "AUDUSD", "USDCAD"):
+        return 1.0
+    if s.category == "forex":
+        return 1.8
+    return 2.0
+
+
+def tp_confirm_pips(symbol: str, row=None) -> float:
+    """v8.0.0: Per-asset conservative TP confirmation buffer in pips (eliminates
+    one-size-fits-all 1.5 pip distortion across Gold / Forex / Crypto)."""
+    s = spec(symbol, row)
+    sym = s.symbol
+    if sym == "XAUUSD":
+        return 2.0
+    if sym == "XAGUSD":
+        return 1.5
+    if s.category == "crypto":
+        return 8.0 if sym in ("BTCUSD", "ETHUSD") else 3.0
+    return 1.0
+
+
 def rr_ratio(entry: float, sl: float, tp: float, direction: str) -> float:
     """Risk/Reward for a given target. Returns 0.0 when invalid."""
     risk = abs(entry - sl)

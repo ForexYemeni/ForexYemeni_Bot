@@ -14,7 +14,9 @@ Score weights (documented, deterministic):
 Base 50. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, structure_labels, swings, support_resistance
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -35,12 +37,20 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     ll = recent.count("LL")
     up_count, down_count = (hh + hl), (lh + ll)
 
+    # v8.0.0 FIX (SIG-1): On CHOCH, `bos_dir` gives the NEW reversal break direction;
+    # NEVER use the pre-reversal `struct["trend"]` which points the OPPOSITE way!
     direction = ""
     if struct["bos"] and struct.get("bos_dir"):
-        # A fresh Break of Structure defines the smart-money direction itself.
         direction = "BUY" if struct["bos_dir"] == "up" else "SELL"
     elif struct["choch"]:
-        direction = "BUY" if struct["trend"] == "up" else "SELL"
+        if struct.get("bos_dir") in ("up", "down"):
+            direction = "BUY" if struct["bos_dir"] == "up" else "SELL"
+        elif struct["trend"] == "down":
+            direction = "BUY"
+        elif struct["trend"] == "up":
+            direction = "SELL"
+        else:
+            direction = "BUY" if close >= float(candles[-1]["open"]) else "SELL"
     if not direction:
         return None
 
@@ -80,29 +90,36 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     risk = abs(entry - stop)
     if risk <= 0:
         return None
-    tps = tuple(entry + risk * m if direction == "BUY" else entry - risk * m for m in (2.0, 3.0, 4.5))
-    rr = abs(tps[0] - entry) / risk
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5,
+        direction,
+    )
 
-    # --- Score -------------------------------------------------------------
-    score = 50.0
+    # --- Normalized Fair Score (v8.0.0) ------------------------------------
+    earned = 0.0
+    max_pts = 72.0
     checks = {}
     checks["labels"] = (direction == "BUY" and up_count > down_count) or (direction == "SELL" and down_count > up_count)
-    score += 14 if checks["labels"] else 0
+    earned += 14 if checks["labels"] else 0
     checks["bos"] = struct["bos"]
-    score += 12 if checks["bos"] else 0
+    earned += 12 if checks["bos"] else 0
     checks["choch"] = struct["choch"]
-    score += 10 if checks["choch"] else 0
+    earned += 10 if checks["choch"] else 0
     checks["zone"] = zone is not None
-    score += 14 if zone else 0
+    earned += 14 if zone else 0
     checks["htf_bias"] = (bias["trend"] == "up" and direction == "BUY") or (bias["trend"] == "down" and direction == "SELL")
-    score += 12 if checks["htf_bias"] else 0
+    earned += 12 if checks["htf_bias"] else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 6 if checks["rr_ok"] else 0
+    earned += 6 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     sr = support_resistance(candles)
@@ -116,6 +133,6 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     ]
     return StrategyResult(
         code="SMC", direction=direction, entry=entry, stop=stop,
-        tp1=tps[0], tp2=tps[1], tp3=tps[2], rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
+        score=score, reasons=reasons, checks=checks,
     )

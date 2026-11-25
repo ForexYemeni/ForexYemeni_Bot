@@ -651,12 +651,13 @@ async def demo_loop(app):
                                 f"<i>أُضيفت للرصيد فوراً — تابع لوحة حسابك التجريبي.</i>",
                                 parse_mode="HTML")
                         elif e["kind"] == "HALF_TP1":
+                            px_fmt = inst.fmt_price(e["symbol"], float(e.get("price") or 0.0))
                             await app.bot.send_message(uid,
                                 f"💧 <b>تنبيه تأمين الربح — وصل السعر نصف الطريق نحو الهدف الأول</b>\n"
                                 f"▎🌐 {esc(e['symbol'])} · {'شراء' if e.get('direction') == 'BUY' else 'بيع'}\n"
                                 f"▎✅ أُغلق <b>50%</b> من الصفقة تلقائياً ({e['closed_lots']:g} lot) وحقق: <b>{e['pnl']:+,.2f} USD</b>\n"
                                 f"▎🛡 نقلنا وقف الخسارة إلى نقطة الدخول — الصفقة المتبقية ({e['remaining_lots']:g} lot) تعمل بلا مخاطرة نحو الأهداف التالية\n"
-                                f"▎💰 سعر اللحظة: <code>{e.get('price', 0):,.2f}</code>",
+                                f"▎💰 سعر اللحظة: <code>{esc(px_fmt)}</code>",
                                 parse_mode="HTML")
                         elif e["kind"] == "PARTIAL_DONE":
                             await app.bot.send_message(uid,

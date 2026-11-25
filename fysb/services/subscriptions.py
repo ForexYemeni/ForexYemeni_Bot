@@ -157,8 +157,26 @@ def grant_subscription(user_id: int, plan_code: str, source: str = "ADMIN", acto
         return {"ok": False, "error": "plan not found"}
     days = override_days if override_days is not None else int(plan["duration_days"] or 0)
     start = datetime.now(timezone.utc)
-    ends = (start + timedelta(days=days)).isoformat() if days > 0 else None
+    extended_from = None
     with db.tx(immediate=True) as c:
+        # v8.0.0 (PAY-1): When renewing/extending the SAME unexpired active plan,
+        # carry forward the remaining days instead of wiping them out!
+        if days > 0:
+            cur_sub = c.execute(
+                "SELECT plan_code, ends_at FROM subscriptions WHERE user_id=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if cur_sub and str(cur_sub["plan_code"] or "").upper() == str(plan_code).upper() and cur_sub["ends_at"]:
+                try:
+                    old_end = datetime.fromisoformat(str(cur_sub["ends_at"]).replace("Z", "+00:00"))
+                    if old_end.tzinfo is None:
+                        old_end = old_end.replace(tzinfo=timezone.utc)
+                    if old_end > start:
+                        extended_from = old_end
+                except Exception:
+                    extended_from = None
+        base_dt = extended_from if extended_from is not None else start
+        ends = (base_dt + timedelta(days=days)).isoformat() if days > 0 else None
         c.execute("UPDATE subscriptions SET status='REPLACED', ends_at=? WHERE user_id=? AND status='ACTIVE'",
                   (config.now(), user_id))
         cur = c.execute("""INSERT INTO subscriptions(user_id,plan_code,starts_at,ends_at,status,created_at,source)

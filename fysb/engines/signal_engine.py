@@ -247,7 +247,16 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
 
     # 8.7: v6.25.0 Institutional Intelligence Enrichment
     # (#3 Adaptive Weighting, #4 Confluence Matrix, #5 DXY Correlation,
-    #  #6 Killzone Session, #7 Liquidity Sweep & Stop-Hunt)
+    # 8.5: Structural TP & Liquidity Obstruction Engine (v8.0.0 — TP1 ALWAYS >= 2.0 × SL!)
+    try:
+        from fysb.engines import structural_tp as _stp
+        for cand in results:
+            _stp.apply_structural_targets(cand, candles, bias_candles)
+    except Exception as exc:
+        log.debug("structural_tp enrichment skipped: %s", exc)
+
+    # 8.8: Intelligence Layer — ZERO double counting (v8.0.0)
+    #  (#3 Adaptive Weight, #4 Confluence, #5 Live DXY, #6 DST Killzone, #7 Sweep)
     try:
         from fysb.engines import intelligence as _intel
         bias_struct = structure_labels(bias_candles) if bias_candles else {}
@@ -258,21 +267,28 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         for cand in results:
             bonus = 0.0
             extra_notes: list[str] = []
-            # Adaptive 30-day closed performance weight
+            c_checks = cand.checks or {}
+            # Adaptive 30-day closed performance weight (unique to Intelligence layer)
             aw = _intel.adaptive_strategy_weight(cand.code, symbol)
             if aw["delta"]:
                 bonus += aw["delta"]
                 extra_notes.append(aw["note"])
-            # Confluence across agreeing strategies + HTF alignment
+            # Confluence across agreeing strategies (don't double-count HTF if already in checks)
             conf = _intel.build_confluence_summary(results, cand.direction, entry_tf, bias_trend)
-            if conf["bonus"]:
-                bonus += conf["bonus"]
+            conf_bonus = float(conf["bonus"] or 0.0)
+            if conf_bonus > 0 and c_checks.get("htf_bias") and int(conf.get("count") or 0) <= 1:
+                conf_bonus = 0.0
+            if conf_bonus:
+                bonus += conf_bonus
             extra_notes.append(conf["label"])
-            # Killzone liquidity session bonus
-            if kz["bonus"]:
-                bonus += kz["bonus"]
+            # Killzone liquidity session bonus (skip positive bonus if strategy already scored kill_zone)
+            kz_b = float(kz.get("bonus") or 0.0)
+            if kz_b > 0 and c_checks.get("kill_zone"):
+                kz_b = 0.0
+            if kz_b:
+                bonus += kz_b
             extra_notes.append(f"الجلسة: {kz['label']}")
-            # Live DXY correlation check
+            # Live DXY correlation check (unique to Intelligence layer)
             d_key = cand.direction.upper()
             if d_key not in dxy_cache_by_dir:
                 dxy_cache_by_dir[d_key] = _intel.dxy_bias_check(symbol, d_key)
@@ -280,9 +296,10 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
             if dxy_res["delta"]:
                 bonus += dxy_res["delta"]
                 extra_notes.append(dxy_res["note"])
-            # Liquidity sweep alignment
+            # Liquidity sweep alignment (skip if strategy already scored sweep)
             if sweep["detected"] and sweep["direction"] == d_key:
-                bonus += sweep["bonus"]
+                if not c_checks.get("sweep"):
+                    bonus += sweep["bonus"]
                 extra_notes.append(sweep["note"])
             if bonus:
                 cand.score = int(max(0, min(95, round(float(cand.score) + bonus))))
@@ -321,7 +338,12 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     skipped_notes: list[str] = []
 
     from fysb.engines.quality_gate import DEFAULT_MIN_SCORE, evaluate_quality_gate
-    min_sig_score = db.get_setting_int("min_signal_score", DEFAULT_MIN_SCORE)
+    # v8.0.0 (UI-2): Honor both `min_signal_score` and WebApp's `engine_min_score`
+    _raw_ms = db.get_setting("min_signal_score", "") or db.get_setting("engine_min_score", "")
+    try:
+        min_sig_score = int(float(_raw_ms)) if str(_raw_ms).strip() else DEFAULT_MIN_SCORE
+    except (TypeError, ValueError):
+        min_sig_score = DEFAULT_MIN_SCORE
     atr_val = atr(candles)
     sym_row = _market_row(symbol)
 
@@ -868,24 +890,36 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     sig_score = sig["score"]
     sig_strategy = (sig.get("strategy") or "").upper()
     await opposite_close_advisory(sig, bot_send)
+    from fysb import afn as _afn
     from fysb.services import partners as partners_svc
-    with db.conn() as c:
-        users = c.execute("SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked,joined_at FROM users WHERE notifications=1 AND is_blocked=0").fetchall()
-    active_partners = partners_svc.active_partner_user_ids()
 
-    # Pre-compute invariant signal payload + batch-load plans & demo accounts ONCE
-    row = _market_row(sig_symbol)
+    def _load_delivery_context():
+        with db.conn() as c:
+            u_rows = [
+                dict(r)
+                for r in c.execute(
+                    "SELECT user_id,market,timeframe,strategy,min_score,notifications,is_blocked,joined_at "
+                    "FROM users WHERE notifications=1 AND is_blocked=0"
+                ).fetchall()
+            ]
+        act_p = partners_svc.active_partner_user_ids()
+        m_row = _market_row(sig_symbol)
+        cand_uids = [
+            int(u["user_id"]) for u in u_rows
+            if int(u["user_id"]) != config.ADMIN_ID and int(u["user_id"]) not in act_p
+        ]
+        p_map = plans_for_users(cand_uids)
+        d_map = _preload_demo_accounts(cand_uids)
+        return u_rows, act_p, m_row, p_map, d_map
+
+    users, active_partners, row, plans_map, demo_map = await _afn.run(_load_delivery_context)
+
+    # Pre-compute invariant signal payload ONCE
     base_card = render_signal_card(sig, user_view=True, row=row)
     pulse = birth_pulse_line(sig, row)
     if pulse:
         base_card += "\n\n<blockquote>" + pulse + "</blockquote>"
 
-    candidate_uids = [
-        int(u["user_id"]) for u in users
-        if int(u["user_id"]) != config.ADMIN_ID and int(u["user_id"]) not in active_partners
-    ]
-    plans_map = plans_for_users(candidate_uids)
-    demo_map = _preload_demo_accounts(candidate_uids)
     auto_exec_queue: list[tuple[int, dict | None]] = []
     delivered_uids: list[int] = []
     sig_created_dt = _parse_iso_utc(sig.get("created_at") or "")

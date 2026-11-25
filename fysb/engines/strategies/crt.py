@@ -28,7 +28,9 @@ Score weights (deterministic, auditable):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -103,51 +105,49 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    # 6) Targets: opposite side first, then measured extensions
+    # 6) Targets: opposite side first, floored strictly >= 2.0R / 3.0R / 4.5R
     ext = (r_hi - r_lo)
-    if direction == "BUY":
-        tp1 = max(r_hi, entry + risk * 2.0)
-        tp2, tp3 = entry + ext * 1.0 + risk, entry + ext * 2.0 + risk * 1.5
-    else:
-        tp1 = min(r_lo, entry - risk * 2.0)
-        tp2, tp3 = entry - ext * 1.0 - risk, entry - ext * 2.0 - risk * 1.5
-    rr = abs(tp1 - entry) / risk
+    raw_tp1 = max(r_hi, entry + risk * 2.0) if direction == "BUY" else min(r_lo, entry - risk * 2.0)
+    raw_tp2 = (entry + ext * 1.0 + risk) if direction == "BUY" else (entry - ext * 1.0 - risk)
+    raw_tp3 = (entry + ext * 2.0 + risk * 1.5) if direction == "BUY" else (entry - ext * 2.0 - risk * 1.5)
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(entry, stop, raw_tp1, raw_tp2, raw_tp3, direction)
 
-    # --- Deterministic score (v6.20.6 calibrated: trigger alone = 62, must earn
-    # real institutional confluence — HTF bias / displacement / FVG — to pass 72) ---
-    score = 36.0
+    # --- Normalized Fair Score (v8.0.0) ------------------------------------
+    earned = 0.0
+    max_pts = 80.0
     checks = {}
     checks["range"] = (r_hi - r_lo) > 0
-    score += 4
+    earned += 4
     checks["sweep"] = True
-    score += 12
+    earned += 12
     checks["confirm_close"] = confirmed
-    score += 10
+    earned += 10
     checks["htf_bias"] = bias_ok
-    score += 12 if bias_ok else 0
+    earned += 12 if bias_ok else 0
     disp = abs(close - ref["close"]) > a
     checks["displacement"] = disp
-    score += 10 if disp else 0
+    earned += 10 if disp else 0
     fvgs = fair_value_gaps(candles[-12:], 3)
     kind = "bullish" if direction == "BUY" else "bearish"
     fvg_in = any(f["kind"] == kind and f["lo"] >= r_lo - 0.1 * a and f["hi"] <= r_hi + 0.1 * a for f in fvgs)
     checks["fvg_inside"] = fvg_in
-    score += 10 if fvg_in else 0
+    earned += 10 if fvg_in else 0
     at_mid = abs(entry - mid) <= 0.25 * a
     checks["crt_mid"] = at_mid
-    score += 6 if at_mid else 0
+    earned += 6 if at_mid else 0
     kz = ctx.kill_zone or (kill_zone(candles[-1]["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 6 if rr >= 2.0 else 0
+    earned += 6 if rr >= 2.0 else 0
 
     if not bias_ok:
         return None
-    if score < 68:
+    score = normalized_score(earned, max_pts)
+    if score < 64:
         return None
 
     reasons = [
@@ -162,5 +162,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="CRT", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

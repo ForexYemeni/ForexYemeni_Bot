@@ -62,6 +62,35 @@ CRYPTO_SYMBOLS = {
     "LINKUSD": "LINK", "TONUSD": "TON",
 }
 
+# v8.0.0 (EXEC-4): Exact exchange LOT_SIZE step precision per coin so orders
+# are never rejected for invalid decimal precision on Binance / Bybit / OKX.
+SYMBOL_QTY_DECIMALS = {
+    "BTC": 5, "ETH": 4, "SOL": 2, "BNB": 3,
+    "XRP": 1, "DOGE": 0, "ADA": 1, "AVAX": 2,
+    "LINK": 2, "TON": 2,
+}
+SYMBOL_PRICE_DECIMALS = {
+    "BTC": 2, "ETH": 2, "SOL": 2, "BNB": 2,
+    "XRP": 4, "DOGE": 5, "ADA": 4, "AVAX": 2,
+    "LINK": 3, "TON": 3,
+}
+
+
+def format_crypto_qty(bot_symbol: str, raw_qty: float) -> tuple[float, str]:
+    base = CRYPTO_SYMBOLS.get(instruments.normalize(bot_symbol), "")
+    dec = SYMBOL_QTY_DECIMALS.get(base, 4)
+    val = round(max(0.0, float(raw_qty)), dec)
+    if dec == 0:
+        val = float(int(val))
+        return val, str(int(val))
+    return val, f"{val:.{dec}f}"
+
+
+def format_crypto_price(bot_symbol: str, px: float) -> str:
+    base = CRYPTO_SYMBOLS.get(instruments.normalize(bot_symbol), "")
+    dec = SYMBOL_PRICE_DECIMALS.get(base, 2)
+    return f"{float(px):.{dec}f}"
+
 
 def is_enabled() -> bool:
     return (db.get_setting("crypto_api_enabled", "1") or "1") == "1"
@@ -410,20 +439,31 @@ def execute_crypto_signal(
 
     side = "BUY" if str(sig.get("direction") or "BUY").upper() == "BUY" else "SELL"
     entry = float(sig.get("entry") or 0.0)
+    stop_px = float(sig.get("stop") or 0.0)
+    tp1_px = float(sig.get("tp1") or 0.0)
     if entry <= 0:
         return {"ok": False, "error": "سعر الدخول غير صالح."}
+    if side == "SELL" and not bool(sig.get("allow_spot_sell", False)):
+        return {
+            "ok": False,
+            "error": (
+                "⚠️ حماية التداول الفوري (Spot): إشارات البيع (SELL) لا يمكن تنفيذها على حساب Spot "
+                "إلا إذا كنت تملك العملة مسبقاً — نُنفّذ تلقائياً صفقات الشراء (BUY) مع أمر حماية SL/TP فقط."
+            ),
+        }
 
     cap_usd = float(row.get("max_trade_usd") or 100.0)
     trade_usd = min(cap_usd, max(10.0, float(notional_usd if notional_usd is not None else cap_usd)))
-    qty = round(trade_usd / entry, 5)
+    qty, qty_str = format_crypto_qty(sig["symbol"], trade_usd / entry)
     if qty <= 0:
-        return {"ok": False, "error": "الكمية المحسوبة أصغر من الحد الأدنى."}
+        return {"ok": False, "error": "الكمية المحسوبة أصغر من الحد الأدنى للعملة."}
 
     testnet = bool(row["testnet"])
     ak, asec, pp = creds["api_key"], creds["api_secret"], creds.get("passphrase", "")
     base = EXCHANGE_META[ex]["testnet_url"] if testnet else EXCHANGE_META[ex]["live_url"]
     order_id = ""
     raw_resp = {}
+    sl_tp_attached = False
 
     try:
         if ex == "BINANCE":
@@ -444,6 +484,34 @@ def execute_crypto_signal(
                 headers={"X-MBX-APIKEY": ak},
             )
             order_id = str(raw_resp.get("orderId") or "")
+            # v8.0.0 (EXEC-4): Immediately attach protective OCO (TP1 + SL) on Binance Spot after BUY fill
+            if side == "BUY" and stop_px > 0 and tp1_px > entry and stop_px < entry:
+                try:
+                    exec_qty_raw = float(raw_resp.get("executedQty") or qty)
+                    _, oco_qty_str = format_crypto_qty(sig["symbol"], exec_qty_raw)
+                    ts2 = str(int(time.time() * 1000))
+                    sl_lim = stop_px * 0.998
+                    oco_params = {
+                        "symbol": ex_sym,
+                        "side": "SELL",
+                        "quantity": oco_qty_str,
+                        "price": format_crypto_price(sig["symbol"], tp1_px),
+                        "stopPrice": format_crypto_price(sig["symbol"], stop_px),
+                        "stopLimitPrice": format_crypto_price(sig["symbol"], sl_lim),
+                        "stopLimitTimeInForce": "GTC",
+                        "timestamp": ts2,
+                        "recvWindow": "5000",
+                    }
+                    q2 = urllib.parse.urlencode(oco_params)
+                    s2 = sign_binance(q2, asec)
+                    _http_json(
+                        f"{base}/api/v3/order/oco?{q2}&signature={s2}",
+                        method="POST",
+                        headers={"X-MBX-APIKEY": ak},
+                    )
+                    sl_tp_attached = True
+                except Exception:
+                    sl_tp_attached = False
 
         elif ex == "BYBIT":
             ts = str(int(time.time() * 1000))
@@ -453,8 +521,15 @@ def execute_crypto_signal(
                 "symbol": ex_sym,
                 "side": "Buy" if side == "BUY" else "Sell",
                 "orderType": "Market",
-                "qty": f"{trade_usd:.2f}" if side == "BUY" else f"{qty:.5f}",
+                "qty": f"{trade_usd:.2f}" if side == "BUY" else qty_str,
             }
+            if side == "BUY" and tp1_px > entry:
+                body_obj["takeProfit"] = format_crypto_price(sig["symbol"], tp1_px)
+                body_obj["tpOrderType"] = "Market"
+            if side == "BUY" and 0 < stop_px < entry:
+                body_obj["stopLoss"] = format_crypto_price(sig["symbol"], stop_px)
+                body_obj["slOrderType"] = "Market"
+                sl_tp_attached = True
             body_str = json.dumps(body_obj, separators=(",", ":"))
             sig_h = sign_bybit(ts, ak, rw, body_str, asec)
             hdrs = {
@@ -477,8 +552,19 @@ def execute_crypto_signal(
                 "tdMode": "cash",
                 "side": side.lower(),
                 "ordType": "market",
-                "sz": f"{trade_usd:.2f}" if side == "BUY" else f"{qty:.5f}",
+                "sz": f"{trade_usd:.2f}" if side == "BUY" else qty_str,
             }
+            if side == "BUY" and (tp1_px > entry or (0 < stop_px < entry)):
+                algo: dict = {}
+                if tp1_px > entry:
+                    algo["tpTriggerPx"] = format_crypto_price(sig["symbol"], tp1_px)
+                    algo["tpOrdPx"] = "-1"
+                if 0 < stop_px < entry:
+                    algo["slTriggerPx"] = format_crypto_price(sig["symbol"], stop_px)
+                    algo["slOrdPx"] = "-1"
+                if algo:
+                    body_obj["attachAlgoOrds"] = [algo]
+                    sl_tp_attached = True
             body_str = json.dumps(body_obj, separators=(",", ":"))
             sig_h = sign_okx(ts_iso, "POST", path, body_str, asec)
             hdrs = {
@@ -505,7 +591,7 @@ def execute_crypto_signal(
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     int(user_id), ex, ex_sym, side, qty, entry,
-                    float(sig.get("stop") or 0.0), float(sig.get("tp1") or 0.0),
+                    stop_px, tp1_px,
                     1 if testnet else 0, order_id, status,
                     json.dumps(raw_resp, ensure_ascii=False)[:500],
                     int(sig.get("id") or 0), config.now(),
@@ -520,6 +606,7 @@ def execute_crypto_signal(
             "trade_usd": round(trade_usd, 2),
             "testnet": testnet,
             "order_id": order_id,
+            "sl_tp_attached": sl_tp_attached,
             "status": status,
         }
     except Exception as exc:

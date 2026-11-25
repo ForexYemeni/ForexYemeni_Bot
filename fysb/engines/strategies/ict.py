@@ -21,7 +21,9 @@ from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
     premium_discount, structure_labels,
 )
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -116,46 +118,49 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
 
     risk = abs(entry - stop)
-    tps = (
+    if risk <= 0:
+        return None
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
         entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
         entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
         entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5,
+        direction,
     )
-    rr = abs(tps[0] - entry) / risk if risk > 0 else 0.0
 
-    # --- Measurable score ----------------------------------------------------
-    score = 50.0
+    # --- Normalized Fair Score (v8.0.0) + FIX checks["mss"] (SIG-6) --------
+    earned = 0.0
+    max_pts = 90.0
     checks = {}
     checks["htf_bias"] = (bias_up and direction == "BUY") or (bias_down and direction == "SELL")
-    score += 12 if checks["htf_bias"] else 0
+    earned += 12 if checks["htf_bias"] else 0
     checks["sweep"] = (sweep["sell_side"] and direction == "BUY") or (sweep["buy_side"] and direction == "SELL")
-    score += 14 if checks["sweep"] else 0
+    earned += 14 if checks["sweep"] else 0
     checks["displacement"] = displacement
-    score += 10 if displacement else 0
+    earned += 10 if displacement else 0
     checks["fvg_zone"] = entry_zone is not None
-    score += 12 if entry_zone else 0
+    earned += 12 if entry_zone else 0
     checks["ob_confluence"] = any(o["kind"] == ("bullish" if direction == "BUY" else "bearish") for o in obs)
-    score += 8 if checks["ob_confluence"] else 0
-    # Premium/Discount measured at the ENTRY level (not the post-move close):
-    # guards against chasing premium prices on BUYs / discount prices on SELLs.
+    earned += 8 if checks["ob_confluence"] else 0
     if pd.get("high") and pd.get("low") and pd["high"] > pd["low"]:
         entry_pos = (entry - pd["low"]) / (pd["high"] - pd["low"])
         checks["pd_align"] = (direction == "BUY" and entry_pos <= 0.75) or (direction == "SELL" and entry_pos >= 0.25)
     else:
         checks["pd_align"] = pd["zone"] in ("discount", "equilibrium", "premium")
-    score += 10 if checks["pd_align"] else 0
-    checks["mss"] = bias["choch"] or bias["bos"]
-    score += 8 if checks["mss"] else 0
+    earned += 10 if checks["pd_align"] else 0
+    checks["mss"] = bool(mss["choch"] or mss["bos"])
+    earned += 8 if checks["mss"] else 0
     kz = ctx.kill_zone or (kill_zone(candles[-1]["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if checks["kill_zone"] else 0
+    earned += 6 if checks["kill_zone"] else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 6 if checks["rr_ok"] else 0
+    earned += 6 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
@@ -169,6 +174,6 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     ]
     return StrategyResult(
         code="ICT", direction=direction, entry=entry, stop=stop,
-        tp1=tps[0], tp2=tps[1], tp3=tps[2], rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
+        score=score, reasons=reasons, checks=checks,
     )

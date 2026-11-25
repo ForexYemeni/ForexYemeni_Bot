@@ -341,8 +341,29 @@ def delete_connection(conn_id: int, user_id: int | None = None, is_admin: bool =
             return {"ok": False, "error": "الربط غير موجود"}
         if not is_admin and int(r["user_id"]) != int(user_id or 0):
             return {"ok": False, "error": "غير مصرح"}
+        # v8.0.0: Clean up pending/queued orders for this connection so no orphans remain
+        c.execute(
+            "UPDATE bridge_orders SET status='CANCELLED', detail='تم حذف الربط', updated_at=? "
+            "WHERE connection_id=? AND status IN ('QUEUED','DISPATCHED')",
+            (config.now(), int(conn_id)),
+        )
         c.execute("DELETE FROM bridge_connections WHERE id=?", (int(conn_id),))
     return {"ok": True, "id": int(conn_id)}
+
+
+def mark_signal_bridge_orders_closed(signal_id: int) -> int:
+    """v8.0.0 (EXEC-2): Mark EXECUTED/QUEUED bridge OPEN orders for a closed signal
+    as CLOSED so they never block `max_open_trades` for the rest of the day."""
+    sid = int(signal_id or 0)
+    if sid <= 0:
+        return 0
+    with db.tx() as c:
+        cur = c.execute(
+            "UPDATE bridge_orders SET status='CLOSED', updated_at=? "
+            "WHERE signal_id=? AND action_type='OPEN' AND status IN ('QUEUED','DISPATCHED','EXECUTED')",
+            (config.now(), sid),
+        )
+        return int(cur.rowcount or 0)
 
 
 def list_orders(user_id: int | None = None, limit: int = 40) -> list[dict]:
@@ -405,10 +426,163 @@ def _tradelocker_auth(creds: dict, account_mode: str) -> tuple[str | None, str]:
             "password": creds.get("password", ""),
             "server": creds.get("server", ""),
         },
+        timeout=6.0,
     )
     if st in (200, 201) and j.get("accessToken"):
         return str(j["accessToken"]), ""
     return None, str(j.get("message") or j.get("error") or f"HTTP {st}")
+
+
+def _tradelocker_resolve_account(base: str, tok: str, creds: dict) -> tuple[str, str]:
+    """Return (account_id, acc_num) for TradeLocker REST trading endpoints."""
+    acc_id = str(creds.get("account_id") or "").strip()
+    acc_num = str(creds.get("acc_num") or "").strip()
+    if acc_id and acc_num:
+        return acc_id, acc_num
+    st, j = _http_json(f"{base}/auth/jwt/all-accounts", headers={"Authorization": f"Bearer {tok}"}, timeout=6.0)
+    accs = (j.get("accounts") if isinstance(j, dict) else []) or []
+    if not accs:
+        raise RuntimeError("لم يتم العثور على حسابات نشطة في TradeLocker")
+    picked = next((a for a in accs if acc_id and str(a.get("id")) == acc_id), accs[0])
+    return str(picked.get("id") or ""), str(picked.get("accNum") or "1")
+
+
+def _tradelocker_place_order(
+    creds: dict,
+    account_mode: str,
+    symbol: str,
+    direction: str,
+    lots: float,
+    *,
+    sl: float = 0.0,
+    tp: float = 0.0,
+    suffix: str = "",
+) -> dict:
+    """v8.0.0 (EXEC-1): Real TradeLocker REST Market Order execution with SL & TP."""
+    tok, err = _tradelocker_auth(creds, account_mode)
+    if not tok:
+        raise RuntimeError(f"فشل توثيق TradeLocker: {err}")
+    base = _tradelocker_base(account_mode)
+    acc_id, acc_num = _tradelocker_resolve_account(base, tok, creds)
+    hdrs = {"Authorization": f"Bearer {tok}", "accNum": acc_num}
+    st_i, ji = _http_json(f"{base}/trade/accounts/{acc_id}/instruments", headers=hdrs, timeout=6.0)
+    insts = ((ji.get("d") or {}).get("instruments") if isinstance(ji, dict) else None) or (ji.get("instruments") if isinstance(ji, dict) else []) or []
+    sym_clean = instruments.normalize(symbol)
+    wanted = [f"{sym_clean}{suffix}".upper(), sym_clean, f"{sym_clean}.RAW", f"{sym_clean}M"]
+    picked = None
+    for w in wanted:
+        picked = next((x for x in insts if str(x.get("name") or "").upper().replace("/", "") == w), None)
+        if picked:
+            break
+    if not picked:
+        picked = next((x for x in insts if sym_clean in str(x.get("name") or "").upper().replace("/", "")), None)
+    if not picked:
+        raise RuntimeError(f"الرمز {symbol} غير موجود في أدوات TradeLocker")
+    inst_id = int(picked.get("tradableInstrumentId") or picked.get("id") or 0)
+    routes = picked.get("routes") or []
+    trade_route = next((r for r in routes if str(r.get("type") or "").upper() == "TRADE"), routes[0] if routes else {})
+    route_id = int(trade_route.get("id") or 0)
+    order_body: dict = {
+        "price": 0,
+        "qty": round(max(0.01, float(lots)), 2),
+        "routeId": route_id,
+        "side": "buy" if str(direction or "BUY").upper() == "BUY" else "sell",
+        "strategyId": "ForexYemeni",
+        "trStopOffset": 0,
+        "tradableInstrumentId": inst_id,
+        "type": "market",
+        "validity": "IOC",
+    }
+    if sl > 0:
+        order_body["stopLoss"] = float(sl)
+        order_body["stopLossType"] = "absolute"
+    if tp > 0:
+        order_body["takeProfit"] = float(tp)
+        order_body["takeProfitType"] = "absolute"
+    st_o, jo = _http_json(f"{base}/trade/accounts/{acc_id}/orders", method="POST", body=order_body, headers=hdrs, timeout=8.0)
+    if st_o not in (200, 201) or (isinstance(jo, dict) and str(jo.get("s") or "").lower() == "error"):
+        raise RuntimeError(str((jo or {}).get("errmsg") or (jo or {}).get("message") or f"HTTP {st_o}"))
+    oid = str(((jo.get("d") or {}).get("orderId") if isinstance(jo, dict) else "") or (jo.get("orderId") if isinstance(jo, dict) else "") or "")
+    return {"order_id": oid, "symbol_name": str(picked.get("name") or symbol)}
+
+
+def _tradelocker_partial_be(creds: dict, account_mode: str, position_id: str, be_price: float) -> dict:
+    """v8.0.0 (EXEC-1): Move TradeLocker position SL to Breakeven on TP1."""
+    tok, err = _tradelocker_auth(creds, account_mode)
+    if not tok:
+        return {"ok": False, "detail": f"فشل توثيق TradeLocker: {err}"}
+    base = _tradelocker_base(account_mode)
+    acc_id, acc_num = _tradelocker_resolve_account(base, tok, creds)
+    hdrs = {"Authorization": f"Bearer {tok}", "accNum": acc_num}
+    st, j = _http_json(
+        f"{base}/trade/positions/{position_id}",
+        method="PATCH",
+        body={"stopLoss": float(be_price)},
+        headers=hdrs,
+        timeout=6.0,
+    )
+    ok = st in (200, 201) and str((j or {}).get("s") or "ok").lower() != "error"
+    return {"ok": ok, "detail": "TradeLocker TP1: نقل الوقف لنقطة الدخول BE ✅" if ok else f"فشل تعديل BE ({st})"}
+
+
+def _deriv_symbol(symbol: str) -> str:
+    s = instruments.normalize(symbol)
+    if s in ("XAUUSD", "XAGUSD"):
+        return f"frx{s}"
+    if s.startswith(("EUR", "GBP", "USD", "AUD", "NZD", "CAD", "CHF")) and len(s) == 6:
+        return f"frx{s}"
+    if s in ("BTCUSD", "ETHUSD"):
+        return f"cry{s}"
+    return f"frx{s}"
+
+
+def _deriv_place_order(
+    creds: dict,
+    symbol: str,
+    direction: str,
+    stake_usd: float,
+    *,
+    sl_usd: float = 0.0,
+    tp_usd: float = 0.0,
+) -> dict:
+    """v8.0.0 (EXEC-1): Real Deriv WebSocket Multiplier contract execution with SL/TP."""
+    token = str(creds.get("api_token") or "").strip()
+    app_id = str(creds.get("app_id") or "1089").strip() or "1089"
+    auth = _deriv_ws_call({"authorize": token}, app_id=app_id, timeout=6.0)
+    if auth.get("error"):
+        raise RuntimeError(str((auth["error"] or {}).get("message") or "Deriv auth failed"))
+    auth_obj = auth.get("authorize") or {}
+    currency = str(auth_obj.get("currency") or "USD")
+    d_sym = _deriv_symbol(symbol)
+    amt = round(max(1.0, float(stake_usd or 10.0)), 2)
+    params: dict = {
+        "amount": amt,
+        "basis": "stake",
+        "contract_type": "MULTUP" if str(direction or "BUY").upper() == "BUY" else "MULTDOWN",
+        "currency": currency,
+        "multiplier": 100,
+        "symbol": d_sym,
+    }
+    lim: dict = {}
+    if sl_usd > 0:
+        lim["stop_loss"] = round(min(amt * 0.95, float(sl_usd)), 2)
+    if tp_usd > 0:
+        lim["take_profit"] = round(float(tp_usd), 2)
+    if lim:
+        params["limit_order"] = lim
+    res = _deriv_ws_call(
+        {"buy": 1, "price": amt, "parameters": params, "passthrough": {"token_mode": True}},
+        app_id=app_id,
+        timeout=8.0,
+    )
+    if res.get("error"):
+        raise RuntimeError(str((res["error"] or {}).get("message") or "Deriv buy failed"))
+    buy_obj = res.get("buy") or {}
+    return {
+        "contract_id": str(buy_obj.get("contract_id") or ""),
+        "symbol_name": d_sym,
+        "buy_price": float(buy_obj.get("buy_price") or amt),
+    }
 
 
 def _deriv_ws_call(payload: dict, app_id: str = "1089", timeout: float = 7.0) -> dict:
@@ -829,9 +1003,28 @@ class _CTraderClient:
             return {"ok": False, "detail": f"الصفقة #{position_id} غير مفتوحة على cTrader"}
         td = target.get("tradeData") or {}
         cur_vol = int(td.get("volume") or 0)
-        half_vol = cur_vol // 2
+        sym_id = int(td.get("symbolId") or 0)
+        # v8.0.0 (EXEC-3): Respect broker's exact minVolume & stepVolume before halving
+        min_vol = 100
+        step_vol = 100
+        if sym_id > 0:
+            try:
+                sinfo_res = self.rpc(
+                    CTRADER_PT_SYMBOL_BY_ID_REQ,
+                    {"ctidTraderAccountId": ctid, "symbolId": [sym_id]},
+                    {CTRADER_PT_SYMBOL_BY_ID_RES},
+                )
+                sinfo_list = (sinfo_res.get("payload") or {}).get("symbol") or []
+                if sinfo_list:
+                    min_vol = max(1, int(sinfo_list[0].get("minVolume") or 100))
+                    step_vol = max(1, int(sinfo_list[0].get("stepVolume") or min_vol))
+            except Exception:
+                pass
+        raw_half = cur_vol // 2
+        half_vol = (raw_half // step_vol) * step_vol if step_vol > 0 else raw_half
+        remaining_vol = cur_vol - half_vol
         closed_half = False
-        if half_vol >= 100:
+        if half_vol >= min_vol and remaining_vol >= min_vol:
             try:
                 self.rpc(
                     CTRADER_PT_CLOSE_POS_REQ,
@@ -1064,15 +1257,25 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
         if not _market_allowed(conn.get("markets") or "ALL", sym):
             continue
 
-        # Dedup check
+        # Dedup & TRUE open-trades check (v8.0.0 EXEC-2: ignore orders whose signal is already CLOSED!)
         with db.conn() as c:
             dup = c.execute(
                 "SELECT id FROM bridge_orders WHERE connection_id=? AND signal_id=? AND action_type='OPEN'",
                 (cid, sid),
             ).fetchone()
             open_cnt = int(c.execute(
-                "SELECT COUNT(*) n FROM bridge_orders WHERE connection_id=? AND action_type='OPEN' AND status IN ('QUEUED','DISPATCHED','EXECUTED') AND created_at>=?",
-                (cid, db.day_start_utc()),
+                """SELECT COUNT(*) n FROM bridge_orders bo
+                   LEFT JOIN signals s ON s.id = bo.signal_id
+                   WHERE bo.connection_id=? AND bo.action_type='OPEN'
+                     AND bo.status IN ('QUEUED','DISPATCHED','EXECUTED')
+                     AND (
+                         bo.signal_id = 0
+                         OR (
+                             (s.closed_at IS NULL OR s.closed_at='')
+                             AND s.status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                         )
+                     )""",
+                (cid,),
             ).fetchone()["n"] or 0)
         if dup:
             continue
@@ -1109,7 +1312,7 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
             blocked += 1
             continue
 
-        # Execute directly on cTrader Open API v2 or queue for MT5 EA / broker cloud worker
+        # Execute directly on cTrader / TradeLocker / Deriv or queue for MT5 EA
         init_status = "QUEUED"
         ext_id = ""
         detail = f"جاهز للتنفيذ على {PLATFORMS[plat]['name']} ({amode})"
@@ -1137,6 +1340,34 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
             except Exception as exc:
                 init_status = "FAILED"
                 detail = f"❌ فشل تنفيذ cTrader: {str(exc)[:160]}"
+        elif plat == "tradelocker":
+            try:
+                creds = vault.decrypt_json(conn.get("creds_enc") or "") if conn.get("creds_enc") else {}
+                if creds.get("email") and creds.get("password"):
+                    ex = _tradelocker_place_order(
+                        creds, amode, sym, direction, lots,
+                        sl=stop, tp=tp3 or tp2 or tp1,
+                        suffix=str(conn.get("symbol_suffix") or ""),
+                    )
+                    init_status = "EXECUTED"
+                    ext_id = str(ex.get("order_id") or "")
+                    detail = f"🟢 نُفذ فعلياً على TradeLocker ({ex.get('symbol_name', sym)} · #{ext_id})"
+            except Exception as exc:
+                init_status = "FAILED"
+                detail = f"❌ فشل تنفيذ TradeLocker: {str(exc)[:160]}"
+        elif plat == "deriv":
+            try:
+                creds = vault.decrypt_json(conn.get("creds_enc") or "") if conn.get("creds_enc") else {}
+                if creds.get("api_token"):
+                    bal = max(100.0, float(conn.get("last_balance") or 1000.0))
+                    stake = max(5.0, round(bal * (float(conn.get("risk_pct") or 1.0) / 100.0), 2))
+                    ex = _deriv_place_order(creds, sym, direction, stake, sl_usd=stake * 0.9, tp_usd=stake * 2.0)
+                    init_status = "EXECUTED"
+                    ext_id = str(ex.get("contract_id") or "")
+                    detail = f"🟢 نُفذ فعلياً على Deriv ({ex.get('symbol_name', sym)} · #{ext_id})"
+            except Exception as exc:
+                init_status = "FAILED"
+                detail = f"❌ فشل تنفيذ Deriv: {str(exc)[:160]}"
         with db.tx() as c:
             c.execute(
                 """INSERT INTO bridge_orders(
@@ -1234,7 +1465,64 @@ def execute_test_trade(
                 )
             return {"ok": False, "error": f"فشل تنفيذ صفقة الاختبار على cTrader: {err}"}
 
-    # For MT5 EA or other bridges: enqueue a test order for immediate pickup
+    if plat == "tradelocker":
+        creds = vault.decrypt_json(row.get("creds_enc") or "") if row.get("creds_enc") else {}
+        try:
+            ex = _tradelocker_place_order(
+                creds, amode, sym, side, lot_v,
+                suffix=str(row.get("symbol_suffix") or ""),
+            )
+            oid = str(ex.get("order_id") or "")
+            detail = f"🧪 صفقة اختبار ناجحة على TradeLocker ({ex.get('symbol_name', sym)} · #{oid})"
+            with db.tx() as c:
+                c.execute(
+                    """INSERT INTO bridge_orders(
+                         connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                         lots,status,external_order_id,detail,created_at,updated_at
+                       ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'EXECUTED',?,?,?,?)""",
+                    (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, oid, detail, now, now),
+                )
+            return {"ok": True, "status": "EXECUTED", "position_id": oid, "symbol": ex.get("symbol_name", sym), "lots": lot_v, "message": detail}
+        except Exception as exc:
+            err = str(exc)
+            with db.tx() as c:
+                c.execute(
+                    """INSERT INTO bridge_orders(
+                         connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                         lots,status,detail,created_at,updated_at
+                       ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'FAILED',?,?,?)""",
+                    (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, f"❌ اختبار TradeLocker فشل: {err[:160]}", now, now),
+                )
+            return {"ok": False, "error": f"فشل تنفيذ صفقة الاختبار على TradeLocker: {err}"}
+
+    if plat == "deriv":
+        creds = vault.decrypt_json(row.get("creds_enc") or "") if row.get("creds_enc") else {}
+        try:
+            ex = _deriv_place_order(creds, sym, side, stake_usd=5.0, sl_usd=4.0, tp_usd=8.0)
+            cid_ext = str(ex.get("contract_id") or "")
+            detail = f"🧪 صفقة اختبار ناجحة على Deriv ({ex.get('symbol_name', sym)} · #{cid_ext})"
+            with db.tx() as c:
+                c.execute(
+                    """INSERT INTO bridge_orders(
+                         connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                         lots,status,external_order_id,detail,created_at,updated_at
+                       ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'EXECUTED',?,?,?,?)""",
+                    (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, cid_ext, detail, now, now),
+                )
+            return {"ok": True, "status": "EXECUTED", "position_id": cid_ext, "symbol": ex.get("symbol_name", sym), "lots": lot_v, "message": detail}
+        except Exception as exc:
+            err = str(exc)
+            with db.tx() as c:
+                c.execute(
+                    """INSERT INTO bridge_orders(
+                         connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                         lots,status,detail,created_at,updated_at
+                       ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'FAILED',?,?,?)""",
+                    (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, f"❌ اختبار Deriv فشل: {err[:160]}", now, now),
+                )
+            return {"ok": False, "error": f"فشل تنفيذ صفقة الاختبار على Deriv: {err}"}
+
+    # For MT5 EA: enqueue a test order for immediate pickup
     with db.tx() as c:
         c.execute(
             """INSERT INTO bridge_orders(
@@ -1288,6 +1576,15 @@ def dispatch_tp1_partial_be(sig: dict) -> int:
             except Exception as exc:
                 pbe_status = "FAILED"
                 pbe_detail = f"❌ فشل تأمين cTrader: {str(exc)[:140]}"
+        elif r["platform"] == "tradelocker" and str(r.get("external_order_id") or "").strip():
+            try:
+                creds = vault.decrypt_json(r.get("creds_enc") or "") if r.get("creds_enc") else {}
+                res_be = _tradelocker_partial_be(creds, r["account_mode"], str(r["external_order_id"]), float(r["entry_price"] or 0.0))
+                pbe_status = "EXECUTED" if res_be.get("ok") else "FAILED"
+                pbe_detail = str(res_be.get("detail") or pbe_detail)
+            except Exception as exc:
+                pbe_status = "FAILED"
+                pbe_detail = f"❌ فشل تأمين TradeLocker: {str(exc)[:140]}"
         with db.tx() as c:
             c.execute(
                 """INSERT INTO bridge_orders(

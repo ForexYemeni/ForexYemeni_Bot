@@ -19,7 +19,9 @@ Score weights (deterministic):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 LOOKBACK = 20
 
@@ -53,47 +55,52 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     entry = last["close"]
     if direction == "BUY":
         stop = min(last["low"], lo) - 0.3 * a
-        stop = cap_stop(entry, stop, direction, a, min_atr=0.6, fallback_atr=1.2, max_atr=2.6, cap_atr=2.2)
-        risk = entry - stop
-        tp1, tp2, tp3 = entry + risk * 2.0, entry + risk * 3.0, entry + risk * 4.5
     else:
         stop = max(last["high"], hi) + 0.3 * a
-        stop = cap_stop(entry, stop, direction, a, min_atr=0.6, fallback_atr=1.2, max_atr=2.6, cap_atr=2.2)
-        risk = stop - entry
-        tp1, tp2, tp3 = entry - risk * 2.0, entry - risk * 3.0, entry - risk * 4.5
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.6, fallback_atr=1.2, max_atr=2.6, cap_atr=2.2)
+    risk = abs(entry - stop)
     if risk <= 0:
         return None
-    rr = abs(tp1 - entry) / risk
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5,
+        direction,
+    )
 
-    score = 40.0
+    earned = 0.0
+    max_pts = 76.0
     checks = {}
     checks["level"] = hi > lo
-    score += 6
+    earned += 6
     checks["false_break"] = True
-    score += 18
+    checks["sweep"] = True
+    earned += 18
     if direction == "BUY":
         margin = (last["close"] - lo) / max(range_, 1e-12)
     else:
         margin = (hi - last["close"]) / max(range_, 1e-12)
     checks["close_back_margin"] = margin >= 0.25
-    score += 12 if checks["close_back_margin"] else 0
+    earned += 12 if checks["close_back_margin"] else 0
     checks["htf_bias"] = bias_ok
-    score += 12 if bias_ok else 0
+    earned += 12 if bias_ok else 0
     upper_wick = last["high"] - max(last["close"], last["open"])
     lower_wick = min(last["close"], last["open"]) - last["low"]
     reject = (direction == "SELL" and upper_wick > body) or (direction == "BUY" and lower_wick > body)
     checks["wick_rejection"] = reject
-    score += 10 if reject else 0
+    earned += 10 if reject else 0
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 8 if rr >= 2.0 else 0
+    earned += 8 if rr >= 2.0 else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
@@ -108,5 +115,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="TURTLE_SOUP", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

@@ -1,40 +1,30 @@
-"""Silver Bullet (ICT) — time-window FVG continuation, fully mechanical.
+"""Silver Bullet (ICT) — DST-aware time-window FVG continuation, 100% mechanical.
 
-Documented rules:
-  1. TIME WINDOW — Silver Bullet windows (documented UTC approximation):
-       LONDON_SB    07:00-08:00 UTC
-       NY_AM_SB     15:00-16:00 UTC
-       NY_PM_SB     19:00-20:00 UTC
-  2. DAY BIAS — the opening-range direction (first 8 candles of the covered
-     window) must agree with the trade direction.
-  3. SETUP — a Fair Value Gap forms inside the window in the bias direction.
-  4. ENTRY — midpoint of the newest in-window FVG; stop beyond the window's
-     opposite extreme; targets are risk multiples.
-
-Score weights (deterministic):
-  inside a silver-bullet window .. +16
-  opening-range bias defined ..... +10
-  FVG formed inside window ....... +16
-  FVG direction == bias .......... +14
-  HTF structure alignment ........ +10
-  volatility regime ok ........... +6
-  RR >= 2 ........................ +8
-Base 40. Cap 95. Outside the windows the strategy simply returns None.
+Documented rules (v8.0.0 DST-accurate America/New_York clock):
+  1. TIME WINDOW — Exact ICT Silver Bullet windows in New York time:
+       LONDON_SB    03:00–04:00 NY
+       NY_AM_SB     10:00–11:00 NY
+       NY_PM_SB     14:00–15:00 NY
+  2. DAY BIAS — Prior-session opening-range direction (bars from the 1–2h
+     preceding the Silver Bullet window) must agree with trade direction.
+  3. SETUP — An intact Fair Value Gap forms inside the window in bias direction.
+  4. ENTRY — Midpoint of the newest intact FVG (never worse than market close).
+  5. TARGETS — Strictly >= 2.0R / 3.0R / 5.0R.
 """
-from fysb.engines.analysis import atr_pct, ema, fair_value_gaps, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
-from datetime import datetime
+from fysb.engines.analysis import atr_pct, fair_value_gaps, ny_hour, structure_labels
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
-SB_WINDOWS = [("LONDON_SB", 7, 8), ("NY_AM_SB", 15, 16), ("NY_PM_SB", 19, 20)]
+SB_WINDOWS = [("LONDON_SB", 3, 4), ("NY_AM_SB", 10, 11), ("NY_PM_SB", 14, 15)]
 
 
 def _window_of(dt_iso: str):
-    try:
-        dt = datetime.fromisoformat(dt_iso.replace("Z", "+00:00"))
-    except Exception:
+    h = ny_hour(dt_iso)
+    if h is None:
         return None
     for name, start, end in SB_WINDOWS:
-        if start <= dt.hour < end:
+        if start <= h < end:
             return name
     return None
 
@@ -48,17 +38,19 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not wname:
         return None
 
-    # Opening-range bias (first 8 of the last 30 candles)
-    window30 = candles[-30:]
-    acc = window30[:8]
+    # Prior-session opening-range bias (1–2h prior to the Silver Bullet window)
+    cur_h = ny_hour(last["datetime"])
+    prior_bars = [
+        c for c in candles[-30:-2]
+        if (bh := ny_hour(c.get("datetime", ""))) is not None and ((cur_h - bh) % 24) in (1, 2)
+    ]
+    acc = prior_bars if len(prior_bars) >= 3 else candles[-30:][:8]
     or_hi = max(c["high"] for c in acc)
     or_lo = min(c["low"] for c in acc)
     close = last["close"]
     bias_dir = "BUY" if close > (or_hi + or_lo) / 2 else "SELL"
 
-    # FVGs formed inside this window (recent 10 candles) — INTACT only (v6.19.0):
-    # a bullish FVG with close already below fvg['lo'] (or bearish above hi) is
-    # invalidated and must never produce a born-in-drawdown signal.
+    # Intact FVGs formed inside this window (recent 10 candles)
     fvgs = fair_value_gaps(candles[-10:], 4)
     fvg = None
     for f in fvgs:
@@ -84,42 +76,48 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     a_abs = max(a_ptr * entry / 100.0, 1e-9)
     if direction == "BUY":
         stop = min(min(c["low"] for c in candles[-8:]), fvg["lo"]) - 0.4 * (or_hi - or_lo) * 0.5
-        stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
-        risk = entry - stop
-        tp1, tp2, tp3 = entry + risk * 2.0, entry + risk * 3.0, entry + risk * 5.0
     else:
         stop = max(max(c["high"] for c in candles[-8:]), fvg["hi"]) + 0.4 * (or_hi - or_lo) * 0.5
-        stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
-        risk = stop - entry
-        tp1, tp2, tp3 = entry - risk * 2.0, entry - risk * 3.0, entry - risk * 5.0
+    stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
+    risk = abs(entry - stop)
     if risk <= 0:
         return None
-    rr = abs(tp1 - entry) / risk
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0,
+        direction,
+    )
 
-    score = 40.0
+    earned = 0.0
+    max_pts = 80.0
     checks = {}
     checks["sb_window"] = wname
-    score += 16
+    checks["kill_zone"] = True
+    earned += 16
     checks["or_bias"] = or_hi > or_lo
-    score += 10
+    earned += 10 if checks["or_bias"] else 0
     checks["fvg_in_window"] = True
-    score += 16
+    earned += 16
     checks["fvg_direction"] = True
-    score += 14
-    checks["htf_align"] = (bias["trend"] == "up" and direction == "BUY") or \
-                          (bias["trend"] == "down" and direction == "SELL") or \
-                          (struct["bos_dir"] == ("up" if direction == "BUY" else "down"))
-    score += 10 if checks["htf_align"] else 0
+    earned += 14
+    checks["htf_bias"] = (bias["trend"] == "up" and direction == "BUY") or \
+                         (bias["trend"] == "down" and direction == "SELL") or \
+                         (struct["bos_dir"] == ("up" if direction == "BUY" else "down"))
+    checks["htf_align"] = checks["htf_bias"]
+    earned += 10 if checks["htf_bias"] else 0
     checks["vol_ok"] = 0.05 < a_ptr < 6.0
-    score += 6 if checks["vol_ok"] else 0
+    earned += 6 if checks["vol_ok"] else 0
     checks["rr_ok"] = rr >= 2.0
-    score += 8 if rr >= 2.0 else 0
+    earned += 8 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
-        f"silver bullet window {wname}",
+        f"silver bullet window {wname} (DST NY time)",
         f"opening-range bias {bias_dir} ({or_lo:.5g}-{or_hi:.5g})",
         f"in-window {fvg['kind']} FVG {fvg['lo']:.5g}-{fvg['hi']:.5g}",
         f"entry at FVG midpoint {entry:.5g}",
@@ -129,5 +127,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="SILVER_BULLET", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

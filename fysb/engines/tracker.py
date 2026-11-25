@@ -134,9 +134,10 @@ def missed_target(sig: dict, candles: list[dict]) -> bool:
     """The entry was NEVER touched but price already reached TP1 — the idea is
     dead (the market ran away without giving the plan its fill). No result is
     credited: an unentered trade cannot win.
-    Uses the same conservative TP confirmation buffer as _evaluate_signal."""
+    Uses per-asset conservative TP confirmation buffer (v8.0.0)."""
     tp1 = float(sig["tp1"])
-    buf = TP_CONFIRM_PIPS * max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
+    pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
+    buf = instruments.tp_confirm_pips(sig["symbol"]) * pip
     if sig["direction"] == "BUY":
         return any(float(c["high"]) >= tp1 + buf for c in candles)
     return any(float(c["low"]) <= tp1 - buf for c in candles)
@@ -727,8 +728,11 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     walked = [c for c in candles if c["datetime"] >= cut]
     if not walked:
         return None
+    # v8.0.0 (SIG-5): Per-asset TP confirmation buffer + realistic Bid/Ask spread
+    # (for SELL orders, Bid-only charts underestimate Ask stops/exits by ~spread)
     pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
-    buf = TP_CONFIRM_PIPS * pip
+    buf = instruments.tp_confirm_pips(sig["symbol"]) * pip
+    ask_spread = instruments.typical_spread_pips(sig["symbol"]) * pip * 0.5
     progress_tp = hit_tp
     # Track the bar index where the already-banked target (hit_tp) was reached
     # so the fill bar itself (at entry) never false-triggers a breakeven stop.
@@ -751,18 +755,19 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
             if progress_tp <= 2 and hi >= tp3 + buf:
                 new_tp = max(new_tp, 3)
         else:
-            sl_now = hi >= sl
-            be_now = hi >= entry
-            if hit_tp == 1 and banked_bar_idx < 0 and lo <= tp1 - buf:
+            sl_now = (hi + ask_spread) >= sl
+            be_now = (hi + ask_spread) >= entry
+            tp_eff_buf = max(buf, ask_spread)
+            if hit_tp == 1 and banked_bar_idx < 0 and lo <= tp1 - tp_eff_buf:
                 banked_bar_idx = idx
-            elif hit_tp == 2 and banked_bar_idx < 0 and lo <= tp2 - buf:
+            elif hit_tp == 2 and banked_bar_idx < 0 and lo <= tp2 - tp_eff_buf:
                 banked_bar_idx = idx
             new_tp = 0
-            if progress_tp == 0 and lo <= tp1 - buf:
+            if progress_tp == 0 and lo <= tp1 - tp_eff_buf:
                 new_tp = 1
-            if progress_tp <= 1 and lo <= tp2 - buf:
+            if progress_tp <= 1 and lo <= tp2 - tp_eff_buf:
                 new_tp = max(new_tp, 2)
-            if progress_tp <= 2 and lo <= tp3 - buf:
+            if progress_tp <= 2 and lo <= tp3 - tp_eff_buf:
                 new_tp = max(new_tp, 3)
         if sl_now and progress_tp == 0:
             # Conservative SL-first rule: if a candle hits SL before any target
@@ -964,6 +969,12 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         try:
             from fysb.services import auto_bridge as _ab
             _ab.dispatch_tp1_partial_be(dict(sig))
+        except Exception:
+            pass
+    if closed_at:
+        try:
+            from fysb.services import auto_bridge as _ab
+            _ab.mark_signal_bridge_orders_closed(int(sig["id"]))
         except Exception:
             pass
 

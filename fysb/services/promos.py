@@ -137,18 +137,36 @@ def redeem_promo(code: str, user_id: int, payment_id: int = 0,
     c_norm = normalize_code(code)
     if not c_norm:
         return False
-    v = validate_promo(c_norm, user_id=user_id)
-    if not v.get("ok"):
-        return False
+    now_iso = config.now()
     with db.tx(immediate=True) as c:
-        row = c.execute("SELECT discount_pct, used_count, max_uses, active FROM promo_codes WHERE code=?", (c_norm,)).fetchone()
-        if not row or not int(row["active"] or 0) or int(row["used_count"]) >= int(row["max_uses"]):
+        row = c.execute(
+            "SELECT discount_pct, used_count, max_uses, active, expires_at FROM promo_codes WHERE code=?",
+            (c_norm,),
+        ).fetchone()
+        if not row or not int(row["active"] or 0):
             return False
-        c.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?", (c_norm,))
+        exp = str(row["expires_at"] or "").strip()
+        if exp and exp < now_iso:
+            return False
+        if int(row["used_count"] or 0) >= int(row["max_uses"] or 1):
+            return False
+        if user_id:
+            prev = c.execute(
+                "SELECT id FROM promo_redemptions WHERE code=? AND user_id=?",
+                (c_norm, int(user_id)),
+            ).fetchone()
+            if prev:
+                return False
+        cur = c.execute(
+            "UPDATE promo_codes SET used_count=used_count+1 WHERE code=? AND used_count < max_uses AND active=1",
+            (c_norm,),
+        )
+        if cur.rowcount == 0:
+            return False
         c.execute(
             "INSERT INTO promo_redemptions(code,user_id,payment_id,plan_code,discount_pct,saved_amount,redeemed_at) "
             "VALUES(?,?,?,?,?,?,?)",
             (c_norm, int(user_id), int(payment_id or 0), str(plan_code or ""),
-             int(row["discount_pct"]), float(saved_amount or 0.0), config.now()),
+             int(row["discount_pct"]), float(saved_amount or 0.0), now_iso),
         )
     return True

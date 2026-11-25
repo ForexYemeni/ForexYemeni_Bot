@@ -19,8 +19,10 @@ Score weights: micro-trend +20 · close-confirmed key break +22 · RSI
 momentum +14 · break distance (>= 0.1 ATR beyond the key) +10 · kill zone +6 ·
 volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
-from fysb.engines.analysis import atr, atr_pct, ema, kill_zone, rsi
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.analysis import atr, atr_pct, ema, kill_zone, rsi, structure_labels
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 KEY_LOOKBACK = 12
 STACK_ATR = 0.15
@@ -37,12 +39,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     last = candles[-1]
     close = float(last["close"])
     checks: dict = {}
-    score = 32.0
+    earned = 0.0
+    max_pts = 75.0
 
     e9 = ema([float(c["close"]) for c in candles], 9)
     e21 = ema([float(c["close"]) for c in candles], 21)
 
-    # 1) micro-trend alignment (both directions tested, exactly one wins)
     direction = ""
     if e9 > e21 + STACK_ATR * a:
         direction = "BUY"
@@ -51,9 +53,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["micro_trend"] = bool(direction)
     if not direction:
         return None
-    score += 14
+    earned += 14
 
-    # 2) the scalp key + close-confirmed break
     window = candles[-KEY_LOOKBACK - 1:-1]
     if direction == "BUY":
         key = max(float(c["high"]) for c in window)
@@ -64,29 +65,32 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["key_break"] = broke
     if not broke:
         return None
-    score += 16
+    earned += 16
 
-    # 3) momentum fuel
     r = rsi([float(c["close"]) for c in candles], 14)
     momentum_ok = (r >= 53.0) if direction == "BUY" else (r <= 47.0)
     checks["rsi_momentum"] = momentum_ok
     if not momentum_ok:
         return None
-    score += 10
+    earned += 10
 
-    # 4) break distance bonus (a decisive push, not a scratch)
     travel = abs(close - key)
     checks["decisive"] = travel >= 0.25 * a
-    score += 8 if checks["decisive"] else 0
+    earned += 8 if checks["decisive"] else 0
+
+    # v8.0.0: Real HTF bias awareness from ctx.bias_candles
+    bias = structure_labels(ctx.bias_candles)
+    htf_ok = (bias["trend"] == "up" and direction == "BUY") or (bias["trend"] == "down" and direction == "SELL")
+    checks["htf_bias"] = htf_ok
+    earned += 12 if htf_ok else 0
 
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
 
-    # 5) tight scalp stop: opposite side of the breakout candle ± 0.3 ATR
     if direction == "BUY":
         stop = min(float(last["low"]), key) - 0.3 * a
     else:
@@ -97,27 +101,31 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    tp1 = entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0
-    tp2 = entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0
-    tp3 = entry + risk * 4.0 if direction == "BUY" else entry - risk * 4.0
-    rr = 2.0
-    checks["rr_ok"] = True
-    score += 5
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 4.5 if direction == "BUY" else entry - risk * 4.5,
+        direction,
+    )
+    checks["rr_ok"] = rr >= 2.0
+    earned += 5 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
         f"EMA9/21 micro-trend aligned ({e9:.5g}/{e21:.5g}) — {direction}",
         f"{KEY_LOOKBACK}-candle key at {key:.5g} broken with a CLOSE (>{MIN_BREAK_ATR} ATR beyond)",
-        f"RSI(14)={r:.1f} confirms the push",
+        f"RSI(14)={r:.1f} confirms the push · HTF bias={bias['trend']}",
         f"tight scalp stop = {stop:.5g}",
-        f"targets 2R/3R/4R = {tp1:.5g} / {tp2:.5g} / {tp3:.5g}",
+        f"targets 2R/3R/4.5R = {tp1:.5g} / {tp2:.5g} / {tp3:.5g}",
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
     return StrategyResult(
         code="SK", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

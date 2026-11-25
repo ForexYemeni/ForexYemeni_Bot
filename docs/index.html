@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Royal Mini App v7.7.4</title>
+<title>FOREXYEMENI — Royal Mini App v8.0.0</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root {
@@ -261,7 +261,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.7.4</div>
+      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v8.0.0</div>
     </div>
   </div>
   <div class="top-right">
@@ -594,7 +594,10 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
 </div>
 
 <script>
-// v7.4.4: Zero-blocking Telegram bridge — renders instantly (<50ms) even when telegram.org/unpkg/fonts are blocked by ISP!
+// v8.0.0: Zero-blocking Telegram bridge + strict HTML XSS sanitizer
+function esc(v){
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 function notifyTgNative(){
   try{
     if(window.Telegram && window.Telegram.WebApp){
@@ -907,18 +910,18 @@ function renderSignals(){
     const st = (s.status||'ACTIVE').toUpperCase();
     const pips = +s.pips_result || 0;
     const pipTxt = pips !== 0 ? ` · <b style="color:${pips>0?'var(--green)':'var(--red)'}">${pips>0?'+':''}${pips.toFixed(1)}p</b>` : '';
-    const seqLbl = s.seq ? `#${s.seq} · ` : '';
-    const creatorTxt = s.creator ? `<div style="font-size:10.5px;color:var(--muted);margin-top:2px">${s.creator}</div>` : '';
+    const seqLbl = s.seq ? `#${esc(s.seq)} · ` : '';
+    const creatorTxt = s.creator ? `<div style="font-size:10.5px;color:var(--muted);margin-top:2px">${esc(s.creator)}</div>` : '';
     const demoLbl = s.demo_open ? '🟢 مفعّل بالتجريبي — عرض على الشارت' : '🎮 تجريبي الآن — فتح على الشارت';
     return `
       <div class="sig-card ${isBuy?'buy-glow':'sell-glow'}">
         <div class="sig-top">
           <div>
-            <div class="sig-sym">${seqLbl}${s.symbol} <span class="badge ${isBuy?'b-buy':'b-sell'}">${isBuy?'▲ BUY':'▼ SELL'}</span></div>
-            <div class="sig-meta">⏱ ${s.timeframe} · 🧠 ${s.strategy} · ⭐ ${s.score||0}/100${pipTxt}</div>
+            <div class="sig-sym">${seqLbl}${esc(s.symbol)} <span class="badge ${isBuy?'b-buy':'b-sell'}">${isBuy?'▲ BUY':'▼ SELL'}</span></div>
+            <div class="sig-meta">⏱ ${esc(s.timeframe)} · 🧠 ${esc(s.strategy)} · ⭐ ${Number(s.score)||0}/100${pipTxt}</div>
             ${creatorTxt}
           </div>
-          <span class="badge b-status">${st}</span>
+          <span class="badge b-status">${esc(st)}</span>
         </div>
         <div class="lvls">
           <div class="lvl"><span>دخول</span><b style="color:var(--gold2)">${s.entry}</b></div>
@@ -1288,11 +1291,11 @@ async function loadBridgeOverview(showToast=false){
   const eb = document.getElementById('bridgeEligibilityBox');
   if(eb){
     eb.innerHTML = (r.can_copy_demo
-      ? `<div style="color:var(--green);font-weight:800">🟢 النسخ التجريبي (Broker Demo): متاح — ${r.reason_demo}</div>`
-      : `<div style="color:var(--red);font-weight:800">🔴 النسخ التجريبي (Broker Demo): ${r.reason_demo}</div>`)
+      ? `<div style="color:var(--green);font-weight:800">🟢 النسخ التجريبي (Broker Demo): متاح — ${esc(r.reason_demo)}</div>`
+      : `<div style="color:var(--red);font-weight:800">🔴 النسخ التجريبي (Broker Demo): ${esc(r.reason_demo)}</div>`)
       + (r.can_copy_live
       ? `<div style="color:var(--gold2);font-size:11px;margin-top:3px">💎 النسخ الحقيقي (Live): متاح</div>`
-      : `<div style="color:var(--muted);font-size:11px;margin-top:3px">🔒 النسخ الحقيقي (Live): ${r.reason_live}</div>`);
+      : `<div style="color:var(--muted);font-size:11px;margin-top:3px">🔒 النسخ الحقيقي (Live): ${esc(r.reason_live)}</div>`);
   }
   const conns = r.connections || [];
   document.getElementById('brConnCnt').textContent = conns.length;
@@ -1301,18 +1304,18 @@ async function loadBridgeOverview(showToast=false){
     <div class="demo-pos-card ${c.enabled && !c.admin_frozen ? 'profit' : 'loss'}">
       <div class="sig-top" style="margin-bottom:6px">
         <div>
-          <div class="sig-sym">${c.platform_name} <span class="badge ${c.account_mode==='DEMO'?'b-buy':'b-gold'}">${c.account_mode}</span></div>
-          <div class="sig-meta">الحالة: <b>${c.admin_frozen?'❄️ مجمّد من الإدارة':(c.enabled?c.last_status:'⏸ متوقف')}</b> · الرصيد: <b>$${(+(c.last_balance||0)).toLocaleString()}</b></div>
-          <div class="sig-meta">⚖️ مخاطرة ${c.risk_pct}% · 🛡 درع DD ${c.max_daily_dd_pct}% · 🌐 ${c.markets}</div>
-          ${c.bridge_key ? `<div class="sig-meta" style="color:var(--gold2);word-break:break-all">🔑 Key: <code>${c.bridge_key}</code></div>` : ''}
+          <div class="sig-sym">${esc(c.platform_name)} <span class="badge ${c.account_mode==='DEMO'?'b-buy':'b-gold'}">${esc(c.account_mode)}</span></div>
+          <div class="sig-meta">الحالة: <b>${c.admin_frozen?'❄️ مجمّد من الإدارة':(c.enabled?esc(c.last_status):'⏸ متوقف')}</b> · الرصيد: <b>$${(+(c.last_balance||0)).toLocaleString()}</b></div>
+          <div class="sig-meta">⚖️ مخاطرة ${Number(c.risk_pct)||0}% · 🛡 درع DD ${Number(c.max_daily_dd_pct)||0}% · 🌐 ${esc(c.markets)}</div>
+          ${c.bridge_key ? `<div class="sig-meta" style="color:var(--gold2);word-break:break-all">🔑 Key: <code>${esc(c.bridge_key)}</code></div>` : ''}
         </div>
       </div>
       <div class="btn-row">
-        <button class="btn ghost" onclick="testBridgeConn(${c.id})">🔍 فحص</button>
-        <button class="btn gold" onclick="runBridgeTestTrade(${c.id})">🧪 صفقة 0.01</button>
-        ${c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${c.id})">⬇️ EA</button>` : ''}
-        <button class="btn ${c.enabled?'ghost':'green'}" onclick="toggleBridgeConn(${c.id})">${c.enabled?'⏸':'▶️'}</button>
-        <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${c.id})">🗑</button>
+        <button class="btn ghost" onclick="testBridgeConn(${Number(c.id)||0})">🔍 فحص</button>
+        <button class="btn gold" onclick="runBridgeTestTrade(${Number(c.id)||0})">🧪 صفقة 0.01</button>
+        ${c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${Number(c.id)||0})">⬇️ EA</button>` : ''}
+        <button class="btn ${c.enabled?'ghost':'green'}" onclick="toggleBridgeConn(${Number(c.id)||0})">${c.enabled?'⏸':'▶️'}</button>
+        <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${Number(c.id)||0})">🗑</button>
       </div>
     </div>`).join('') : '<div class="empty">لم تربط أي حساب وسيط بعد — اختر منصتك واضغط حفظ أعلاه!</div>';
 
@@ -1320,10 +1323,10 @@ async function loadBridgeOverview(showToast=false){
   const oBox = document.getElementById('bridgeOrdersBox');
   oBox.innerHTML = ords.length ? ords.map(o => `
     <div class="news-item">
-      <div><b>${o.symbol}</b> <span class="badge ${o.direction==='BUY'?'b-buy':'b-sell'}">${o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}</span>
-        <div style="font-size:10.5px;color:var(--muted)">${o.platform} (${o.account_mode}) · ${o.lots} لوت · ${o.detail||''}</div>
+      <div><b>${esc(o.symbol)}</b> <span class="badge ${o.direction==='BUY'?'b-buy':'b-sell'}">${o.action_type==='PARTIAL_BE'?'🛡 50%+BE':esc(o.direction)}</span>
+        <div style="font-size:10.5px;color:var(--muted)">${esc(o.platform)} (${esc(o.account_mode)}) · ${Number(o.lots)||0} لوت · ${esc(o.detail||'')}</div>
       </div>
-      <span class="badge b-status">${o.status}</span>
+      <span class="badge b-status">${esc(o.status)}</span>
     </div>`).join('') : '<div class="empty">لا توجد أوامر نسخ بعد.</div>';
   if(showToast) toast('✅ تم تحديث حالة جسر النسخ الملكي');
 }
@@ -1496,10 +1499,10 @@ async function boot(){
       document.getElementById('pChannelsList').innerHTML = chs.length ? chs.map(c =>
         `<div class="news-item">
           <div>
-            <b>${c.enabled?'🟢':'⚪'} ${c.title}</b>
-            <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${c.markets||'ALL'} · ${c.post_mode}${c.is_vip_gate?' · 🔐 VIP':''}</div>
+            <b>${c.enabled?'🟢':'⚪'} ${esc(c.title)}</b>
+            <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${esc(c.markets||'ALL')} · ${esc(c.post_mode)}${c.is_vip_gate?' · 🔐 VIP':''}</div>
           </div>
-          <button class="btn ${c.enabled?'green':'ghost'}" style="flex:0;min-width:74px;padding:6px 10px" onclick="togglePartnerChannel(${c.id})">${c.enabled?'مفعّلة':'متوقفة'}</button>
+          <button class="btn ${c.enabled?'green':'ghost'}" style="flex:0;min-width:74px;padding:6px 10px" onclick="togglePartnerChannel(${Number(c.id)||0})">${c.enabled?'مفعّلة':'متوقفة'}</button>
         </div>`
       ).join('') : '<div class="empty">لا توجد قنوات مربوطة بعد — اربط قناتك عبر /partner.</div>';
     } else {

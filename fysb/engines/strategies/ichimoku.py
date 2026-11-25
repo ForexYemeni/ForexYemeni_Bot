@@ -24,7 +24,9 @@ fresh cross bonus +6 · future cloud color +12 · chikou confirm +10 ·
 HTF bias +12 · kill zone +6 · volatility +4 · RR +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 TENKAN_P, KIJUN_P, SENKOU_B_P, DISPLACEMENT = 9, 26, 52, 26
 
@@ -57,9 +59,9 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     fut_b = _mid(candles, SENKOU_B_P)
 
     checks: dict = {}
-    score = 32.0
+    earned = 0.0
+    max_pts = 71.0
 
-    # 1) cloud position decides the direction (exactly one side)
     if close > cloud_top:
         direction = "BUY"
     elif close < cloud_bot:
@@ -67,14 +69,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         return None
     checks["cloud"] = True
-    score += 14
+    earned += 14
 
     tk_aligned = (tenkan > kijun) if direction == "BUY" else (tenkan < kijun)
     checks["tk"] = tk_aligned
     if not tk_aligned:
         return None
-    score += 10
-    # fresh cross: tenkan/kijun order flipped within the last 5 closes
+    earned += 10
     fresh = False
     for i in range(len(candles) - 5, len(candles)):
         win = candles[:i + 1]
@@ -83,22 +84,20 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             fresh = True
             break
     checks["fresh_cross"] = fresh
-    score += 8 if fresh else 0
+    earned += 8 if fresh else 0
 
     fut_bullish = fut_a > fut_b
     checks["future_cloud"] = (direction == "BUY" and fut_bullish) or (direction == "SELL" and not fut_bullish)
     if not checks["future_cloud"]:
         return None
-    score += 8
+    earned += 8
 
-    # v6.20.0 FIX: True Chikou Span compares CURRENT close (plotted 26 bars back)
-    # against the price 26 bars ago — NOT 26-ago vs 52-ago!
     ref_26 = float(candles[-1 - DISPLACEMENT]["close"])
     chikou_ok = (close > ref_26) if direction == "BUY" else (close < ref_26)
     checks["chikou"] = chikou_ok
     if not chikou_ok:
         return None
-    score += 8
+    earned += 8
 
     bias_close = float(ctx.bias_candles[-1]["close"]) if ctx.bias_candles else close
     bias_kijun = _mid(ctx.bias_candles, KIJUN_P) if len(ctx.bias_candles) >= KIJUN_P else bias_close
@@ -106,15 +105,15 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["htf_bias"] = bias_ok
     if not bias_ok:
         return None
-    score += 8
+    earned += 8
 
     last = candles[-1]
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
 
     entry = close
     stop = (kijun - 0.5 * a) if direction == "BUY" else (kijun + 0.5 * a)
@@ -122,14 +121,18 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     risk = abs(entry - stop)
     if risk <= 0:
         return None
-    tp1 = entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0
-    tp2 = entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0
-    tp3 = entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0
-    rr = 2.0
-    checks["rr_ok"] = True
-    score += 5
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0,
+        direction,
+    )
+    checks["rr_ok"] = rr >= 2.0
+    earned += 5 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
@@ -146,5 +149,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="ICHIMOKU", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

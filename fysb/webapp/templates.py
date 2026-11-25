@@ -611,7 +611,10 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
 </div>
 
 <script>
-// v7.4.4: Zero-blocking Telegram bridge — renders instantly (<50ms) even when telegram.org/unpkg/fonts are blocked by ISP!
+// v8.0.0: Zero-blocking Telegram bridge + strict HTML XSS sanitizer
+function esc(v){{
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}}
 function notifyTgNative(){{
   try{{
     if(window.Telegram && window.Telegram.WebApp){{
@@ -924,18 +927,18 @@ function renderSignals(){{
     const st = (s.status||'ACTIVE').toUpperCase();
     const pips = +s.pips_result || 0;
     const pipTxt = pips !== 0 ? ` · <b style="color:${{pips>0?'var(--green)':'var(--red)'}}">${{pips>0?'+':''}}${{pips.toFixed(1)}}p</b>` : '';
-    const seqLbl = s.seq ? `#${{s.seq}} · ` : '';
-    const creatorTxt = s.creator ? `<div style="font-size:10.5px;color:var(--muted);margin-top:2px">${{s.creator}}</div>` : '';
+    const seqLbl = s.seq ? `#${{esc(s.seq)}} · ` : '';
+    const creatorTxt = s.creator ? `<div style="font-size:10.5px;color:var(--muted);margin-top:2px">${{esc(s.creator)}}</div>` : '';
     const demoLbl = s.demo_open ? '🟢 مفعّل بالتجريبي — عرض على الشارت' : '🎮 تجريبي الآن — فتح على الشارت';
     return `
       <div class="sig-card ${{isBuy?'buy-glow':'sell-glow'}}">
         <div class="sig-top">
           <div>
-            <div class="sig-sym">${{seqLbl}}${{s.symbol}} <span class="badge ${{isBuy?'b-buy':'b-sell'}}">${{isBuy?'▲ BUY':'▼ SELL'}}</span></div>
-            <div class="sig-meta">⏱ ${{s.timeframe}} · 🧠 ${{s.strategy}} · ⭐ ${{s.score||0}}/100${{pipTxt}}</div>
+            <div class="sig-sym">${{seqLbl}}${{esc(s.symbol)}} <span class="badge ${{isBuy?'b-buy':'b-sell'}}">${{isBuy?'▲ BUY':'▼ SELL'}}</span></div>
+            <div class="sig-meta">⏱ ${{esc(s.timeframe)}} · 🧠 ${{esc(s.strategy)}} · ⭐ ${{Number(s.score)||0}}/100${{pipTxt}}</div>
             ${{creatorTxt}}
           </div>
-          <span class="badge b-status">${{st}}</span>
+          <span class="badge b-status">${{esc(st)}}</span>
         </div>
         <div class="lvls">
           <div class="lvl"><span>دخول</span><b style="color:var(--gold2)">${{s.entry}}</b></div>
@@ -1305,11 +1308,11 @@ async function loadBridgeOverview(showToast=false){{
   const eb = document.getElementById('bridgeEligibilityBox');
   if(eb){{
     eb.innerHTML = (r.can_copy_demo
-      ? `<div style="color:var(--green);font-weight:800">🟢 النسخ التجريبي (Broker Demo): متاح — ${{r.reason_demo}}</div>`
-      : `<div style="color:var(--red);font-weight:800">🔴 النسخ التجريبي (Broker Demo): ${{r.reason_demo}}</div>`)
+      ? `<div style="color:var(--green);font-weight:800">🟢 النسخ التجريبي (Broker Demo): متاح — ${{esc(r.reason_demo)}}</div>`
+      : `<div style="color:var(--red);font-weight:800">🔴 النسخ التجريبي (Broker Demo): ${{esc(r.reason_demo)}}</div>`)
       + (r.can_copy_live
       ? `<div style="color:var(--gold2);font-size:11px;margin-top:3px">💎 النسخ الحقيقي (Live): متاح</div>`
-      : `<div style="color:var(--muted);font-size:11px;margin-top:3px">🔒 النسخ الحقيقي (Live): ${{r.reason_live}}</div>`);
+      : `<div style="color:var(--muted);font-size:11px;margin-top:3px">🔒 النسخ الحقيقي (Live): ${{esc(r.reason_live)}}</div>`);
   }}
   const conns = r.connections || [];
   document.getElementById('brConnCnt').textContent = conns.length;
@@ -1318,18 +1321,18 @@ async function loadBridgeOverview(showToast=false){{
     <div class="demo-pos-card ${{c.enabled && !c.admin_frozen ? 'profit' : 'loss'}}">
       <div class="sig-top" style="margin-bottom:6px">
         <div>
-          <div class="sig-sym">${{c.platform_name}} <span class="badge ${{c.account_mode==='DEMO'?'b-buy':'b-gold'}}">${{c.account_mode}}</span></div>
-          <div class="sig-meta">الحالة: <b>${{c.admin_frozen?'❄️ مجمّد من الإدارة':(c.enabled?c.last_status:'⏸ متوقف')}}</b> · الرصيد: <b>$${{(+(c.last_balance||0)).toLocaleString()}}</b></div>
-          <div class="sig-meta">⚖️ مخاطرة ${{c.risk_pct}}% · 🛡 درع DD ${{c.max_daily_dd_pct}}% · 🌐 ${{c.markets}}</div>
-          ${{c.bridge_key ? `<div class="sig-meta" style="color:var(--gold2);word-break:break-all">🔑 Key: <code>${{c.bridge_key}}</code></div>` : ''}}
+          <div class="sig-sym">${{esc(c.platform_name)}} <span class="badge ${{c.account_mode==='DEMO'?'b-buy':'b-gold'}}">${{esc(c.account_mode)}}</span></div>
+          <div class="sig-meta">الحالة: <b>${{c.admin_frozen?'❄️ مجمّد من الإدارة':(c.enabled?esc(c.last_status):'⏸ متوقف')}}</b> · الرصيد: <b>$${{(+(c.last_balance||0)).toLocaleString()}}</b></div>
+          <div class="sig-meta">⚖️ مخاطرة ${{Number(c.risk_pct)||0}}% · 🛡 درع DD ${{Number(c.max_daily_dd_pct)||0}}% · 🌐 ${{esc(c.markets)}}</div>
+          ${{c.bridge_key ? `<div class="sig-meta" style="color:var(--gold2);word-break:break-all">🔑 Key: <code>${{esc(c.bridge_key)}}</code></div>` : ''}}
         </div>
       </div>
       <div class="btn-row">
-        <button class="btn ghost" onclick="testBridgeConn(${{c.id}})">🔍 فحص</button>
-        <button class="btn gold" onclick="runBridgeTestTrade(${{c.id}})">🧪 صفقة 0.01</button>
-        ${{c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${{c.id}})">⬇️ EA</button>` : ''}}
-        <button class="btn ${{c.enabled?'ghost':'green'}}" onclick="toggleBridgeConn(${{c.id}})">${{c.enabled?'⏸':'▶️'}}</button>
-        <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${{c.id}})">🗑</button>
+        <button class="btn ghost" onclick="testBridgeConn(${{Number(c.id)||0}})">🔍 فحص</button>
+        <button class="btn gold" onclick="runBridgeTestTrade(${{Number(c.id)||0}})">🧪 صفقة 0.01</button>
+        ${{c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${{Number(c.id)||0}})">⬇️ EA</button>` : ''}}
+        <button class="btn ${{c.enabled?'ghost':'green'}}" onclick="toggleBridgeConn(${{Number(c.id)||0}})">${{c.enabled?'⏸':'▶️'}}</button>
+        <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${{Number(c.id)||0}})">🗑</button>
       </div>
     </div>`).join('') : '<div class="empty">لم تربط أي حساب وسيط بعد — اختر منصتك واضغط حفظ أعلاه!</div>';
 
@@ -1337,10 +1340,10 @@ async function loadBridgeOverview(showToast=false){{
   const oBox = document.getElementById('bridgeOrdersBox');
   oBox.innerHTML = ords.length ? ords.map(o => `
     <div class="news-item">
-      <div><b>${{o.symbol}}</b> <span class="badge ${{o.direction==='BUY'?'b-buy':'b-sell'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}}</span>
-        <div style="font-size:10.5px;color:var(--muted)">${{o.platform}} (${{o.account_mode}}) · ${{o.lots}} لوت · ${{o.detail||''}}</div>
+      <div><b>${{esc(o.symbol)}}</b> <span class="badge ${{o.direction==='BUY'?'b-buy':'b-sell'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':esc(o.direction)}}</span>
+        <div style="font-size:10.5px;color:var(--muted)">${{esc(o.platform)}} (${{esc(o.account_mode)}}) · ${{Number(o.lots)||0}} لوت · ${{esc(o.detail||'')}}</div>
       </div>
-      <span class="badge b-status">${{o.status}}</span>
+      <span class="badge b-status">${{esc(o.status)}}</span>
     </div>`).join('') : '<div class="empty">لا توجد أوامر نسخ بعد.</div>';
   if(showToast) toast('✅ تم تحديث حالة جسر النسخ الملكي');
 }}
@@ -1513,10 +1516,10 @@ async function boot(){{
       document.getElementById('pChannelsList').innerHTML = chs.length ? chs.map(c =>
         `<div class="news-item">
           <div>
-            <b>${{c.enabled?'🟢':'⚪'}} ${{c.title}}</b>
-            <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${{c.markets||'ALL'}} · ${{c.post_mode}}${{c.is_vip_gate?' · 🔐 VIP':''}}</div>
+            <b>${{c.enabled?'🟢':'⚪'}} ${{esc(c.title)}}</b>
+            <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${{esc(c.markets||'ALL')}} · ${{esc(c.post_mode)}}${{c.is_vip_gate?' · 🔐 VIP':''}}</div>
           </div>
-          <button class="btn ${{c.enabled?'green':'ghost'}}" style="flex:0;min-width:74px;padding:6px 10px" onclick="togglePartnerChannel(${{c.id}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
+          <button class="btn ${{c.enabled?'green':'ghost'}}" style="flex:0;min-width:74px;padding:6px 10px" onclick="togglePartnerChannel(${{Number(c.id)||0}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
         </div>`
       ).join('') : '<div class="empty">لا توجد قنوات مربوطة بعد — اربط قناتك عبر /partner.</div>';
     }} else {{
@@ -2041,7 +2044,14 @@ input:focus,select:focus{{border-color:var(--gold)}}
 </div>
 
 <script>
-// v7.5.1: Zero-blocking Telegram Admin Multi-Page App — instant paint & smooth 5-page executive UX
+// v8.0.0: Zero-blocking Telegram Admin Multi-Page App + strict XSS sanitizer
+function esc(v){{
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}}
+function copyBtnVal(btn, msg){{
+  const val = btn && btn.dataset ? (btn.dataset.copy || '') : '';
+  if(val) copyVal(val, msg || '✅ تم النسخ');
+}}
 function notifyTgNative(){{
   try{{
     if(window.Telegram && window.Telegram.WebApp){{
@@ -2303,16 +2313,17 @@ async function loadAdminUsers(){{
   if(!arr.length){{ box.innerHTML = '<div class="empty">لا يوجد أعضاء مطابقون للبحث.</div>'; return; }}
   box.innerHTML = arr.map(u => {{
     const pBadge = u.plan_code === 'ROYAL' ? '' : (u.plan_code === 'FREE' ? 'cyan' : 'green');
-    const expTxt = u.plan_expires ? ` · ينتهي ${{String(u.plan_expires).slice(0,10)}}` : '';
-    const unTxt = u.username ? `@${{u.username}}` : `ID:${{u.user_id}}`;
+    const expTxt = u.plan_expires ? ` · ينتهي ${{esc(String(u.plan_expires).slice(0,10))}}` : '';
+    const unTxt = u.username ? `@${{esc(u.username)}}` : `ID:${{Number(u.user_id)||0}}`;
     const brOv = (u.bridge_override || 'AUTO').toUpperCase();
     const brPill = brOv === 'ALLOW' ? '<span class="pill green">⚡ نسخ: مسموح</span>' : (brOv === 'DENY' ? '<span class="pill red">🚫 نسخ: ممنوع</span>' : '<span class="pill">⚙️ نسخ: تلقائي</span>');
+    const uidN = Number(u.user_id) || 0;
     return `<div class="sig-card ${{u.is_blocked?'loss':(u.plan_code!=='FREE'?'win':'live')}}">
       <div class="sig-top">
         <div>
-          <div class="sig-sym">${{u.full_name || 'مستخدم'}} <span class="pill ${{pBadge}}">${{u.plan_code}}</span> ${{brPill}} ${{u.is_blocked?'<span class="pill red">محظور</span>':''}}</div>
-          <div class="sig-meta">${{unTxt}} · <code>${{u.user_id}}</code>${{expTxt}}</div>
-          <div class="sig-meta">📊 اليوم: ${{u.used_today||0}} إشارة · 💰 مدفوع: $${{u.total_paid_usd||0}} · 🔌 جسر: ${{u.bridge_connections||0}} حساب</div>
+          <div class="sig-sym">${{esc(u.full_name || 'مستخدم')}} <span class="pill ${{pBadge}}">${{esc(u.plan_code)}}</span> ${{brPill}} ${{u.is_blocked?'<span class="pill red">محظور</span>':''}}</div>
+          <div class="sig-meta">${{unTxt}} · <code>${{uidN}}</code>${{expTxt}}</div>
+          <div class="sig-meta">📊 اليوم: ${{Number(u.used_today)||0}} إشارة · 💰 مدفوع: $${{Number(u.total_paid_usd)||0}} · 🔌 جسر: ${{Number(u.bridge_connections)||0}} حساب</div>
         </div>
       </div>
       <div class="row-form" style="margin-bottom:7px">
@@ -2420,14 +2431,14 @@ async function loadAdminBridge(){{
   if(cBox){{
     cBox.innerHTML = conns.length ? conns.map(c => `
       <div class="item">
-        <div>${{c.admin_frozen?'❄️':(c.enabled?'🟢':'⏸')}} <b>${{c.full_name||c.username||('UID '+c.user_id)}}</b>
-          <span class="pill ${{c.account_mode==='DEMO'?'green':'cyan'}}">${{c.platform}} · ${{c.account_mode}}</span>
-          <div style="font-size:11px;color:var(--muted)">UID ${{c.user_id}} · رصيد $${{(+(c.last_balance||0)).toLocaleString()}} · ${{c.last_status}}</div>
+        <div>${{c.admin_frozen?'❄️':(c.enabled?'🟢':'⏸')}} <b>${{esc(c.full_name||c.username||('UID '+c.user_id))}}</b>
+          <span class="pill ${{c.account_mode==='DEMO'?'green':'cyan'}}">${{esc(c.platform)}} · ${{esc(c.account_mode)}}</span>
+          <div style="font-size:11px;color:var(--muted)">UID ${{Number(c.user_id)||0}} · رصيد $${{(+(c.last_balance||0)).toLocaleString()}} · ${{esc(c.last_status)}}</div>
         </div>
         <div style="display:flex;gap:5px">
-          <button class="btn ghost" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'test')">🔍</button>
-          <button class="btn ${{c.admin_frozen?'on':'danger'}}" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'${{c.admin_frozen?'unfreeze':'freeze'}}')">${{c.admin_frozen?'🔥 فك':'❄️ تجميد'}}</button>
-          <button class="btn danger" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'delete')">🗑</button>
+          <button class="btn ghost" style="padding:5px 8px" onclick="adminBridgeConnOp(${{Number(c.id)||0}},'test')">🔍</button>
+          <button class="btn ${{c.admin_frozen?'on':'danger'}}" style="padding:5px 8px" onclick="adminBridgeConnOp(${{Number(c.id)||0}},'${{c.admin_frozen?'unfreeze':'freeze'}}')">${{c.admin_frozen?'🔥 فك':'❄️ تجميد'}}</button>
+          <button class="btn danger" style="padding:5px 8px" onclick="adminBridgeConnOp(${{Number(c.id)||0}},'delete')">🗑</button>
         </div>
       </div>`).join('') : '<div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div>';
   }}
@@ -2437,10 +2448,10 @@ async function loadAdminBridge(){{
   if(oBox){{
     oBox.innerHTML = ords.length ? ords.slice(0,12).map(o => `
       <div class="item">
-        <div><b>${{o.symbol}}</b> <span class="pill ${{o.direction==='BUY'?'green':'red'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}}</span> · UID <code>${{o.user_id}}</code>
-          <div style="font-size:10.5px;color:var(--muted)">${{o.platform}} (${{o.account_mode}}) · ${{o.lots}} لوت · ${{o.detail||''}}</div>
+        <div><b>${{esc(o.symbol)}}</b> <span class="pill ${{o.direction==='BUY'?'green':'red'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':esc(o.direction)}}</span> · UID <code>${{Number(o.user_id)||0}}</code>
+          <div style="font-size:10.5px;color:var(--muted)">${{esc(o.platform)}} (${{esc(o.account_mode)}}) · ${{Number(o.lots)||0}} لوت · ${{esc(o.detail||'')}}</div>
         </div>
-        <span class="pill">${{o.status}}</span>
+        <span class="pill">${{esc(o.status)}}</span>
       </div>`).join('') : '<div class="empty">لا توجد أوامر مسجلة بعد.</div>';
   }}
 }}
@@ -2479,7 +2490,7 @@ async function genGift(){{
     max_uses:+document.getElementById('gUses').value
   }})}});
   if(r.ok){{
-    document.getElementById('giftOut').innerHTML = `🎟 الكود: <span>${{r.code}}</span> <button class="btn ghost" style="padding:4px 9px;margin-right:6px" onclick="copyVal('${{r.code}}','✅ تم نسخ كود الهدية')">📋 نسخ</button>`;
+    document.getElementById('giftOut').innerHTML = `🎟 الكود: <span>${{esc(r.code)}}</span> <button class="btn ghost" style="padding:4px 9px;margin-right:6px" data-copy="${{esc(r.code)}}" onclick="copyBtnVal(this,'✅ تم نسخ كود الهدية')">📋 نسخ</button>`;
     toast('🎁 تم إصدار الكود الملكي');
   }} else toast(r.error||'خطأ', true);
 }}
@@ -2489,9 +2500,9 @@ async function loadAdmin(){{
   if(!d || !d.ok){{
     const errEl = document.getElementById('authErr');
     if(d && d.netErr){{
-      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + (d.error||'') + '</span>';
+      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + esc(d.error||'') + '</span>';
     }} else if(d && d.error && d._status !== 401 && d._status !== 403){{
-      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + d.error;
+      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + esc(d.error);
     }}
     errEl.style.display='block';
     document.getElementById('adminBody').style.display='none';
@@ -2564,14 +2575,14 @@ async function loadAdmin(){{
   if(pBox){{
     pBox.innerHTML = promos.length ? promos.map(pr => `
       <div class="item">
-        <div>${{pr.active?'🟢':'⚪'}} <b style="font-family:var(--mono);color:var(--gold2)">${{pr.code}}</b>
-          <span class="pill green">-${{pr.discount_pct}}%</span>
-          <span style="font-size:11px;color:var(--muted)"> · استخدام ${{pr.used_count||0}}/${{pr.max_uses||0}}</span>
+        <div>${{pr.active?'🟢':'⚪'}} <b style="font-family:var(--mono);color:var(--gold2)">${{esc(pr.code)}}</b>
+          <span class="pill green">-${{Number(pr.discount_pct)||0}}%</span>
+          <span style="font-size:11px;color:var(--muted)"> · استخدام ${{Number(pr.used_count)||0}}/${{Number(pr.max_uses)||0}}</span>
         </div>
         <div style="display:flex;gap:5px">
-          <button class="btn ghost" style="padding:5px 8px" onclick="copyVal('${{pr.code}}','✅ تم نسخ كود الخصم')">📋</button>
-          <button class="btn ${{pr.active?'on':'off'}}" style="padding:5px 8px" onclick="promoOp('toggle','${{pr.code}}')">${{pr.active?'مفعّل':'متوقف'}}</button>
-          <button class="btn danger" style="padding:5px 8px" onclick="promoOp('delete','${{pr.code}}')">🗑</button>
+          <button class="btn ghost" style="padding:5px 8px" data-copy="${{esc(pr.code)}}" onclick="copyBtnVal(this,'✅ تم نسخ كود الخصم')">📋</button>
+          <button class="btn ${{pr.active?'on':'off'}}" style="padding:5px 8px" data-code="${{esc(pr.code)}}" onclick="promoOp('toggle',this.dataset.code)">${{pr.active?'مفعّل':'متوقف'}}</button>
+          <button class="btn danger" style="padding:5px 8px" data-code="${{esc(pr.code)}}" onclick="promoOp('delete',this.dataset.code)">🗑</button>
         </div>
       </div>`).join('') : '<div class="empty">لا توجد أكواد خصم نسبية بعد — أنشئ كودك الأول أعلاه.</div>';
   }}
@@ -2597,12 +2608,12 @@ async function loadAdmin(){{
   document.getElementById('chCountPill').textContent = cchs.length + ' قناة';
   document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
     `<div class="item">
-      <div>${{c.enabled?'🟢':'⚪'}} <b>${{c.title||c.chat_id}}</b> <span class="pill">${{c.markets||'ALL'}}</span>
-        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{c.chat_id}}</div>
+      <div>${{c.enabled?'🟢':'⚪'}} <b>${{esc(c.title||c.chat_id)}}</b> <span class="pill">${{esc(c.markets||'ALL')}}</span>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{esc(c.chat_id)}}</div>
       </div>
       <div style="display:flex;gap:6px">
-        <button class="btn ${{c.enabled?'on':'off'}}" onclick="chartChOp('toggle',${{c.id}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
-        <button class="btn danger" onclick="chartChOp('delete',${{c.id}})">🗑</button>
+        <button class="btn ${{c.enabled?'on':'off'}}" onclick="chartChOp('toggle',${{Number(c.id)||0}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
+        <button class="btn danger" onclick="chartChOp('delete',${{Number(c.id)||0}})">🗑</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه.</div>';
@@ -2613,12 +2624,12 @@ async function loadAdmin(){{
   if(nev.length){{
     document.getElementById('adminNewsBox').innerHTML = nev.slice(0,10).map(e=>
       `<div class="item">
-        <div><span class="pill red">${{e.currency}}</span> <b>${{e.title}}</b></div>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{e.time_utc||''}}</span>
+        <div><span class="pill red">${{esc(e.currency)}}</span> <b>${{esc(e.title)}}</b></div>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{esc(e.time_utc||'')}}</span>
       </div>`
     ).join('');
   }} else if(d.news_feed_error){{
-    document.getElementById('adminNewsBox').innerHTML = `<div class="empty" style="color:var(--red)">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${{d.news_feed_error}}</div>`;
+    document.getElementById('adminNewsBox').innerHTML = `<div class="empty" style="color:var(--red)">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${{esc(d.news_feed_error)}}</div>`;
   }} else {{
     document.getElementById('adminNewsBox').innerHTML = '<div class="empty">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
   }}
@@ -2630,8 +2641,8 @@ async function loadAdmin(){{
   document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,10).map((r,i)=>
     `<div class="lb-row">
       <div class="lb-top">
-        <span>${{medals[i]||'🔹'}} <b>${{r.name||r.strategy||r.code}}</b> <span class="pill">${{r.code}}</span></span>
-        <span style="font-family:var(--mono)">${{r.win_rate}}% · <b style="color:${{r.net_pips>=0?'var(--green)':'var(--red)'}}">${{r.net_pips>0?'+':''}}${{r.net_pips}}p</b> (${{r.trades}})</span>
+        <span>${{medals[i]||'🔹'}} <b>${{esc(r.name||r.strategy||r.code)}}</b> <span class="pill">${{esc(r.code)}}</span></span>
+        <span style="font-family:var(--mono)">${{Number(r.win_rate)||0}}% · <b style="color:${{r.net_pips>=0?'var(--green)':'var(--red)'}}">${{r.net_pips>0?'+':''}}${{Number(r.net_pips)||0}}p</b> (${{Number(r.trades)||0}})</span>
       </div>
       <div class="lb-bar"><div class="lb-fill" style="width:${{Math.min(100,Math.max(4,Math.round(r.win_rate||0)))}}%"></div></div>
     </div>`
@@ -2642,23 +2653,23 @@ async function loadAdmin(){{
   document.getElementById('payoutBadgePill').textContent = pendOut.length;
   document.getElementById('payBox').innerHTML = pendPay.length ? pendPay.map(p=>
     `<div class="item">
-      <div><b style="color:var(--gold2)">#${{p.id}}</b> · UID <code>${{p.user_id}}</code> · <span class="pill green">${{p.plan_code}}</span> · <b>${{p.amount}}$</b></div>
+      <div><b style="color:var(--gold2)">#${{Number(p.id)||0}}</b> · UID <code>${{Number(p.user_id)||0}}</code> · <span class="pill green">${{esc(p.plan_code)}}</span> · <b>${{Number(p.amount)||0}}$</b></div>
       <div class="btn-row" style="width:100%;margin-top:6px">
-        <button class="btn on" onclick="actPay(${{p.id}},'approve')">✅ اعتماد وتفعيل الباقة</button>
-        <button class="btn danger" style="flex:0;min-width:84px" onclick="actPay(${{p.id}},'reject')">❌ رفض</button>
+        <button class="btn on" onclick="actPay(${{Number(p.id)||0}},'approve')">✅ اعتماد وتفعيل الباقة</button>
+        <button class="btn danger" style="flex:0;min-width:84px" onclick="actPay(${{Number(p.id)||0}},'reject')">❌ رفض</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">✅ لا توجد طلبات دفع معلقة حالياً.</div>';
 
   document.getElementById('payoutBox').innerHTML = pendOut.length ? pendOut.map(p=>
     `<div class="item">
-      <div><b style="color:var(--gold2)">#${{p.id}}</b> · UID <code>${{p.user_id}}</code> · <b style="color:var(--green)">${{p.amount_usd}}$</b>
-        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${{p.wallet_address}}</div>
+      <div><b style="color:var(--gold2)">#${{Number(p.id)||0}}</b> · UID <code>${{Number(p.user_id)||0}}</code> · <b style="color:var(--green)">${{Number(p.amount_usd)||0}}$</b>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${{esc(p.wallet_address)}}</div>
       </div>
       <div class="btn-row" style="width:100%;margin-top:6px">
-        <button class="btn ghost" style="flex:0;min-width:74px" onclick="copyVal('${{p.wallet_address}}','✅ تم نسخ عنوان المحفظة')">📋 نسخ</button>
-        <button class="btn on" onclick="actPayout(${{p.id}},'approve')">✅ اعتماد الصرف</button>
-        <button class="btn danger" style="flex:0;min-width:74px" onclick="actPayout(${{p.id}},'reject')">❌ رفض</button>
+        <button class="btn ghost" style="flex:0;min-width:74px" data-copy="${{esc(p.wallet_address)}}" onclick="copyBtnVal(this,'✅ تم نسخ عنوان المحفظة')">📋 نسخ</button>
+        <button class="btn on" onclick="actPayout(${{Number(p.id)||0}},'approve')">✅ اعتماد الصرف</button>
+        <button class="btn danger" style="flex:0;min-width:74px" onclick="actPayout(${{Number(p.id)||0}},'reject')">❌ رفض</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">✅ لا توجد طلبات سحب معلقة حالياً.</div>';

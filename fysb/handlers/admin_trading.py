@@ -1390,8 +1390,12 @@ async def admin_engine_adjust(q, uid, context, bot, key: str, delta: float):
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)
         return
     setting_key, lo, hi = bounds[key]
-    cur = await afn.run(db.get_setting_int, setting_key, 300 if key == "interval" else 80)
-    await afn.run(db.set_setting, setting_key, int(max(lo, min(hi, cur + delta))))
+    cur = await afn.run(db.get_setting_int, setting_key, 300 if key == "interval" else 72)
+    new_val = int(max(lo, min(hi, cur + delta)))
+    await afn.run(db.set_setting, setting_key, new_val)
+    if key == "minscore":
+        # v8.0.0 (UI-2): Keep `min_signal_score` and `engine_min_score` 100% synchronized
+        await afn.run(db.set_setting, "min_signal_score", new_val)
     val_after = await afn.run(db.get_setting, setting_key)
     await afn.run(audit_log.log, uid, f"engine_setting:{setting_key}:{val_after}")
     await admin_engine(q, uid, context, bot)

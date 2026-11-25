@@ -201,6 +201,7 @@ _IS_NOT_NUM_RE = re.compile(r"\bIS\s+NOT\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE)
 _AUTOINC_RE = re.compile(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.IGNORECASE)
 _INT_TYPE_RE = re.compile(r"\bINTEGER\b", re.IGNORECASE)
 _INSERT_TBL_RE = re.compile(r"^\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+_DDL_STMT_RE = re.compile(r"^\s*(?:CREATE|ALTER)\b", re.IGNORECASE)
 _PRAGMA_RE = re.compile(r"^\s*PRAGMA\b", re.IGNORECASE)
 
 
@@ -226,15 +227,19 @@ def reset_serial_cache() -> None:
 def _qmarks(sql: str, escape_percent: bool) -> str:
     """Placeholder + percent handling for psycopg client-side binding.
 
-    psycopg's client-side formatter is quote-BLIND: with params present, ANY
-    bare % (even inside string literals like LIKE '%ICT%') is a format token
-    and must be doubled. Without params the query is sent as-is, so % must
-    stay untouched. `?` -> `%s` stays quote-aware in both modes.
+    Quote-aware including SQL escaped single quotes (`''`).
     """
     out = []
     in_q = False
-    for ch in sql:
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
         if ch == "'":
+            if in_q and i + 1 < n and sql[i + 1] == "'":
+                out.append("''")
+                i += 2
+                continue
             in_q = not in_q
             out.append(ch)
         elif ch == "?" and not in_q:
@@ -243,6 +248,7 @@ def _qmarks(sql: str, escape_percent: bool) -> str:
             out.append("%%")
         else:
             out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -265,7 +271,10 @@ def translate(sql: str, cur=None, has_params: bool = False) -> str:
     if _PRAGMA_RE.match(s):
         raise ValueError(
             "PRAGMA is SQLite-only — db.py handles dialect branches before this point")
-    s = ddl(s)
+    # v8.0.0 (DB-1): Only apply DDL type widening on CREATE/ALTER statements,
+    # never mutate literal text containing the word 'INTEGER' in SELECT/INSERT/UPDATE!
+    if _DDL_STMT_RE.match(s):
+        s = ddl(s)
     s = _IS_NOT_NUM_RE.sub(r"IS DISTINCT FROM \1", s)
 
     had_ignore = bool(_OR_IGNORE_RE.search(s))

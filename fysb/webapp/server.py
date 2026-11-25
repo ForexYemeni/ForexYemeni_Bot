@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import threading
+import time
 import urllib.parse
+from collections import deque
 from datetime import datetime, timezone
 
-from fysb import config, db
+from fysb import config, db, instruments
 from fysb.config import log
 from fysb.engines import market_data, news_guard
 from fysb.services import (
@@ -26,6 +30,94 @@ from fysb.webapp import auth as wa_auth
 from fysb.webapp import templates
 
 _BOT_RUNTIME: dict = {"bot": None, "loop": None}
+
+# v8.0.0: In-memory sliding-window rate limiter (anti-brute-force & anti-DoS)
+_RL_LOCK = threading.Lock()
+_RL_BUCKETS: dict[tuple[str, str], deque] = {}
+
+
+def reset_rate_limits() -> None:
+    """Clear API rate limit buckets (used in unit tests)."""
+    with _RL_LOCK:
+        _RL_BUCKETS.clear()
+
+
+def _check_rate_limit(bucket: str, key: str, max_hits: int, window_sec: float = 60.0) -> bool:
+    """Return True if request is allowed, False if rate limit exceeded."""
+    now = time.monotonic()
+    k = (bucket, str(key))
+    with _RL_LOCK:
+        if len(_RL_BUCKETS) > 8000:
+            _RL_BUCKETS.clear()
+        dq = _RL_BUCKETS.setdefault(k, deque())
+        while dq and (now - dq[0]) > window_sec:
+            dq.popleft()
+        if len(dq) >= max_hits:
+            return False
+        dq.append(now)
+        return True
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        v = float(val)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val, default: int = 0) -> int:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _plan_allows_symbol(plan: dict, symbol: str) -> bool:
+    sym = instruments.normalize(symbol)
+    raw = str((plan or {}).get("markets") or "").strip()
+    if not raw:
+        return True
+    allowed = {instruments.normalize(x) for x in raw.split(",") if x.strip()}
+    return "ALL" in allowed or sym in allowed
+
+
+def _plan_allows_tf(plan: dict, tf: str) -> bool:
+    t = (tf or "").strip().upper()
+    raw = str((plan or {}).get("timeframes") or "").strip()
+    if not raw or not t:
+        return True
+    allowed = {x.strip().upper() for x in raw.split(",") if x.strip()}
+    return "ALL" in allowed or t in allowed
+
+
+def _user_can_access_signal(uid: int, is_admin: bool, sig: dict) -> bool:
+    """v8.0.0: Strict signal authorization preventing cross-user & plan leaks.
+
+    * Admin: always allowed.
+    * Private SIGNAL_NOW signals: strictly owner-only (NEVER visible to other users or partners).
+    * Public/AUTO signals: allowed if delivered to `uid`, already traded in `uid`'s demo,
+      already CLOSED (public proof), or matching `uid`'s active plan markets.
+    """
+    if is_admin:
+        return True
+    src = str(sig.get("source") or "AUTO").upper()
+    owner = int(sig.get("created_by") or 0)
+    if src == "SIGNAL_NOW":
+        return owner == int(uid)
+    st = str(sig.get("status") or "").upper()
+    if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "TP1_BE", "TP2_BE", "CANCELLED", "EXPIRED") and sig.get("closed_at"):
+        return True
+    if st in ("TP3_HIT", "SL_HIT", "TP1_BE", "TP2_BE", "CANCELLED", "EXPIRED"):
+        return True
+    sid = int(sig.get("id") or 0)
+    with db.conn() as c:
+        if c.execute("SELECT 1 FROM signal_deliveries WHERE signal_id=? AND user_id=?", (sid, int(uid))).fetchone():
+            return True
+        if c.execute("SELECT 1 FROM demo_positions WHERE signal_id=? AND user_id=?", (sid, int(uid))).fetchone():
+            return True
+    plan = dict(subscriptions.plan_for(int(uid)))
+    return _plan_allows_symbol(plan, sig.get("symbol") or "")
 
 
 def set_bot_runtime(bot, loop=None) -> None:
@@ -109,9 +201,11 @@ def dispatch_request(
     # 1.5) v7.7.0 MT5 Royal Bridge EA endpoints (authenticated by per-user secret bridge_key)
     if m == "GET" and path == "/api/bridge/poll":
         from fysb.services import auto_bridge as _ab
-        bkey = qs.get("key") or hdrs.get("x-bridge-key") or ""
-        bal = float(qs.get("balance") or 0.0)
-        eq = float(qs.get("equity") or 0.0)
+        bkey = (qs.get("key") or hdrs.get("x-bridge-key") or "").strip()
+        if not _check_rate_limit("bridge_poll", bkey or "anon", 90, 60.0):
+            return _json_resp(429, {"ok": False, "error": "Rate limit exceeded"})
+        bal = _safe_float(qs.get("balance"), 0.0)
+        eq = _safe_float(qs.get("equity"), 0.0)
         res = _ab.poll_mt5_orders(bkey, balance=bal, equity=eq)
         return _json_resp(200 if res.get("ok") else 401, res)
 
@@ -121,14 +215,16 @@ def dispatch_request(
             ack_body = json.loads(body.decode("utf-8")) if body else {}
         except Exception:
             return _json_resp(400, {"ok": False, "error": "Invalid JSON"})
-        bkey = str(ack_body.get("key") or hdrs.get("x-bridge-key") or "")
+        if not isinstance(ack_body, dict):
+            return _json_resp(400, {"ok": False, "error": "Invalid JSON object"})
+        bkey = str(ack_body.get("key") or hdrs.get("x-bridge-key") or "").strip()
         res = _ab.ack_mt5_order(
             bkey,
-            int(ack_body.get("order_id") or 0),
+            _safe_int(ack_body.get("order_id"), 0),
             str(ack_body.get("status") or "EXECUTED"),
             ticket=str(ack_body.get("ticket") or ""),
             detail=str(ack_body.get("detail") or ""),
-            pnl_usd=float(ack_body.get("pnl_usd") or 0.0),
+            pnl_usd=_safe_float(ack_body.get("pnl_usd"), 0.0),
         )
         return _json_resp(200 if res.get("ok") else 400, res)
 
@@ -559,13 +655,47 @@ def dispatch_request(
                 })
 
             if m == "POST" and path == "/api/admin/signal":
-                sid = int(payload.get("signal_id") or 0)
+                sid = _safe_int(payload.get("signal_id"), 0)
                 op = str(payload.get("op") or "").lower()
                 if op == "cancel" and sid > 0:
                     with db.tx() as c:
+                        sig_row = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
                         c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=?", (config.now(), sid))
-                    audit_log.log(uid, f"webapp_signal_cancel:{sid}")
-                    return _json_resp(200, {"ok": True, "signal_id": sid, "status": "CANCELLED"})
+                        delivs = [dict(r) for r in c.execute(
+                            "SELECT DISTINCT user_id, chat_id FROM signal_deliveries WHERE signal_id=?", (sid,)
+                        ).fetchall()]
+                    try:
+                        from fysb.services import auto_bridge as _ab
+                        _ab.mark_signal_bridge_orders_closed(sid)
+                    except Exception:
+                        pass
+                    # v8.0.0: Notify holders when Admin cancels a signal from the Web Panel
+                    bot_obj = _BOT_RUNTIME.get("bot")
+                    loop_obj = _BOT_RUNTIME.get("loop")
+                    notified = 0
+                    if sig_row and delivs and bot_obj is not None and loop_obj is not None and loop_obj.is_running():
+                        from fysb.engines.tracker import seq_of
+                        sym_txt = sig_row["symbol"]
+                        seq_n = seq_of(sid)
+                        note_txt = (
+                            f"🚫 <b>تم إلغاء الإشارة #{seq_n} ({sym_txt}) من غرفة الإدارة</b>\n"
+                            "<i>يرجى إلغاء أي أمر معلق أو مراجعة الصفقة المفتوحة فوراً.</i>"
+                        )
+                        async def _notify_cancel():
+                            seen = set()
+                            for d in delivs:
+                                tgt = d.get("chat_id") or d.get("user_id")
+                                if not tgt or str(tgt) in seen:
+                                    continue
+                                seen.add(str(tgt))
+                                try:
+                                    await bot_obj.send_message(tgt, note_txt, parse_mode="HTML")
+                                except Exception:
+                                    pass
+                        asyncio.run_coroutine_threadsafe(_notify_cancel(), loop_obj)
+                        notified = len(delivs)
+                    audit_log.log(uid, f"webapp_signal_cancel:{sid}:notified={notified}")
+                    return _json_resp(200, {"ok": True, "signal_id": sid, "status": "CANCELLED", "notified": notified})
                 return _json_resp(400, {"ok": False, "error": "Unsupported signal op"})
 
             if m == "POST" and path == "/api/admin/chart-channel":
@@ -615,8 +745,10 @@ def dispatch_request(
                 return _json_resp(200 if res.get("ok") else 400, res)
 
             if m == "POST" and path == "/api/admin/payout":
-                pid = int(payload.get("payout_id") or 0)
-                dec = str(payload.get("decision") or "").lower()
+                pid = _safe_int(payload.get("payout_id"), 0)
+                dec = str(payload.get("decision") or "").strip().lower()
+                if dec not in ("approve", "reject"):
+                    return _json_resp(400, {"ok": False, "error": "decision must be approve|reject"})
                 row = affiliates.approve_payout(pid, "Admin Web Panel") if dec == "approve" else affiliates.reject_payout(pid, "Admin Web Panel")
                 if not row:
                     return _json_resp(404, {"ok": False, "error": "Pending payout not found"})
@@ -775,9 +907,17 @@ def dispatch_request(
         if m == "POST" and path == "/api/demo/open-signal":
             from fysb.engines import demo as demo_engine
             from fysb.engines.tracker import seq_of
-            sid = int(payload.get("signal_id") or 0)
+            sid = _safe_int(payload.get("signal_id"), 0)
+            with db.conn() as c:
+                sig_check = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+            if not sig_check:
+                return _json_resp(404, {"ok": False, "error": "الإشارة غير موجودة"})
+            if not _user_can_access_signal(uid, principal["is_admin"], dict(sig_check)):
+                return _json_resp(403, {"ok": False, "error": "⛔ هذه الإشارة غير مشمولة في باقتك أو خاصة بمستخدم آخر"})
             lots_raw = payload.get("lots")
-            lots_ov = float(lots_raw) if lots_raw not in (None, "") else None
+            lots_ov = _safe_float(lots_raw, 0.0) if lots_raw not in (None, "") else None
+            if lots_ov is not None and lots_ov <= 0:
+                lots_ov = None
             res = demo_engine.open_signal_interactive(uid, sid, config.market_api_key(), lots_override=lots_ov)
             if not res.get("ok"):
                 return _json_resp(400, res)
@@ -837,10 +977,21 @@ def dispatch_request(
         if m == "POST" and path == "/api/signal-now":
             from fysb.engines import signal_engine
             from fysb.engines.tracker import seq_of
-            sym = str(payload.get("symbol") or "XAUUSD").strip().upper()
+            if not _check_rate_limit("signal_now", str(uid), 12, 60.0):
+                return _json_resp(429, {"ok": False, "error": "⏳ طلبات كثيرة خلال دقيقة — انتظر لحظات ثم أعد المحاولة"})
+            sym = instruments.normalize(str(payload.get("symbol") or "XAUUSD"))
             tf = str(payload.get("timeframe") or "M15").strip().upper()
             strat = str(payload.get("strategy") or "AUTO").strip().upper()
             plan = dict(subscriptions.plan_for(uid))
+            if not principal["is_admin"]:
+                if not _plan_allows_symbol(plan, sym):
+                    return _json_resp(403, {"ok": False, "error": f"⛔ السوق {sym} غير مشمول في باقتك — رقِّ باقتك لفتحه"})
+                if not _plan_allows_tf(plan, tf):
+                    return _json_resp(403, {"ok": False, "error": f"⛔ الإطار الزمني {tf} غير مشمول في باقتك"})
+                if strat not in ("", "AUTO", "ALL"):
+                    p_strats = {x.strip().upper() for x in str(plan.get("strategies") or "").split(",") if x.strip()}
+                    if p_strats and "ALL" not in p_strats and strat not in p_strats:
+                        return _json_resp(403, {"ok": False, "error": f"⛔ استراتيجية {strat} غير مشمولة في باقتك"})
             max_day = int(plan.get("max_signals_per_day") or 3)
             day_start = db.day_start_utc()
             with db.conn() as c:
@@ -848,30 +999,41 @@ def dispatch_request(
                     "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
                     (uid, day_start),
                 ).fetchone()["n"]
-                mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
             if not principal["is_admin"] and max_day > 0 and used >= max_day:
                 return _json_resp(403, {"ok": False, "error": f"استهلكت حدك اليومي ({used}/{max_day}) — رقِّ باقتك لفتح إشارات غير محدودة"})
-            # 1) Try live engine scan for this symbol first
+            # 1) Try live engine scan for this symbol + strategy (fixed v8.0.0: reads `signal_id`!)
             gen_sig = None
+            only_s = None if strat in ("", "AUTO", "ALL") else strat
+            sig_src = "ADMIN_SIGNAL_NOW" if principal["is_admin"] else "SIGNAL_NOW"
             try:
                 res_gen = signal_engine.generate_signal(
-                    sym, timeframe=tf, force=False, api_key=config.market_api_key(),
+                    sym,
+                    entry_tf=tf,
+                    source=sig_src,
+                    created_by=uid,
+                    force=False,
+                    only_strategy=only_s,
                 )
-                if isinstance(res_gen, dict) and res_gen.get("id"):
-                    gen_sig = res_gen
+                new_sid = int((res_gen or {}).get("signal_id") or 0) if isinstance(res_gen, dict) else 0
+                if new_sid > 0:
+                    with db.conn() as c:
+                        row_new = c.execute("SELECT * FROM signals WHERE id=?", (new_sid,)).fetchone()
+                        if row_new:
+                            gen_sig = dict(row_new)
             except Exception as exc:
                 log.debug("webapp signal-now generate_signal fallback: %s", exc)
-            # 2) Fallback: latest open/active real signal for this symbol (or any market) in DB
+            # 2) Safe fallback: latest open PUBLIC signal on the requested symbol (NEVER leaks private SIGNAL_NOW or out-of-plan VIP!)
             if not gen_sig:
                 with db.conn() as c:
                     cand = c.execute(
-                        "SELECT * FROM signals WHERE symbol=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id DESC LIMIT 1",
-                        (sym,),
+                        """SELECT * FROM signals
+                           WHERE REPLACE(UPPER(symbol),'/','')=?
+                             AND (source IS NULL OR source != 'SIGNAL_NOW' OR created_by=?)
+                             AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                             AND (closed_at IS NULL OR closed_at='')
+                           ORDER BY id DESC LIMIT 1""",
+                        (sym, uid),
                     ).fetchone()
-                    if not cand:
-                        cand = c.execute(
-                            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id DESC LIMIT 1"
-                        ).fetchone()
                     if cand:
                         gen_sig = dict(cand)
             if not gen_sig:
@@ -892,12 +1054,14 @@ def dispatch_request(
 
         if m == "GET" and path == "/api/share-card/signal":
             from fysb.ui import charts as _charts, share_cards as _sc
-            sid = int(qs.get("id") or 0)
+            sid = _safe_int(qs.get("id"), 0)
             with db.conn() as c:
                 sig = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
                 if not sig:
                     return _json_resp(404, {"ok": False, "error": "Signal not found"})
                 sig_d = dict(sig)
+                if not _user_can_access_signal(uid, principal["is_admin"], sig_d):
+                    return _json_resp(403, {"ok": False, "error": "Forbidden: signal not accessible for your plan"})
                 mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sig_d["symbol"],)).fetchone()
             metrics = _charts.live_signal_metrics(sig_d, row=dict(mrow) if mrow else None)
             bn = (config.BRAND or "ForexYemeniBot").lstrip("@")
@@ -1054,8 +1218,19 @@ def dispatch_request(
             p_row = partners.get_partner_by_user(uid)
             is_partner = bool(p_row and int(p_row.get("enabled") or 0) == 1)
             with db.conn() as c:
-                if principal["is_admin"] or is_partner:
+                if principal["is_admin"]:
                     rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 25").fetchall()]
+                elif is_partner:
+                    # Partners see public/auto signals + their own, NEVER other users' private SIGNAL_NOW
+                    rows = [
+                        dict(r)
+                        for r in c.execute(
+                            """SELECT * FROM signals
+                               WHERE (source IS NULL OR source != 'SIGNAL_NOW' OR created_by=?)
+                               ORDER BY id DESC LIMIT 25""",
+                            (uid,),
+                        ).fetchall()
+                    ]
                 else:
                     rows = [
                         dict(r)
@@ -1081,8 +1256,14 @@ def dispatch_request(
             return _json_resp(200, {"ok": True, "signals": rows})
 
         if m == "GET" and path == "/api/candles":
-            sym = (qs.get("symbol") or "XAUUSD").strip().upper()
+            if not _check_rate_limit("candles", str(uid), 40, 60.0):
+                return _json_resp(429, {"ok": False, "error": "Rate limit exceeded for /api/candles"})
+            sym = instruments.normalize(qs.get("symbol") or "XAUUSD")
             tf = (qs.get("tf") or "H1").strip().upper()
+            if not principal["is_admin"]:
+                plan = dict(subscriptions.plan_for(uid))
+                if not _plan_allows_symbol(plan, sym):
+                    return _json_resp(403, {"ok": False, "error": f"⛔ السوق {sym} غير مشمول في باقتك"})
             with db.conn() as c:
                 mrow = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
             prov_sym = (mrow["provider_symbol"] if mrow and mrow["provider_symbol"] else sym)
@@ -1150,16 +1331,20 @@ def dispatch_request(
             return _json_resp(200, {"ok": True, "profile": prof})
 
         if m == "POST" and path == "/api/journal":
-            sid = int(payload.get("signal_id") or 0)
+            sid = _safe_int(payload.get("signal_id"), 0)
             act = str(payload.get("action") or "TAKEN").upper()
             with db.conn() as c:
                 s = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
             if not s:
                 return _json_resp(404, {"ok": False, "error": "Signal not found"})
+            if not _user_can_access_signal(uid, principal["is_admin"], dict(s)):
+                return _json_resp(403, {"ok": False, "error": "Forbidden: signal not accessible for your plan"})
             res = risk_journal.log_journal_action(uid, dict(s), act)
             return _json_resp(200, {"ok": True, **res})
 
         if m == "POST" and path == "/api/redeem":
+            if not _check_rate_limit("redeem", str(uid), 6, 60.0):
+                return _json_resp(429, {"ok": False, "error": "⏳ محاولات كثيرة لتفعيل الأكواد — انتظر دقيقة ثم أعد المحاولة"})
             res = gifts.redeem_code(uid, str(payload.get("code") or ""))
             return _json_resp(200 if res.get("ok") else 400, res)
 
@@ -1168,7 +1353,8 @@ def dispatch_request(
 
 _STATUS_TEXT = {
     200: "OK", 204: "No Content", 400: "Bad Request",
-    401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error",
+    401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+    413: "Payload Too Large", 429: "Too Many Requests", 500: "Internal Server Error",
 }
 
 
@@ -1216,24 +1402,37 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         if "chunked" in (headers.get("transfer-encoding") or "").lower():
             body = await _read_chunked_body(reader)
         else:
-            clen = min(262_144, max(0, int(headers.get("content-length") or "0")))
-            body = await asyncio.wait_for(reader.readexactly(clen), timeout=10.0) if clen else b""
-        status, ctype, data = await asyncio.to_thread(dispatch_request, method, target, headers, body)
+            raw_cl = (headers.get("content-length") or "0").strip()
+            try:
+                clen_req = int(raw_cl)
+            except ValueError:
+                status, ctype, data = _json_resp(400, {"ok": False, "error": "Invalid Content-Length"})
+                clen_req = -1
+            if clen_req > 262_144:
+                status, ctype, data = _json_resp(413, {"ok": False, "error": "Payload Too Large"})
+                body = None
+            elif clen_req < 0:
+                body = None
+            else:
+                body = await asyncio.wait_for(reader.readexactly(clen_req), timeout=10.0) if clen_req else b""
+        if body is not None:
+            status, ctype, data = await asyncio.to_thread(dispatch_request, method, target, headers, body)
         resp = (
             f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'OK')}\r\n"
             f"Content-Type: {ctype}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: no-store\r\n"
+            f"X-Content-Type-Options: nosniff\r\n"
             f"Access-Control-Allow-Origin: *\r\n"
             f"Access-Control-Allow-Methods: GET, POST, OPTIONS, HEAD\r\n"
-            f"Access-Control-Allow-Headers: Content-Type, X-Telegram-Init-Data, ngrok-skip-browser-warning, X-Pinggy-No-Screen\r\n"
+            f"Access-Control-Allow-Headers: Content-Type, X-Telegram-Init-Data, X-Bridge-Key, ngrok-skip-browser-warning, X-Pinggy-No-Screen\r\n"
             f"Access-Control-Max-Age: 86400\r\n"
             f"Connection: close\r\n\r\n"
         ).encode("ascii") + data
         writer.write(resp)
         await writer.drain()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("webapp client error: %s", type(exc).__name__)
     finally:
         try:
             writer.close()

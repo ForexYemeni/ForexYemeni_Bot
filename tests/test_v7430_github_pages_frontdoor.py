@@ -78,6 +78,13 @@ def test_github_pages_static_files_exist_and_match_templates():
         assert "API_BASE" in html
         assert "ngrok-skip-browser-warning" in html
         assert "X-Pinggy-No-Screen" in html
+        # v7.4.4 anti-white-screen guard: ZERO blocking external <script> or stylesheet in <head>!
+        head = html.split("</head>", 1)[0]
+        assert "<script src=" not in head, "blocking external script in <head> causes white screen on restricted ISPs"
+        assert 'rel="stylesheet"' not in head, "blocking external stylesheet in <head> delays first paint"
+        assert "tgWebAppData" in html
+        assert "TelegramWebviewProxy" in html
+    assert "drawFallbackCanvas" in u_html
 
 
 def test_tunnel_recognizes_github_pages_as_frontdoor(tmp_path, monkeypatch):

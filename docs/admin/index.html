@@ -3,12 +3,10 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<title>FOREXYEMENI — Super Admin Web Panel v7.4.3</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet"/>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<meta name="theme-color" content="#06080f"/>
+<title>FOREXYEMENI — Super Admin Web Panel v7.4.4</title>
 <style>
+html{background:#06080f;color:#f1f5f9}
 :root{
   --bg:#06080f;--glass:rgba(16,22,36,.82);--border:rgba(148,163,184,.16);
   --gold:#d9b04c;--gold2:#f7de8c;--gold-line:rgba(217,176,76,.35);
@@ -74,7 +72,7 @@ input:focus,select:focus{border-color:var(--gold)}
 <div class="hdr">
   <div>
     <h1>👑 لوحة الإدارة الملكية — FOREXYEMENI</h1>
-    <div class="sub">مركز القيادة التنفيذي · v7.4.3</div>
+    <div class="sub">مركز القيادة التنفيذي · v7.4.4</div>
   </div>
   <button class="btn gold" onclick="loadAdmin()">🔄 تحديث حي</button>
 </div>
@@ -127,12 +125,51 @@ input:focus,select:focus{border-color:var(--gold)}
   <div class="card"><h3>💸 طلبات سحب الشركاء المعلقة</h3><div id="payoutBox">—</div></div>
 </div>
 <script>
-const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) { tg.ready(); tg.expand(); try{ tg.setHeaderColor('#06080f'); tg.setBackgroundColor('#06080f'); }catch(_e){} }
-const INIT_DATA = (tg && tg.initData) || '';
+// v7.4.4: Zero-blocking Telegram Admin bridge — instant paint even when telegram.org is blocked!
+function notifyTgNative(){
+  try{
+    if(window.Telegram && window.Telegram.WebApp){
+      const t = window.Telegram.WebApp;
+      t.ready(); t.expand();
+      try{ t.setHeaderColor('#06080f'); t.setBackgroundColor('#06080f'); }catch(_e){}
+      return;
+    }
+  }catch(_e){}
+  try{
+    if(window.TelegramWebviewProxy && window.TelegramWebviewProxy.postEvent){
+      window.TelegramWebviewProxy.postEvent('web_app_ready', '');
+      window.TelegramWebviewProxy.postEvent('web_app_expand', '');
+      window.TelegramWebviewProxy.postEvent('web_app_set_header_color', JSON.stringify({color:'#06080f'}));
+      window.TelegramWebviewProxy.postEvent('web_app_set_background_color', JSON.stringify({color:'#06080f'}));
+    } else if(window.parent && window.parent !== window){
+      window.parent.postMessage(JSON.stringify({eventType:'web_app_ready',eventData:''}), '*');
+      window.parent.postMessage(JSON.stringify({eventType:'web_app_expand',eventData:''}), '*');
+    }
+  }catch(_e){}
+}
+function getInitData(){
+  try{
+    const t = window.Telegram && window.Telegram.WebApp;
+    if(t && t.initData) return t.initData;
+  }catch(_e){}
+  try{
+    const rawHash = (window.location.hash || '').replace(/^#/, '');
+    if(rawHash){
+      const d = new URLSearchParams(rawHash).get('tgWebAppData');
+      if(d){ try{ sessionStorage.setItem('fysb_tg_init', d); }catch(_e){} return d; }
+    }
+  }catch(_e){}
+  try{
+    const d = new URLSearchParams(window.location.search || '').get('tgWebAppData');
+    if(d) return d;
+  }catch(_e){}
+  try{ return sessionStorage.getItem('fysb_tg_init') || ''; }catch(_e){ return ''; }
+}
+notifyTgNative();
+const INIT_DATA = getInitData();
 function toast(m,e=false){const el=document.getElementById('toast');el.textContent=m;el.style.background=e?'#f04452':'#16c784';el.style.color=e?'#fff':'#04120c';el.style.display='block';setTimeout(()=>el.style.display='none',2800);}
 const API_BASE=(()=>{try{const q=new URLSearchParams(window.location.search).get('api')||'';const c=q.trim().replace(/\/+$/,'');if(c&&/^https?:\/\//i.test(c))return c;}catch(_e){}return '';})();
-async function api(p,o={}){const h=Object.assign({'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'},o.headers||{});try{const r=await fetch(API_BASE+p,Object.assign({},o,{headers:h}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {ok:false,error:'HTTP '+r.status};return await r.json();}catch(err){return {ok:false,error:'تعذر الاتصال بالخادم'};}}
+async function api(p,o={}){const h=Object.assign({'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'},o.headers||{});try{const r=await fetch(API_BASE+p,Object.assign({},o,{headers:h}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {ok:false,status:r.status,error:'HTTP '+r.status};const j=await r.json();j._status=r.status;return j;}catch(err){return {ok:false,netErr:true,error:'تعذر الاتصال بخادم البوت ('+(API_BASE||'same-origin')+')'};}}
 
 async function toggleKey(key){
   const r = await api('/api/admin/toggle',{method:'POST',body:JSON.stringify({key})});
@@ -181,10 +218,18 @@ async function genGift(){
 async function loadAdmin(){
   const d = await api('/api/admin/overview');
   if(!d || !d.ok){
-    document.getElementById('authErr').style.display='block';
+    const errEl = document.getElementById('authErr');
+    if(d && d.netErr){
+      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + (d.error||'') + '</span>';
+    } else if(d && d.error && d._status !== 401 && d._status !== 403){
+      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + d.error;
+    }
+    errEl.style.display='block';
     document.getElementById('adminBody').style.display='none';
     return;
   }
+  document.getElementById('authErr').style.display='none';
+  document.getElementById('adminBody').style.display='block';
   document.getElementById('kUsers').textContent = d.kpis.users;
   document.getElementById('kSubs').textContent = d.kpis.active_paid_subs;
   document.getElementById('kOpen').textContent = d.kpis.open_signals;
@@ -263,6 +308,20 @@ async function loadAdmin(){
   ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات سحب معلقة.</div>';
 }
 loadAdmin();
+setTimeout(()=>{
+  try{
+    const ln = document.createElement('link');
+    ln.rel = 'stylesheet';
+    ln.href = 'https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap';
+    document.head.appendChild(ln);
+  }catch(_e){}
+  try{
+    const ts = document.createElement('script');
+    ts.async = true; ts.src = 'https://telegram.org/js/telegram-web-app.js';
+    ts.onload = ()=>{ notifyTgNative(); };
+    document.body.appendChild(ts);
+  }catch(_e){}
+}, 50);
 </script>
 </body>
 </html>

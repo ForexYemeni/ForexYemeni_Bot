@@ -28,7 +28,7 @@ Score weights (deterministic, auditable):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -96,10 +96,9 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     # 5) Invalidation = swept extreme + realistic ATR buffer (0.85 ATR survives Gold wicks)
     if direction == "BUY":
         stop = min(sweep_level, r_lo) - 0.85 * a
-        stop = min(stop, entry - 1.15 * a)
     else:
         stop = max(sweep_level, r_hi) + 0.85 * a
-        stop = max(stop, entry + 1.15 * a)
+    stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

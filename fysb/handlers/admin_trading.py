@@ -551,24 +551,74 @@ async def admin_engine(q, uid, context, bot):
     enabled = await afn.run(db.get_setting, "engine_enabled", "0") == "1"
     interval = await afn.run(db.get_setting_int, "engine_interval_seconds", 300)
     min_score = await afn.run(db.get_setting_int, "engine_min_score", 80)
+    scan_tfs_raw = await afn.run(db.get_setting, "engine_scan_timeframes", "M15,H1")
     markets, runs = await afn.run(_engine_page_rows)
     lines = ["🧠 <b>محرك السوق والتحليل</b>",
              f"📌 الحالة: <b>{'🟢 يعمل' if enabled else '⚪ متوقف'}</b>",
              f"⏱ فاصل الدورة: {interval} ثانية",
              f"⭐ الحد الأدنى للجودة: {min_score}/100",
+             f"📐 فريمات المسح الآلي: <b>{esc(scan_tfs_raw or 'M15,H1')}</b>",
              f"🌐 أسواق جاهزة (مفعلة+موثقة): <b>{markets}</b>",
              "",
              "<b>آخر الدورات:</b>"]
     for r in runs:
         lines.append(f"  {r['created_at'][11:16]} {esc(r['symbol'])} {esc(r['timeframe'])}: {esc(r['result'])}")
     rows_kb = [
-        [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle")],
+        [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle", style="danger" if enabled else "success")],
+        [kb.btn(f"📐 فريمات المسح الآلي ({scan_tfs_raw or 'M15,H1'})", "a:scantfs", style="primary")],
         [kb.btn("➖ فاصل", f"a:engineadj:interval:-60"), kb.btn(f"⏱ {interval}s", "a:plannoop"), kb.btn("➕ فاصل", f"a:engineadj:interval:60")],
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
         [kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+_SCAN_TF_CHOICES = ("M5", "M15", "M30", "H1", "H4", "D1")
+
+
+def _toggle_scan_tf_sync(code: str) -> str:
+    code = (code or "").strip().upper()
+    raw = (db.get_setting("engine_scan_timeframes", "M15,H1") or "M15,H1").strip()
+    cur = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    if code in cur:
+        if len(cur) > 1:
+            cur.remove(code)
+    else:
+        if code in _SCAN_TF_CHOICES:
+            cur.append(code)
+    ordered = [tf for tf in _SCAN_TF_CHOICES if tf in cur] or ["M15"]
+    new_val = ",".join(ordered)
+    db.set_setting("engine_scan_timeframes", new_val)
+    return new_val
+
+
+async def admin_scan_tfs(q, uid, context, bot):
+    raw = await afn.run(db.get_setting, "engine_scan_timeframes", "M15,H1")
+    active = {x.strip().upper() for x in (raw or "M15,H1").split(",") if x.strip()}
+    rows_kb = []
+    row = []
+    for tf in _SCAN_TF_CHOICES:
+        on = tf in active
+        row.append(kb.btn(f"{'✅' if on else '⬜'} {tf}", f"a:togglescantf:{tf}", style="success" if on else None))
+        if len(row) == 3:
+            rows_kb.append(row)
+            row = []
+    if row:
+        rows_kb.append(row)
+    rows_kb.append([kb.btn("↩️ المحرك", "a:engine")])
+    body = (
+        "📐 <b><u>فريمات المسح الآلي متعدد الأطر</u></b>\n"
+        f"<blockquote>▎الفريمات النشطة حالياً: <b>{esc(raw or 'M15,H1')}</b>\n"
+        "▎اضغط على أي فريم لتفعيله أو إيقافه في دورة المحرك الآلي (يبقى فريم واحد نشط على الأقل).</blockquote>"
+    )
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
+    new_val = await afn.run(_toggle_scan_tf_sync, code)
+    await afn.run(audit_log.log, uid, f"engine_scan_timeframes:{new_val}")
+    await admin_scan_tfs(q, uid, context, bot)
 
 
 def _enabled_backtest_markets() -> list[str]:

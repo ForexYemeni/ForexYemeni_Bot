@@ -414,3 +414,71 @@ def mark_expired_and_notify_targets() -> list[dict]:
     if targets:
         log.info("subscriptions expired: %s", [t["user_id"] for t in targets])
     return targets
+
+
+def free_trial_due_reminders() -> list[dict]:
+    """v6.24.0 (#8) Return FREE-trial users due for a luxury drip reminder:
+      * '48h'     : <= 48h and > 24h left
+      * '24h'     : <= 24h and > 0h left
+      * 'expired' : trial just expired (<= 0h left)
+    Each stage is returned at most ONCE per user (tracked in free_trial_reminders).
+    """
+    with db.conn() as c:
+        fp = c.execute("SELECT * FROM plans WHERE code='FREE'").fetchone()
+        if not fp:
+            return []
+        free_plan = dict(fp)
+        trial_days = int(free_plan.get("duration_days") or 0)
+        if trial_days <= 0:
+            return []
+        users_rows = c.execute(
+            "SELECT user_id, joined_at, notifications, is_blocked FROM users "
+            "WHERE is_blocked=0 AND notifications=1"
+        ).fetchall()
+        sent_rows = c.execute("SELECT user_id, stage FROM free_trial_reminders").fetchall()
+    already = {(int(r["user_id"]), str(r["stage"])) for r in sent_rows}
+
+    from fysb.services import partners as partners_svc
+    active_partners = partners_svc.active_partner_user_ids()
+    uids = [
+        int(u["user_id"]) for u in users_rows
+        if int(u["user_id"]) != config.ADMIN_ID and int(u["user_id"]) not in active_partners
+    ]
+    plans_map = plans_for_users(uids)
+    due: list[dict] = []
+    for u in users_rows:
+        uid = int(u["user_id"])
+        if uid == config.ADMIN_ID or uid in active_partners:
+            continue
+        p = plans_map.get(uid)
+        if not p or str(p.get("code") or "").upper() != "FREE":
+            continue
+        st = free_trial_status(uid, user_row=u, plan_row=free_plan)
+        if not st.get("is_free") or st.get("unlimited"):
+            continue
+        rem_h = float(st.get("hours_left") or 0)
+        stage = ""
+        if st.get("expired") or rem_h <= 0:
+            stage = "expired"
+        elif rem_h <= 24.0:
+            stage = "24h"
+        elif rem_h <= 48.0:
+            stage = "48h"
+        if not stage or (uid, stage) in already:
+            continue
+        due.append({
+            "user_id": uid,
+            "stage": stage,
+            "hours_left": max(1, int(round(rem_h))) if not st.get("expired") and rem_h > 0 else 0,
+            "trial_days": trial_days,
+        })
+    return due
+
+
+def mark_free_trial_reminded(user_id: int, stage: str) -> None:
+    """Record that a FREE-trial drip reminder stage was sent to `user_id`."""
+    with db.conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO free_trial_reminders(user_id, stage, sent_at) VALUES(?,?,?)",
+            (int(user_id), str(stage), config.now()),
+        )

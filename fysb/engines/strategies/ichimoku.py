@@ -24,7 +24,7 @@ fresh cross bonus +6 · future cloud color +12 · chikou confirm +10 ·
 HTF bias +12 · kill zone +6 · volatility +4 · RR +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 TENKAN_P, KIJUN_P, SENKOU_B_P, DISPLACEMENT = 9, 26, 52, 26
 
@@ -118,6 +118,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     entry = close
     stop = (kijun - 0.5 * a) if direction == "BUY" else (kijun + 0.5 * a)
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

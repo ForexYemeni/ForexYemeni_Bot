@@ -22,7 +22,7 @@ pullback visit +16 · resumption candle +14 · momentum (close vs EMA9) +6 ·
 kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 STACK_ATR = 0.25      # each EMA layer must be separated by >= 0.25 ATR —
                       # an EMAs-equal market is NOT a trend, never chase noise
@@ -110,6 +110,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         stop = max(float(c["high"]) for c in recent) + 0.5 * a
     entry = close
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

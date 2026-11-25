@@ -396,7 +396,88 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         sid = cur.lastrowid
     _log_run(symbol, entry_tf, "SIGNAL_CREATED",
              f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}")
-    return {"status": "SIGNAL_CREATED", "signal_id": sid, "reason": best.summary(), "score": best.score}
+
+    # v6.24.0 (#6 Tier-Aware Best Pick): if AUTO emitted an upper-tier strategy
+    # (e.g. SMC/ICT) on a market+TF that FREE allows (e.g. XAUUSD M15/H1), check
+    # whether a high-quality FREE-allowed candidate (CLASSIC/TREND) also passed
+    # every institutional gate so FREE users don't starve unnecessarily.
+    free_sid = None
+    if sig_source == "AUTO" and not only_strategies:
+        try:
+            with db.conn() as c:
+                fp = c.execute("SELECT markets,timeframes,strategies,min_score FROM plans WHERE code='FREE'").fetchone()
+            if fp:
+                f_markets = {_norm_sym(x) for x in str(fp["markets"] or "").split(",") if x.strip()}
+                f_tfs = {x.strip().upper() for x in str(fp["timeframes"] or "").split(",") if x.strip()}
+                f_strats = {x.strip().upper() for x in str(fp["strategies"] or "").split(",") if x.strip()}
+                f_min_score = int(fp["min_score"] or 80)
+                if ((not f_markets or "ALL" in f_markets or _norm_sym(symbol) in f_markets)
+                        and (not f_tfs or "ALL" in f_tfs or entry_tf.upper() in f_tfs)
+                        and f_strats and best.code.upper() not in f_strats):
+                    for fcand in results:
+                        if fcand.code.upper() not in f_strats or fcand.score < f_min_score:
+                            continue
+                        ok_geo_f, _ = validate_signal_geometry(
+                            symbol, entry_tf, fcand.direction,
+                            fcand.entry, fcand.stop, fcand.tp1, fcand.tp2, fcand.tp3,
+                            atr_val=atr_val, row=sym_row,
+                        )
+                        if not ok_geo_f:
+                            continue
+                        if not force:
+                            ok_q_f, _ = evaluate_quality_gate(
+                                symbol, entry_tf, candles, bias_candles, fcand,
+                                min_score=max(min_sig_score, f_min_score),
+                            )
+                            if not ok_q_f:
+                                continue
+                        if live_px > 0:
+                            stale_f, _ = is_stale_entry(symbol, fcand.direction, fcand.entry,
+                                                        fcand.stop, fcand.tp1, live_px)
+                            if stale_f:
+                                continue
+                            f_birth = birth_status(fcand.direction, fcand.entry, live_px)
+                        else:
+                            f_birth = "ACTIVE"
+                        if fcand.rr < float(db.get_setting("min_rr", "1.5") or 1.5):
+                            continue
+                        with db.conn() as c:
+                            dup_f = c.execute(
+                                """SELECT id FROM signals WHERE source='AUTO_FREE' AND symbol=?
+                                   AND direction=? AND timeframe=?
+                                   AND (
+                                       ((closed_at IS NULL OR closed_at='')
+                                        AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                                        AND created_at>=?)
+                                       OR (closed_at!='' AND closed_at>=?)
+                                   ) LIMIT 1""",
+                                (symbol, fcand.direction, entry_tf, open_cutoff, closed_cutoff),
+                            ).fetchone()
+                            if dup_f:
+                                break
+                            f_filled = config_now().isoformat() if f_birth == "RUNNING" else ""
+                            free_sid = c.execute(
+                                """INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
+                                   strategy,reason,status,source,created_by,created_at,data_source,data_time,
+                                   strategy_scores,expires_at,entry_zone_lo,entry_zone_hi,filled_at,live_px)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (symbol, fcand.direction, entry_tf, fcand.entry, fcand.stop, fcand.tp1, fcand.tp2, fcand.tp3,
+                                 f"{fcand.tp1},{fcand.tp2},{fcand.tp3}", fcand.rr, fcand.score, fcand.code,
+                                 " | ".join(fcand.reasons), f_birth, "AUTO_FREE", 0,
+                                 config.now(), "LIVE", payload["last_candle_iso"],
+                                 json.dumps({r.code: r.score for r in results}), _expiry_iso(),
+                                 0.0, 0.0, f_filled, live_px),
+                            ).lastrowid
+                        _log_run(symbol, entry_tf, "FREE_TIER_PICK",
+                                 f"id={free_sid} {fcand.summary()} (companion to #{sid} {best.code})")
+                        break
+        except Exception as exc:
+            log.debug("free_tier_fallback skipped: %s", exc)
+
+    out = {"status": "SIGNAL_CREATED", "signal_id": sid, "reason": best.summary(), "score": best.score}
+    if free_sid:
+        out["free_fallback_signal_id"] = free_sid
+    return out
 
 
 def opposite_close_advisory_targets(symbol: str, direction: str, exclude_sid: int,
@@ -744,6 +825,9 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     demo_map = _preload_demo_accounts(candidate_uids)
     auto_exec_queue: list[tuple[int, dict | None]] = []
     sig_created_dt = _parse_iso_utc(sig.get("created_at") or "")
+    is_free_only = str(sig.get("source") or "").upper() == "AUTO_FREE"
+    if is_free_only:
+        include_channels = False
 
     for u in users:
         uid = int(u["user_id"])
@@ -760,6 +844,9 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
         # 1) package entitlement — hard gate (slash-normalized symbol matching)
         plan = plans_map.get(uid)
         if not plan:
+            stats["skipped_filters"] += 1
+            continue
+        if is_free_only and str(plan.get("code") or "").upper() != "FREE":
             stats["skipped_filters"] += 1
             continue
         if is_free_trial_expired(uid, user_row=u, plan_row=plan):

@@ -34,7 +34,7 @@ real volume data) · kill zone +6 · volatility regime +4 · RR(TP1)>=2 +8.
 Base 40. Cap 95. Minimum 55 to fire — a weak spring is no spring at all.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 RANGE_WINDOW = 26          # candles defining the trading range (excluding the event)
 RANGE_MAX_ATR = 3.0        # range width ceiling in ATR — consolidation, not drift
@@ -148,6 +148,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         stop = wick_extreme - 0.5 * a
     else:
         stop = wick_extreme + 0.5 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

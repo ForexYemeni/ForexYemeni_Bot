@@ -20,7 +20,7 @@ direction-correct side +14 · confirmation pattern +16 · EMA50 slope +10 ·
 kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, support_resistance
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 PROXIMITY_ATR = 2.0
 
@@ -106,6 +106,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         stop = max(level, max(float(c["high"]) for c in recent)) + 0.5 * a
     entry = close
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

@@ -14,7 +14,7 @@ Score weights (documented, deterministic):
 Base 50. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, structure_labels, swings, support_resistance
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -73,12 +73,9 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     # --- Stop beyond the protective swing (v6.20.6: 0.85 ATR breathing room) --
     if direction == "BUY":
         stop = (zone[0] - 0.85 * a) if zone else entry - 1.8 * a
-        if stop >= entry or (entry - stop) < 1.15 * a:
-            stop = entry - 1.8 * a
     else:
         stop = (zone[1] + 0.85 * a) if zone else entry + 1.8 * a
-        if stop <= entry or (stop - entry) < 1.15 * a:
-            stop = entry + 1.8 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.8, max_atr=2.8, cap_atr=2.4)
 
     risk = abs(entry - stop)
     if risk <= 0:

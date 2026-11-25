@@ -435,6 +435,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_engine_now(q, uid, context, bot)
     elif act == "engineclean":
         await admin_trading.admin_engine_clean(q, uid, context, bot)
+    elif act == "scantfs":
+        await admin_trading.admin_scan_tfs(q, uid, context, bot)
+    elif act == "togglescantf":
+        await admin_trading.admin_scan_tf_toggle(q, uid, context, bot, arg)
     elif act == "backtest":
         await admin_trading.admin_backtest(q, uid, context, bot)
     elif act == "btrun":

@@ -20,7 +20,7 @@ momentum +14 · break distance (>= 0.1 ATR beyond the key) +10 · kill zone +6 �
 volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone, rsi
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 KEY_LOOKBACK = 12
 STACK_ATR = 0.15
@@ -92,6 +92,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     else:
         stop = max(float(last["high"]), key) + 0.3 * a
     entry = close
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.5, fallback_atr=1.0, max_atr=2.4, cap_atr=2.0)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

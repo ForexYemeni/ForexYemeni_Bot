@@ -26,7 +26,7 @@ Score weights (deterministic, auditable):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 IMPULSE_ATR = 2.5
 POCKET_LO, POCKET_HI = 0.618, 0.786
@@ -126,6 +126,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     entry = close
     stop = (origin_px - 0.5 * a) if direction == "BUY" else (origin_px + 0.5 * a)
+    stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
         return None

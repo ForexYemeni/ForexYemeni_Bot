@@ -21,7 +21,7 @@ Score weights (deterministic):
 Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 OPEN_WINDOW = 8          # candles forming the accumulation range
 
@@ -74,14 +74,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     if direction == "BUY":
         stop = min(manip_level, lo) - 0.5 * a
-        stop = min(stop, entry - 0.8 * a)
+        stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = entry - stop
         tp1 = hi + (hi - lo) * 0.5
         tp2 = hi + (hi - lo)
         tp3 = hi + (hi - lo) * 1.5
     else:
         stop = max(manip_level, hi) + 0.5 * a
-        stop = max(stop, entry + 0.8 * a)
+        stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         risk = stop - entry
         tp1 = lo - (hi - lo) * 0.5
         tp2 = lo - (hi - lo)

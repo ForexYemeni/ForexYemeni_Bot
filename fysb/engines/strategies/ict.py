@@ -21,7 +21,7 @@ from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
     premium_discount, structure_labels,
 )
-from fysb.engines.strategies.base import Ctx, StrategyResult, clamp_score
+from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
 
 
 def evaluate(ctx: Ctx) -> StrategyResult | None:
@@ -110,14 +110,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if direction == "BUY":
         swing_low = min(c["low"] for c in candles[-8:])
         stop = min(entry_zone[0] if entry_zone else swing_low, swing_low) - 0.85 * a
-        if stop >= entry or (entry - stop) < 1.15 * a:
-            stop = entry - 1.6 * a
     else:
         swing_high = max(c["high"] for c in candles[-8:])
         stop = max(entry_zone[1] if entry_zone else swing_high, swing_high) + 0.85 * a
-        if stop <= entry or (stop - entry) < 1.15 * a:
-            stop = entry + 1.6 * a
-            stop = entry + 1.5 * a
+    stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
 
     risk = abs(entry - stop)
     tps = (

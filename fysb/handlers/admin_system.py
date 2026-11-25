@@ -529,13 +529,23 @@ async def admin_health(q, uid, context, bot):
         mem_mb = 0
     db_size = 0
     try:
-        db_size = config.DB_FILE.stat().st_size // 1024
-        wal = config.DB_FILE.with_suffix(".db-wal")
+        from pathlib import Path as _Path
+        _dbf = _Path(config.DB_FILE)
+        db_size = _dbf.stat().st_size // 1024
+        wal = _dbf.with_suffix(".db-wal")
         wal_size = (wal.stat().st_size // 1024) if wal.exists() else 0
     except OSError:
         wal_size = 0
     provider = market_data.provider_status()
+    from fysb.engines import crypto_ws, provider_health
+    cb_snap = provider_health.health_snapshot()
+    ws_info = crypto_ws.ws_stats()
     uptime = int(_time.time() - _BOOT_EPOCH)
+    ws_badge = (
+        f"🟢 متصل ({esc(ws_info['venue'])} · {ws_info['fresh_symbols']} عملة)"
+        if ws_info["connected"]
+        else ("⚪ غير متصل بعد" if ws_info["enabled"] else "⏸ معطّل")
+    )
     lines = [
         "🖥 <b>حالة النظام</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -544,10 +554,19 @@ async def admin_health(q, uid, context, bot):
         f"🧮 ذاكرة العملية: <b>{mem_mb:.1f} MB</b>",
         f"🗄 قاعدة البيانات: <b>{db_size} KB</b> (WAL: {wal_size} KB) · <b>{'✅ سليمة' if ok else '❌ ' + esc(integrity)}</b>",
         f"🌐 مزود البيانات: <b>{esc(provider.get('state', '?'))}</b> · مفاتيح مضبوطة: {'نعم' if provider.get('configured') else 'لا'}",
+        f"⚡ بث الكريبتو WebSocket: <b>{ws_badge}</b>",
         f"🤖 البوت: <b>متصل</b> (polling نشط)",
         f"🧠 المحرك: <b>{'يعمل' if eng == '1' else 'متوقف'}</b>",
         f"🔒 LIVE: <b>{'مفعل ⚠️' if live == '1' else 'مغلق'}</b>",
     ]
+    if cb_snap:
+        lines.append("")
+        lines.append("🛡 <b>قاطع الدائرة لمزودي الأسعار (Circuit Breaker):</b>")
+        for pname, st in cb_snap.items():
+            ico = "🟢" if st["state"] == "CLOSED" else ("🔴" if st["state"] == "OPEN" else "🟡")
+            lat = f" · {st['avg_latency_ms']:.0f}ms" if st["avg_latency_ms"] > 0 else ""
+            cd = f" (تبريد {st['cooldown_remaining_s']}s)" if st["cooldown_remaining_s"] > 0 else ""
+            lines.append(f"  {ico} <code>{esc(pname)}</code>: {st['state']}{cd} · ✓{st['successes']} ✗{st['failures']}{lat}")
     await render(q, "\n".join(lines), kb.admin_nav([[kb.btn("🔄 إدارة التحديثات والإصدارات", "a:updates", style="primary")]]), bot)
 
 

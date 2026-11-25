@@ -37,6 +37,7 @@ from pathlib import Path
 
 from fysb import config
 from fysb.config import log
+from fysb.engines import crypto_ws, provider_health
 
 BASE_URL_TD = "https://api.twelvedata.com/time_series"
 QUOTE_URL_TD = "https://api.twelvedata.com/price"
@@ -168,6 +169,8 @@ def _ck(provider: str, symbol: str, interval: str) -> str:
 
 
 def in_cooldown(provider: str, symbol: str, interval: str) -> bool:
+    if provider_health.is_open(provider):
+        return True
     entry = _fail_streak.get(_ck(provider, symbol, interval))
     if not entry:
         return False
@@ -175,14 +178,16 @@ def in_cooldown(provider: str, symbol: str, interval: str) -> bool:
     return time.time() < until
 
 
-def _mark_failure(provider: str, symbol: str, interval: str) -> None:
+def _mark_failure(provider: str, symbol: str, interval: str, err: str = "") -> None:
     key = _ck(provider, symbol, interval)
     streak = _fail_streak.get(key, (0.0, 0))[1] + 1
     _fail_streak[key] = (time.time() + PROVIDER_COOLDOWN_SECONDS * min(streak, 4), streak)
+    provider_health.record_failure(provider, err)
 
 
-def _mark_success(provider: str, symbol: str, interval: str) -> None:
+def _mark_success(provider: str, symbol: str, interval: str, latency_ms: float = 0.0) -> None:
     _fail_streak.pop(_ck(provider, symbol, interval), None)
+    provider_health.record_success(provider, latency_ms)
 
 
 def _http_json(url: str, timeout: int = 15, headers: dict | None = None) -> dict:
@@ -629,6 +634,19 @@ def cached_price(symbol: str, max_age_seconds: float = 120.0) -> float:
 def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
     """Latest REAL quote — headline prices must match the actual market."""
     internal = _norm(symbol)
+    cls = _class_of(internal)
+    # v6.24.0: sub-second free live crypto WebSocket tick fast-path
+    if use_cache and cls == "crypto":
+        ws_px = crypto_ws.get_live_price(internal)
+        if ws_px and ws_px > 0:
+            _last_provider[internal] = "crypto-ws"
+            return {
+                "symbol": symbol,
+                "price": ws_px,
+                "fetched_at": config.now(),
+                "source": "LIVE",
+                "ws": True,
+            }
     if use_cache:
         qhit = _cache.get(("quote", internal))
         if qhit and time.time() - qhit["t"] < QUOTE_CACHE_TTL_SECONDS:
@@ -636,7 +654,6 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
             out["symbol"] = symbol
             return out
 
-    cls = _class_of(internal)
     base_chain = _QUOTE_CHAINS.get(cls, ["twelvedata"] if cls is None else [])
     chain = _ordered_chain(base_chain, config.PRICE_PROVIDER, config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
@@ -644,15 +661,18 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
     for provider in chain:
         if in_cooldown(provider, internal, "quote"):
             continue
+        t0 = time.monotonic()
         try:
             if provider == "spot-ref":
                 ref = _fetch_goldapi_price(GOLD_API_MAP[internal])
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": ref["price"],
                                      "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
                                     use_cache)
             if provider == "fx-ref":
                 ref = _fetch_yahoo_quote(YAHOO_FX_MAP[internal])
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": ref["price"],
                                      "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
@@ -665,6 +685,7 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                     offset = _persisted_offset(internal)
                 if offset:
                     venue_price = venue_price + offset
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": venue_price,
                                      "fetched_at": config.now(), "source": "LIVE", "spot_ref": bool(offset)},
@@ -673,6 +694,7 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                 if not venue:
                     continue
                 price = _fetch_binance_price(venue)
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": price,
                                      "fetched_at": config.now(), "source": "LIVE"},
@@ -682,18 +704,20 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                 if not bybit_sym:
                     continue
                 price = _fetch_bybit_price(bybit_sym)
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": price,
                                      "fetched_at": config.now(), "source": "LIVE"},
                                     use_cache)
             if provider == "twelvedata":
                 price = _fetch_td_price(_td_symbol(internal, symbol), config.market_api_key())
+                provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": price,
                                      "fetched_at": config.now(), "source": "LIVE"},
                                     use_cache)
-        except Exception:
-            _mark_failure(provider, internal, "quote")
+        except Exception as exc:
+            _mark_failure(provider, internal, "quote", str(exc))
             continue
 
     if internal in FOREX_ONLY and not config.has_market_api():

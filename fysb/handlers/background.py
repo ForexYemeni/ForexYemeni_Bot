@@ -167,13 +167,114 @@ def _pid_alive(pid: int) -> bool:
         return True  # exists but owned by another user
 
 
+def _armed_scan_timeframes() -> list[str]:
+    """v6.24.0 (#5) Multi-timeframe auto scanner list from `engine_scan_timeframes`
+    intersected with enabled+verified rows in `timeframe_catalog`."""
+    raw = (db.get_setting("engine_scan_timeframes", "M15,H1") or "M15,H1").strip()
+    wanted = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    with db.conn() as c:
+        enabled = {
+            r["code"].upper()
+            for r in c.execute("SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchall()
+        }
+    tfs = [tf for tf in wanted if not enabled or tf in enabled]
+    if not tfs:
+        tfs = ["M15"] if ("M15" in enabled or not enabled) else [sorted(enabled)[0]]
+    return tfs
+
+
+def _pin_admin_delivery(signal_id: int, msg) -> None:
+    """v6.24.0 (#4) Pin Admin's auto-signal message_id in signal_deliveries so
+    tracker.py live-edits the Admin's exact signal card on TP1/TP2/TP3/SL."""
+    if not config.ADMIN_ID or msg is None:
+        return
+    message_id = getattr(msg, "message_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if chat_id is None:
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+    if not message_id or chat_id is None:
+        return
+    with db.conn() as c:
+        c.execute(
+            """INSERT OR IGNORE INTO signal_deliveries(user_id, signal_id, delivered_at, chat_id, message_id)
+               VALUES(?,?,?,?,?)""",
+            (int(config.ADMIN_ID), int(signal_id), config.now(), str(chat_id), int(message_id)),
+        )
+        c.execute(
+            "UPDATE signal_deliveries SET chat_id=?, message_id=? WHERE user_id=? AND signal_id=?",
+            (str(chat_id), int(message_id), int(config.ADMIN_ID), int(signal_id)),
+        )
+
+
+def _build_free_trial_drip_payload(item: dict) -> tuple[str, list]:
+    """v6.24.0 (#8) Build luxury FREE-trial drip card + 1-tap upgrade buttons."""
+    from fysb.services import subscriptions as subs
+    from fysb.ui import keyboards as kb
+    from fysb.ui.cards import render_luxury_upgrade_card
+
+    uid = int(item["user_id"])
+    stage = str(item["stage"])
+    hours_left = int(item.get("hours_left") or 0)
+    trial_days = int(item.get("trial_days") or 7)
+    target = subs.next_higher_plan("FREE")
+    t_code = (target["code"] if target else "PRO").upper()
+    t_title = target["title"] if target else "PRO"
+    t_price = f"{float(target['price']):g}$" if target else "19$"
+
+    if stage == "expired":
+        paid_plans = sorted(
+            [p for p in subs._plans_map().values() if str(p.get("code") or "").upper() != "FREE"],
+            key=lambda p: float(p.get("price") or 0),
+        )
+        reason = f"انتهت فترتك المجانية ({trial_days} يوم) — قم بالترقية الآن للاستمرار في الإشارات الحية"
+        text = render_luxury_upgrade_card(
+            reason,
+            current_plan=subs.plan_for(uid),
+            paid_plans=paid_plans,
+            recommended_plan=target,
+            trial_expired=True,
+        )
+        rows = [
+            [kb.btn(f"⚡ الترقية السريعة إلى {t_title} ({t_price})", f"u:plan:{t_code}", style="success")],
+            [
+                kb.btn("👑 VIP", "u:plan:VIP", style="primary"),
+                kb.btn("🏆 ROYAL", "u:plan:ROYAL", style="primary"),
+            ],
+            [kb.btn("💎 مقارنة جميع الباقات", "u:plans")],
+        ]
+        return text, rows
+
+    urgency = "🚨 تنبيه أخير" if stage == "24h" else "⏳ تذكير ملكي"
+    text = (
+        f"{urgency} — <b><u>فترتك التجريبية المجانية توشك على الانتهاء</u></b>\n\n"
+        f"<blockquote>"
+        f"▎⏱ الوقت المتبقي: <b>~{hours_left} ساعة</b> (من أصل {trial_days} أيام)\n"
+        f"▎✨ رَقِّ حسابك الآن إلى <b>{t_title}</b> ({t_price}/شهرياً) لتحصل على:\n"
+        f"▎   • <b>4 إشارات يومية + 4 تحليلات فورية</b>\n"
+        f"▎   • أسواق <b>الذهب + العملات الرئيسية</b> على <b>M15/M30/H1/H4</b>\n"
+        f"▎   • استراتيجيات <b>Price Action · Fibonacci · Ichimoku</b>\n"
+        f"▎   • تتبع حي مستمر بدون انقطاع!</blockquote>"
+    )
+    rows = [
+        [kb.btn(f"🚀 الترقية الآن إلى {t_title} ({t_price})", f"u:plan:{t_code}", style="success")],
+        [kb.btn("💎 استعراض جميع الباقات", "u:plans", style="primary")],
+    ]
+    return text, rows
+
+
 async def market_engine_loop(app):
     """Signal-only scanner — real data, honest rejections, never places orders.
 
     Works WITHOUT any API key: the hidden real-time provider chain (gold/crypto)
     serves the engine; keyed providers add forex coverage.
+    v6.24.0: Multi-timeframe scanner + live-editable Admin card + FREE tier companion pick.
     """
-    from fysb.engines.signal_engine import generate_signal
+    from fysb.engines.signal_engine import (
+        admin_accepts_market,
+        emit_to_users,
+        generate_signal,
+    )
 
     async def bot_send(uid: int, text: str):
         # Return the sent Message — emit_to_users pins its chat/message ids so
@@ -188,50 +289,51 @@ async def market_engine_loop(app):
                     and not await afn.run(db.kill_switch_on) \
                     and await afn.run(db.get_setting, "signal_push_enabled", "1") == "1":
                 markets = await afn.run(_armed_market_rows)
+                scan_tfs = await afn.run(_armed_scan_timeframes)
                 for m in markets:
-                    try:
-                        result = await asyncio.to_thread(generate_signal, m["symbol"])
-                        if result["status"] == "SIGNAL_CREATED":
-                            sig = await afn.run(_signal_row_by_id, result["signal_id"])
-                            if sig:
-                                from fysb.engines.signal_engine import (
-                                    admin_accepts_market,
-                                    emit_to_users,
-                                    opposite_close_advisory,
-                                )
-                                try:
-                                    for adv_target, adv_txt in await afn.run(opposite_close_advisory, dict(sig)):
-                                        await _safe_send(app.bot, adv_target, adv_txt)
-                                except Exception as exc:
-                                    log.warning("engine opposite_close_advisory failed: %s", exc)
-                                stats = await emit_to_users(dict(sig), bot_send, bot=app.bot, include_channels=True)
-                                log.info("auto signal #%s emitted: %s", result["signal_id"], stats)
-                                if await afn.run(admin_accepts_market, m["symbol"]):
-                                    try:
-                                        # v6.8.0: the admin receives the REAL full card —
-                                        # the same royal board the users received, plus
-                                        # delivery counters. v6.8.1: the number shown is
-                                        # the REAL sequential number (same as the
-                                        # signals center), never the internal id.
-                                        from fysb.engines.tracker import seq_of
-                                        from fysb.ui.cards import render_signal_card
-                                        mrow = await afn.run(_market_row, m["symbol"])
-                                        seq = await afn.run(seq_of, result["signal_id"])
-                                        card = render_signal_card(
-                                            dict(sig), user_view=False,
-                                            row=dict(mrow) if mrow else None)
-                                        card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
-                                                 f" ({m['symbol']}) — جودة {result.get('score')}/100</b>\n"
-                                                 f"▎📤 التسليم: {stats['sent']} مستلم"
-                                                 f" · قنوات: {stats.get('channels_sent', 0)}"
-                                                 f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
-                                                 f" · فشل: {stats.get('failed', 0)}</blockquote>")
-                                        await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
-                                    except Exception:
-                                        pass
-                    except Exception as e:
-                        log.warning("engine scan failed for %s: %s", m["symbol"], type(e).__name__)
-                    await asyncio.sleep(config.MARKET_SYMBOL_DELAY_SECONDS)
+                    for tf in scan_tfs:
+                        try:
+                            result = await asyncio.to_thread(generate_signal, m["symbol"], tf)
+                            if result["status"] == "SIGNAL_CREATED":
+                                sig = await afn.run(_signal_row_by_id, result["signal_id"])
+                                if sig:
+                                    # emit_to_users already awaits opposite_close_advisory cleanly
+                                    stats = await emit_to_users(dict(sig), bot_send, bot=app.bot, include_channels=True)
+                                    log.info("auto signal #%s (%s %s) emitted: %s",
+                                             result["signal_id"], m["symbol"], tf, stats)
+                                    if await afn.run(admin_accepts_market, m["symbol"]):
+                                        try:
+                                            from fysb.engines.tracker import seq_of
+                                            from fysb.ui.cards import render_signal_card
+                                            mrow = await afn.run(_market_row, m["symbol"])
+                                            seq = await afn.run(seq_of, result["signal_id"])
+                                            card = render_signal_card(
+                                                dict(sig), user_view=False,
+                                                row=dict(mrow) if mrow else None)
+                                            card += (f"\n\n<blockquote>📡 <b>إشارة آلية جديدة #{seq}"
+                                                     f" ({m['symbol']} · {tf}) — جودة {result.get('score')}/100</b>\n"
+                                                     f"▎📤 التسليم: {stats['sent']} مستلم"
+                                                     f" · قنوات: {stats.get('channels_sent', 0)}"
+                                                     f" · تجاوز الحد: {stats.get('skipped_quota', 0)}"
+                                                     f" · فشل: {stats.get('failed', 0)}</blockquote>")
+                                            admin_msg = await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
+                                            # v6.24.0 (#4): pin Admin message_id for live tracker edits!
+                                            await afn.run(_pin_admin_delivery, result["signal_id"], admin_msg)
+                                        except Exception:
+                                            pass
+                                # v6.24.0 (#6): deliver companion FREE-tier pick if one was created
+                                free_sid = result.get("free_fallback_signal_id")
+                                if free_sid:
+                                    free_sig = await afn.run(_signal_row_by_id, free_sid)
+                                    if free_sig:
+                                        f_stats = await emit_to_users(
+                                            dict(free_sig), bot_send, bot=app.bot, include_channels=False
+                                        )
+                                        log.info("free companion signal #%s (%s %s): %s",
+                                                 free_sid, m["symbol"], tf, f_stats)
+                        except Exception as e:
+                            log.warning("engine scan failed for %s %s: %s", m["symbol"], tf, type(e).__name__)
+                        await asyncio.sleep(config.MARKET_SYMBOL_DELAY_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -347,6 +449,23 @@ async def subscriptions_loop(app):
                                                f"⏳ تنبيه: ينتهي اشتراكك ({s['plan_code']}) بعد <b>~{hours_left} ساعة</b>. جدّد مبكراً لتفادي التوقف.",
                                                parse_mode="HTML")
                     await afn.run(subs.mark_reminded, s["id"], s["stage"])
+                except Exception:
+                    pass
+            # v6.24.0 (#8): FREE Trial luxury drip reminders (48h / 24h / expired)
+            from telegram import InlineKeyboardMarkup
+            from fysb.ui.keyboards import strip_button_styles
+            for item in await afn.run(subs.free_trial_due_reminders):
+                try:
+                    drip_txt, drip_rows = await afn.run(_build_free_trial_drip_payload, item)
+                    markup = InlineKeyboardMarkup(drip_rows)
+                    try:
+                        await app.bot.send_message(item["user_id"], drip_txt, reply_markup=markup, parse_mode="HTML")
+                    except Exception:
+                        await app.bot.send_message(
+                            item["user_id"], drip_txt,
+                            reply_markup=strip_button_styles(markup), parse_mode="HTML",
+                        )
+                    await afn.run(subs.mark_free_trial_reminded, item["user_id"], item["stage"])
                 except Exception:
                     pass
             day = config.now()[:10]
@@ -480,6 +599,7 @@ async def post_init(app):
             await asyncio.to_thread(_warm_pg)
         except Exception:
             log.warning("pg pool warm-up skipped (will self-heal on demand)")
+    from fysb.engines.crypto_ws import crypto_ws_loop
     _TASKS = [
         asyncio.create_task(market_engine_loop(app), name="fysb-market-engine"),
         asyncio.create_task(tracker_loop(app), name="fysb-tracker"),
@@ -487,9 +607,10 @@ async def post_init(app):
         asyncio.create_task(demo_loop(app), name="fysb-demo"),
         asyncio.create_task(channels_loop(app), name="fysb-channels"),
         asyncio.create_task(watchers_loop(app), name="fysb-watchers"),
+        asyncio.create_task(crypto_ws_loop(app), name="fysb-crypto-ws"),
     ]
     post_init._tasks_ref = _TASKS
-    log.info("background loops started (6)")
+    log.info("background loops started (7)")
 
 
 def _warm_pg() -> None:

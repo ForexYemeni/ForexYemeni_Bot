@@ -325,6 +325,12 @@ CREATE TABLE IF NOT EXISTS vip_channel_members(
   granted_at TEXT NOT NULL,
   removed_at TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS free_trial_reminders(
+  user_id INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  sent_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, stage)
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -481,6 +487,8 @@ DEFAULT_SETTINGS = {
     # signal/tracker alerts ONLY for those symbols while users & channels keep
     # receiving every enabled market allowed by their plan/channel filters.
     "admin_signal_markets": "",
+    # v6.24.0 Multi-timeframe auto scanner (comma-separated enabled TFs, e.g. M15,H1)
+    "engine_scan_timeframes": "M15,H1",
 }
 
 SEED_MARKETS = [

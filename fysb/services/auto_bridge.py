@@ -230,8 +230,14 @@ def save_connection(
         return {"ok": False, "error": "يرجى إدخال البريد الإلكتروني وكلمة المرور واسم السيرفر لـ TradeLocker"}
     if plat == "deriv" and not clean_creds.get("api_token"):
         return {"ok": False, "error": "يرجى إدخال Deriv API Token الخاص بحسابك (Demo أو Live)"}
-    if plat == "ctrader" and not (clean_creds.get("access_token") and clean_creds.get("account_id")):
-        return {"ok": False, "error": "يرجى إدخال cTrader Access Token ورقم الحساب (Account ID)"}
+    if plat == "ctrader":
+        g_cid, g_csec = get_global_ctrader_app()
+        eff_cid = clean_creds.get("client_id") or g_cid
+        eff_csec = clean_creds.get("client_secret") or g_csec
+        if not clean_creds.get("access_token"):
+            return {"ok": False, "error": "يرجى إدخال cTrader Access Token الخاص بحسابك"}
+        if not (eff_cid and eff_csec):
+            return {"ok": False, "error": "يرجى إدخال Client ID و Client Secret من تطبيق cTrader Open API (أو ضبطهما مرة واحدة من لوحة الإدارة)"}
 
     now = config.now()
     enc = vault.encrypt_json(clean_creds) if clean_creds else ""
@@ -450,6 +456,421 @@ def _deriv_ws_call(payload: dict, app_id: str = "1089", timeout: float = 7.0) ->
             return json.loads(buf.decode("utf-8", errors="replace"))
 
 
+# ---------------------------------------------------------------------------
+# 3b. Official Spotware cTrader Open API v2 (Pure Stdlib JSON over WSS :5036)
+# ---------------------------------------------------------------------------
+
+CTRADER_PT_HEARTBEAT = 51
+CTRADER_PT_APP_AUTH_REQ = 2100
+CTRADER_PT_APP_AUTH_RES = 2101
+CTRADER_PT_ACC_AUTH_REQ = 2102
+CTRADER_PT_ACC_AUTH_RES = 2103
+CTRADER_PT_NEW_ORDER_REQ = 2106
+CTRADER_PT_AMEND_SLTP_REQ = 2110
+CTRADER_PT_CLOSE_POS_REQ = 2111
+CTRADER_PT_SYMBOLS_LIST_REQ = 2114
+CTRADER_PT_SYMBOLS_LIST_RES = 2115
+CTRADER_PT_SYMBOL_BY_ID_REQ = 2116
+CTRADER_PT_SYMBOL_BY_ID_RES = 2117
+CTRADER_PT_TRADER_REQ = 2121
+CTRADER_PT_TRADER_RES = 2122
+CTRADER_PT_RECONCILE_REQ = 2124
+CTRADER_PT_RECONCILE_RES = 2125
+CTRADER_PT_EXECUTION_EVENT = 2126
+CTRADER_PT_ORDER_ERROR_EVENT = 2132
+CTRADER_PT_ERROR_RES = 2142
+CTRADER_PT_GET_ACCOUNTS_REQ = 2149
+CTRADER_PT_GET_ACCOUNTS_RES = 2150
+
+
+def get_global_ctrader_app() -> tuple[str, str]:
+    """Optional bot-wide cTrader Open API App credentials (encrypted in settings)."""
+    raw = db.get_setting("bridge_ctrader_app_enc", "")
+    if raw:
+        data = vault.decrypt_json(raw)
+        cid = str(data.get("client_id") or "").strip()
+        csec = str(data.get("client_secret") or "").strip()
+        if cid and csec:
+            return cid, csec
+    return (
+        os.environ.get("CTRADER_CLIENT_ID", "").strip(),
+        os.environ.get("CTRADER_CLIENT_SECRET", "").strip(),
+    )
+
+
+def set_global_ctrader_app(client_id: str, client_secret: str) -> dict:
+    cid = str(client_id or "").strip()
+    csec = str(client_secret or "").strip()
+    if not cid or not csec:
+        db.set_setting("bridge_ctrader_app_enc", "")
+        return {"ok": True, "configured": False}
+    db.set_setting("bridge_ctrader_app_enc", vault.encrypt_json({"client_id": cid, "client_secret": csec}))
+    return {"ok": True, "configured": True, "client_id_masked": cid[:6] + "…" + cid[-4:] if len(cid) > 10 else cid}
+
+
+def _ctrader_effective_creds(creds: dict) -> tuple[str, str, str]:
+    g_cid, g_csec = get_global_ctrader_app()
+    cid = str(creds.get("client_id") or g_cid or "").strip()
+    csec = str(creds.get("client_secret") or g_csec or "").strip()
+    tok = str(creds.get("access_token") or "").strip()
+    return cid, csec, tok
+
+
+def _normalize_sym_key(name: str) -> str:
+    return "".join(ch for ch in str(name or "").upper() if ch.isalnum())
+
+
+def _match_ctrader_symbol(symbols: list[dict], target_sym: str, suffix: str = "") -> dict | None:
+    """Match a ForexYemeni symbol (e.g. XAUUSD, EURUSD, US30) against broker's cTrader symbol list."""
+    want_raw = str(target_sym or "").strip().upper()
+    want_sfx = (want_raw + str(suffix or "").strip().upper()) if suffix else want_raw
+    aliases = {
+        "XAUUSD": ["XAUUSD", "GOLD", "XAUUSDPRO", "XAUUSDRAW", "XAUUSDM", "XAUUSDC"],
+        "XAGUSD": ["XAGUSD", "SILVER"],
+        "US30": ["US30", "DJ30", "WS30", "US30CASH", "DJI30"],
+        "NAS100": ["NAS100", "USTEC", "US100", "NDX100", "USTECH"],
+        "BTCUSD": ["BTCUSD", "BTCUSDT", "BITCOIN"],
+        "ETHUSD": ["ETHUSD", "ETHUSDT", "ETHEREUM"],
+    }
+    want_keys = [_normalize_sym_key(want_sfx), _normalize_sym_key(want_raw)]
+    for a in aliases.get(want_raw, []):
+        k = _normalize_sym_key(a)
+        if k not in want_keys:
+            want_keys.append(k)
+
+    enabled_syms = [s for s in symbols if s.get("enabled", True)]
+    pool = enabled_syms or symbols
+    # 1. Exact normalized match
+    for wk in want_keys:
+        for s in pool:
+            if _normalize_sym_key(s.get("symbolName", "")) == wk:
+                return s
+    # 2. Prefix match (e.g. EURUSD.raw, XAUUSD_i, XAUUSDm)
+    for wk in want_keys[:2]:
+        for s in pool:
+            sn = _normalize_sym_key(s.get("symbolName", ""))
+            if sn.startswith(wk) and len(sn) <= len(wk) + 5:
+                return s
+    return None
+
+
+class _CTraderClient:
+    """Zero-dependency RFC-6455 TLS WebSocket JSON client for Spotware cTrader Open API v2 (:5036)."""
+
+    def __init__(self, account_mode: str = "DEMO", timeout: float = 10.0):
+        self.account_mode = "LIVE" if str(account_mode or "DEMO").upper() == "LIVE" else "DEMO"
+        self.host = "live.ctraderapi.com" if self.account_mode == "LIVE" else "demo.ctraderapi.com"
+        self.port = 5036
+        self.timeout = timeout
+        self._raw = None
+        self._sock = None
+        self._seq = 0
+
+    def __enter__(self) -> "_CTraderClient":
+        self.connect()
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+    def connect(self) -> None:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        ctx = ssl.create_default_context()
+        self._raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self._sock = ctx.wrap_socket(self._raw, server_hostname=self.host)
+        self._sock.settimeout(self.timeout)
+        req = (
+            f"GET / HTTP/1.1\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self._sock.sendall(req.encode("ascii"))
+        hdr = b""
+        while b"\r\n\r\n" not in hdr and len(hdr) < 8192:
+            ch = self._sock.recv(1024)
+            if not ch:
+                break
+            hdr += ch
+        if b" 101 " not in hdr:
+            raise ConnectionError(f"cTrader WS handshake failed ({self.host}:{self.port})")
+
+    def close(self) -> None:
+        for s in (self._sock, self._raw):
+            try:
+                if s is not None:
+                    s.close()
+            except Exception:
+                pass
+        self._sock = None
+        self._raw = None
+
+    def _recv_exact(self, n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            ch = self._sock.recv(n - len(buf))
+            if not ch:
+                raise ConnectionError("cTrader WS closed unexpectedly")
+            buf.extend(ch)
+        return bytes(buf)
+
+    def _send_frame(self, payload: bytes, opcode: int = 0x01) -> None:
+        mask = os.urandom(4)
+        n = len(payload)
+        if n < 126:
+            hdr = bytes([0x80 | opcode, 0x80 | n])
+        elif n < 65536:
+            hdr = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", n)
+        else:
+            hdr = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", n)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self._sock.sendall(hdr + mask + masked)
+
+    def _recv_message(self) -> dict:
+        chunks = bytearray()
+        while True:
+            b0, b1 = self._recv_exact(2)
+            fin = bool(b0 & 0x80)
+            opcode = b0 & 0x0F
+            masked = bool(b1 & 0x80)
+            plen = b1 & 0x7F
+            if plen == 126:
+                plen = struct.unpack("!H", self._recv_exact(2))[0]
+            elif plen == 127:
+                plen = struct.unpack("!Q", self._recv_exact(8))[0]
+            mask_key = self._recv_exact(4) if masked else b""
+            data = self._recv_exact(plen) if plen else b""
+            if masked:
+                data = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))
+            if opcode == 0x09:  # PING -> reply PONG
+                self._send_frame(data, opcode=0x0A)
+                continue
+            if opcode == 0x0A:  # PONG
+                continue
+            if opcode == 0x08:  # CLOSE
+                raise ConnectionError("cTrader server closed connection")
+            chunks.extend(data)
+            if fin:
+                break
+        return json.loads(chunks.decode("utf-8", errors="replace"))
+
+    def rpc(self, payload_type: int, payload: dict, expect_types: set[int]) -> dict:
+        self._seq += 1
+        cid = f"fy_{self._seq}_{py_secrets.token_hex(4)}"
+        msg = {"clientMsgId": cid, "payloadType": int(payload_type), "payload": payload}
+        self._send_frame(json.dumps(msg).encode("utf-8"), opcode=0x01)
+        for _ in range(25):
+            res = self._recv_message()
+            pt = int(res.get("payloadType") or 0)
+            if pt == CTRADER_PT_HEARTBEAT:
+                continue
+            if pt in (CTRADER_PT_ERROR_RES, CTRADER_PT_ORDER_ERROR_EVENT):
+                err_p = res.get("payload") or {}
+                code = err_p.get("errorCode") or "CTRADER_ERROR"
+                desc = err_p.get("description") or ""
+                raise RuntimeError(f"{code}: {desc}".strip(": "))
+            if pt in expect_types:
+                if res.get("clientMsgId") and res.get("clientMsgId") != cid and pt != CTRADER_PT_EXECUTION_EVENT:
+                    continue
+                return res
+        raise TimeoutError(f"cTrader RPC {payload_type} timed out waiting for {expect_types}")
+
+    def auth_session(self, client_id: str, client_secret: str, access_token: str,
+                     hint_account_id: str = "") -> tuple[int, dict]:
+        """App Auth -> Auto-Discover/Verify Account -> Account Auth -> Trader Info."""
+        self.rpc(
+            CTRADER_PT_APP_AUTH_REQ,
+            {"clientId": client_id, "clientSecret": client_secret},
+            {CTRADER_PT_APP_AUTH_RES},
+        )
+        # Discover accounts linked to this Access Token (also fixes login-vs-ctid confusion!)
+        acc_res = self.rpc(
+            CTRADER_PT_GET_ACCOUNTS_REQ,
+            {"accessToken": access_token},
+            {CTRADER_PT_GET_ACCOUNTS_RES},
+        )
+        accs = (acc_res.get("payload") or {}).get("ctidTraderAccount") or []
+        want_live = self.account_mode == "LIVE"
+        chosen = None
+        hint = str(hint_account_id or "").strip()
+        if hint:
+            for a in accs:
+                if str(a.get("ctidTraderAccountId") or "") == hint or str(a.get("traderLogin") or "") == hint:
+                    chosen = a
+                    break
+        if chosen is None:
+            matching = [a for a in accs if bool(a.get("isLive")) == want_live]
+            chosen = matching[0] if matching else (accs[0] if accs else None)
+        if chosen is None and hint.isdigit():
+            ctid = int(hint)
+        elif chosen is not None:
+            if bool(chosen.get("isLive")) != want_live:
+                env_lbl = "LIVE" if chosen.get("isLive") else "DEMO"
+                raise RuntimeError(
+                    f"الحساب المكتشف #{chosen.get('traderLogin') or chosen.get('ctidTraderAccountId')} هو حساب {env_lbl} وليس {self.account_mode} — بدّل وضع الحساب في النموذج إلى {env_lbl}"
+                )
+            ctid = int(chosen["ctidTraderAccountId"])
+        else:
+            raise RuntimeError("لم يتم العثور على أي حساب cTrader مرتبط بهذا Access Token")
+
+        self.rpc(
+            CTRADER_PT_ACC_AUTH_REQ,
+            {"ctidTraderAccountId": ctid, "accessToken": access_token},
+            {CTRADER_PT_ACC_AUTH_RES},
+        )
+        tr_res = self.rpc(
+            CTRADER_PT_TRADER_REQ,
+            {"ctidTraderAccountId": ctid},
+            {CTRADER_PT_TRADER_RES},
+        )
+        trader = (tr_res.get("payload") or {}).get("trader") or {}
+        if chosen:
+            trader.setdefault("brokerTitleShort", chosen.get("brokerTitleShort") or "")
+            trader.setdefault("traderLogin", chosen.get("traderLogin") or ctid)
+        return ctid, trader
+
+    def execute_market_order(
+        self,
+        ctid: int,
+        symbol: str,
+        direction: str,
+        lots: float,
+        entry: float = 0.0,
+        sl: float = 0.0,
+        tp: float = 0.0,
+        suffix: str = "",
+        comment: str = "ForexYemeni",
+    ) -> dict:
+        slist_res = self.rpc(
+            CTRADER_PT_SYMBOLS_LIST_REQ,
+            {"ctidTraderAccountId": ctid, "includeArchivedSymbols": False},
+            {CTRADER_PT_SYMBOLS_LIST_RES},
+        )
+        syms = (slist_res.get("payload") or {}).get("symbol") or []
+        light = _match_ctrader_symbol(syms, symbol, suffix=suffix)
+        if not light:
+            raise RuntimeError(f"الرمز {symbol} غير موجود في قائمة رموز وسيط cTrader")
+        sym_id = int(light["symbolId"])
+        sym_name = str(light.get("symbolName") or symbol)
+
+        # Fetch exact symbol volume spec (lotSize, minVolume, stepVolume)
+        sinfo_res = self.rpc(
+            CTRADER_PT_SYMBOL_BY_ID_REQ,
+            {"ctidTraderAccountId": ctid, "symbolId": [sym_id]},
+            {CTRADER_PT_SYMBOL_BY_ID_RES},
+        )
+        sinfo_list = (sinfo_res.get("payload") or {}).get("symbol") or []
+        sinfo = sinfo_list[0] if sinfo_list else {}
+        lot_size = int(sinfo.get("lotSize") or 10_000_000)  # standard FX 100k units * 100 cents = 10,000,000
+        min_vol = int(sinfo.get("minVolume") or max(100, lot_size // 100))
+        step_vol = int(sinfo.get("stepVolume") or min_vol)
+        raw_vol = int(round(max(0.01, float(lots)) * lot_size))
+        if step_vol > 0:
+            raw_vol = max(min_vol, (raw_vol // step_vol) * step_vol)
+        else:
+            raw_vol = max(min_vol, raw_vol)
+
+        is_buy = str(direction or "BUY").upper() == "BUY"
+        order_payload: dict = {
+            "ctidTraderAccountId": ctid,
+            "symbolId": sym_id,
+            "orderType": 1,  # MARKET
+            "tradeSide": 1 if is_buy else 2,  # 1=BUY, 2=SELL
+            "volume": raw_vol,
+            "label": "ForexYemeni",
+            "comment": str(comment or "ForexYemeni")[:96],
+        }
+        # Relative SL/TP in 1/100_000 price units (supported directly on MARKET orders!)
+        if entry > 0 and sl > 0 and abs(entry - sl) > 0:
+            order_payload["relativeStopLoss"] = max(1, int(round(abs(entry - sl) * 100_000)))
+        if entry > 0 and tp > 0 and abs(tp - entry) > 0:
+            order_payload["relativeTakeProfit"] = max(1, int(round(abs(tp - entry) * 100_000)))
+
+        ev = self.rpc(
+            CTRADER_PT_NEW_ORDER_REQ,
+            order_payload,
+            {CTRADER_PT_EXECUTION_EVENT},
+        )
+        ep = ev.get("payload") or {}
+        pos = ep.get("position") or {}
+        order_obj = ep.get("order") or {}
+        pos_id = str(pos.get("positionId") or order_obj.get("positionId") or ep.get("orderId") or "")
+        fill_px = float(pos.get("price") or order_obj.get("executionPrice") or entry or 0.0)
+        return {
+            "position_id": pos_id,
+            "symbol_name": sym_name,
+            "volume": raw_vol,
+            "fill_price": fill_px,
+            "execution_type": ep.get("executionType"),
+        }
+
+    def partial_close_and_be(self, ctid: int, position_id: int, be_price: float) -> dict:
+        """Close 50% of an open cTrader position & move Stop Loss to Entry (Breakeven)."""
+        rec = self.rpc(
+            CTRADER_PT_RECONCILE_REQ,
+            {"ctidTraderAccountId": ctid},
+            {CTRADER_PT_RECONCILE_RES},
+        )
+        positions = (rec.get("payload") or {}).get("position") or []
+        target = next((p for p in positions if int(p.get("positionId") or 0) == int(position_id)), None)
+        if not target:
+            return {"ok": False, "detail": f"الصفقة #{position_id} غير مفتوحة على cTrader"}
+        td = target.get("tradeData") or {}
+        cur_vol = int(td.get("volume") or 0)
+        half_vol = cur_vol // 2
+        closed_half = False
+        if half_vol >= 100:
+            try:
+                self.rpc(
+                    CTRADER_PT_CLOSE_POS_REQ,
+                    {"ctidTraderAccountId": ctid, "positionId": int(position_id), "volume": half_vol},
+                    {CTRADER_PT_EXECUTION_EVENT},
+                )
+                closed_half = True
+            except Exception:
+                closed_half = False
+        be_ok = False
+        if be_price > 0:
+            amend_p: dict = {
+                "ctidTraderAccountId": ctid,
+                "positionId": int(position_id),
+                "stopLoss": float(be_price),
+            }
+            if target.get("takeProfit"):
+                amend_p["takeProfit"] = float(target["takeProfit"])
+            self.rpc(CTRADER_PT_AMEND_SLTP_REQ, amend_p, {CTRADER_PT_EXECUTION_EVENT})
+            be_ok = True
+        return {
+            "ok": closed_half or be_ok,
+            "detail": f"cTrader TP1: {'50% إغلاق ✅' if closed_half else 'بدون جزئي'} · {'BE ✅' if be_ok else ''}".strip(),
+        }
+
+
+def _ctrader_live_test(creds: dict, account_mode: str) -> dict:
+    cid, csec, tok = _ctrader_effective_creds(creds)
+    if not (cid and csec and tok):
+        return {"ok": False, "error": "بيانات cTrader غير مكتملة (يلزم Client ID و Client Secret و Access Token)"}
+    try:
+        with _CTraderClient(account_mode=account_mode, timeout=10.0) as cli:
+            ctid, trader = cli.auth_session(cid, csec, tok, hint_account_id=str(creds.get("account_id") or ""))
+            digits = int(trader.get("moneyDigits") or 2)
+            bal = round(float(trader.get("balance") or 0.0) / (10 ** digits), 2)
+            login = str(trader.get("traderLogin") or ctid)
+            broker = str(trader.get("brokerTitleShort") or creds.get("broker_name") or "cTrader")
+            return {
+                "ok": True,
+                "ctid": ctid,
+                "login": login,
+                "broker": broker,
+                "balance": bal,
+                "message": f"🟢 متصل فعلياً بـ cTrader ({account_mode} · {broker} #{login}) · الرصيد الحي: ${bal:,.2f}",
+            }
+    except Exception as exc:
+        return {"ok": False, "error": f"فشل اتصال cTrader ({account_mode}): {exc}"}
+
+
 def test_connection(conn_id: int, user_id: int | None = None, is_admin: bool = False) -> dict:
     """Verify real broker connectivity & refresh live balance for a saved bridge connection."""
     with db.conn() as c:
@@ -525,14 +946,37 @@ def test_connection(conn_id: int, user_id: int | None = None, is_admin: bool = F
                 "message": f"🟢 متصل بـ Deriv ({detected_mode}) · الرصيد: {bal:,.2f} {auth_obj.get('currency','USD')}"}
 
     if plat == "ctrader":
-        ok_fmt = bool(creds.get("access_token") and creds.get("account_id"))
-        if not ok_fmt:
-            return {"ok": False, "error": "بيانات cTrader Open API غير مكتملة"}
+        res = _ctrader_live_test(creds, amode)
+        if not res.get("ok"):
+            err_msg = str(res.get("error") or "cTrader auth failed")
+            with db.tx() as c:
+                c.execute("UPDATE bridge_connections SET last_status=?, updated_at=? WHERE id=?",
+                          (f"ERR: {err_msg[:80]}", now, int(conn_id)))
+            return {"ok": False, "error": err_msg}
+        bal = float(res.get("balance") or 0.0)
+        # Persist auto-discovered ctidTraderAccountId inside encrypted creds for instant execution
+        if res.get("ctid"):
+            creds["account_id"] = str(res["ctid"])
+            if res.get("broker"):
+                creds["broker_name"] = str(res["broker"])
+            enc_upd = vault.encrypt_json(creds)
+        else:
+            enc_upd = row.get("creds_enc") or ""
         with db.tx() as c:
-            c.execute("UPDATE bridge_connections SET last_heartbeat=?, last_status='READY_OAUTH', updated_at=? WHERE id=?",
-                      (now, now, int(conn_id)))
-        return {"ok": True, "platform": plat, "account_mode": amode, "balance": float(row.get("last_balance") or 0.0),
-                "message": f"🟢 حساب cTrader ({amode} · #{creds.get('account_id')}) محفوظ ومجهز للنسخ الآلي"}
+            c.execute(
+                "UPDATE bridge_connections SET creds_enc=?, last_balance=?, last_equity=?, last_heartbeat=?, last_status='CONNECTED', updated_at=? WHERE id=?",
+                (enc_upd, bal, bal, now, now, int(conn_id)),
+            )
+        return {
+            "ok": True,
+            "platform": plat,
+            "account_mode": amode,
+            "balance": bal,
+            "ctid": res.get("ctid"),
+            "login": res.get("login"),
+            "broker": res.get("broker"),
+            "message": res["message"],
+        }
 
     return {"ok": False, "error": "منصة غير معروفة"}
 
@@ -655,20 +1099,142 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
             blocked += 1
             continue
 
-        # Queue for MT5 EA or broker cloud worker
+        # Execute directly on cTrader Open API v2 or queue for MT5 EA / broker cloud worker
         init_status = "QUEUED"
+        ext_id = ""
         detail = f"جاهز للتنفيذ على {PLATFORMS[plat]['name']} ({amode})"
+        if plat == "ctrader":
+            try:
+                creds = vault.decrypt_json(conn.get("creds_enc") or "") if conn.get("creds_enc") else {}
+                c_cid, c_sec, c_tok = _ctrader_effective_creds(creds)
+                if c_cid and c_sec and c_tok:
+                    with _CTraderClient(account_mode=amode, timeout=10.0) as cli:
+                        ctid, _tr = cli.auth_session(c_cid, c_sec, c_tok, hint_account_id=str(creds.get("account_id") or ""))
+                        ex = cli.execute_market_order(
+                            ctid=ctid,
+                            symbol=sym,
+                            direction=direction,
+                            lots=lots,
+                            entry=entry,
+                            sl=stop,
+                            tp=tp3 or tp2 or tp1,
+                            suffix=str(conn.get("symbol_suffix") or ""),
+                            comment=f"FY-SIG#{sid}",
+                        )
+                        init_status = "EXECUTED"
+                        ext_id = str(ex.get("position_id") or "")
+                        detail = f"🟢 نُفذ فعلياً على cTrader ({ex.get('symbol_name', sym)} · #{ext_id})"
+            except Exception as exc:
+                init_status = "FAILED"
+                detail = f"❌ فشل تنفيذ cTrader: {str(exc)[:160]}"
         with db.tx() as c:
             c.execute(
                 """INSERT INTO bridge_orders(
                      connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
-                     lots,entry_price,stop_price,tp1_price,tp2_price,tp3_price,status,detail,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?)""",
+                     lots,entry_price,stop_price,tp1_price,tp2_price,tp3_price,status,external_order_id,detail,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?,?)""",
                 (cid, uid, plat, amode, sid, sym, direction, lots, entry, stop, tp1, tp2, tp3,
-                 init_status, detail, now, now),
+                 init_status, ext_id, detail, now, now),
             )
         queued += 1
     return {"ok": True, "queued": queued, "blocked": blocked}
+
+
+def execute_test_trade(
+    conn_id: int,
+    symbol: str = "EURUSD",
+    direction: str = "BUY",
+    lots: float = 0.01,
+    user_id: int | None = None,
+    is_admin: bool = False,
+) -> dict:
+    """Send an instant 0.01 lot real verification trade (Demo recommended) to test end-to-end execution."""
+    with db.conn() as c:
+        row = c.execute("SELECT * FROM bridge_connections WHERE id=?", (int(conn_id),)).fetchone()
+    if not row:
+        return {"ok": False, "error": "الربط غير موجود"}
+    row = dict(row)
+    if not is_admin and int(row["user_id"]) != int(user_id or 0):
+        return {"ok": False, "error": "غير مصرح"}
+    if int(row.get("admin_frozen") or 0) == 1:
+        return {"ok": False, "error": "هذا الحساب مجمّد حالياً من الإدارة"}
+    amode = row["account_mode"]
+    ok_perm, reason = user_can_copy(int(row["user_id"]), amode)
+    if not ok_perm:
+        return {"ok": False, "error": reason}
+
+    sym = str(symbol or "EURUSD").strip().upper()
+    side = "SELL" if str(direction or "BUY").strip().upper() == "SELL" else "BUY"
+    lot_v = round(max(0.01, min(0.10, float(lots or 0.01))), 2)
+    plat = row["platform"]
+    now = config.now()
+
+    if plat == "ctrader":
+        creds = vault.decrypt_json(row.get("creds_enc") or "") if row.get("creds_enc") else {}
+        c_cid, c_sec, c_tok = _ctrader_effective_creds(creds)
+        if not (c_cid and c_sec and c_tok):
+            return {"ok": False, "error": "بيانات cTrader غير مكتملة"}
+        try:
+            with _CTraderClient(account_mode=amode, timeout=12.0) as cli:
+                ctid, trader = cli.auth_session(c_cid, c_sec, c_tok, hint_account_id=str(creds.get("account_id") or ""))
+                ex = cli.execute_market_order(
+                    ctid=ctid,
+                    symbol=sym,
+                    direction=side,
+                    lots=lot_v,
+                    suffix=str(row.get("symbol_suffix") or ""),
+                    comment="FY-TEST-001",
+                )
+                digits = int(trader.get("moneyDigits") or 2)
+                bal = round(float(trader.get("balance") or 0.0) / (10 ** digits), 2)
+                pos_id = str(ex.get("position_id") or "")
+                fill_px = float(ex.get("fill_price") or 0.0)
+                detail = f"🧪 صفقة اختبار ناجحة على cTrader ({ex.get('symbol_name', sym)} · #{pos_id} @ {fill_px})"
+                with db.tx() as c:
+                    c.execute(
+                        "UPDATE bridge_connections SET last_balance=?, last_equity=?, last_heartbeat=?, last_status='CONNECTED', updated_at=? WHERE id=?",
+                        (bal, bal, now, now, int(conn_id)),
+                    )
+                    c.execute(
+                        """INSERT INTO bridge_orders(
+                             connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                             lots,entry_price,status,external_order_id,detail,created_at,updated_at
+                           ) VALUES(?,?,?,?,0,?,?,'OPEN',?,?,'EXECUTED',?,?,?,?)""",
+                        (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, fill_px, pos_id, detail, now, now),
+                    )
+                return {
+                    "ok": True,
+                    "status": "EXECUTED",
+                    "position_id": pos_id,
+                    "symbol": ex.get("symbol_name", sym),
+                    "fill_price": fill_px,
+                    "lots": lot_v,
+                    "balance": bal,
+                    "message": detail,
+                }
+        except Exception as exc:
+            err = str(exc)
+            with db.tx() as c:
+                c.execute(
+                    """INSERT INTO bridge_orders(
+                         connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                         lots,status,detail,created_at,updated_at
+                       ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'FAILED',?,?,?)""",
+                    (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v, f"❌ اختبار فشل: {err[:160]}", now, now),
+                )
+            return {"ok": False, "error": f"فشل تنفيذ صفقة الاختبار على cTrader: {err}"}
+
+    # For MT5 EA or other bridges: enqueue a test order for immediate pickup
+    with db.tx() as c:
+        c.execute(
+            """INSERT INTO bridge_orders(
+                 connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                 lots,status,detail,created_at,updated_at
+               ) VALUES(?,?,?,?,0,?,?,'OPEN',?,'QUEUED',?,?,?)""",
+            (int(conn_id), int(row["user_id"]), plat, amode, sym, side, lot_v,
+             f"🧪 صفقة اختبار {lot_v} لوت جاهزة للالتقاط على {PLATFORMS[plat]['name']}", now, now),
+        )
+    return {"ok": True, "status": "QUEUED", "message": f"🧪 تم إرسال صفقة اختبار {sym} {side} ({lot_v} لوت) لقائمة التنفيذ"}
 
 
 def dispatch_tp1_partial_be(sig: dict) -> int:
@@ -680,7 +1246,7 @@ def dispatch_tp1_partial_be(sig: dict) -> int:
     enqueued = 0
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            """SELECT bo.*, bc.partial_tp_be, bc.enabled, bc.admin_frozen
+            """SELECT bo.*, bc.partial_tp_be, bc.enabled, bc.admin_frozen, bc.creds_enc
                FROM bridge_orders bo
                JOIN bridge_connections bc ON bc.id = bo.connection_id
                WHERE bo.signal_id=? AND bo.action_type='OPEN'
@@ -697,16 +1263,31 @@ def dispatch_tp1_partial_be(sig: dict) -> int:
             ).fetchone()
         if exists:
             continue
+        pbe_status = "QUEUED"
+        pbe_detail = "تأمين 50% عند TP1 + نقل الوقف لنقطة الدخول (BE)"
+        if r["platform"] == "ctrader" and str(r.get("external_order_id") or "").isdigit():
+            try:
+                creds = vault.decrypt_json(r.get("creds_enc") or "") if r.get("creds_enc") else {}
+                c_cid, c_sec, c_tok = _ctrader_effective_creds(creds)
+                if c_cid and c_sec and c_tok:
+                    with _CTraderClient(account_mode=r["account_mode"], timeout=10.0) as cli:
+                        ctid, _tr = cli.auth_session(c_cid, c_sec, c_tok, hint_account_id=str(creds.get("account_id") or ""))
+                        res_be = cli.partial_close_and_be(ctid, int(r["external_order_id"]), float(r["entry_price"] or 0.0))
+                        pbe_status = "EXECUTED" if res_be.get("ok") else "FAILED"
+                        pbe_detail = str(res_be.get("detail") or pbe_detail)
+            except Exception as exc:
+                pbe_status = "FAILED"
+                pbe_detail = f"❌ فشل تأمين cTrader: {str(exc)[:140]}"
         with db.tx() as c:
             c.execute(
                 """INSERT INTO bridge_orders(
                      connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
                      lots,entry_price,stop_price,tp1_price,tp2_price,tp3_price,status,external_order_id,detail,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,'PARTIAL_BE',?,?,?,?,?,?,'QUEUED',?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,'PARTIAL_BE',?,?,?,?,?,?,?,?,?,?,?)""",
                 (cid, int(r["user_id"]), r["platform"], r["account_mode"], sid, r["symbol"], r["direction"],
                  round(float(r["lots"] or 0.01) * 0.5, 2), float(r["entry_price"] or 0.0), float(r["entry_price"] or 0.0),
                  float(r["tp1_price"] or 0.0), float(r["tp2_price"] or 0.0), float(r["tp3_price"] or 0.0),
-                 str(r.get("external_order_id") or ""), "تأمين 50% عند TP1 + نقل الوقف لنقطة الدخول (BE)", now, now),
+                 pbe_status, str(r.get("external_order_id") or ""), pbe_detail, now, now),
             )
         enqueued += 1
     return enqueued

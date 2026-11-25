@@ -1248,10 +1248,12 @@ const BRIDGE_PLAT_META = {{
     ['api_token','Deriv API Token (بصلاحية Trade)','password'],
     ['app_id','App ID (اتركه 1089 افتراضياً)','text'],
   ]}},
-  ctrader: {{desc:'👑 ربط cTrader Open API لحسابات Demo و Live من الهاتف (IC Markets · Pepperstone · FTMO · FxPro).', fields:[
-    ['access_token','cTrader Access Token','password'],
-    ['account_id','رقم حساب cTrader (Account ID)','text'],
-    ['broker_name','اسم الوسيط (مثال: IC Markets)','text'],
+  ctrader: {{desc:'👑 تنفيذ فوري وحقيقي عبر cTrader Open API v2 (Demo & Live) من الهاتف 100% — يكتشف رقم الحساب تلقائياً ويقرأ الرصيد الحي وينفذ الصفقات و50% TP1 + BE.', fields:[
+    ['access_token','cTrader Access Token (مطلوب — بصلاحية Trade)','password'],
+    ['client_id','cTrader Client ID (اختياري إذا ضبطته الإدارة)','text'],
+    ['client_secret','cTrader Client Secret (اختياري إذا ضبطته الإدارة)','password'],
+    ['account_id','رقم حساب cTrader (اختياري — يُكتشف تلقائياً)','text'],
+    ['symbol_suffix','لاحقة الرمز لدى الوسيط إن وجدت (مثال: .raw أو فارغ)','text'],
   ]}},
   mt5_bridge: {{desc:'🖥 يولّد لك مفتاح جسر مشفّر + ملف ForexYemeni_Bridge.mq5 جاهز للتحميل بضغطة لحسابات MT5 Demo و Live مجاناً 100%.', fields:[
     ['symbol_suffix','لاحقة الرموز لدى الوسيط إن وجدت (مثال: m أو .raw أو اتركها فارغة)','text'],
@@ -1316,8 +1318,9 @@ async function loadBridgeOverview(showToast=false){{
       </div>
       <div class="btn-row">
         <button class="btn ghost" onclick="testBridgeConn(${{c.id}})">🔍 فحص</button>
-        ${{c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${{c.id}})">⬇️ تحميل EA</button>` : ''}}
-        <button class="btn ${{c.enabled?'ghost':'green'}}" onclick="toggleBridgeConn(${{c.id}})">${{c.enabled?'⏸ إيقاف':'▶️ تشغيل'}}</button>
+        <button class="btn gold" onclick="runBridgeTestTrade(${{c.id}})">🧪 صفقة 0.01</button>
+        ${{c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${{c.id}})">⬇️ EA</button>` : ''}}
+        <button class="btn ${{c.enabled?'ghost':'green'}}" onclick="toggleBridgeConn(${{c.id}})">${{c.enabled?'⏸':'▶️'}}</button>
         <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${{c.id}})">🗑</button>
       </div>
     </div>`).join('') : '<div class="empty">لم تربط أي حساب وسيط بعد — اختر منصتك واضغط حفظ أعلاه!</div>';
@@ -1362,6 +1365,12 @@ async function testBridgeConn(id){{
   toast('🔍 جارٍ فحص الاتصال والرصيد الحقيقي...');
   const r = await api('/api/bridge/test', {{method:'POST', body:JSON.stringify({{connection_id:id}})}});
   toast((r && (r.message || r.error)) || 'اكتمل الفحص', !(r && r.ok));
+  loadBridgeOverview(false);
+}}
+async function runBridgeTestTrade(id){{
+  toast('🧪 جارٍ إرسال صفقة اختبار EURUSD BUY 0.01 لوت...');
+  const r = await api('/api/bridge/test-trade', {{method:'POST', body:JSON.stringify({{connection_id:id, symbol:'EURUSD', direction:'BUY', lots:0.01}})}});
+  toast((r && (r.message || r.error)) || 'اكتمل الاختبار', !(r && r.ok));
   loadBridgeOverview(false);
 }}
 async function toggleBridgeConn(id){{
@@ -1814,6 +1823,14 @@ input:focus,select:focus{{border-color:var(--gold)}}
         <div class="row-form">
           <input id="brAllowedPlans" value="VIP,ROYAL" placeholder="الباقات المسموحة (مثال: VIP,ROYAL)" style="flex:1;min-width:140px"/>
           <button class="btn gold" style="flex:0;min-width:92px" onclick="saveBridgePlans()">💾 حفظ الباقات</button>
+        </div>
+        <div style="margin-top:8px;padding:9px;border-radius:11px;background:rgba(12,18,32,.6);border:1px solid var(--border)">
+          <div style="font-size:11.5px;font-weight:800;margin-bottom:6px">👑 مفاتيح تطبيق cTrader Open API المركزية (اختياري): <span id="admCtAppStatus" class="pill">غير مضبوط</span></div>
+          <div class="row-form" style="margin-bottom:0">
+            <input id="admCtCid" placeholder="cTrader Client ID" style="flex:1;min-width:110px"/>
+            <input id="admCtCsec" type="password" placeholder="cTrader Client Secret" style="flex:1;min-width:110px"/>
+            <button class="btn gold" style="flex:0;min-width:80px" onclick="saveAdminCtraderApp()">🔐 حفظ</button>
+          </div>
         </div>
         <div class="card-hdr" style="margin-top:8px"><h3>🔌 الحسابات المربوطة حالياً</h3><span class="pill" id="admBrConnCnt">0</span></div>
         <div id="admBridgeConns"><div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div></div>
@@ -2344,6 +2361,14 @@ async function saveBridgePlans(){{
   loadAdminBridge();
 }}
 
+async function saveAdminCtraderApp(){{
+  const client_id = (document.getElementById('admCtCid')?.value || '').trim();
+  const client_secret = (document.getElementById('admCtCsec')?.value || '').trim();
+  const r = await api('/api/admin/bridge/ctrader-app', {{method:'POST', body:JSON.stringify({{client_id, client_secret}})}});
+  toast(r && r.ok ? (r.configured ? '🔐 تم حفظ مفاتيح تطبيق cTrader مشفّرة' : 'تم مسح المفاتيح المركزية') : 'خطأ', !(r && r.ok));
+  loadAdminBridge();
+}}
+
 async function adminBridgeConnOp(connection_id, op){{
   const r = await api('/api/admin/bridge/connection', {{method:'POST', body:JSON.stringify({{connection_id, op}})}});
   toast(r && r.ok ? (r.message || '✅ تم تحديث الربط') : ((r && r.error) || 'خطأ'), !(r && r.ok));
@@ -2363,6 +2388,8 @@ async function loadAdminBridge(){{
   }});
   const apEl = document.getElementById('brAllowedPlans');
   if(apEl && Array.isArray(pol.allowed_plans)) apEl.value = pol.allowed_plans.join(',');
+  const ctSt = document.getElementById('admCtAppStatus');
+  if(ctSt){{ ctSt.textContent = r.ctrader_app_configured ? '🟢 مضبوط ومشفّر' : '⚪ غير مضبوط'; ctSt.className = r.ctrader_app_configured ? 'pill green' : 'pill'; }}
 
   const conns = r.connections || [];
   const cntEl = document.getElementById('admBrConnCnt');

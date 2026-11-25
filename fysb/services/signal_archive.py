@@ -517,30 +517,19 @@ def _user_visibility_sql(
     strategies: list[str],
     min_score: int,
 ) -> tuple[str, list]:
-    """Signals visible to a user:
-      1) ANY signal ALREADY delivered to this user (NEVER vanishes, even after closing!)
-      2) OR any non-cancelled/non-expired signal matching their plan
-         (excluding other users' private SIGNAL_NOW requests).
+    """v6.23.0 — 100% Honest Delivered-Only User Signal Archive.
+
+    A user sees ONLY signals that were genuinely delivered as real signal cards
+    to their account (`signal_deliveries`):
+      1) No undelivered signal ever appears in «📊 الإشارات».
+      2) Newly registered users NEVER see old pre-join signals created before
+         they joined, and can never be enrolled in pre-join tracker alerts.
+      3) Every delivered signal stays permanently in their archive (never
+         vanishes after closing on TP1/TP2/TP3/SL) and matches 1-to-1 with
+         their live tracking updates.
     """
-    m_list = markets or ["XAUUSD"]
-    t_list = timeframes or ["M15"]
-    s_list = strategies or ["ICT"]
-    marks_m = ",".join("?" for _ in m_list)
-    marks_t = ",".join("?" for _ in t_list)
-    marks_s = ",".join("?" for _ in s_list)
-    sql = (
-        "(s.id IN (SELECT signal_id FROM signal_deliveries WHERE user_id=?) "
-        "OR ("
-        "s.status NOT IN ('CANCELLED','EXPIRED') "
-        "AND (s.source!='SIGNAL_NOW' OR s.created_by=?) "
-        f"AND REPLACE(s.symbol,'/','') IN ({marks_m}) "
-        f"AND s.timeframe IN ({marks_t}) "
-        f"AND s.strategy IN ({marks_s}) "
-        "AND s.score>=?"
-        "))"
-    )
-    args = [int(uid), int(uid), *m_list, *t_list, *s_list, int(min_score)]
-    return sql, args
+    sql = "s.id IN (SELECT signal_id FROM signal_deliveries WHERE user_id=?)"
+    return sql, [int(uid)]
 
 
 def user_scope_counts(

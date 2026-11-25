@@ -57,10 +57,16 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         stop = min(c["low"] for c in candles[-6:]) - 0.85 * a
         if stop >= entry or (entry - stop) < 1.2 * a:
             stop = entry - 1.8 * a
+        elif (entry - stop) > 2.6 * a:
+            # v6.23.0: cap abnormal news-wick stops so SL/TP3 stay institutional
+            stop = entry - 2.4 * a
     else:
         stop = max(c["high"] for c in candles[-6:]) + 0.85 * a
         if stop <= entry or (stop - entry) < 1.2 * a:
             stop = entry + 1.8 * a
+        elif (stop - entry) > 2.6 * a:
+            # v6.23.0: cap abnormal news-wick stops so SL/TP3 stay institutional
+            stop = entry + 2.4 * a
 
     risk = abs(entry - stop)
     if risk <= 0:

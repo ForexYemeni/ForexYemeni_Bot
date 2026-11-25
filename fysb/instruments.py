@@ -104,6 +104,18 @@ def pips(symbol: str, price_a: float, price_b: float, row=None) -> float:
     return abs(price_a - price_b) / s.pip_size
 
 
+def signed_pips(symbol: str, direction: str, entry: float, level: float, row=None) -> float:
+    """Directional signed PIPS from `entry` to `level` for a BUY or SELL trade.
+
+    Profit-side levels (TP) return positive pips (+); risk-side levels (SL) return negative pips (-).
+    """
+    s = spec(symbol, row)
+    if s.pip_size <= 0:
+        return 0.0
+    delta = (float(level) - float(entry)) if (direction or "").upper() == "BUY" else (float(entry) - float(level))
+    return delta / s.pip_size
+
+
 def points(symbol: str, price_a: float, price_b: float, row=None) -> float:
     """Distance between two prices expressed in POINTS."""
     s = spec(symbol, row)

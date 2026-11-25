@@ -21,7 +21,7 @@ from datetime import timedelta
 from fysb import config, db
 from fysb.config import log
 from fysb.engines import market_data
-from fysb.engines.analysis import atr_pct, confirmed_candles, structure_labels
+from fysb.engines.analysis import atr, atr_pct, confirmed_candles, structure_labels
 from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
 from fysb.engines.strategies import consensus_filter, evaluate_all
 from fysb.engines.strategies.base import Ctx
@@ -55,6 +55,92 @@ def _allowed_strategies(symbol: str, timeframe: str) -> list[str]:
         rows = c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchall()
     codes = [r["code"] for r in rows if REGISTRY.get(r["code"]) is not None]
     return codes or ["PRICE_ACTION"]
+
+
+_MAX_STOP_PCT_BY_TF = {
+    "M1": 0.0045,
+    "M5": 0.0065,
+    "M15": 0.0100,
+    "M30": 0.0125,
+    "H1": 0.0150,
+    "H4": 0.0250,
+    "D1": 0.0400,
+    "W1": 0.0650,
+}
+
+
+def validate_signal_geometry(
+    symbol: str,
+    timeframe: str,
+    direction: str,
+    entry: float,
+    stop: float,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    atr_val: float = 0.0,
+    row=None,
+) -> tuple[bool, str]:
+    """v6.23.0 Universal SL/TP Geometry & Max-Stop Institutional Guard.
+
+    1. Enforces strict directional ordering (zero inverted SL or TP levels):
+       BUY : stop < entry < tp1 < tp2 < tp3
+       SELL: tp3 < tp2 < tp1 < entry < stop
+    2. Caps stop distance against both ATR (<= 3.5x ATR) and timeframe % of price
+       (x2.5 for crypto) so freak spike candles never emit 888-pip H1 stops.
+    """
+    d = (direction or "").upper()
+    try:
+        entry = float(entry)
+        stop = float(stop)
+        tp1 = float(tp1)
+        tp2 = float(tp2)
+        tp3 = float(tp3)
+    except (TypeError, ValueError):
+        return False, "invalid numeric levels"
+    if entry <= 0 or stop <= 0 or tp1 <= 0 or tp2 <= 0 or tp3 <= 0:
+        return False, "non-positive price level"
+
+    if d == "BUY":
+        if not (stop < entry < tp1 < tp2 < tp3):
+            return False, "invalid BUY geometry — وقف الخسارة أو الأهداف معكوسة"
+    elif d == "SELL":
+        if not (tp3 < tp2 < tp1 < entry < stop):
+            return False, "invalid SELL geometry — وقف الخسارة أو الأهداف معكوسة"
+    else:
+        return False, f"invalid direction {d}"
+
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return False, "zero stop distance"
+
+    spec = instruments.spec(symbol, row)
+    base_pct = _MAX_STOP_PCT_BY_TF.get((timeframe or "H1").upper(), 0.0200)
+    max_pct = base_pct * 2.5 if spec.category == "crypto" else base_pct
+    if (risk / entry) > max_pct:
+        pips_sl = instruments.pips(symbol, entry, stop, row)
+        return False, f"stop exceeds {timeframe} max ({pips_sl:.1f} pips, {risk / entry * 100:.2f}% > {max_pct * 100:.2f}%)"
+
+    # Cap freak spike stops relative to real ATR (skip artificially flat synthetic test bars < 0.1% ATR)
+    if atr_val and float(atr_val) > 0 and (float(atr_val) / entry) >= 0.0010 and risk > 4.0 * float(atr_val):
+        pips_sl = instruments.pips(symbol, entry, stop, row)
+        return False, f"oversized stop ({pips_sl:.1f} pips > 4.0x ATR)"
+
+    return True, ""
+
+
+def _parse_iso_utc(ts: str):
+    """Best-effort ISO8601 -> timezone-aware UTC datetime (None if empty/invalid)."""
+    if not ts:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
@@ -173,8 +259,25 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
 
     from fysb.engines.quality_gate import DEFAULT_MIN_SCORE, evaluate_quality_gate
     min_sig_score = db.get_setting_int("min_signal_score", DEFAULT_MIN_SCORE)
+    atr_val = atr(candles)
+    sym_row = _market_row(symbol)
 
     for cand in results:
+        # 11.4: Institutional SL/TP Geometry & Max-Stop Guard (v6.23.0)
+        # Never allow inverted SL/TP levels or freak spike-candle stops even on force=True.
+        ok_geo, geo_reason = validate_signal_geometry(
+            symbol, entry_tf, cand.direction,
+            cand.entry, cand.stop, cand.tp1, cand.tp2, cand.tp3,
+            atr_val=atr_val, row=sym_row,
+        )
+        if not ok_geo:
+            if not first_reject_reason:
+                first_reject_tag = "GEOMETRY_REJECTED"
+                first_reject_reason = geo_reason
+                first_reject_score = cand.score
+            skipped_notes.append(f"{cand.code}:geo({geo_reason[:36]})")
+            continue
+
         # 11.5: Institutional Quality + HTF Bias + Chop + Session Gate (v6.20.6)
         # Matches backtest.py 100% identically. Admin manual force=True bypasses
         # only the soft regime filter if explicitly forced.
@@ -640,11 +743,19 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     plans_map = plans_for_users(candidate_uids)
     demo_map = _preload_demo_accounts(candidate_uids)
     auto_exec_queue: list[tuple[int, dict | None]] = []
+    sig_created_dt = _parse_iso_utc(sig.get("created_at") or "")
 
     for u in users:
         uid = int(u["user_id"])
         if uid == config.ADMIN_ID or uid in active_partners:
             continue  # admin & active partner-mode accounts are not private user recipients
+
+        # 0) v6.23.0 strict post-join isolation: never push a signal created before the user joined
+        if sig_created_dt is not None:
+            joined_dt = _parse_iso_utc(u["joined_at"] if "joined_at" in u.keys() else "")
+            if joined_dt is not None and sig_created_dt < joined_dt:
+                stats["skipped_filters"] += 1
+                continue
 
         # 1) package entitlement — hard gate (slash-normalized symbol matching)
         plan = plans_map.get(uid)

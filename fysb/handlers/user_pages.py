@@ -603,11 +603,11 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             rows_kb.append([kb.btn("🔴 إلغاء البحث التلقائي", f"u:watchoff:{w['id']}")])
         if not rows:
             if is_today:
-                extra.append("▎✨ لا توجد إشارات اليوم حتى الآن — استعرض «📆 أمس» أو «🗓 بالتاريخ» أو اضغط «🚀 إشارة الآن».")
+                extra.append("▎✨ لم تصلك إشارات حية اليوم بعد — المحرك يراقب الأسواق تلقائياً وستصلك كل إشارة حقيقية فور اكتمال شروطها، أو اضغط «🚀 إشارة الآن».")
             elif is_open:
-                extra.append("▎✨ لا توجد صفقات مفتوحة حالياً — تصفّح «📅 اليوم» أو «📆 أمس» أو «🗓 بالتاريخ».")
+                extra.append("▎✨ لا توجد صفقات مفتوحة مرسلة لحسابك حالياً — ستظهر هنا وتُتتبع لحظياً فور صدور إشارة جديدة.")
             else:
-                extra.append("▎لا توجد إشارات مسجلة في هذا التاريخ.")
+                extra.append("▎لا توجد إشارات مرسلة لحسابك في هذا التاريخ.")
 
         rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow", style="success")])
 
@@ -674,6 +674,26 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         if not sig or sig["status"] in ("CANCELLED",):
             await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
             return
+        # v6.23.0: strict post-join & privacy guard — a user can NEVER view or get
+        # enrolled into tracking for pre-join signals or another user's private SIGNAL_NOW.
+        if uid != config.ADMIN_ID and int(sig["created_by"] or 0) != uid:
+            is_delivered = await afn.run(_user_has_delivered_signal, uid, sid)
+            if not is_delivered:
+                from fysb.engines.signal_engine import _parse_iso_utc
+                is_other_priv = (sig["source"] or "").upper() == "SIGNAL_NOW"
+                sig_dt = _parse_iso_utc(sig["created_at"] or "")
+                join_dt = _parse_iso_utc((u["joined_at"] if u and "joined_at" in u.keys() else "") or "")
+                is_pre_join = (sig_dt is not None and join_dt is not None and sig_dt < join_dt)
+                if is_other_priv or is_pre_join:
+                    await render(
+                        q,
+                        "⛔ <b>هذه الإشارة لم تُرسل لحسابك</b>\n"
+                        "<blockquote>▎لا يمكن عرض أو تتبع إشارات سابقة قبل انضمامك أو خاصة بمستخدم آخر.\n"
+                        "▎المحرك يراقب الأسواق تلقائياً وستصلك كل إشارة حية جديدة فور صدورها.</blockquote>",
+                        kb.user_nav([[kb.btn("🚀 إشارة الآن", "u:signow", style="success")], [kb.btn("↩️ الإشارات", "u:signals")]]),
+                        bot,
+                    )
+                    return
         # Server-side quota consumption (anti-bypass: re-check on every callback)
         consumption = await afn.run(subs.consume_on_view, uid, sid)
         if not consumption["ok"] and not consumption.get("already"):
@@ -1242,11 +1262,15 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                      kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
 
     elif action == "demopick":
-        rows = await afn.run(_open_signals_rows)
+        rows = await afn.run(_open_signals_rows, uid)
         rows_kb = [[kb.btn(f"#{r['seq']} {esc(r['symbol'])} {r['direction']} {r['score']}/100", f"u:demolots:{r['id']}")] for r in rows]
         rows_kb.append([kb.btn("↩️ التجريبي", "u:demo")])
-        await render(q, "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):",
-                     kb.user_nav(rows_kb), bot)
+        body_demo = (
+            "🚀 <b>فتح صفقة تجريبية</b>\nاختر إشارة لإدخالها محاكاةً (سعر الدخول الحقيقي + سبريد وانزلاق):"
+            if rows else
+            "🚀 <b>فتح صفقة تجريبية</b>\n<i>لا توجد إشارات مفتوحة مرسلة لحسابك حالياً — ستظهر هنا فور استلامك إشارة جديدة.</i>"
+        )
+        await render(q, body_demo, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("demolots:"):
         sid = _safe_int(action.split(":", 1)[1])
@@ -1576,9 +1600,31 @@ def _signal_row(sid: int):
         return c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
 
 
-def _open_signals_rows():
-    """(v6.11.0 thread-offload helper) latest open signals for the demo picker."""
+def _user_has_delivered_signal(uid: int, sid: int) -> bool:
+    """(v6.23.0 thread-offload helper) True iff `sid` was actually delivered to `uid`."""
     with db.conn() as c:
+        r = c.execute(
+            "SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=? LIMIT 1",
+            (int(uid), int(sid)),
+        ).fetchone()
+    return r is not None
+
+
+def _open_signals_rows(uid: int | None = None):
+    """(v6.11.0 / v6.23.0) latest open signals for the demo picker — scoped to
+    signals actually delivered to `uid` (admin sees all open signals)."""
+    with db.conn() as c:
+        if uid is not None and int(uid) != config.ADMIN_ID:
+            return c.execute(
+                """SELECT s.*, (SELECT COUNT(*) FROM signals s2 WHERE s2.id <= s.id) AS seq
+                   FROM signals s
+                   JOIN signal_deliveries d ON d.signal_id=s.id
+                   WHERE d.user_id=?
+                     AND s.status IN ('ACTIVE','RUNNING','TP1_HIT')
+                     AND (s.closed_at IS NULL OR s.closed_at='')
+                   ORDER BY s.id DESC LIMIT 6""",
+                (int(uid),),
+            ).fetchall()
         return c.execute("""SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS seq
                             FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT')
                             AND (closed_at IS NULL OR closed_at='')

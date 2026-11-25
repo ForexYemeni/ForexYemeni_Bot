@@ -40,9 +40,10 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
     status_line = signal_status_badge(sig)
     spec = instruments.spec(symbol, row)
 
-    # Prices card — each level with its pip distance from entry
+    # Prices card — each level with its directional signed pip distance from entry
+    # (SL always negative -X.X pips, TP1/TP2/TP3 always positive +X.X pips).
     def level_line(icon, label, price):
-        pips_d = instruments.pips(symbol, sig["entry"], price, row)
+        pips_d = instruments.signed_pips(symbol, direction, sig["entry"], price, row)
         return (f"{icon} <b>{label}:</b> <code>{fmt_sym_price(symbol, price, row)}</code>"
                 f"  <i>({pips_d:+.1f} pips)</i>")
 

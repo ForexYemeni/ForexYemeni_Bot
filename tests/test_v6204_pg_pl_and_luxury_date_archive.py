@@ -195,21 +195,28 @@ class TestV6204PgPlAndLuxuryDateArchive(unittest.TestCase):
         sid_today_closed = _insert_sig(self.d_today, "XAUUSD", "TP1_HIT", 297.2, closed=True, strat="CLASSIC")
         sid_yest_closed = _insert_sig(self.d_yest, "XAUUSD", "TP3_HIT", 410.0, closed=True, strat="CLASSIC")
         sid_old_delivered = _insert_sig(self.d_old, "EURUSD", "TP2_HIT", 155.0, closed=True, tf="H1", strat="SMC")
-        # Private SIGNAL_NOW owned by USER_B must NOT leak to USER_A
+        # Private SIGNAL_NOW owned by USER_B & any undelivered AUTO signal must NOT leak to USER_A
         sid_b_priv = _insert_sig(self.d_today, "XAUUSD", "RUNNING", 0.0, closed=False, source="SIGNAL_NOW", created_by=USER_B, strat="CLASSIC")
+        sid_undelivered = _insert_sig(self.d_today, "XAUUSD", "RUNNING", 0.0, closed=False, source="AUTO", strat="CLASSIC")
 
-        # Mark old signal as delivered to USER_A (even though plan default is XAUUSD/M15/ICT)
+        # Mark USER_A's genuinely delivered signals across Today, Yesterday, and 4 days ago
         with db.conn() as c:
-            c.execute(
-                "INSERT INTO signal_deliveries(user_id,signal_id,delivered_at) VALUES(?,?,?)",
-                (USER_A, sid_old_delivered, f"{self.d_old}T11:31:00+00:00"),
-            )
+            for sid, day_s in (
+                (sid_today_closed, self.d_today),
+                (sid_yest_closed, self.d_yest),
+                (sid_old_delivered, self.d_old),
+            ):
+                c.execute(
+                    "INSERT INTO signal_deliveries(user_id,signal_id,delivered_at) VALUES(?,?,?)",
+                    (USER_A, sid, f"{day_s}T11:31:00+00:00"),
+                )
 
-        # 1) User opens u:signals -> Today (sees closed today signal, NOT USER_B's private signal!)
+        # 1) User opens u:signals -> Today (sees delivered today signal; NOT USER_B's private or undelivered!)
         t_txt, t_datas = _fire("u:signals", USER_A)
         self.assertIn("إشارات اليوم", t_txt)
         self.assertIn(f"u:signalview:{sid_today_closed}", t_datas)
         self.assertNotIn(f"u:signalview:{sid_b_priv}", t_datas)
+        self.assertNotIn(f"u:signalview:{sid_undelivered}", t_datas)
         self.assertIn("u:sigday:yesterday:0", t_datas)
         self.assertIn("u:sigdates:0", t_datas)
 

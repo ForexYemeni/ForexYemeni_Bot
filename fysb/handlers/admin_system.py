@@ -789,6 +789,8 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
     from fysb.webapp import tunnel as _tun
     ready = config.webapp_ready()
     auto_on = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+    gh_db = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"
+    config.WEBAPP_GH_PAGES_ENABLED = gh_db
     has_ngrok = bool(await afn.run(_tun.get_ngrok_token))
     has_cf = bool(await afn.run(_tun.get_cf_tunnel_token))
     has_pg = bool(await afn.run(_tun.get_pinggy_token))
@@ -855,12 +857,17 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
     if notice:
         body += f"\n\n<i>{esc(notice)}</i>"
     if not config.WEBAPP_URL_STATIC:
-        rows_kb.append([kb.btn("🌐 تفعيل واجهة GitHub Pages (مجاني · بلا حجب وبلا تحذير)", "a:webapp_ghpages", style="success")])
-        rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="primary")])
+        gh_lbl = (
+            "🟢 واجهة GitHub Pages: مفعّلة (اضغط للفتح المباشر)"
+            if config.WEBAPP_GH_PAGES_ENABLED
+            else "⚪ واجهة GitHub Pages: متوقفة (فتح مباشر للرابط)"
+        )
+        rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="success")])
         rows_kb.append([
             kb.btn("🔄 تشغيل / تجديد النفق", "a:webapptunnel_restart", style="primary"),
             kb.btn("🔗 لصق أي رابط HTTPS", "a:webapp_seturl", style="primary"),
         ])
+        rows_kb.append([kb.btn(gh_lbl, "a:webapp_ghpages", style="primary" if config.WEBAPP_GH_PAGES_ENABLED else "primary")])
         rows_kb.append([
             kb.btn("☁️ كود Cloudflare Worker", "a:webapp_worker", style="primary"),
             kb.btn(
@@ -874,14 +881,29 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
 
 
 async def admin_webapp_enable_ghpages(q, uid, context, bot):
-    """1-Tap activation of Royal GitHub Pages Front-Door (clears blocked workers.dev custom URL, keeps live tunnel!)."""
+    """Toggle optional GitHub Pages Front-Door (OFF by default — direct tunnel opening)."""
     from fysb.handlers import background as _bg
     from fysb.webapp import server as _wsrv
     from fysb.webapp import tunnel as _tun
 
-    await afn.run(db.set_setting, "webapp_custom_url", "")
+    cur = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"
+    nxt = not cur
+    await afn.run(db.set_setting, "webapp_gh_pages_enabled", "1" if nxt else "0")
+    config.WEBAPP_GH_PAGES_ENABLED = nxt
+
+    if not nxt:
+        await afn.run(audit_log.log, uid, "webapp_ghpages_disabled")
+        await admin_webapp_info(
+            q, uid, context, bot,
+            notice="✅ تم إيقاف واجهة GitHub Pages — الأزرار تفتح الآن رابطك/نفقك مباشرةً 100%.",
+        )
+        return
+
+    # Turning ON: clear any blocked workers.dev custom URL and attach to live tunnel
+    cur_custom = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip().lower()
+    if ".workers.dev" in cur_custom:
+        await afn.run(db.set_setting, "webapp_custom_url", "")
     await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
-    config.WEBAPP_GH_PAGES_ENABLED = True
     st = _tun.tunnel_status()
     live_back = str(st.get("url") or "").strip().rstrip("/")
     if live_back.lower().startswith("https://") and _tun.is_tunnel_alive():
@@ -889,11 +911,10 @@ async def admin_webapp_enable_ghpages(q, uid, context, bot):
         await afn.run(audit_log.log, uid, f"webapp_ghpages_enabled:{live_back}")
         await admin_webapp_info(
             q, uid, context, bot,
-            notice="✅ تم تفعيل واجهة GitHub Pages الملكية فوراً! افتح لوحة الإدارة أو التطبيق من الأزرار أعلاه — بدون VPN وبلا أي تحذير.",
+            notice="✅ تم تفعيل واجهة GitHub Pages الاختيارية وربطها بالنفق النشط.",
         )
         return
 
-    # Start tunnel immediately if not running yet
     if getattr(_bg.post_init, "_webapp_srv", None) is None:
         _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
     await _tun.stop_tunnel()
@@ -903,12 +924,12 @@ async def admin_webapp_enable_ghpages(q, uid, context, bot):
         await afn.run(audit_log.log, uid, f"webapp_ghpages_enabled:{url}")
         await admin_webapp_info(
             q, uid, context, bot,
-            notice="✅ تم تفعيل واجهة GitHub Pages الملكية وتشغيل النفق بنجاح! اضغط «🖥 فتح لوحة الإدارة الويب» الآن.",
+            notice="✅ تم تفعيل واجهة GitHub Pages وتشغيل النفق بنجاح.",
         )
     else:
         await admin_webapp_info(
             q, uid, context, bot,
-            notice="⚠️ تم مسح الرابط القديم وتفعيل وضع GitHub Pages — شغّل النفق أو اربط توكن Ngrok ليعمل فوراً.",
+            notice="⚠️ تم تفعيل وضع GitHub Pages — شغّل النفق أو اربط توكن Ngrok للعمل.",
         )
 
 

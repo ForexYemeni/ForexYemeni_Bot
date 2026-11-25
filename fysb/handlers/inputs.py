@@ -417,6 +417,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 await afn.run(audit_log.log, uid, "pinggy_token_set")
 
             await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
+            config.WEBAPP_GH_PAGES_ENABLED = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"
             await update.effective_message.reply_text(
                 f"⏳ تم حفظ توكن <b>{esc(lbl)}</b> — جاري التشغيل والتحقق الحي (10-20 ثانية)...",
                 parse_mode="HTML",

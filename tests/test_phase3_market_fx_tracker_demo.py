@@ -64,7 +64,8 @@ class TestPhase3MarketData(unittest.TestCase):
              "open": 3550.0, "high": 3555.0, "low": 3545.0, "close": 3552.0}
             for i in range(45)
         ]
-        with patch.object(md, "_fetch_binance_candles", side_effect=RuntimeError("geo-blocked")), \
+        with patch.object(md, "_fetch_yahoo_candles", side_effect=RuntimeError("offline")), \
+             patch.object(md, "_fetch_binance_candles", side_effect=RuntimeError("geo-blocked")), \
              patch.object(md, "_fetch_bybit_candles", return_value=bybit_candles), \
              patch.object(md, "_gold_offset_now", return_value=-12.0):
             res = md.fetch_candles("XAUUSD", "15min", "", 45, use_cache=False)

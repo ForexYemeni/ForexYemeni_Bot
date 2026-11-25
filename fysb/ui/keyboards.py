@@ -128,10 +128,10 @@ def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
 
 
 def copy_btn(text: str, copy_value: str, style: str | None = "primary") -> InlineKeyboardButton:
-    """Native one-tap CopyTextButton (falls back safely on older PTB)."""
-    val = str(copy_value or "")
+    """Native one-tap CopyTextButton (enforces Telegram's 1..256 char hard limit to prevent BadRequest)."""
+    val = str(copy_value or "").strip()
     resolved = style if style in VALID_STYLES else infer_luxury_style(text)
-    if _HAS_COPY_TEXT:
+    if _HAS_COPY_TEXT and 1 <= len(val) <= 256:
         if resolved and _HAS_STYLE:
             return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val), style=resolved)
         return InlineKeyboardButton(text, copy_text=CopyTextButton(text=val))
@@ -315,11 +315,14 @@ def admin_hub_system() -> InlineKeyboardMarkup:
 
 def webapp_btn(text: str, url: str, style: str | None = "success") -> InlineKeyboardButton:
     """Native Telegram Mini App button (`WebAppInfo`) with graceful fallback."""
+    clean_url = (url or "").strip().splitlines()[0].strip() if url else ""
     kwargs: dict = {}
-    if WebAppInfo is not None and (url or "").lower().startswith("https://"):
-        kwargs["web_app"] = WebAppInfo(url=url)
+    if WebAppInfo is not None and clean_url.lower().startswith("https://"):
+        kwargs["web_app"] = WebAppInfo(url=clean_url)
+    elif clean_url.lower().startswith(("http://", "https://")):
+        kwargs["url"] = clean_url
     else:
-        kwargs["url"] = url
+        return btn(text, "a:webapp", style=style)
     if _HAS_STYLE and style in VALID_STYLES:
         kwargs["style"] = style
     return InlineKeyboardButton(text, **kwargs)

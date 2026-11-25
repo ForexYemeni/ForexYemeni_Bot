@@ -109,14 +109,112 @@ def get_ngrok_domain() -> str:
     return raw
 
 
+def get_cf_tunnel_token() -> str:
+    """Cloudflare Zero Trust Named Tunnel token (`eyJhIjo...`)."""
+    env_tok = os.getenv("CLOUDFLARE_TUNNEL_TOKEN", "").strip() or os.getenv("CF_TUNNEL_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    try:
+        return (db.get_setting("cf_tunnel_token", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def get_pinggy_token() -> str:
+    """Optional Pinggy token (`<token>@a.pinggy.io`)."""
+    env_tok = os.getenv("PINGGY_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    try:
+        return (db.get_setting("pinggy_token", "") or "").strip()
+    except Exception:
+        return ""
+
+
+_URL_EXTRACT_RE = re.compile(r"https://[^\s\)\]\>\"'<>]+", re.IGNORECASE)
+_CF_TOKEN_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{30,}\b")
+
+
+def extract_https_url(raw: str) -> str:
+    """Extract a clean `https://...` URL even if pasted with markdown brackets or surrounding text."""
+    m = _URL_EXTRACT_RE.search(raw or "")
+    if not m:
+        return ""
+    return m.group(0).rstrip(".,;:/)")
+
+
+def detect_and_parse_tunnel_input(raw: str) -> dict:
+    """Smart universal parser for ANY link or tunnel token an Admin pastes:
+      - `clear` / `off` / `مسح`
+      - Cloudflare Zero Trust Tunnel Token (`eyJ...`, or full `cloudflared ... --token eyJ...`)
+      - Pinggy Token (`pinggy:<tok>` or `<tok>@a.pinggy.io`)
+      - Ngrok Authtoken (`ngrok config add-authtoken ...` or raw token + optional static domain)
+      - Any custom `https://...` URL (including `*.workers.dev`, custom domain, VPS, etc.)
+    """
+    txt = (raw or "").strip()
+    if not txt:
+        return {"kind": "invalid", "error": "إدخال فارغ"}
+    if txt.lower() in ("clear", "off", "delete", "مسح", "حذف"):
+        return {"kind": "clear"}
+
+    # 1) Cloudflare Zero Trust Named Tunnel JWT Token (even if pasted inside full `cloudflared` command!)
+    m_cf = _CF_TOKEN_RE.search(txt)
+    if m_cf:
+        url_extra = extract_https_url(txt)
+        return {"kind": "cloudflare_token", "token": m_cf.group(0), "url": url_extra}
+
+    # 2) Explicit Pinggy token (`pinggy:TOKEN` or `TOKEN@a.pinggy.io`)
+    if txt.lower().startswith("pinggy:"):
+        tok = txt.split(":", 1)[1].strip().split()[0]
+        if tok:
+            return {"kind": "pinggy_token", "token": tok}
+    m_pg = re.search(r"([A-Za-z0-9_-]{6,})@a\.pinggy\.io", txt)
+    if m_pg:
+        return {"kind": "pinggy_token", "token": m_pg.group(1)}
+
+    # 3) Custom HTTPS URL (unless it's a Ngrok token + static https://...ngrok-free.app pair)
+    url_found = extract_https_url(txt)
+    # Strip known ngrok CLI prefixes if user pasted the full command from dashboard
+    cleaned = re.sub(r"^\s*ngrok\s+config\s+add-authtoken\s+", "", txt, flags=re.IGNORECASE).strip()
+    parts = [p.strip() for p in cleaned.replace("|", " ").split() if p.strip()]
+
+    # If the ENTIRE input is just an HTTPS URL (or markdown link), treat as custom_url
+    if url_found and (
+        txt.lower().startswith("https://")
+        or txt.startswith("[https://")
+        or len(parts) == 1
+    ):
+        return {"kind": "custom_url", "url": url_found}
+
+    # 4) Ngrok authtoken (+ optional static domain as 2nd token)
+    if parts and len(parts[0]) >= 20 and not parts[0].lower().startswith(("http://", "https://")):
+        tok = parts[0]
+        dom = ""
+        if len(parts) >= 2:
+            dom = parts[1].replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
+        return {"kind": "ngrok_token", "token": tok, "domain": dom}
+
+    # 5) Short standalone token (e.g. Pinggy token without prefix)
+    if len(parts) == 1 and 8 <= len(parts[0]) < 20 and re.fullmatch(r"[A-Za-z0-9_-]+", parts[0]):
+        return {"kind": "pinggy_token", "token": parts[0]}
+
+    if url_found:
+        return {"kind": "custom_url", "url": url_found}
+
+    if "http://" in txt.lower():
+        return {"kind": "http_not_https", "error": "تيليجرام يقبل روابط https:// فقط (http:// مرفوض رسمياً من تيليجرام)"}
+
+    return {"kind": "invalid", "error": "لم يتم التعرف على الصيغة — أرسل رابط https:// أو توكن Cloudflare / Ngrok / Pinggy"}
+
+
 def is_proxy_frontdoor_url(url: str) -> bool:
-    """True when custom URL is a Cloudflare Worker / reverse-proxy front door that needs the local tunnel alive behind it."""
+    """True when custom URL needs the local tunnel kept alive behind it (e.g. Cloudflare Worker / Named Tunnel / Ngrok)."""
     u = (url or "").strip().lower()
     if not u.startswith("https://"):
         return False
     if ".workers.dev" in u or ".pages.dev" in u:
         return True
-    return bool(get_ngrok_token() and get_ngrok_domain())
+    return bool(get_cf_tunnel_token() or get_ngrok_token() or get_pinggy_token())
 
 
 def build_cloudflare_worker_code(origin_url: str = "") -> str:
@@ -434,6 +532,78 @@ async def _try_spawn_provider(
     return url, ""
 
 
+async def _try_spawn_cf_named_tunnel(
+    bin_path: Path,
+    cf_token: str,
+    target_port: int,
+    timeout: float,
+) -> tuple[str | None, str]:
+    """Start a Cloudflare Zero Trust permanent Named Tunnel (`cloudflared tunnel run --token ...`)."""
+    global _PROC
+    await stop_tunnel()
+    cmd = [
+        str(bin_path),
+        "tunnel",
+        "--no-autoupdate",
+        "--edge-ip-version",
+        "4",
+        "--protocol",
+        "http2",
+        "run",
+        "--token",
+        cf_token,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        return None, f"Cloudflare-Token: تعذر التشغيل ({type(exc).__name__})"
+
+    _PROC = proc
+    _STATE["pid"] = proc.pid or 0
+    _STATE["port"] = target_port
+    _STATE["provider"] = "Cloudflare-Token"
+
+    loop = asyncio.get_running_loop()
+    dummy_url_fut: asyncio.Future = loop.create_future()
+    reg_fut: asyncio.Future = loop.create_future()
+    readers = []
+    if proc.stderr:
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stderr, _TRYCF_RE, dummy_url_fut, reg_fut, "CF-Token")))
+    if proc.stdout:
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stdout, _TRYCF_RE, dummy_url_fut, reg_fut, "CF-Token")))
+    _READERS.extend(readers)
+
+    try:
+        await asyncio.wait_for(reg_fut, timeout=min(timeout, 20.0))
+    except asyncio.TimeoutError:
+        await stop_tunnel()
+        return None, "Cloudflare-Token: انتهت المهلة (قد يكون بورت 7844 محجوباً على الاستضافة)"
+
+    if proc.returncode is not None:
+        await stop_tunnel()
+        return None, f"Cloudflare-Token: توقف مبكر (code={proc.returncode})"
+
+    try:
+        custom_db = (db.get_setting("webapp_custom_url", "") or "").strip().rstrip("/")
+    except Exception:
+        custom_db = ""
+    live_url = custom_db if custom_db.lower().startswith("https://") else (config.WEBAPP_URL or "")
+    _STATE["active"] = True
+    _STATE["verified"] = True
+    _STATE["url"] = live_url or "cloudflare-named-tunnel"
+    _STATE["provider"] = "Cloudflare-Token"
+    _STATE["last_error"] = ""
+    if live_url:
+        config.set_runtime_webapp_url(live_url, source="worker_proxy")
+    log.info("WEBAPP TUNNEL READY [Cloudflare-Token]: %s -> http://127.0.0.1:%s", _STATE["url"], target_port)
+    return _STATE["url"], ""
+
+
 async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: bool = True) -> str | None:
     """Start a verified free HTTPS tunnel pointing to `http://127.0.0.1:<port>`."""
     async with _get_lock():
@@ -447,6 +617,18 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
 
         _LOGS.clear()
         errors: list[str] = []
+
+        # 0) Cloudflare Zero Trust Named Tunnel Token (if configured — 100% free forever, zero warnings!)
+        cf_tok = await asyncio.to_thread(get_cf_tunnel_token)
+        if cf_tok:
+            cf_bin = await asyncio.to_thread(ensure_cloudflared_binary)
+            if cf_bin:
+                url, err = await _try_spawn_cf_named_tunnel(cf_bin, cf_tok, target_port, timeout)
+                if url:
+                    return url
+                errors.append(err)
+            else:
+                errors.append("Cloudflare-Token: تعذر تحميل cloudflared")
 
         # 1) PRIORITY: Ngrok v3 over PURE TLS port 443 (with optional free permanent --domain)
         ngrok_tok = await asyncio.to_thread(get_ngrok_token)
@@ -482,8 +664,39 @@ async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: b
             else:
                 errors.append("Ngrok-443: تعذر تحميل أداة ngrok")
 
-        # 2) Zero-account SSH HTTPS tunnels on TCP port 443 (Serveo & LocalhostRun FIRST — NO warning screen!)
+        # 2) Authenticated Pinggy Token on TCP port 443 (if configured)
         ssh_bin = shutil.which("ssh")
+        pinggy_tok = await asyncio.to_thread(get_pinggy_token)
+        if ssh_bin and pinggy_tok:
+            ssh_tok_cmd = [
+                ssh_bin, "-T",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PreferredAuthentications=none,keyboard-interactive,password",
+                "-o", "NumberOfPasswordPrompts=0",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-o", "ConnectTimeout=10",
+                "-o", "ExitOnForwardFailure=yes",
+                "-p", "443",
+                "-R", f"0:127.0.0.1:{target_port}",
+                f"{pinggy_tok}@a.pinggy.io",
+            ]
+            url, err = await _try_spawn_provider(
+                "Pinggy-Token-443",
+                ssh_tok_cmd,
+                _PINGGY_RE,
+                require_cf_register=False,
+                target_port=target_port,
+                timeout=min(timeout, 18.0),
+                verify=verify,
+            )
+            if url:
+                return url
+            errors.append(err)
+
+        # 3) Zero-account SSH HTTPS tunnels on TCP port 443 (Serveo & LocalhostRun FIRST — NO warning screen!)
         if ssh_bin:
             ssh_base = [
                 ssh_bin,

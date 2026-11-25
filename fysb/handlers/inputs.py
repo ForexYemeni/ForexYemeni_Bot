@@ -337,129 +337,123 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         return True
 
     # ---------- v7.2.2 Admin: Ngrok-443 Authtoken & Custom HTTPS WebApp URL ----------
-    if ud.pop("awaiting_ngrok_token", False):
-        raw_ng = text.strip()
+    if ud.pop("awaiting_ngrok_token", False) or ud.pop("awaiting_webapp_url", False):
         from fysb.handlers import background as _bg
         from fysb.ui import keyboards as kb_ui
         from fysb.webapp import server as _wsrv
         from fysb.webapp import tunnel as _tun
-        if raw_ng.lower() in ("clear", "off", "delete", "مسح"):
+
+        parsed_in = _tun.detect_and_parse_tunnel_input(text)
+        kind = parsed_in.get("kind")
+
+        if kind == "clear":
+            await afn.run(db.set_setting, "webapp_custom_url", "")
             await afn.run(db.set_setting, "ngrok_authtoken", "")
             await afn.run(db.set_setting, "ngrok_domain", "")
+            await afn.run(db.set_setting, "cf_tunnel_token", "")
+            await afn.run(db.set_setting, "pinggy_token", "")
             await _tun.stop_tunnel()
+            config.set_runtime_webapp_url("", source="")
             await update.effective_message.reply_text(
-                "✅ تمت إزالة توكن ودومين Ngrok.",
+                "✅ تمت إزالة الرابط المخصص وجميع توكنات الأنفاق والعودة للوضع التلقائي.",
                 reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
             )
             return True
-        parts_ng = [p.strip() for p in raw_ng.replace("|", " ").split() if p.strip()]
-        tok = parts_ng[0] if parts_ng else ""
-        dom = ""
-        if len(parts_ng) >= 2:
-            dom = parts_ng[1].replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
-        if len(tok) < 20:
-            ud["awaiting_ngrok_token"] = True
+
+        if kind == "custom_url":
+            u_txt = parsed_in["url"]
+            is_frontdoor = await afn.run(_tun.is_proxy_frontdoor_url, u_txt)
+            # ALWAYS save & activate the Admin's chosen HTTPS URL immediately!
+            await afn.run(db.set_setting, "webapp_custom_url", u_txt)
+            if not is_frontdoor:
+                await _tun.stop_tunnel()
+                config.set_runtime_webapp_url(u_txt, source="db_custom")
+            else:
+                # Keep backend Ngrok / Cloudflare / Pinggy tunnel ALIVE behind Worker/Proxy!
+                config.set_runtime_webapp_url(u_txt, source="worker_proxy")
+            await afn.run(audit_log.log, uid, f"webapp_custom_url:{u_txt}")
+
+            # Non-blocking honest live health check so Admin sees immediate status
+            ok_live, diag_msg = await _tun.verify_https_health(u_txt, retries=1, delay=0.5)
+            cur_origin = _tun.tunnel_status().get("url") or ""
+            origin_note = f"\n▎🛰 النفق الخلفي النشط: <code>{esc(cur_origin)}</code>" if cur_origin.startswith("https://") else ""
+            if ok_live:
+                status_line = "▎🟢 الفحص الحي (/health): <b>HTTP 200 — جاهز ويعمل 100%!</b>"
+            else:
+                status_line = (
+                    f"▎🟡 حالة الفحص الحي حالياً: <b>{esc(diag_msg)}</b>\n"
+                    "▎💡 إذا كان هذا رابط Cloudflare Worker ولم تلصق كود البروكسي بعد، اضغط <b>«☁️ كود Cloudflare Worker»</b>."
+                )
             await update.effective_message.reply_text(
-                "❌ صيغة التوكن غير صحيحة — أرسل <code>AUTHTOKEN</code> أو <code>AUTHTOKEN your-static.ngrok-free.app</code>.",
-                parse_mode="HTML",
-            )
-            return True
-        await afn.run(db.set_setting, "ngrok_authtoken", tok)
-        if dom:
-            await afn.run(db.set_setting, "ngrok_domain", dom)
-        await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
-        await afn.run(audit_log.log, uid, f"ngrok_authtoken_set:dom={dom or 'auto'}")
-        await update.effective_message.reply_text("⏳ جاري تشغيل Ngrok على بورت 443 والتحقق الحي من التطبيق (10-20 ثانية)...")
-        if getattr(_bg.post_init, "_webapp_srv", None) is None:
-            _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
-        await _tun.stop_tunnel()
-        url = await _tun.start_tunnel(port=config.WEBAPP_PORT, timeout=35.0)
-        if url:
-            show_url = config.WEBAPP_URL or url
-            dom_note = f"\n▎📌 الدومين الثابت: <code>{esc(dom)}</code>" if dom else ""
-            await update.effective_message.reply_text(
-                "🎉 <b><u>تم تشغيل التطبيق المصغّر ولوحة الإدارة عبر Ngrok-443 بنجاح!</u></b>\n"
-                f"<blockquote>▎🟢 رابط الخلفية (Ngrok): <code>{esc(url)}</code>{dom_note}\n"
-                f"▎🌐 الرابط الفعّال للتطبيق: <code>{esc(show_url)}</code>\n"
-                "▎💡 لإخفاء رسالة تحذير Ngrok نهائياً مجاناً مدى الحياة، اضغط زر <b>«☁️ كود Cloudflare Worker»</b> بالأسفل!</blockquote>",
+                f"✅ <b><u>تم حفظ وتفعيل رابط التطبيق المصغّر بنجاح!</u></b>\n"
+                f"<blockquote>▎🔗 <code>{esc(u_txt)}</code>{origin_note}\n{status_line}</blockquote>",
                 reply_markup=kb_ui.admin_nav([
-                    [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{show_url}/admin", style="success")],
-                    [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{show_url}/", style="primary")],
-                    [kb_ui.btn("☁️ كود Cloudflare Worker (إلغاء التحذير)", "a:webapp_worker", style="success")],
+                    [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{u_txt}/admin", style="success")],
+                    [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{u_txt}/", style="primary")],
+                    [kb_ui.btn("☁️ كود Cloudflare Worker", "a:webapp_worker", style="primary")],
                     [kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")],
                 ]),
                 parse_mode="HTML",
             )
-        else:
-            err = _tun.tunnel_status().get("last_error") or "تعذر تشغيل Ngrok"
-            await update.effective_message.reply_text(
-                f"⚠️ تم حفظ التوكن لكن فشل البدء الفوري:\n<code>{esc(err)}</code>",
-                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
-                parse_mode="HTML",
-            )
-        return True
+            return True
 
-    if ud.pop("awaiting_webapp_url", False):
-        u_txt = text.strip().rstrip("/")
-        from fysb.ui import keyboards as kb_ui
-        from fysb.webapp import tunnel as _tun
-        if u_txt.lower() in ("clear", "off", "delete", "مسح"):
-            await afn.run(db.set_setting, "webapp_custom_url", "")
-            cur_tun = _tun.tunnel_status().get("url") or ""
-            config.set_runtime_webapp_url(cur_tun, source="auto_tunnel" if cur_tun else "")
+        if kind in ("cloudflare_token", "ngrok_token", "pinggy_token"):
+            if kind == "cloudflare_token":
+                await afn.run(db.set_setting, "cf_tunnel_token", parsed_in["token"])
+                if parsed_in.get("url"):
+                    await afn.run(db.set_setting, "webapp_custom_url", parsed_in["url"])
+                    config.set_runtime_webapp_url(parsed_in["url"], source="worker_proxy")
+                lbl = "☁️ Cloudflare Zero Trust Tunnel"
+                await afn.run(audit_log.log, uid, "cf_tunnel_token_set")
+            elif kind == "ngrok_token":
+                await afn.run(db.set_setting, "ngrok_authtoken", parsed_in["token"])
+                if parsed_in.get("domain"):
+                    await afn.run(db.set_setting, "ngrok_domain", parsed_in["domain"])
+                lbl = "🔑 Ngrok-443" + (f" ({parsed_in['domain']})" if parsed_in.get("domain") else "")
+                await afn.run(audit_log.log, uid, f"ngrok_authtoken_set:dom={parsed_in.get('domain') or 'auto'}")
+            else:
+                await afn.run(db.set_setting, "pinggy_token", parsed_in["token"])
+                lbl = "⚡ Pinggy-443 Token"
+                await afn.run(audit_log.log, uid, "pinggy_token_set")
+
+            await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
             await update.effective_message.reply_text(
-                "✅ تمت إزالة الرابط المخصص والعودة للوضع التلقائي.",
-                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
-            )
-            return True
-        if not u_txt.lower().startswith("https://"):
-            ud["awaiting_webapp_url"] = True
-            await update.effective_message.reply_text(
-                "❌ يجب أن يبدأ الرابط بـ <code>https://</code> (متطلب رسمي من تيليجرام — روابط <code>http://</code> مرفوضة).",
+                f"⏳ تم حفظ توكن <b>{esc(lbl)}</b> — جاري التشغيل والتحقق الحي (10-20 ثانية)...",
                 parse_mode="HTML",
             )
-            return True
-        # Live verification BEFORE activating so empty Workers ("Hello World!") are caught immediately!
-        ok_live, diag_msg = await _tun.verify_https_health(u_txt, retries=2, delay=1.0)
-        is_frontdoor = await afn.run(_tun.is_proxy_frontdoor_url, u_txt)
-        if not ok_live:
-            ud["awaiting_webapp_url"] = True
-            cur_origin = _tun.tunnel_status().get("url") or ""
-            hint_origin = f"\n▎🛰 رابط النفق الخلفي الحالي: <code>{esc(cur_origin)}</code>" if cur_origin else ""
-            await update.effective_message.reply_text(
-                "⚠️ <b><u>الرابط لم يمر بالفحص الحي (/health) — لم يُعتمد بعد!</u></b>\n"
-                "<blockquote>"
-                f"▎🔗 الرابط المُدخل: <code>{esc(u_txt)}</code>\n"
-                f"▎❌ السبب المكتشف حياً: <b>{esc(diag_msg)}</b>{hint_origin}\n"
-                "▎💡 إذا كان هذا رابط Cloudflare Worker، اضغط <b>«☁️ كود Cloudflare Worker»</b> لنسخ كود البروكسي الجاهز ولصقه في Worker ثم أعد إرسال الرابط هنا."
-                "</blockquote>",
-                reply_markup=kb_ui.admin_nav([
-                    [kb_ui.btn("☁️ كود Cloudflare Worker الجاهز", "a:webapp_worker", style="success")],
-                    [kb_ui.btn("❌ إلغاء", "a:webapp", style="danger")],
-                ]),
-                parse_mode="HTML",
-            )
-            return True
-        await afn.run(db.set_setting, "webapp_custom_url", u_txt)
-        if not is_frontdoor:
+            if getattr(_bg.post_init, "_webapp_srv", None) is None:
+                _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
             await _tun.stop_tunnel()
-            config.set_runtime_webapp_url(u_txt, source="db_custom")
-        else:
-            # Keep the backend Ngrok/SSH tunnel ALIVE for Cloudflare Worker front-door!
-            config.set_runtime_webapp_url(u_txt, source="worker_proxy")
-        await afn.run(audit_log.log, uid, f"webapp_custom_url:{u_txt}")
-        mode_note = (
-            "▎☁️ <b>وضع واجهة Cloudflare Worker نشط</b> — النفق الخلفي يبقى يعمل بصمت وبدون أي رسالة تحذير!"
-            if is_frontdoor
-            else "▎🔗 تم الفحص الحي (HTTP 200 ✅)."
-        )
+            url = await _tun.start_tunnel(port=config.WEBAPP_PORT, timeout=35.0)
+            show_url = config.WEBAPP_URL or (url if (url or "").startswith("https://") else "")
+            if url:
+                rows_ok = []
+                if show_url:
+                    rows_ok.append([kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{show_url}/admin", style="success")])
+                    rows_ok.append([kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{show_url}/", style="primary")])
+                rows_ok.append([kb_ui.btn("☁️ كود Cloudflare Worker (إلغاء التحذير)", "a:webapp_worker", style="success")])
+                rows_ok.append([kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")])
+                await update.effective_message.reply_text(
+                    f"🎉 <b><u>تم تشغيل {esc(lbl)} بنجاح!</u></b>\n"
+                    f"<blockquote>▎🛰 النفق الخلفي: <code>{esc(url)}</code>\n"
+                    f"▎🌐 الرابط الفعّال: <code>{esc(show_url or 'أضف رابط الدومين عبر 🔗 لصق أي رابط HTTPS')}</code></blockquote>",
+                    reply_markup=kb_ui.admin_nav(rows_ok),
+                    parse_mode="HTML",
+                )
+            else:
+                err = _tun.tunnel_status().get("last_error") or "تعذر التشغيل الفوري"
+                await update.effective_message.reply_text(
+                    f"⚠️ تم حفظ توكن <b>{esc(lbl)}</b> لكن فشل البدء الفوري:\n<code>{esc(err)}</code>",
+                    reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
+                    parse_mode="HTML",
+                )
+            return True
+
+        # Invalid / http:// input — keep prompt active with clear guidance
+        ud["awaiting_webapp_url"] = True
         await update.effective_message.reply_text(
-            f"✅ <b><u>تم فحص وتفعيل رابط التطبيق المصغّر بنجاح (HTTP 200)!</u></b>\n"
-            f"<blockquote>▎🔗 <code>{esc(u_txt)}</code>\n{mode_note}</blockquote>",
-            reply_markup=kb_ui.admin_nav([
-                [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{u_txt}/admin", style="success")],
-                [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{u_txt}/", style="primary")],
-            ]),
+            f"❌ {esc(parsed_in.get('error') or 'صيغة غير صالحة')}\n"
+            "<i>أرسل رابط <code>https://...</code> أو توكن Cloudflare / Ngrok / Pinggy، أو أرسل <code>clear</code> للإزالة.</i>",
             parse_mode="HTML",
         )
         return True

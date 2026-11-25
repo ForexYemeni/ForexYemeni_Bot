@@ -383,8 +383,14 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
     </div>
   </div>
 
-  <!-- PANE 2: LIVE DEMO TRADING DECK (v7.5.0 — Synced with Telegram Bot Demo Account) -->
+  <!-- PANE 2: LIVE DEMO TRADING DECK + v7.7.0 ROYAL AUTO-BRIDGE (Broker Demo & Live) -->
   <div id="pane-demo" class="pane">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:11px">
+      <button class="btn gold" id="subDemoBtn" onclick="switchDemoSub('internal')">🎮 التجريبي الداخلي</button>
+      <button class="btn ghost" id="subBridgeBtn" onclick="switchDemoSub('bridge')">⚡ نسخ المنصات (Demo/Live)</button>
+    </div>
+
+    <div id="demoInternalSub">
     <div class="hero">
       <div class="hero-top">
         <div>
@@ -417,6 +423,64 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
     <div class="card">
       <div class="card-hdr"><h3>📜 أحدث الصفقات التجريبية المغلقة</h3></div>
       <div id="demoClosedList"><div class="empty">لا يوجد سجل صفقات مغلقة بعد.</div></div>
+    </div>
+    </div>
+
+    <!-- v7.7.0 ROYAL AUTO-BRIDGE (Broker Demo & Live — 100% Free) -->
+    <div id="demoBridgeSub" style="display:none">
+      <div class="hero">
+        <div class="hero-top">
+          <div>
+            <div class="hero-title">⚡ جسر النسخ الملكي المجاني 100% (من الهاتف)</div>
+            <div class="hero-plan" style="font-size:18px">Broker Demo &amp; Live Copier</div>
+          </div>
+          <button class="btn ghost" style="flex:0;padding:6px 10px" onclick="loadBridgeOverview(true)">🔄</button>
+        </div>
+        <div id="bridgeEligibilityBox" style="margin-top:8px;padding:9px 11px;border-radius:12px;background:rgba(15,21,36,.75);border:1px solid var(--border);font-size:11.5px">⏳ جارٍ فحص صلاحية النسخ الآلي...</div>
+      </div>
+
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>🔗 ربط حساب وسيط جديد (مشفّر AES)</h3>
+          <span class="badge b-gold">مجاني 100%</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:9px">
+          <button class="btn gold" id="bp_tradelocker" onclick="selectBridgePlatform('tradelocker')">⚡ TradeLocker 📱</button>
+          <button class="btn ghost" id="bp_deriv" onclick="selectBridgePlatform('deriv')">🔥 Deriv 📱</button>
+          <button class="btn ghost" id="bp_ctrader" onclick="selectBridgePlatform('ctrader')">👑 cTrader 📱</button>
+          <button class="btn ghost" id="bp_mt5_bridge" onclick="selectBridgePlatform('mt5_bridge')">🖥 MT5 Bridge EA</button>
+        </div>
+        <div id="bridgePlatDesc" style="font-size:11px;color:var(--muted);margin-bottom:9px">نسخ سحابي مباشر لحسابات Demo و Live في شركات التمويل والوسطاء من الهاتف 100%.</div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px">
+          <button class="btn green" id="bm_DEMO" onclick="selectBridgeMode('DEMO')">🧪 تجريبي Demo (آمن)</button>
+          <button class="btn ghost" id="bm_LIVE" onclick="selectBridgeMode('LIVE')">💎 حقيقي Live</button>
+        </div>
+
+        <div id="bridgeCredFields" style="display:flex;flex-direction:column;gap:7px;margin-bottom:10px"></div>
+
+        <div class="grid2" style="margin-bottom:9px">
+          <div class="field"><label>المخاطرة (% لكل صفقة)</label><input id="brRisk" type="number" step="0.25" value="1"/></div>
+          <div class="field"><label>درع الخسارة اليومية (%)</label><input id="brDd" type="number" step="0.5" value="3"/></div>
+          <div class="field"><label>أقصى صفقات مفتوحة</label><input id="brMaxOpen" type="number" value="3"/></div>
+          <div class="field"><label>الأسواق (ALL أو XAUUSD)</label><input id="brMarkets" value="ALL"/></div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px;cursor:pointer">
+          <input type="checkbox" id="brPartialBe" checked style="width:auto"/>
+          <span>🛡 تفعيل إغلاق 50% تلقائياً عند TP1 + نقل الوقف للدخول (BE)</span>
+        </label>
+        <button class="btn gold" style="width:100%;padding:11px" onclick="saveBridgeConnection()">🔐 حفظ وربط الحساب مشفّراً الآن</button>
+      </div>
+
+      <div class="card gold-edge">
+        <div class="card-hdr"><h3>🔌 حساباتي المربوطة للنسخ</h3><span class="badge b-gold" id="brConnCnt">0</span></div>
+        <div id="bridgeConnsBox"><div class="empty">لم تربط أي حساب وسيط بعد — ابدأ بحساب Demo مجاني أعلاه!</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr"><h3>📜 سجل أوامر النسخ الآلي</h3></div>
+        <div id="bridgeOrdersBox"><div class="empty">لا توجد أوامر نسخ منفّذة بعد.</div></div>
+      </div>
     </div>
   </div>
 
@@ -1170,6 +1234,162 @@ function closeShareModal(){{
   if(m) m.style.display = 'none';
 }}
 
+// --- v7.7.0 USER ROYAL AUTO-BRIDGE JS ---
+let curBridgePlat = 'tradelocker';
+let curBridgeMode = 'DEMO';
+const BRIDGE_PLAT_META = {{
+  tradelocker: {{desc:'⚡ نسخ سحابي مباشر لحسابات TradeLocker (Demo و Live) من الهاتف 100% — مناسب لشركات التمويل.', fields:[
+    ['email','البريد الإلكتروني في TradeLocker','email'],
+    ['password','كلمة المرور (تُشفّر فوراً بـ AES)','password'],
+    ['server','اسم السيرفر (مثال: FundedNext-Demo)','text'],
+    ['account_id','رقم الحساب Account ID (اختياري)','text'],
+  ]}},
+  deriv: {{desc:'🔥 نسخ فوري للذهب والفوركس والمؤشرات عبر Deriv API Token الرسمي (حساب Demo $10,000 أو Live).', fields:[
+    ['api_token','Deriv API Token (بصلاحية Trade)','password'],
+    ['app_id','App ID (اتركه 1089 افتراضياً)','text'],
+  ]}},
+  ctrader: {{desc:'👑 ربط cTrader Open API لحسابات Demo و Live من الهاتف (IC Markets · Pepperstone · FTMO · FxPro).', fields:[
+    ['access_token','cTrader Access Token','password'],
+    ['account_id','رقم حساب cTrader (Account ID)','text'],
+    ['broker_name','اسم الوسيط (مثال: IC Markets)','text'],
+  ]}},
+  mt5_bridge: {{desc:'🖥 يولّد لك مفتاح جسر مشفّر + ملف ForexYemeni_Bridge.mq5 جاهز للتحميل بضغطة لحسابات MT5 Demo و Live مجاناً 100%.', fields:[
+    ['symbol_suffix','لاحقة الرموز لدى الوسيط إن وجدت (مثال: m أو .raw أو اتركها فارغة)','text'],
+  ]}},
+}};
+
+function switchDemoSub(which){{
+  const isBr = which === 'bridge';
+  document.getElementById('demoInternalSub').style.display = isBr ? 'none' : 'block';
+  document.getElementById('demoBridgeSub').style.display = isBr ? 'block' : 'none';
+  document.getElementById('subDemoBtn').className = isBr ? 'btn ghost' : 'btn gold';
+  document.getElementById('subBridgeBtn').className = isBr ? 'btn gold' : 'btn ghost';
+  if(isBr){{
+    selectBridgePlatform(curBridgePlat);
+    loadBridgeOverview(false);
+  }}
+}}
+
+function selectBridgePlatform(p){{
+  curBridgePlat = p;
+  ['tradelocker','deriv','ctrader','mt5_bridge'].forEach(k => {{
+    const el = document.getElementById('bp_' + k);
+    if(el) el.className = (k === p) ? 'btn gold' : 'btn ghost';
+  }});
+  const m = BRIDGE_PLAT_META[p] || BRIDGE_PLAT_META.tradelocker;
+  document.getElementById('bridgePlatDesc').textContent = m.desc;
+  document.getElementById('bridgeCredFields').innerHTML = m.fields.map(([k,ph,tp]) =>
+    `<input id="bc_${{k}}" type="${{tp}}" placeholder="${{ph}}" style="width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-family:var(--mono);font-size:12px"/>`
+  ).join('');
+}}
+
+function selectBridgeMode(mode){{
+  curBridgeMode = mode;
+  document.getElementById('bm_DEMO').className = mode === 'DEMO' ? 'btn green' : 'btn ghost';
+  document.getElementById('bm_LIVE').className = mode === 'LIVE' ? 'btn gold' : 'btn ghost';
+}}
+
+async function loadBridgeOverview(showToast=false){{
+  const r = await api('/api/bridge/overview');
+  if(!r || !r.ok) return;
+  const eb = document.getElementById('bridgeEligibilityBox');
+  if(eb){{
+    eb.innerHTML = (r.can_copy_demo
+      ? `<div style="color:var(--green);font-weight:800">🟢 النسخ التجريبي (Broker Demo): متاح — ${{r.reason_demo}}</div>`
+      : `<div style="color:var(--red);font-weight:800">🔴 النسخ التجريبي (Broker Demo): ${{r.reason_demo}}</div>`)
+      + (r.can_copy_live
+      ? `<div style="color:var(--gold2);font-size:11px;margin-top:3px">💎 النسخ الحقيقي (Live): متاح</div>`
+      : `<div style="color:var(--muted);font-size:11px;margin-top:3px">🔒 النسخ الحقيقي (Live): ${{r.reason_live}}</div>`);
+  }}
+  const conns = r.connections || [];
+  document.getElementById('brConnCnt').textContent = conns.length;
+  const cBox = document.getElementById('bridgeConnsBox');
+  cBox.innerHTML = conns.length ? conns.map(c => `
+    <div class="demo-pos-card ${{c.enabled && !c.admin_frozen ? 'profit' : 'loss'}}">
+      <div class="sig-top" style="margin-bottom:6px">
+        <div>
+          <div class="sig-sym">${{c.platform_name}} <span class="badge ${{c.account_mode==='DEMO'?'b-buy':'b-gold'}}">${{c.account_mode}}</span></div>
+          <div class="sig-meta">الحالة: <b>${{c.admin_frozen?'❄️ مجمّد من الإدارة':(c.enabled?c.last_status:'⏸ متوقف')}}</b> · الرصيد: <b>$${{(+(c.last_balance||0)).toLocaleString()}}</b></div>
+          <div class="sig-meta">⚖️ مخاطرة ${{c.risk_pct}}% · 🛡 درع DD ${{c.max_daily_dd_pct}}% · 🌐 ${{c.markets}}</div>
+          ${{c.bridge_key ? `<div class="sig-meta" style="color:var(--gold2);word-break:break-all">🔑 Key: <code>${{c.bridge_key}}</code></div>` : ''}}
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" onclick="testBridgeConn(${{c.id}})">🔍 فحص</button>
+        ${{c.platform==='mt5_bridge' ? `<button class="btn gold" onclick="downloadMt5Ea(${{c.id}})">⬇️ تحميل EA</button>` : ''}}
+        <button class="btn ${{c.enabled?'ghost':'green'}}" onclick="toggleBridgeConn(${{c.id}})">${{c.enabled?'⏸ إيقاف':'▶️ تشغيل'}}</button>
+        <button class="btn red" style="flex:0;padding:8px 10px" onclick="deleteBridgeConn(${{c.id}})">🗑</button>
+      </div>
+    </div>`).join('') : '<div class="empty">لم تربط أي حساب وسيط بعد — اختر منصتك واضغط حفظ أعلاه!</div>';
+
+  const ords = r.orders || [];
+  const oBox = document.getElementById('bridgeOrdersBox');
+  oBox.innerHTML = ords.length ? ords.map(o => `
+    <div class="news-item">
+      <div><b>${{o.symbol}}</b> <span class="badge ${{o.direction==='BUY'?'b-buy':'b-sell'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}}</span>
+        <div style="font-size:10.5px;color:var(--muted)">${{o.platform}} (${{o.account_mode}}) · ${{o.lots}} لوت · ${{o.detail||''}}</div>
+      </div>
+      <span class="badge b-status">${{o.status}}</span>
+    </div>`).join('') : '<div class="empty">لا توجد أوامر نسخ بعد.</div>';
+  if(showToast) toast('✅ تم تحديث حالة جسر النسخ الملكي');
+}}
+
+async function saveBridgeConnection(){{
+  const m = BRIDGE_PLAT_META[curBridgePlat] || {{fields:[]}};
+  const creds = {{}};
+  m.fields.forEach(([k]) => {{
+    const el = document.getElementById('bc_' + k);
+    if(el && el.value.trim()) creds[k] = el.value.trim();
+  }});
+  const r = await api('/api/bridge/connect', {{method:'POST', body:JSON.stringify({{
+    platform: curBridgePlat,
+    account_mode: curBridgeMode,
+    creds,
+    risk_pct: +document.getElementById('brRisk').value || 1,
+    max_daily_dd_pct: +document.getElementById('brDd').value || 3,
+    max_open_trades: +document.getElementById('brMaxOpen').value || 3,
+    markets: document.getElementById('brMarkets').value || 'ALL',
+    partial_tp_be: !!document.getElementById('brPartialBe').checked,
+    symbol_suffix: creds.symbol_suffix || '',
+  }})}});
+  if(r && r.ok){{
+    toast('🔐 تم ربط الحساب وتشفيره بنجاح!');
+    loadBridgeOverview(false);
+  }} else toast((r && r.error) || 'تعذر حفظ الربط', true);
+}}
+
+async function testBridgeConn(id){{
+  toast('🔍 جارٍ فحص الاتصال والرصيد الحقيقي...');
+  const r = await api('/api/bridge/test', {{method:'POST', body:JSON.stringify({{connection_id:id}})}});
+  toast((r && (r.message || r.error)) || 'اكتمل الفحص', !(r && r.ok));
+  loadBridgeOverview(false);
+}}
+async function toggleBridgeConn(id){{
+  const r = await api('/api/bridge/toggle', {{method:'POST', body:JSON.stringify({{connection_id:id}})}});
+  toast(r && r.ok ? (r.enabled ? '▶️ تم تشغيل النسخ' : '⏸ تم إيقاف النسخ مؤقتاً') : 'خطأ', !(r && r.ok));
+  loadBridgeOverview(false);
+}}
+async function deleteBridgeConn(id){{
+  const r = await api('/api/bridge/delete', {{method:'POST', body:JSON.stringify({{connection_id:id}})}});
+  toast(r && r.ok ? '🗑 تم حذف الربط' : 'خطأ', !(r && r.ok));
+  loadBridgeOverview(false);
+}}
+async function downloadMt5Ea(id){{
+  try{{
+    const res = await fetch(API_BASE + '/api/bridge/ea-download?id=' + id, {{
+      headers: {{'X-Telegram-Init-Data': INIT_DATA, 'ngrok-skip-browser-warning': 'true'}}
+    }});
+    if(!res.ok) return toast('تعذر تحميل ملف EA', true);
+    const txt = await res.text();
+    const blob = new Blob([txt], {{type:'text/plain;charset=utf-8'}});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'ForexYemeni_Bridge.mq5';
+    document.body.appendChild(a); a.click(); a.remove();
+    toast('⬇️ تم تنزيل ForexYemeni_Bridge.mq5 المجهّز بمفتاحك!');
+  }} catch(_e){{ toast('تعذر التحميل', true); }}
+}}
+
 async function logJournal(sid, action){{
   const r = await api('/api/journal', {{method:'POST', body:JSON.stringify({{signal_id:sid, action}})}});
   toast(r.ok ? '✅ تم تسجيل قرارك في مفكرة التداول الملكية' : (r.error||'خطأ'), !r.ok);
@@ -1576,6 +1796,29 @@ input:focus,select:focus{{border-color:var(--gold)}}
         <div style="margin-top:11px">
           <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الفاخرة الآن</button>
         </div>
+      </div>
+
+      <!-- v7.7.0 ROYAL AUTO-BRIDGE GOVERNANCE STUDIO (OFF / ALL / PLANS / SELECTED + Per-User Overrides) -->
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>⚡ سياسة وحوكمة جسر النسخ الآلي (Demo &amp; Live)</h3>
+          <span class="pill cyan" id="brModePill">PLANS</span>
+        </div>
+        <div style="font-size:11.5px;color:var(--muted);margin-bottom:9px">تحكّم كامل بضغطة: إيقاف كلي · فتح للجميع · حصر على باقات · أو أعضاء محددون فقط (ويمكنك السماح/المنع لأي عضو من صفحة «👥 الأعضاء»).</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:9px">
+          <button class="btn off" id="brm_OFF" onclick="setBridgePolicyMode('OFF')">🛑 إيقاف كلي للجميع</button>
+          <button class="btn off" id="brm_ALL" onclick="setBridgePolicyMode('ALL')">🌐 مفتوح للجميع</button>
+          <button class="btn off" id="brm_PLANS" onclick="setBridgePolicyMode('PLANS')">💎 لباقات محددة</button>
+          <button class="btn off" id="brm_SELECTED" onclick="setBridgePolicyMode('SELECTED')">🎯 أعضاء محددون فقط</button>
+        </div>
+        <div class="row-form">
+          <input id="brAllowedPlans" value="VIP,ROYAL" placeholder="الباقات المسموحة (مثال: VIP,ROYAL)" style="flex:1;min-width:140px"/>
+          <button class="btn gold" style="flex:0;min-width:92px" onclick="saveBridgePlans()">💾 حفظ الباقات</button>
+        </div>
+        <div class="card-hdr" style="margin-top:8px"><h3>🔌 الحسابات المربوطة حالياً</h3><span class="pill" id="admBrConnCnt">0</span></div>
+        <div id="admBridgeConns"><div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div></div>
+        <div class="card-hdr" style="margin-top:10px"><h3>📜 سجل تنفيذ جسر النسخ</h3></div>
+        <div id="admBridgeOrders"><div class="empty">لا توجد أوامر مسجلة بعد.</div></div>
       </div>
     </div>
 
@@ -2023,12 +2266,14 @@ async function loadAdminUsers(){{
     const pBadge = u.plan_code === 'ROYAL' ? '' : (u.plan_code === 'FREE' ? 'cyan' : 'green');
     const expTxt = u.plan_expires ? ` · ينتهي ${{String(u.plan_expires).slice(0,10)}}` : '';
     const unTxt = u.username ? `@${{u.username}}` : `ID:${{u.user_id}}`;
+    const brOv = (u.bridge_override || 'AUTO').toUpperCase();
+    const brPill = brOv === 'ALLOW' ? '<span class="pill green">⚡ نسخ: مسموح</span>' : (brOv === 'DENY' ? '<span class="pill red">🚫 نسخ: ممنوع</span>' : '<span class="pill">⚙️ نسخ: تلقائي</span>');
     return `<div class="sig-card ${{u.is_blocked?'loss':(u.plan_code!=='FREE'?'win':'live')}}">
       <div class="sig-top">
         <div>
-          <div class="sig-sym">${{u.full_name || 'مستخدم'}} <span class="pill ${{pBadge}}">${{u.plan_code}}</span> ${{u.is_blocked?'<span class="pill red">محظور</span>':''}}</div>
+          <div class="sig-sym">${{u.full_name || 'مستخدم'}} <span class="pill ${{pBadge}}">${{u.plan_code}}</span> ${{brPill}} ${{u.is_blocked?'<span class="pill red">محظور</span>':''}}</div>
           <div class="sig-meta">${{unTxt}} · <code>${{u.user_id}}</code>${{expTxt}}</div>
-          <div class="sig-meta">📊 اليوم: ${{u.used_today||0}} إشارة · 💰 مدفوع: $${{u.total_paid_usd||0}} · ${{u.auto_signals?'📡 تلقائي':'🔕 متوقف'}} · ${{u.demo_auto_copy?'🤖 نسخ تجريبي':''}}</div>
+          <div class="sig-meta">📊 اليوم: ${{u.used_today||0}} إشارة · 💰 مدفوع: $${{u.total_paid_usd||0}} · 🔌 جسر: ${{u.bridge_connections||0}} حساب</div>
         </div>
       </div>
       <div class="row-form" style="margin-bottom:7px">
@@ -2040,6 +2285,11 @@ async function loadAdminUsers(){{
         </select>
         <input id="ud_${{u.user_id}}" type="number" value="30" min="1" max="3650" style="width:68px;padding:6px;font-size:11.5px" placeholder="أيام"/>
         <button class="btn gold" style="flex:0;padding:6px 10px" onclick="adminSetUserPlan(${{u.user_id}})">💎 تفعيل</button>
+      </div>
+      <div class="btn-row" style="margin-bottom:6px">
+        <button class="btn ${{brOv==='ALLOW'?'on':'ghost'}}" style="padding:6px 7px;font-size:11px" onclick="setAdminUserBridgeRule(${{u.user_id}},'ALLOW')">⚡ سماح بالنسخ</button>
+        <button class="btn ${{brOv==='DENY'?'danger':'ghost'}}" style="padding:6px 7px;font-size:11px" onclick="setAdminUserBridgeRule(${{u.user_id}},'DENY')">🚫 منع النسخ</button>
+        <button class="btn ghost" style="flex:0;padding:6px 8px;font-size:11px" onclick="setAdminUserBridgeRule(${{u.user_id}},'AUTO')">⚙️ تلقائي</button>
       </div>
       <div class="btn-row">
         <button class="btn ghost" onclick="adminUserAction(${{u.user_id}},'reset_quota')">🔄 تصفير الحصة</button>
@@ -2069,6 +2319,81 @@ async function adminUserAction(user_id, op, extra={{}}){{
     loadAdminUsers();
     if(op === 'set_plan') loadAdmin();
   }} else toast((r && r.error) || 'تعذر تنفيذ الإجراء', true);
+}}
+
+async function setAdminUserBridgeRule(user_id, override_mode){{
+  const r = await api('/api/admin/bridge/user-rule', {{method:'POST', body:JSON.stringify({{user_id, override_mode}})}});
+  if(r && r.ok){{
+    toast(override_mode === 'ALLOW' ? `⚡ تم السماح للعضو ${{user_id}} بالنسخ الآلي` : (override_mode === 'DENY' ? `🚫 تم منع العضو ${{user_id}} من النسخ` : `⚙️ تم إرجاع العضو ${{user_id}} للوضع التلقائي`));
+    loadAdminUsers();
+    loadAdminBridge();
+  }} else toast((r && r.error) || 'خطأ', true);
+}}
+
+async function setBridgePolicyMode(access_mode){{
+  const r = await api('/api/admin/bridge/policy', {{method:'POST', body:JSON.stringify({{access_mode, enabled: access_mode !== 'OFF'}})}});
+  toast(r && r.ok ? `⚡ تم تحديث سياسة النسخ إلى: ${{access_mode}}` : 'خطأ', !(r && r.ok));
+  loadAdminBridge();
+  loadAdmin();
+}}
+
+async function saveBridgePlans(){{
+  const plans = (document.getElementById('brAllowedPlans')?.value || 'VIP,ROYAL').trim();
+  const r = await api('/api/admin/bridge/policy', {{method:'POST', body:JSON.stringify({{allowed_plans: plans}})}});
+  toast(r && r.ok ? '✅ تم حفظ الباقات المسموحة للنسخ' : 'خطأ', !(r && r.ok));
+  loadAdminBridge();
+}}
+
+async function adminBridgeConnOp(connection_id, op){{
+  const r = await api('/api/admin/bridge/connection', {{method:'POST', body:JSON.stringify({{connection_id, op}})}});
+  toast(r && r.ok ? (r.message || '✅ تم تحديث الربط') : ((r && r.error) || 'خطأ'), !(r && r.ok));
+  loadAdminBridge();
+}}
+
+async function loadAdminBridge(){{
+  const r = await api('/api/admin/bridge/overview');
+  if(!r || !r.ok) return;
+  const pol = r.policy || {{}};
+  const mode = pol.access_mode || 'PLANS';
+  const mp = document.getElementById('brModePill');
+  if(mp) mp.textContent = pol.kill_switch ? '🛑 طوارئ متوقف' : (!pol.enabled ? '⏹ متوقف' : mode);
+  ['OFF','ALL','PLANS','SELECTED'].forEach(m => {{
+    const el = document.getElementById('brm_' + m);
+    if(el) el.className = (mode === m ? (m === 'OFF' ? 'btn danger' : 'btn on') : 'btn off');
+  }});
+  const apEl = document.getElementById('brAllowedPlans');
+  if(apEl && Array.isArray(pol.allowed_plans)) apEl.value = pol.allowed_plans.join(',');
+
+  const conns = r.connections || [];
+  const cntEl = document.getElementById('admBrConnCnt');
+  if(cntEl) cntEl.textContent = conns.length;
+  const cBox = document.getElementById('admBridgeConns');
+  if(cBox){{
+    cBox.innerHTML = conns.length ? conns.map(c => `
+      <div class="item">
+        <div>${{c.admin_frozen?'❄️':(c.enabled?'🟢':'⏸')}} <b>${{c.full_name||c.username||('UID '+c.user_id)}}</b>
+          <span class="pill ${{c.account_mode==='DEMO'?'green':'cyan'}}">${{c.platform}} · ${{c.account_mode}}</span>
+          <div style="font-size:11px;color:var(--muted)">UID ${{c.user_id}} · رصيد $${{(+(c.last_balance||0)).toLocaleString()}} · ${{c.last_status}}</div>
+        </div>
+        <div style="display:flex;gap:5px">
+          <button class="btn ghost" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'test')">🔍</button>
+          <button class="btn ${{c.admin_frozen?'on':'danger'}}" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'${{c.admin_frozen?'unfreeze':'freeze'}}')">${{c.admin_frozen?'🔥 فك':'❄️ تجميد'}}</button>
+          <button class="btn danger" style="padding:5px 8px" onclick="adminBridgeConnOp(${{c.id}},'delete')">🗑</button>
+        </div>
+      </div>`).join('') : '<div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div>';
+  }}
+
+  const ords = r.orders || [];
+  const oBox = document.getElementById('admBridgeOrders');
+  if(oBox){{
+    oBox.innerHTML = ords.length ? ords.slice(0,12).map(o => `
+      <div class="item">
+        <div><b>${{o.symbol}}</b> <span class="pill ${{o.direction==='BUY'?'green':'red'}}">${{o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}}</span> · UID <code>${{o.user_id}}</code>
+          <div style="font-size:10.5px;color:var(--muted)">${{o.platform}} (${{o.account_mode}}) · ${{o.lots}} لوت · ${{o.detail||''}}</div>
+        </div>
+        <span class="pill">${{o.status}}</span>
+      </div>`).join('') : '<div class="empty">لا توجد أوامر مسجلة بعد.</div>';
+  }}
 }}
 
 async function createAdminPromo(){{
@@ -2156,6 +2481,8 @@ async function loadAdmin(){{
   // Page 1: Toggles
   const labels = {{
     engine_enabled:'🧠 المحرك الآلي', global_kill_switch:'🛑 مفتاح الطوارئ',
+    bridge_enabled:'⚡ جسر النسخ الآلي', bridge_kill_switch:'🚨 طوارئ جسر النسخ',
+    bridge_allow_live:'💎 نسخ حقيقي Live',
     news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
     news_broadcast_users:'👥 بث للمستخدمين', news_broadcast_partners:'🤝 بث للشركاء',
     news_broadcast_channels:'📺 بث للقنوات', charts_enabled:'📊 الشارتات المحلية',
@@ -2164,9 +2491,10 @@ async function loadAdmin(){{
   }};
   document.getElementById('togglesBox').innerHTML = Object.entries(labels).map(([k,lbl])=>{{
     const on = !!d.toggles[k];
-    const cls = k==='global_kill_switch' ? (on?'danger':'off') : (on?'on':'off');
+    const cls = (k==='global_kill_switch' || k==='bridge_kill_switch') ? (on?'danger':'off') : (on?'on':'off');
     return `<button class="btn ${{cls}}" onclick="toggleKey('${{k}}')">${{lbl}}: ${{on?'🟢':'⚪'}}</button>`;
   }}).join('');
+  loadAdminBridge();
 
   // Populate Manual Signal Studio & Chart Channel Markets
   const manSel = document.getElementById('manSym');

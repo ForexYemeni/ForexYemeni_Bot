@@ -960,6 +960,12 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
             strategy_stats.invalidate_leaderboard_cache()
         except Exception:
             pass
+    if status == "TP1_HIT":
+        try:
+            from fysb.services import auto_bridge as _ab
+            _ab.dispatch_tp1_partial_be(dict(sig))
+        except Exception:
+            pass
 
     # The card the user holds is re-rendered with the NEW status immediately —
     # «بانتظار التنفيذ» never outlives the candle that ended it.

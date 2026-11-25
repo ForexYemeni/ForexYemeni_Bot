@@ -1357,7 +1357,7 @@ async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
         + (f"▎🎟 خصم مطبّق: <b>{res['pct']}% ({esc(promo_code)})</b>\n" if res["pct"] else "")
         + f"▎📅 المدة: <b>{int(p.get('duration_days') or 30)} يوماً</b>\n"
         "▎🚀 جميع صلاحيات باقتك مفتوحة الآن تلقائياً!",
-        reply_markup=_kb.user_menu(),
+        reply_markup=_kb.admin_menu() if u.id == config.ADMIN_ID else _kb.user_menu(),
         parse_mode="HTML",
     )
     if config.ADMIN_ID:

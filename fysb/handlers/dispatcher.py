@@ -72,7 +72,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
             else:
                 from fysb.handlers.common import render
-                await render(q, "زر غير معروف. أرسل /start لتحديث القائمة.", kb.user_menu(), context.bot)
+                await render(
+                    q,
+                    "زر غير معروف. أرسل /start لتحديث القائمة.",
+                    kb.admin_menu() if uid == config.ADMIN_ID else kb.user_menu(),
+                    context.bot,
+                )
             await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
     except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])

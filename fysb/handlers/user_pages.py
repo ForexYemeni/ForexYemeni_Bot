@@ -240,12 +240,16 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
 
     # ---------- Home / profile ----------
     if action == "home":
-        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
-        menu = kb.user_menu(auto_signals_on=bool(u["notifications"]))
         if uid == config.ADMIN_ID:
-            from telegram import InlineKeyboardMarkup as _IKM
-            menu = _IKM([[kb.btn("👑 العودة إلى لوحة الإدارة", "a:home", style="danger")]] + [list(r) for r in menu.inline_keyboard])
-        await render(q, home_text, menu, bot)
+            await render(
+                q,
+                f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
+                kb.admin_menu(),
+                bot,
+            )
+            return
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
+        await render(q, home_text, kb.user_menu(auto_signals_on=bool(u["notifications"])), bot)
 
     elif action == "autosig_toggle":
         new_val = 0 if u["notifications"] else 1
@@ -261,12 +265,16 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             )
         except Exception:
             pass
-        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
-        menu = kb.user_menu(auto_signals_on=bool(new_val))
         if uid == config.ADMIN_ID:
-            from telegram import InlineKeyboardMarkup as _IKM
-            menu = _IKM([[kb.btn("👑 العودة إلى لوحة الإدارة", "a:home", style="danger")]] + [list(r) for r in menu.inline_keyboard])
-        await render(q, home_text, menu, bot)
+            await render(
+                q,
+                f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
+                kb.admin_menu(),
+                bot,
+            )
+            return
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
+        await render(q, home_text, kb.user_menu(auto_signals_on=bool(new_val)), bot)
 
     elif action == "profile":
         profile = await afn.run(users_service.profile_summary, uid, u)

@@ -1,6 +1,14 @@
-"""Telegram UI handlers for Phase 4 (v6.27.0):
-  1. Independent Trading Academy (User + Admin toggle/pricing/curriculum/certificates)
-  2. Gift Subscriptions & Redeem Codes (any tier PRO/VIP/ROYAL/ACADEMY, any duration)
+"""Telegram UI handlers for Phase 4 & v7.1.0 Royal Academy Studio:
+  1. Independent Trading Academy:
+     - Intensive 15-lesson curriculum (5 FREE + 10 PAID) with multi-question
+       interactive quizzes & pedagogical feedback
+     - Full media delivery (Video / Audio / Voice / PDF / Photo / Text)
+     - Identical payment methods to Subscription Plans (USDT On-Chain Fast Lane
+       + Yemeni wallets & manual methods + Copy button + Receipt upload + Gift codes)
+     - Complete Admin Academy Studio: inspect/preview every lesson, add new lessons
+       (Text/Video/Audio/Voice/PDF/Photo), attach/replace media, edit content/quiz,
+       delete lessons, custom price & custom duration
+  2. Gift Subscriptions & Redeem Codes (PRO/VIP/ROYAL/ACADEMY, any duration)
   3. Tiered Affiliate / Commission System (15%->35%, dashboard, Admin 1-tap payouts)
 """
 from __future__ import annotations
@@ -12,8 +20,11 @@ from fysb import afn, config, db
 from fysb.handlers.common import render
 from fysb.services import academy, affiliates, gifts
 from fysb.services import audit as audit_log
+from fysb.services import payments as payments_service
 from fysb.theme import esc
 from fysb.ui import keyboards as kb
+
+_NUM_EMOJI = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣")
 
 
 def _user_full_name_sync(uid: int) -> str:
@@ -22,6 +33,106 @@ def _user_full_name_sync(uid: int) -> str:
     if not r:
         return f"Trader {uid}"
     return (r["full_name"] or r["username"] or f"Trader {uid}").strip()
+
+
+async def send_lesson_media(bot, chat_id: int, les: dict) -> bool:
+    """Send a lesson's native Telegram media attachment (VIDEO / AUDIO / VOICE / PDF / PHOTO)."""
+    fid = str(les.get("media_file_id") or "").strip()
+    mtype = str(les.get("media_type") or "TEXT").upper()
+    if not fid or mtype == "TEXT":
+        return False
+    cap_extra = f"\n{esc(les['media_caption'])}" if les.get("media_caption") else ""
+    caption = f"🎓 <b>{esc(les['title'])}</b>\n<i>{academy.media_badge(mtype)}</i>{cap_extra}"[:1000]
+    try:
+        if mtype == "VIDEO":
+            await bot.send_video(chat_id=chat_id, video=fid, caption=caption, parse_mode="HTML")
+        elif mtype == "AUDIO":
+            await bot.send_audio(chat_id=chat_id, audio=fid, caption=caption, parse_mode="HTML")
+        elif mtype == "VOICE":
+            await bot.send_voice(chat_id=chat_id, voice=fid, caption=caption, parse_mode="HTML")
+        elif mtype == "PDF":
+            await bot.send_document(chat_id=chat_id, document=fid, caption=caption, parse_mode="HTML")
+        elif mtype == "PHOTO":
+            await bot.send_photo(chat_id=chat_id, photo=fid, caption=caption, parse_mode="HTML")
+        else:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _parse_quiz_line(raw: str) -> list[dict] | None:
+    """Parse Admin quiz input lines: `السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح [| تفسير]`"""
+    out: list[dict] = []
+    for line in (raw or "").strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 4:
+            continue
+        q_txt = parts[0]
+        # Last numeric token indicates 1-based correct index; optional explanation after it
+        exp = ""
+        ans_idx = 0
+        opts: list[str] = []
+        if len(parts) >= 6 and parts[4].isdigit():
+            opts = parts[1:4]
+            ans_idx = max(0, min(len(opts) - 1, int(parts[4]) - 1))
+            exp = parts[5]
+        elif len(parts) >= 5 and parts[-1].isdigit():
+            opts = parts[1:-1]
+            ans_idx = max(0, min(len(opts) - 1, int(parts[-1]) - 1))
+        elif len(parts) >= 6 and parts[-2].isdigit():
+            opts = parts[1:-2]
+            ans_idx = max(0, min(len(opts) - 1, int(parts[-2]) - 1))
+            exp = parts[-1]
+        else:
+            opts = parts[1:]
+            ans_idx = 0
+        if q_txt and len(opts) >= 2:
+            out.append({"q": q_txt, "opts": opts[:4], "ans": ans_idx, "exp": exp})
+    return out or None
+
+
+async def _render_academy_checkout(q, uid: int, context, bot):
+    """Show the EXACT SAME payment methods as subscription plans (USDT Blockchain Fast Lane
+    + all enabled manual payment methods + Gift code)."""
+    price = await afn.run(academy.paid_price_usd)
+    days = await afn.run(academy.paid_duration_days)
+    dur = "مدى الحياة ♾" if days == 0 else f"{days} يوماً"
+    methods = await afn.run(payments_service.list_methods, enabled_only=True)
+    chains = await afn.run(payments_service.configured_chains)
+
+    body = (
+        "👑 <b><u>الاشتراك في المسار الاحترافي — أكاديمية ForexYemeni الملكية</u></b>\n"
+        "<blockquote>"
+        "▎🎓 <b>المنتج:</b> المسار الاحترافي الكامل (مستقل بالكامل عن باقات الإشارات)\n"
+        "▎📚 <b>المحتوى:</b> 10+ دروس مؤسسية مكثفة (SMC · ICT · Silver Bullet · Wyckoff · CRT · AMD · Turtle Soup · SK · DXY &amp; News · Psychology) + مرفقات الإدارة (فيديو/صوت/PDF)\n"
+        "▎📝 <b>الاختبارات:</b> اختبارات تطبيقية تفاعلية لكل درس + تصحيح وتفسير فوري\n"
+        "▎🏆 <b>الشهادة:</b> شهادة تخرج ملكية معتمدة PNG برقم تسلسلي فريد\n"
+        f"▎💵 <b>سعر الدورة:</b> <b>{price:g} USD</b> · ⏳ المدة: <b>{dur}</b>"
+        "</blockquote>"
+    )
+    rows_kb = []
+    if chains:
+        body += (
+            "\n\n⛓ <b><u>التفعيل الفوري بالبلوكيشن — المحافظ الموثقة</u></b>\n"
+            "<blockquote>"
+            "▎⚡ اختر شبكة USDT المناسبة وأرسل الـ TXID — يتم التحقق على البلوكيشن وفتح الأكاديمية فوراً 100%."
+            "</blockquote>"
+        )
+        for ch in chains:
+            rows_kb.append([kb.btn(f"⚡ اشتراك فوري — USDT {ch}", f"u:acadusdt:{ch}", style="success")])
+    if methods:
+        body += "\n\n💳 <b><u>وسائل الدفع المفعّلة (نفس طرق دفع الباقات):</u></b>"
+        for m in methods:
+            rows_kb.append([kb.btn(f"🧾 اشتراك عبر {esc(m['title'])}", f"u:acadpay:{m['id']}", style="primary")])
+    else:
+        rows_kb.append([kb.btn("🧾 طلب اشتراك (دفع يدوي)", "u:acadpay:0", style="primary")])
+    rows_kb.append([kb.btn("🎁 لدي كود هدية للأكاديمية", "u:redeem", style="success")])
+    rows_kb.append([kb.btn("📗 المسار المجاني", "u:acadtrack:FREE"), kb.btn("↩️ الأكاديمية", "u:academy")])
+    await render(q, body, kb.user_nav(rows_kb), bot)
 
 
 async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
@@ -69,63 +180,91 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
             track = "FREE"
         has_paid = await afn.run(academy.has_paid_access, uid)
         if track == "PAID" and not has_paid:
-            price = await afn.run(academy.paid_price_usd)
-            days = await afn.run(academy.paid_duration_days)
-            dur = "مدى الحياة ♾" if days == 0 else f"{days} يوماً"
-            body = (
-                "👑 <b><u>المسار الاحترافي المدفوع — أكاديمية ForexYemeni</u></b>\n"
-                "<blockquote>"
-                "▎🔒 هذا المسار مستقل بالكامل عن باقات الإشارات ويضم <b>10 دروس مؤسسية متقدمة</b>:\n"
-                "▎• Smart Money Concepts (SMC) &amp; Order Blocks\n"
-                "▎• ICT FVG + Silver Bullet + Wyckoff Spring\n"
-                "▎• CRT + AMD Power of 3 + Turtle Soup + SK\n"
-                "▎• درع الأخبار، ارتباط DXY، وسيكولوجية المحترفين\n"
-                "▎🏆 شهادة تخرج ملكية معتمدة PNG برقم تسلسلي فريد.\n\n"
-                f"▎💵 رسوم الانضمام المستقل: <b>{price:g} $</b> ({dur})"
-                "</blockquote>"
-            )
-            rows_kb = [
-                [kb.btn(f"💳 طلب فتح الأكاديمية ({price:g}$)", "u:acadbuy", style="success")],
-                [kb.btn("🎁 تفعيل كود هدية", "u:redeem", style="primary"), kb.btn("📗 المسار المجاني", "u:acadtrack:FREE")],
-                [kb.btn("↩️ الأكاديمية", "u:academy")],
-            ]
-            await render(q, body, kb.user_nav(rows_kb), bot)
+            await _render_academy_checkout(q, uid, context, bot)
             return True
 
         lessons = await afn.run(academy.list_lessons, track)
         prog = await afn.run(academy.user_progress, uid)
         done = prog["completed_codes"]
         rows_kb = [
-            [kb.btn(f"{'✅ ' if l['code'] in done else '📖 '}{l['title'][:46]}", f"u:acadles:{l['code']}", style="success" if l["code"] in done else "primary")]
+            [
+                kb.btn(
+                    f"{'✅ ' if l['code'] in done else academy.media_icon(l['media_type']) + ' '}{l['title'][:44]}",
+                    f"u:acadles:{l['id']}",
+                    style="success" if l["code"] in done else "primary",
+                )
+            ]
             for l in lessons
         ]
         rows_kb.append([kb.btn("↩️ الأكاديمية", "u:academy")])
-        title = "📗 <b><u>المسار المجاني — الأساسيات (5 دروس)</u></b>" if track == "FREE" else "👑 <b><u>المسار الاحترافي — الـ 13 استراتيجية المؤسسية</u></b>"
-        await render(q, f"{title}\n<blockquote>▎اختر أي درس أدناه لقراءته واجتياز اختباره:</blockquote>", kb.user_nav(rows_kb), bot)
+        title = (
+            f"📗 <b><u>المسار المجاني التأسيسي ({len(lessons)} دروس مكثفة)</u></b>"
+            if track == "FREE"
+            else f"👑 <b><u>المسار الاحترافي المؤسسي ({len(lessons)} دروس مكثفة)</u></b>"
+        )
+        await render(
+            q,
+            f"{title}\n<blockquote>▎اختر أي درس أدناه لقراءة الشرح المكثف ومشاهدة مرفقاته ثم اجتياز اختباره التفاعلي:</blockquote>",
+            kb.user_nav(rows_kb),
+            bot,
+        )
+        return True
+
+    if action.startswith("acadmedia:"):
+        if not await afn.run(academy.is_enabled):
+            await render(q, "🔴 الأكاديمية مغلقة مؤقتاً من الإدارة.", kb.user_nav(), bot)
+            return True
+        ref = action.split(":", 1)[1].strip()
+        les = await afn.run(academy.get_lesson_any, ref)
+        if not les or not les.get("enabled"):
+            await render(q, "الدرس غير متاح.", kb.user_nav([[kb.btn("↩️ الأكاديمية", "u:academy")]]), bot)
+            return True
+        if str(les["track"]).upper() == "PAID" and not await afn.run(academy.has_paid_access, uid):
+            await _render_academy_checkout(q, uid, context, bot)
+            return True
+        ok = await send_lesson_media(bot, uid, les)
+        if not ok:
+            await render(q, "⚠️ لا يوجد مرفق وسائط لهذا الدرس حالياً.", kb.user_nav([[kb.btn("↩️ الدرس", f"u:acadles:{les['id']}")]]), bot)
         return True
 
     if action.startswith("acadles:"):
         if not await afn.run(academy.is_enabled):
             await render(q, "🔴 الأكاديمية مغلقة مؤقتاً من الإدارة.", kb.user_nav(), bot)
             return True
-        code = action.split(":", 1)[1].strip()
-        les = await afn.run(academy.get_lesson, code)
+        parts = action.split(":")
+        ref = parts[1].strip() if len(parts) > 1 else ""
+        q_idx = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        les = await afn.run(academy.get_lesson_any, ref)
         if not les or not les.get("enabled"):
             await render(q, "الدرس غير متاح.", kb.user_nav([[kb.btn("↩️ الأكاديمية", "u:academy")]]), bot)
             return True
         track = str(les["track"]).upper()
         if track == "PAID" and not await afn.run(academy.has_paid_access, uid):
-            await render(q, "🔒 هذا الدرس ضمن المسار الاحترافي المدفوع.", kb.user_nav([[kb.btn("🔓 فتح المسار الاحترافي", "u:acadbuy", style="success")]]), bot)
+            await _render_academy_checkout(q, uid, context, bot)
             return True
-        body = await afn.run(academy.render_lesson_card, uid, les)
+        # Deliver video/audio/voice/PDF automatically on initial lesson open (q_idx == 0)
+        if q_idx == 0 and les.get("media_file_id"):
+            await send_lesson_media(bot, uid, les)
+
+        body = await afn.run(academy.render_lesson_card, uid, les, q_idx, False)
         rows_kb = []
+        if les.get("media_file_id"):
+            rows_kb.append([kb.btn(f"{academy.media_icon(les['media_type'])} إعادة إرسال المرفق ({academy.media_badge(les['media_type'])})", f"u:acadmedia:{les['id']}", style="success")])
         quiz = les.get("quiz") or []
         if quiz:
-            q0 = quiz[0]
-            for idx, opt in enumerate(q0["opts"]):
-                rows_kb.append([kb.btn(f"📝 إجابة {idx + 1}: {opt[:42]}", f"u:acadquiz:{code}:{idx}", style="primary")])
+            safe_qi = min(max(0, q_idx), len(quiz) - 1)
+            qcur = quiz[safe_qi]
+            for idx, opt in enumerate(qcur.get("opts") or []):
+                em = _NUM_EMOJI[idx] if idx < len(_NUM_EMOJI) else f"{idx + 1})"
+                rows_kb.append([
+                    kb.btn(
+                        f"{em} {opt[:42]}",
+                        f"u:acadquiz:{les['id']}:{safe_qi}:{idx}",
+                        style="primary",
+                    )
+                ])
         else:
-            rows_kb.append([kb.btn("✅ تحديد كمكتمل", f"u:acadquiz:{code}:0", style="success")])
+            rows_kb.append([kb.btn("✅ تأكيد إتمام الدرس", f"u:acadquiz:{les['id']}:0:0", style="success")])
         rows_kb.append([kb.btn("↩️ قائمة الدروس", f"u:acadtrack:{track}"), kb.btn("🎓 الأكاديمية", "u:academy")])
         await render(q, body, kb.user_nav(rows_kb), bot)
         return True
@@ -134,31 +273,63 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
         parts = action.split(":")
         if len(parts) < 3:
             return True
-        code, opt_idx = parts[1], int(parts[2])
-        res = await afn.run(academy.submit_quiz_answer, uid, code, opt_idx)
+        ref = parts[1].strip()
+        if len(parts) >= 4 and parts[2].isdigit() and parts[3].isdigit():
+            q_idx, opt_idx = int(parts[2]), int(parts[3])
+        else:
+            q_idx, opt_idx = 0, int(parts[2]) if parts[2].isdigit() else 0
+        res = await afn.run(academy.submit_quiz_answer, uid, ref, opt_idx, q_idx)
         if not res.get("ok"):
             await render(q, "تعذر تصحيح الاختبار.", kb.user_nav([[kb.btn("↩️ الأكاديمية", "u:academy")]]), bot)
             return True
         les = res["lesson"]
         track = str(les["track"]).upper()
+        exp_block = f"\n▎💡 <b>التفسير العلمي:</b> {esc(res['explanation'])}" if res.get("explanation") else ""
+
         if res["correct"]:
-            prog = await afn.run(academy.user_progress, uid)
-            body = (
-                f"🎉 <b><u>إجابة صحيحة! تم إتمام الدرس بنجاح</u></b>\n"
-                f"<blockquote>"
-                f"▎📚 الدرس: <b>{esc(les['title'])}</b>\n"
-                f"▎📈 تقدمك الإجمالي في الأكاديمية: <b>{prog['overall_pct']:.0f}%</b> ({prog['total_done']}/{prog['total_all']})"
-                f"</blockquote>"
-            )
-            rows_kb = [[kb.btn("➡️ الدرس التالي / القائمة", f"u:acadtrack:{track}", style="success")]]
-            if (track == "FREE" and prog["cert_ready_free"]) or (track == "PAID" and prog["cert_ready_paid"]):
-                rows_kb.append([kb.btn("🏆 إصدار شهادتي الملكية الآن!", f"u:acadcert:{track}", style="success")])
+            if res["next_q_idx"] is not None:
+                nxt_q = res["next_q_idx"]
+                body = (
+                    f"✅ <b><u>إجابة صحيحة! ({q_idx + 1} من {res['total_questions']})</u></b>\n"
+                    f"<blockquote>"
+                    f"▎📚 الدرس: <b>{esc(les['title'])}</b>"
+                    f"{exp_block}\n"
+                    f"▎🔥 ممتاز! انتقل الآن إلى <b>السؤال {nxt_q + 1} من {res['total_questions']}</b> لإتمام الدرس."
+                    f"</blockquote>"
+                )
+                rows_kb = [
+                    [kb.btn(f"➡️ السؤال التالي ({nxt_q + 1}/{res['total_questions']})", f"u:acadles:{les['id']}:{nxt_q}", style="success")],
+                    [kb.btn("↩️ قائمة الدروس", f"u:acadtrack:{track}")],
+                ]
+            else:
+                prog = await afn.run(academy.user_progress, uid)
+                nxt_les = await afn.run(academy.next_lesson_in_track, les["id"])
+                body = (
+                    f"🎉 <b><u>أحسنت! تم اجتياز الاختبار وإتمام الدرس 100%</u></b>\n"
+                    f"<blockquote>"
+                    f"▎📚 الدرس المكتمل: <b>{esc(les['title'])}</b>"
+                    f"{exp_block}\n"
+                    f"▎📈 تقدمك الإجمالي في الأكاديمية: <b>{prog['overall_pct']:.0f}%</b> ({prog['total_done']}/{prog['total_all']})"
+                    f"</blockquote>"
+                )
+                rows_kb = []
+                if nxt_les:
+                    rows_kb.append([kb.btn(f"➡️ الدرس التالي: {nxt_les['title'][:34]}", f"u:acadles:{nxt_les['id']}", style="success")])
+                rows_kb.append([kb.btn("📚 قائمة دروس المسار", f"u:acadtrack:{track}", style="primary")])
+                if (track == "FREE" and prog["cert_ready_free"]) or (track == "PAID" and prog["cert_ready_paid"]):
+                    rows_kb.append([kb.btn("🏆 إصدار شهادتي الملكية الآن!", f"u:acadcert:{track}", style="success")])
         else:
             body = (
-                "❌ <b><u>إجابة غير دقيقة — حاول مجدداً!</u></b>\n"
-                "<blockquote>▎💡 راجع الدرس جيداً ثم أعد اختيار الإجابة الصحيحة لتثبيت الفهم وإتمام الدرس.</blockquote>"
+                f"❌ <b><u>إجابة غير دقيقة — حاول مجدداً! (السؤال {q_idx + 1} من {res['total_questions']})</u></b>\n"
+                f"<blockquote>"
+                f"▎📚 الدرس: <b>{esc(les['title'])}</b>\n"
+                f"▎💡 راجع القاعدة في الدرس بعناية ثم أعد اختيار الإجابة الصحيحة لتثبيت الفهم المؤسسي."
+                f"</blockquote>"
             )
-            rows_kb = [[kb.btn("🔄 إعادة المحاولة", f"u:acadles:{code}", style="primary")]]
+            rows_kb = [
+                [kb.btn(f"🔄 إعادة محاولة السؤال {q_idx + 1}", f"u:acadles:{les['id']}:{q_idx}", style="primary")],
+                [kb.btn("📖 قراءة الدرس من البداية", f"u:acadles:{les['id']}:0")],
+            ]
         rows_kb.append([kb.btn("🎓 الأكاديمية", "u:academy")])
         await render(q, body, kb.user_nav(rows_kb), bot)
         return True
@@ -196,34 +367,84 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
         return True
 
     if action == "acadbuy":
+        await _render_academy_checkout(q, uid, context, bot)
+        return True
+
+    if action.startswith("acadusdt:"):
+        chain = action.split(":", 1)[1].strip().upper()
+        chains = await afn.run(payments_service.configured_chains)
+        if chain not in chains:
+            await render(
+                q,
+                "⛓ هذه الشبكة غير موثقة حالياً — اختر شبكة أخرى أو وسيلة دفع مفعّلة.",
+                kb.user_nav([[kb.btn("↩️ طرق دفع الأكاديمية", "u:acadbuy")]]),
+                bot,
+            )
+            return True
+        price = await afn.run(academy.paid_price_usd)
+        pid = await afn.run(payments_service.create_request, uid, "ACADEMY", price, f"USDT-{chain}")
+        req = await afn.run(payments_service.get_request, pid)
+        from fysb.handlers.user_pages import _render_chain_payment
+        await _render_chain_payment(q, bot, req, chain)
+        return True
+
+    if action.startswith("acadpay:"):
+        try:
+            mid = int(action.split(":", 1)[1].strip())
+        except ValueError:
+            mid = 0
         price = await afn.run(academy.paid_price_usd)
         days = await afn.run(academy.paid_duration_days)
         dur = "مدى الحياة ♾" if days == 0 else f"{days} يوماً"
-        from fysb.services import payments as pay_svc
-        pid = await afn.run(pay_svc.create_request, uid, "ACADEMY", price, "MANUAL")
-        body = (
-            f"💳 <b><u>طلب اشتراك مستقل — المسار الاحترافي للأكاديمية</u></b>\n"
-            f"<blockquote>"
-            f"▎🧾 رقم الطلب: <code>#{pid}</code>\n"
-            f"▎🎓 المنتج: <b>أكاديمية ForexYemeni الاحترافية (مستقلة عن الإشارات)</b>\n"
-            f"▎💵 المبلغ المطلوب: <b>{price:g} $</b> · المدة: <b>{dur}</b>\n"
-            f"▎📌 يمكنك إرفاق إيصال الدفع من قسم <b>مدفوعاتي</b> أو عبر الدعم لتفعيل وصولك فوراً."
-            f"</blockquote>"
+        method = await afn.run(payments_service.get_method, mid) if mid else None
+        pay_req = await afn.run(
+            payments_service.create_request,
+            uid,
+            "ACADEMY",
+            price,
+            method["title"] if method else "MANUAL",
         )
-        if config.ADMIN_ID:
+        context.user_data["awaiting_receipt"] = pay_req
+        body = [
+            f"🧾 <b>طلب اشتراك أكاديمية #{pay_req}</b>",
+            "🎓 المنتج: <b>أكاديمية ForexYemeni الملكية (المسار الاحترافي المستقل)</b>",
+            f"💰 المبلغ المطلوب: <b>{price:g} USD</b> · ⏳ المدة: <b>{dur}</b>",
+        ]
+        is_usdt = bool(method and "USDT" in (method["title"] or "").upper())
+        chains = (await afn.run(payments_service.configured_chains)) if is_usdt else []
+        if method:
+            body.append("\n💳 <b>وسيلة الدفع:</b> " + esc(method["title"]))
+            if method.get("country"):
+                body.append("🌍 الدولة: " + esc(method["country"]))
+            if method.get("account_ref"):
+                body.append("🔢 بيانات الحساب: <code>" + esc(method["account_ref"]) + "</code>")
+            if method.get("instructions"):
+                body.append("📝 التعليمات: " + esc(method["instructions"]))
+        rows_kb = []
+        if is_usdt and chains:
+            body += [
+                "\n⛓ <b><u>التفعيل الفوري بالتحقق البلوكيشن — اختر شبكتك</u></b>",
+                f"▎💵 ارسل <b>{price:g} USDT</b> إلى عنوان الإدارة على الشبكة التي تناسبك ثم اضغط الشبكة بالأسفل وأرسل <b>TXID</b>.",
+            ]
+            for ch in chains:
+                rows_kb.append([kb.btn(f"⛓ الدفع عبر {ch}", f"u:paychain:{pay_req}:{ch}", style="success")])
+        else:
+            body.append("\n📸 <b>أرسل صورة إيصال التحويل هنا مباشرة</b> — سيُرسل للإدارة فوراً ويُفتح لك المسار الاحترافي فور الاعتماد.")
+            if method and method.get("account_ref"):
+                rows_kb.append([kb.copy_btn("📋 نسخ رقم الحساب / المحفظة", method["account_ref"], style="primary")])
+        rows_kb.append([kb.btn("🧾 مدفوعاتي", "u:payments"), kb.btn("↩️ الأكاديمية", "u:academy")])
+        if config.ADMIN_ID and uid != config.ADMIN_ID:
             try:
                 await bot.send_message(
                     config.ADMIN_ID,
-                    f"🎓 <b>طلب اشتراك أكاديمية جديد #{pid}</b>\nUID: <code>{uid}</code> · المبلغ: <b>{price:g}$</b>",
+                    f"🎓 <b>طلب اشتراك أكاديمية جديد #{pay_req}</b>\n"
+                    f"▎👤 UID: <code>{uid}</code>\n"
+                    f"▎💵 المبلغ: <b>{price:g} USD</b> · الوسيلة: <b>{esc(method['title'] if method else 'MANUAL')}</b>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
-        rows_kb = [
-            [kb.btn("🧾 متابعة مدفوعاتي", "u:payments", style="success"), kb.btn("🎁 لدي كود هدية", "u:redeem", style="primary")],
-            [kb.btn("↩️ الأكاديمية", "u:academy")],
-        ]
-        await render(q, body, kb.user_nav(rows_kb), bot)
+        await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
         return True
 
     # --- 2) GIFT CODE REDEEM ---
@@ -282,10 +503,43 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
     return False
 
 
+# =============================================================================
+#                       ADMIN ACADEMY STUDIO & GROWTH
+# =============================================================================
+async def _render_admin_lesson_inspector(q, uid: int, les_id: int, bot, notice: str = ""):
+    les = await afn.run(academy.get_lesson_any, les_id)
+    if not les:
+        await render(q, "الدرس غير موجود.", kb.admin_nav([[kb.btn("📚 كل الدروس", "a:acadlessons")]]), bot)
+        return
+    body = await afn.run(academy.render_lesson_card, uid, les, 0, True)
+    if notice:
+        body = f"<blockquote>{esc(notice)}</blockquote>\n\n" + body
+    rows_kb = [
+        [kb.btn("👁 معاينة + إرسال المرفق كطالب", f"a:acadles_preview:{les['id']}", style="success")],
+        [
+            kb.btn("📎 إرفاق فيديو/صوت/PDF", f"a:acadles_media:{les['id']}", style="primary"),
+            kb.btn("✏️ تعديل النص", f"a:acadles_edit:{les['id']}", style="primary"),
+        ],
+        [
+            kb.btn("📝 تعديل الاختبار", f"a:acadles_quiz:{les['id']}", style="primary"),
+            kb.btn(
+                "🔄 نقل إلى المجاني 📗" if les["track"] == "PAID" else "🔄 نقل إلى الاحترافي 👑",
+                f"a:acadles_track:{les['id']}",
+            ),
+        ],
+        [
+            kb.btn("⚪ إخفاء الدرس" if les["enabled"] else "🟢 إظهار الدرس", f"a:acadles_tog:{les['id']}", style="danger" if les["enabled"] else "success"),
+            kb.btn("🗑 حذف الدرس", f"a:acadles_del:{les['id']}", style="danger"),
+        ],
+        [kb.btn("↩️ كل الدروس", "a:acadlessons"), kb.btn("🎓 الأكاديمية", "a:academy")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
 async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, context, bot) -> bool:
-    """Handle Admin callbacks for Academy, Gift Codes & Affiliate Payouts.
+    """Handle Admin callbacks for Academy Studio, Gift Codes & Affiliate Payouts.
     Returns True if handled, False otherwise."""
-    # --- 1) ADMIN ACADEMY ---
+    # --- 1) ADMIN ACADEMY STUDIO ---
     if act == "academy":
         body = await afn.run(academy.render_admin_academy_card)
         st = await afn.run(academy.admin_stats)
@@ -302,15 +556,20 @@ async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, contex
                 kb.btn(f"{'✅ ' if st['price_usd'] == 99 else ''}$99", "a:acadprice:99"),
             ],
             [
+                kb.btn(f"✏️ تعديل السعر برقم مخصص ({st['price_usd']:g}$)", "a:acadprice_custom", style="primary"),
+                kb.btn("⏳ مدة مخصصة", "a:acaddur_custom", style="primary"),
+            ],
+            [
                 kb.btn(f"{'✅ ' if st['duration_days'] == 90 else ''}90d", "a:acaddur:90"),
                 kb.btn(f"{'✅ ' if st['duration_days'] == 180 else ''}180d", "a:acaddur:180"),
                 kb.btn(f"{'✅ ' if st['duration_days'] == 365 else ''}365d", "a:acaddur:365"),
                 kb.btn(f"{'✅ ' if st['duration_days'] == 0 else ''}♾ مدى الحياة", "a:acaddur:0", style="success"),
             ],
             [
-                kb.btn("📚 إدارة الدروس والمسارات", "a:acadlessons", style="primary"),
-                kb.btn("👑 منح وصول لمستخدم", "a:acadgrant", style="success"),
+                kb.btn("📚 عرض وإدارة الدروس", "a:acadlessons", style="primary"),
+                kb.btn("➕ إضافة درس جديد", "a:acadnew", style="success"),
             ],
+            [kb.btn("👑 منح وصول لمستخدم", "a:acadgrant", style="success")],
             [kb.btn("↩️ المالية", "a:hub:finance")],
         ]
         await render(q, body, kb.admin_nav(rows_kb), bot)
@@ -331,6 +590,32 @@ async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, contex
             pass
         return await handle_admin_growth(q, uid, "academy", "", "", context, bot)
 
+    if act == "acadprice_custom":
+        context.user_data["awaiting_acad_price"] = True
+        cur_p = await afn.run(academy.paid_price_usd)
+        await render(
+            q,
+            f"💵 <b><u>تعديل سعر الدورة (المسار الاحترافي)</u></b>\n"
+            f"<blockquote>▎السعر الحالي: <b>{cur_p:g} USD</b>\n"
+            "▎أرسل الآن <b>السعر الجديد بالدولار</b> (مثال: <code>35</code> أو <code>120</code> أو <code>19.99</code>):</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", "a:academy", style="danger")]]),
+            bot,
+        )
+        return True
+
+    if act == "acaddur_custom":
+        context.user_data["awaiting_acad_dur"] = True
+        cur_d = await afn.run(academy.paid_duration_days)
+        await render(
+            q,
+            f"⏳ <b><u>تعديل مدة اشتراك الأكاديمية بالأيام</u></b>\n"
+            f"<blockquote>▎المدة الحالية: <b>{'مدى الحياة ♾' if cur_d == 0 else f'{cur_d} يوماً'}</b>\n"
+            "▎أرسل عدد الأيام (أو <code>0</code> لجعلها <b>مدى الحياة</b>):</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", "a:academy", style="danger")]]),
+            bot,
+        )
+        return True
+
     if act == "acaddur":
         try:
             d = int(arg or 365)
@@ -341,35 +626,224 @@ async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, contex
         return await handle_admin_growth(q, uid, "academy", "", "", context, bot)
 
     if act == "acadlessons":
-        lessons = await afn.run(academy.list_lessons, None, True)
+        flt = (arg or "").strip().upper()
+        track_arg = flt if flt in ("FREE", "PAID") else None
+        lessons = await afn.run(academy.list_lessons, track_arg, True)
         rows_kb = [
             [
-                kb.btn(
-                    f"{'🟢' if l['enabled'] else '⚪'} {'📗' if l['track']=='FREE' else '👑'} {l['title'][:28]}",
-                    f"a:acadles_track:{l['code']}",
-                    style="success" if l["track"] == "FREE" else "primary",
-                ),
-                kb.btn("👁 إخفاء" if l["enabled"] else "✅ إظهار", f"a:acadles_tog:{l['code']}", style="danger" if l["enabled"] else "success"),
-            ]
-            for l in lessons
+                kb.btn(f"{'✅ ' if not track_arg else ''}الكل", "a:acadlessons", style="success" if not track_arg else "primary"),
+                kb.btn(f"{'✅ ' if track_arg == 'FREE' else ''}📗 المجاني", "a:acadlessons:FREE", style="success" if track_arg == "FREE" else "primary"),
+                kb.btn(f"{'✅ ' if track_arg == 'PAID' else ''}👑 الاحترافي", "a:acadlessons:PAID", style="success" if track_arg == "PAID" else "primary"),
+            ],
+            [kb.btn("➕ إضافة درس جديد (فيديو / نص / صوت / PDF)", "a:acadnew", style="success")],
         ]
+        for l in lessons:
+            vis = "🟢" if l["enabled"] else "⚪"
+            tr = "📗" if l["track"] == "FREE" else "👑"
+            mi = academy.media_icon(l["media_type"])
+            rows_kb.append([
+                kb.btn(
+                    f"{vis} {tr}{mi} {l['title'][:38]}",
+                    f"a:acadles_view:{l['id']}",
+                    style="success" if l["track"] == "FREE" else "primary",
+                )
+            ])
         rows_kb.append([kb.btn("↩️ الأكاديمية", "a:academy")])
         await render(
             q,
-            "📚 <b><u>إدارة منهج الأكاديمية (15 درساً)</u></b>\n"
-            "<blockquote>▎اضغط على اسم الدرس لتبديل مساره (مجاني 📗 ↔ مدفوع 👑)، أو الزر الجانبي لإظهاره/إخفائه.</blockquote>",
+            f"📚 <b><u>استوديو دروس الأكاديمية ({len(lessons)} درس)</u></b>\n"
+            "<blockquote>▎اضغط على أي درس أدناه لـ <b>رؤية محتواه بالكامل، معاينة مرفقاته، تعديل نصه/اختباره، إرفاق فيديو أو صوت أو PDF، أو حذفه</b>.</blockquote>",
             kb.admin_nav(rows_kb),
+            bot,
+        )
+        return True
+
+    if act == "acadles_view":
+        await _render_admin_lesson_inspector(q, uid, arg, bot)
+        return True
+
+    if act == "acadles_preview":
+        les = await afn.run(academy.get_lesson_any, arg)
+        if not les:
+            await render(q, "الدرس غير موجود.", kb.admin_nav([[kb.btn("📚 كل الدروس", "a:acadlessons")]]), bot)
+            return True
+        if les.get("media_file_id"):
+            await send_lesson_media(bot, uid, les)
+        body = await afn.run(academy.render_lesson_card, uid, les, 0, False)
+        await render(
+            q,
+            "👁 <b><u>معاينة الدرس كما يظهر للطالب:</u></b>\n\n" + body,
+            kb.admin_nav([[kb.btn("↩️ إدارة هذا الدرس", f"a:acadles_view:{les['id']}")]]),
+            bot,
+        )
+        return True
+
+    if act == "acadles_media":
+        les = await afn.run(academy.get_lesson_any, arg)
+        if not les:
+            return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        context.user_data["awaiting_acad_media_for"] = int(les["id"])
+        await render(
+            q,
+            f"📎 <b><u>إرفاق / تحديث وسائط للدرس: {esc(les['title'])}</u></b>\n"
+            "<blockquote>"
+            "▎أرسل الآن مباشرة في هذه المحادثة أياً مما يلي:\n"
+            "• 🎬 <b>فيديو تعليمي</b> (MP4)\n"
+            "• 🎙 <b>تسجيل صوتي (Voice)</b> أو 🎧 <b>ملف صوتي (MP3/Audio)</b>\n"
+            "• 📄 <b>ملف PDF / مستند</b>\n"
+            "• 🖼 <b>صورة / شارت توضيحي</b>\n"
+            "▎سيُحفظ تلقائياً ويُعرض لكل طالب يفتح الدرس مجاناً 100%!"
+            "</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", f"a:acadles_view:{les['id']}", style="danger")]]),
+            bot,
+        )
+        return True
+
+    if act == "acadles_edit":
+        les = await afn.run(academy.get_lesson_any, arg)
+        if not les:
+            return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        context.user_data["awaiting_acad_edit_for"] = int(les["id"])
+        await render(
+            q,
+            f"✏️ <b><u>تعديل عنوان ومحتوى الدرس: {esc(les['title'])}</u></b>\n"
+            "<blockquote>"
+            "▎أرسل النص الجديد بالتنسيق:\n"
+            "<code>السطر الأول: العنوان الجديد</code>\n"
+            "<code>بقية الأسطر: المحتوى التفصيلي للدرس</code>\n\n"
+            "▎<i>(أو أرسل المحتوى مباشرة في سطر واحد لتحديث المحتوى فقط)</i>"
+            "</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", f"a:acadles_view:{les['id']}", style="danger")]]),
+            bot,
+        )
+        return True
+
+    if act == "acadles_quiz":
+        les = await afn.run(academy.get_lesson_any, arg)
+        if not les:
+            return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        context.user_data["awaiting_acad_quiz_for"] = int(les["id"])
+        await render(
+            q,
+            f"📝 <b><u>تعديل / إضافة أسئلة اختبار الدرس: {esc(les['title'])}</u></b>\n"
+            "<blockquote>"
+            "▎أرسل سؤالاً في كل سطر بالتنسيق:\n"
+            "<code>السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح | تفسير اختياري</code>\n\n"
+            "▎<b>مثال:</b>\n"
+            "<code>ما أفضل منطقة شراء في ICT؟ | Discount أقل من 50% | Premium فوق 50% | عند القمة | 1 | نشتري دائماً في الخصم</code>"
+            "</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", f"a:acadles_view:{les['id']}", style="danger")]]),
             bot,
         )
         return True
 
     if act == "acadles_track":
         await afn.run(academy.toggle_lesson_track, arg)
-        return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        await _render_admin_lesson_inspector(q, uid, arg, bot, notice="✅ تم تبديل مسار الدرس بنجاح.")
+        return True
 
     if act == "acadles_tog":
         await afn.run(academy.toggle_lesson_enabled, arg)
+        await _render_admin_lesson_inspector(q, uid, arg, bot, notice="✅ تم تحديث حالة إظهار الدرس.")
+        return True
+
+    if act == "acadles_del":
+        les = await afn.run(academy.get_lesson_any, arg)
+        if not les:
+            return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        await render(
+            q,
+            f"🗑 <b><u>تأكيد حذف الدرس نهائياً؟</u></b>\n"
+            f"<blockquote>▎📚 الدرس: <b>{esc(les['title'])}</b>\n▎⚠️ سيتم حذفه من المنهج نهائياً.</blockquote>",
+            kb.admin_nav([
+                [kb.btn("🗑 نعم، احذف نهائياً", f"a:acadles_delgo:{les['id']}", style="danger")],
+                [kb.btn("❌ إلغاء", f"a:acadles_view:{les['id']}")],
+            ]),
+            bot,
+        )
+        return True
+
+    if act == "acadles_delgo":
+        ok = await afn.run(academy.delete_lesson, arg)
+        if ok:
+            await afn.run(audit_log.log, uid, f"academy_lesson_deleted:{arg}")
         return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+
+    # --- Guided Wizard: Add New Lesson (Text / Video / Audio / Voice / PDF / Photo) ---
+    if act == "acadnew":
+        context.user_data.pop("acad_new_draft", None)
+        await render(
+            q,
+            "➕ <b><u>إضافة درس جديد إلى الأكاديمية (الخطوة 1/4)</u></b>\n"
+            "<blockquote>▎اختر المسار الذي سيندرج تحته الدرس الجديد:</blockquote>",
+            kb.admin_nav([
+                [
+                    kb.btn("📗 المسار المجاني (FREE)", "a:acadnew_tr:FREE", style="success"),
+                    kb.btn("👑 المسار الاحترافي (PAID)", "a:acadnew_tr:PAID", style="primary"),
+                ],
+                [kb.btn("❌ إلغاء", "a:acadlessons", style="danger")],
+            ]),
+            bot,
+        )
+        return True
+
+    if act == "acadnew_tr":
+        tr = "FREE" if str(arg).upper() == "FREE" else "PAID"
+        context.user_data["acad_new_draft"] = {"track": tr, "step": "pick_media_type"}
+        await render(
+            q,
+            f"➕ <b><u>إضافة درس جديد (الخطوة 2/4) — {'📗 مجاني' if tr == 'FREE' else '👑 احترافي'}</u></b>\n"
+            "<blockquote>▎اختر نوع الدرس الذي ترغب بإضافته:</blockquote>",
+            kb.admin_nav([
+                [kb.btn("📝 درس نصي مكثف", "a:acadnew_mt:TEXT", style="primary")],
+                [
+                    kb.btn("🎬 درس فيديو", "a:acadnew_mt:VIDEO", style="success"),
+                    kb.btn("🎙 درس صوتي / فويس", "a:acadnew_mt:AUDIO", style="success"),
+                ],
+                [
+                    kb.btn("📄 ملف PDF / كتاب", "a:acadnew_mt:PDF", style="primary"),
+                    kb.btn("🖼 شارت / صورة", "a:acadnew_mt:PHOTO", style="primary"),
+                ],
+                [kb.btn("❌ إلغاء", "a:acadlessons", style="danger")],
+            ]),
+            bot,
+        )
+        return True
+
+    if act == "acadnew_mt":
+        mt = str(arg or "TEXT").upper()
+        if mt not in academy.MEDIA_BADGES:
+            mt = "TEXT"
+        draft = context.user_data.get("acad_new_draft") or {"track": "PAID"}
+        draft["media_type"] = mt
+        draft["step"] = "title"
+        context.user_data["acad_new_draft"] = draft
+        await render(
+            q,
+            f"➕ <b><u>إضافة درس جديد (الخطوة 3/4) — {academy.media_badge(mt)}</u></b>\n"
+            "<blockquote>▎أرسل الآن <b>عنوان الدرس</b> (مثال: <code>16. استراتيجية قنص الذهب في جلسة نيويورك</code>):</blockquote>",
+            kb.admin_nav([[kb.btn("❌ إلغاء", "a:acadlessons", style="danger")]]),
+            bot,
+        )
+        return True
+
+    if act == "acadnew_save":
+        draft = context.user_data.pop("acad_new_draft", None)
+        if not draft or not draft.get("title"):
+            return await handle_admin_growth(q, uid, "acadlessons", "", "", context, bot)
+        created = await afn.run(
+            academy.create_lesson,
+            title=draft["title"],
+            track=draft.get("track", "PAID"),
+            content=draft.get("content", ""),
+            media_type=draft.get("media_type", "TEXT"),
+            media_file_id=draft.get("media_file_id", ""),
+            media_caption=draft.get("media_caption", ""),
+            quiz=draft.get("quiz") or [],
+        )
+        await afn.run(audit_log.log, uid, f"academy_lesson_created:{created['code']}:{created['media_type']}")
+        await _render_admin_lesson_inspector(q, uid, created["id"], bot, notice="🎉 تم إضافة الدرس الجديد ونشره في الأكاديمية بنجاح!")
+        return True
 
     if act == "acadgrant":
         context.user_data["awaiting_acad_grant"] = True
@@ -514,8 +988,94 @@ async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, contex
     return False
 
 
+# =============================================================================
+#                   TEXT & MEDIA INPUT HANDLERS (ADMIN + USER)
+# =============================================================================
+async def handle_growth_media_input(update, context, uid: int) -> bool:
+    """Capture Admin Video / Audio / Voice / PDF / Photo uploads for Academy lessons."""
+    if uid != config.ADMIN_ID:
+        return False
+    ud = context.user_data
+    msg = update.effective_message
+    if not msg:
+        return False
+
+    attach_id = ud.get("awaiting_acad_media_for")
+    draft = ud.get("acad_new_draft")
+    draft_waiting_media = bool(draft and draft.get("step") == "media")
+    if not attach_id and not draft_waiting_media:
+        return False
+
+    media_type = ""
+    file_id = ""
+    caption = (msg.caption or "").strip()
+
+    if getattr(msg, "video", None):
+        media_type = "VIDEO"
+        file_id = msg.video.file_id
+        caption = caption or (getattr(msg.video, "file_name", "") or "")
+    elif getattr(msg, "voice", None):
+        media_type = "VOICE"
+        file_id = msg.voice.file_id
+    elif getattr(msg, "audio", None):
+        media_type = "AUDIO"
+        file_id = msg.audio.file_id
+        caption = caption or (getattr(msg.audio, "title", "") or getattr(msg.audio, "file_name", "") or "")
+    elif getattr(msg, "document", None):
+        media_type = "PDF"
+        file_id = msg.document.file_id
+        caption = caption or (getattr(msg.document, "file_name", "") or "")
+    elif getattr(msg, "photo", None):
+        media_type = "PHOTO"
+        file_id = msg.photo[-1].file_id
+    else:
+        return False
+
+    # Case 1: Attaching/replacing media on an existing lesson
+    if attach_id:
+        ud.pop("awaiting_acad_media_for", None)
+        updated = await afn.run(academy.update_lesson_media, int(attach_id), media_type, file_id, caption)
+        if not updated:
+            await msg.reply_text("❌ تعذر إيجاد الدرس لتحديث مرفقه.")
+            return True
+        await afn.run(audit_log.log, uid, f"academy_lesson_media:{updated['id']}:{media_type}")
+        await msg.reply_text(
+            f"✅ <b>تم حفظ مرفق الدرس بنجاح!</b>\n"
+            f"<blockquote>▎📚 الدرس: <b>{esc(updated['title'])}</b>\n"
+            f"▎📎 النوع: <b>{academy.media_badge(media_type)}</b></blockquote>",
+            reply_markup=kb.admin_nav([[kb.btn("👁 عرض وإدارة الدرس", f"a:acadles_view:{updated['id']}", style="success")]]),
+            parse_mode="HTML",
+        )
+        return True
+
+    # Case 2: New lesson wizard step == 'media'
+    draft["media_type"] = media_type
+    draft["media_file_id"] = file_id
+    if caption and not draft.get("media_caption"):
+        draft["media_caption"] = caption
+    if caption and not draft.get("content"):
+        draft["content"] = caption
+    draft["step"] = "quiz"
+    ud["acad_new_draft"] = draft
+    await msg.reply_text(
+        f"✅ <b>تم استلام المرفق ({academy.media_badge(media_type)}) بنجاح!</b>\n\n"
+        "📝 <b>الخطوة الأخيرة (اختياري): إضافة سؤال اختبار للدرس</b>\n"
+        "<blockquote>"
+        "▎أرسل سؤالاً بالتنسيق:\n"
+        "<code>السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح | تفسير اختياري</code>\n"
+        "▎أو اضغط الزر أدناه للحفظ والنشر فوراً بدون سؤال:"
+        "</blockquote>",
+        reply_markup=kb.admin_nav([
+            [kb.btn("🚀 حفظ ونشر الدرس الآن", "a:acadnew_save", style="success")],
+            [kb.btn("❌ إلغاء", "a:acadlessons", style="danger")],
+        ]),
+        parse_mode="HTML",
+    )
+    return True
+
+
 async def handle_growth_text_input(update, context, uid: int, text: str) -> bool:
-    """Process one-shot text prompts for Phase 4 (gift code, payout wallet, admin grants/gifts)."""
+    """Process one-shot and wizard text prompts for Academy Studio, Gift Codes & Affiliates."""
     bot = context.bot
     ud = context.user_data
 
@@ -582,6 +1142,178 @@ async def handle_growth_text_input(update, context, uid: int, text: str) -> bool
 
     if uid != config.ADMIN_ID:
         return False
+
+    # Admin: Custom Academy Course Price
+    if ud.pop("awaiting_acad_price", None):
+        try:
+            p = float(text.replace("$", "").replace(",", "").strip())
+            if not (1.0 <= p <= 100000.0):
+                raise ValueError("range")
+            new_p, _ = await afn.run(academy.set_pricing, p, None)
+            await afn.run(audit_log.log, uid, f"academy_price_custom:{new_p:g}")
+            await update.message.reply_text(
+                f"✅ <b>تم تحديث سعر الدورة الاحترافية إلى: {new_p:g} USD</b>",
+                reply_markup=kb.admin_nav([[kb.btn("🎓 استوديو الأكاديمية", "a:academy", style="success")]]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            ud["awaiting_acad_price"] = True
+            await update.message.reply_text(
+                "❌ يرجى إدخال رقم صحيح للسعر بالدولار (مثال: <code>49</code> أو <code>125</code>).",
+                parse_mode="HTML",
+            )
+        return True
+
+    # Admin: Custom Academy Duration
+    if ud.pop("awaiting_acad_dur", None):
+        try:
+            d = int(text.strip())
+            if not (0 <= d <= 36500):
+                raise ValueError("range")
+            _, new_d = await afn.run(academy.set_pricing, None, d)
+            await afn.run(audit_log.log, uid, f"academy_dur_custom:{new_d}")
+            dur_lbl = "مدى الحياة ♾" if new_d == 0 else f"{new_d} يوماً"
+            await update.message.reply_text(
+                f"✅ <b>تم تحديث مدة اشتراك الأكاديمية إلى: {dur_lbl}</b>",
+                reply_markup=kb.admin_nav([[kb.btn("🎓 استوديو الأكاديمية", "a:academy", style="success")]]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            ud["awaiting_acad_dur"] = True
+            await update.message.reply_text(
+                "❌ يرجى إدخال عدد أيام صحيح (مثال: <code>365</code> أو <code>0</code> لمدى الحياة).",
+                parse_mode="HTML",
+            )
+        return True
+
+    # Admin: Edit existing lesson title/content
+    edit_id = ud.pop("awaiting_acad_edit_for", None)
+    if edit_id:
+        lines = text.splitlines()
+        if len(lines) >= 2:
+            new_title = lines[0].strip()
+            new_content = "\n".join(lines[1:]).strip()
+        else:
+            new_title = None
+            new_content = text.strip()
+        updated = await afn.run(academy.update_lesson_content, int(edit_id), new_title, new_content)
+        if not updated:
+            await update.message.reply_text("❌ الدرس غير موجود.")
+            return True
+        await afn.run(audit_log.log, uid, f"academy_lesson_edited:{updated['id']}")
+        await update.message.reply_text(
+            f"✅ <b>تم تحديث الدرس بنجاح:</b> {esc(updated['title'])}",
+            reply_markup=kb.admin_nav([[kb.btn("👁 عرض وإدارة الدرس", f"a:acadles_view:{updated['id']}", style="success")]]),
+            parse_mode="HTML",
+        )
+        return True
+
+    # Admin: Edit existing lesson quiz
+    quiz_id = ud.pop("awaiting_acad_quiz_for", None)
+    if quiz_id:
+        parsed = _parse_quiz_line(text)
+        if not parsed:
+            ud["awaiting_acad_quiz_for"] = quiz_id
+            await update.message.reply_text(
+                "❌ صيغة غير مكتملة. أرسل: <code>السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح</code>",
+                parse_mode="HTML",
+            )
+            return True
+        updated = await afn.run(academy.update_lesson_quiz, int(quiz_id), parsed)
+        await afn.run(audit_log.log, uid, f"academy_lesson_quiz:{quiz_id}:n={len(parsed)}")
+        await update.message.reply_text(
+            f"✅ <b>تم حفظ {len(parsed)} سؤال اختبار للدرس بنجاح!</b>",
+            reply_markup=kb.admin_nav([[kb.btn("👁 عرض وإدارة الدرس", f"a:acadles_view:{updated['id']}", style="success")]]),
+            parse_mode="HTML",
+        )
+        return True
+
+    # Admin: Guided New Lesson Wizard (title -> content -> media -> quiz)
+    draft = ud.get("acad_new_draft")
+    if draft:
+        step = draft.get("step")
+        if step == "title":
+            draft["title"] = text.strip()[:140]
+            draft["step"] = "content"
+            ud["acad_new_draft"] = draft
+            await update.message.reply_text(
+                f"✅ العنوان: <b>{esc(draft['title'])}</b>\n\n"
+                "📝 <b>الخطوة 4/4: أرسل النص الشارح أو الملخص المكثف للدرس:</b>\n"
+                "<blockquote>▎يمكنك كتابة الشرح الكامل والقواعد والمثال العملي (أو ملخص قصير إذا كان الدرس فيديو/صوت/PDF).</blockquote>",
+                reply_markup=kb.admin_nav([[kb.btn("❌ إلغاء", "a:acadlessons", style="danger")]]),
+                parse_mode="HTML",
+            )
+            return True
+
+        if step == "content":
+            draft["content"] = text.strip()
+            mt = draft.get("media_type", "TEXT")
+            if mt != "TEXT":
+                draft["step"] = "media"
+                ud["acad_new_draft"] = draft
+                await update.message.reply_text(
+                    f"📎 <b>أرسل الآن ملف الدرس ({academy.media_badge(mt)}) مباشرة في هذه المحادثة:</b>\n"
+                    "<blockquote>▎يدعم رفع أو إعادة توجيه: فيديو (MP4) · صوت/فويس · ملف PDF · صورة.</blockquote>",
+                    reply_markup=kb.admin_nav([[kb.btn("❌ إلغاء", "a:acadlessons", style="danger")]]),
+                    parse_mode="HTML",
+                )
+            else:
+                draft["step"] = "quiz"
+                ud["acad_new_draft"] = draft
+                await update.message.reply_text(
+                    "📝 <b>اختياري — أضف سؤال اختبار للدرس أو احفظه مباشرة:</b>\n"
+                    "<blockquote>"
+                    "▎لإضافة سؤال أرسل:\n"
+                    "<code>السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح | تفسير اختياري</code>\n"
+                    "▎أو اضغط «حفظ ونشر الدرس الآن» بالأسفل:"
+                    "</blockquote>",
+                    reply_markup=kb.admin_nav([
+                        [kb.btn("🚀 حفظ ونشر الدرس الآن", "a:acadnew_save", style="success")],
+                        [kb.btn("❌ إلغاء", "a:acadlessons", style="danger")],
+                    ]),
+                    parse_mode="HTML",
+                )
+            return True
+
+        if step == "media":
+            await update.message.reply_text(
+                f"📎 بانتظار رفع الملف ({academy.media_badge(draft.get('media_type', 'VIDEO'))}) — أرسل فيديو أو صوت أو فويس أو PDF وليس نصاً.",
+                reply_markup=kb.admin_nav([[kb.btn("⏭ حفظ كدرس نصي فقط", "a:acadnew_save", style="primary")]]),
+                parse_mode="HTML",
+            )
+            return True
+
+        if step == "quiz":
+            parsed = _parse_quiz_line(text)
+            if not parsed:
+                await update.message.reply_text(
+                    "❌ صيغة السؤال غير صحيحة. أرسل: <code>السؤال | خيار1 | خيار2 | خيار3 | رقم_الصحيح</code> أو اضغط الحفظ مباشرة.",
+                    reply_markup=kb.admin_nav([[kb.btn("🚀 حفظ ونشر الدرس الآن", "a:acadnew_save", style="success")]]),
+                    parse_mode="HTML",
+                )
+                return True
+            draft["quiz"] = parsed
+            ud.pop("acad_new_draft", None)
+            created = await afn.run(
+                academy.create_lesson,
+                title=draft["title"],
+                track=draft.get("track", "PAID"),
+                content=draft.get("content", ""),
+                media_type=draft.get("media_type", "TEXT"),
+                media_file_id=draft.get("media_file_id", ""),
+                media_caption=draft.get("media_caption", ""),
+                quiz=parsed,
+            )
+            await afn.run(audit_log.log, uid, f"academy_lesson_created:{created['code']}:{created['media_type']}")
+            await update.message.reply_text(
+                f"🎉 <b><u>تم إنشاء ونشر الدرس الجديد بنجاح!</u></b>\n"
+                f"<blockquote>▎📚 <b>{esc(created['title'])}</b>\n"
+                f"▎🏷 المسار: <b>{'📗 مجاني' if created['track']=='FREE' else '👑 احترافي'}</b> · {academy.media_badge(created['media_type'])}\n"
+                f"▎📝 عدد أسئلة الاختبار: <b>{len(parsed)}</b></blockquote>",
+                reply_markup=kb.admin_nav([[kb.btn("👁 عرض وإدارة الدرس", f"a:acadles_view:{created['id']}", style="success")]]),
+                parse_mode="HTML",
+            )
+            return True
 
     # Admin: Grant Paid Academy
     if ud.pop("awaiting_acad_grant", None):

@@ -90,7 +90,9 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
                 "awaiting_partner_limit",
                 "awaiting_gift_code", "awaiting_aff_wallet",
-                "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct",
+                "awaiting_acad_grant", "awaiting_acad_price", "awaiting_acad_dur",
+                "awaiting_acad_media_for", "awaiting_acad_edit_for", "awaiting_acad_quiz_for",
+                "awaiting_gift_custom", "awaiting_gift_direct",
                 "awaiting_exch_creds")
 
 
@@ -111,9 +113,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await crypto_api.handle_crypto_text_input(update, context, uid, text):
             return
 
-    # ---------- Phase 4 (v6.27.0) Academy / Gift Codes / Affiliate Payouts ----------
+    # ---------- Phase 4 (v6.27.0) & v7.1.0 Royal Academy Studio ----------
     if any(ud.get(k) for k in ("awaiting_gift_code", "awaiting_aff_wallet",
-                               "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct")):
+                               "awaiting_acad_grant", "awaiting_acad_price", "awaiting_acad_dur",
+                               "awaiting_acad_edit_for", "awaiting_acad_quiz_for", "acad_new_draft",
+                               "awaiting_gift_custom", "awaiting_gift_direct")):
         from fysb.handlers import academy_growth
         if await academy_growth.handle_growth_text_input(update, context, uid, text):
             return
@@ -201,8 +205,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                       + safe(appr.get("error", "خطأ")) + " — تواصل مع الدعم.")
             return
         plan = await afn.run(_fetch_plan_row, req["plan_code"])
-        title = esc(plan["title"]) if plan else esc(req["plan_code"])
-        days = plan["duration_days"] if plan else 0
+        if str(req["plan_code"] or "").upper() == "ACADEMY":
+            from fysb.services import academy as _acad_svc
+            title = "🎓 أكاديمية ForexYemeni الاحترافية"
+            days = await afn.run(_acad_svc.paid_duration_days)
+        else:
+            title = esc(plan["title"]) if plan else esc(req["plan_code"])
+            days = plan["duration_days"] if plan else 0
         tx_short = f"{text.strip()[:12]}…{text.strip()[-8:]}"
         await update.effective_message.reply_text(
             "👑 <b><u>تم التحقق من دفعتك على البلوكيشن — باقتك مفتوحة الآن</u></b>\n"
@@ -931,6 +940,15 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.effective_message.photo[-1]
     caption = (update.effective_message.caption or "").strip()
 
+    # v7.1.0 Admin: Academy lesson photo attachment
+    if uid == config.ADMIN_ID and (
+        ud.get("awaiting_acad_media_for")
+        or (ud.get("acad_new_draft") or {}).get("step") == "media"
+    ):
+        from fysb.handlers import academy_growth
+        if await academy_growth.handle_growth_media_input(update, context, uid):
+            return
+
     # Admin: broadcast photo
     if uid == config.ADMIN_ID and ud.get("awaiting_broadcast_photo"):
         bid = ud.get("broadcast_draft", 0)
@@ -960,8 +978,12 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ok:
             preq = await afn.run(payments_service.get_request, int(pid))
             plan_code = (preq["plan_code"] if preq else "") or "—"
-            plan_row = await afn.run(_fetch_plan_row, plan_code) if plan_code != "—" else None
-            plan_title = esc(plan_row["title"]) if plan_row else esc(plan_code)
+            plan_row = await afn.run(_fetch_plan_row, plan_code) if plan_code not in ("—", "ACADEMY") else None
+            plan_title = (
+                "🎓 أكاديمية ForexYemeni الاحترافية"
+                if plan_code.upper() == "ACADEMY"
+                else (esc(plan_row["title"]) if plan_row else esc(plan_code))
+            )
             plan_cur = esc(plan_row["currency"]) if plan_row else "USD"
             amt = float(preq["amount"] or 0) if preq else 0.0
             method_txt = esc((preq["method"] if preq else "") or "MANUAL")
@@ -1038,3 +1060,13 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await update.effective_message.reply_text(f"✅ أُضيف المرفق للتذكرة #{tid}.")
         return
+
+
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v7.1.0 — Handle Admin Video / Audio / Voice / PDF (Document) uploads for Academy lessons."""
+    uid = update.effective_user.id
+    if uid == config.ADMIN_ID:
+        from fysb.handlers import academy_growth
+        if await academy_growth.handle_growth_media_input(update, context, uid):
+            return
+

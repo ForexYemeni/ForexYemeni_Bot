@@ -114,6 +114,7 @@ def main() -> int:
         app.add_handler(CommandHandler("backup", backup_command))
         app.add_handler(CallbackQueryHandler(buttons))
         app.add_handler(MessageHandler(filters.PHOTO, inputs.on_photo))
+        app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, inputs.on_media))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inputs.on_text))
         app.add_error_handler(error_handler)
         log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup + callbacks + text/photo)",

@@ -125,9 +125,9 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "💬 أرسل رسالتك الآن — ستُسجل في التذكرة.", None, context.bot)
         return
-    # Phase 4 (v6.27.0): Independent Academy, Gift Code Redeem, Tiered Affiliates
+    # Phase 4 (v6.27.0) & v7.1.0 Royal Academy: Independent Academy, Gift Code Redeem, Tiered Affiliates
     if action in ("academy", "acadbuy", "redeem", "affiliate", "affpayout") or action.startswith(
-        ("acadtrack:", "acadles:", "acadquiz:", "acadcert:")
+        ("acadtrack:", "acadles:", "acadquiz:", "acadcert:", "acadmedia:", "acadusdt:", "acadpay:")
     ):
         from fysb.handlers import academy_growth
         if await academy_growth.handle_user_growth(q, uid, action, context, context.bot):
@@ -650,8 +650,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_anl_global(q, uid, context, bot)
     elif act == "repanal":
         await admin_system.admin_rep_anal(q, uid, context, bot)
-    elif act in ("academy", "acadtoggle", "acadprice", "acaddur", "acadlessons",
-                 "acadles_track", "acadles_tog", "acadgrant",
+    elif act in ("academy", "acadtoggle", "acadprice", "acadprice_custom", "acaddur", "acaddur_custom",
+                 "acadlessons", "acadles_view", "acadles_preview", "acadles_media", "acadles_edit",
+                 "acadles_quiz", "acadles_track", "acadles_tog", "acadles_del", "acadles_delgo",
+                 "acadnew", "acadnew_tr", "acadnew_mt", "acadnew_save", "acadgrant",
                  "gifts", "giftgen", "giftcustom", "giftdirect",
                  "affiliates", "affapprove", "affreject"):
         from fysb.handlers import academy_growth

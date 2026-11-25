@@ -364,6 +364,10 @@ CREATE TABLE IF NOT EXISTS academy_lessons(
   summary TEXT NOT NULL DEFAULT '',
   content TEXT NOT NULL DEFAULT '',
   quiz_json TEXT NOT NULL DEFAULT '[]',
+  media_type TEXT NOT NULL DEFAULT 'TEXT',
+  media_file_id TEXT NOT NULL DEFAULT '',
+  media_caption TEXT NOT NULL DEFAULT '',
+  edited_by_admin INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
@@ -543,6 +547,12 @@ ADD_COLUMNS = {
         "manual_usage_date": "TEXT DEFAULT ''",
         "manual_analysis_used": "INTEGER NOT NULL DEFAULT 0",
         "manual_signal_used": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "academy_lessons": {
+        "media_type": "TEXT NOT NULL DEFAULT 'TEXT'",
+        "media_file_id": "TEXT NOT NULL DEFAULT ''",
+        "media_caption": "TEXT NOT NULL DEFAULT ''",
+        "edited_by_admin": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 

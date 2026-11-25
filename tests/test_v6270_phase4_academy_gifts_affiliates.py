@@ -84,14 +84,16 @@ def test_independent_academy_curriculum_isolation_quiz_and_certificate(isolated_
     assert academy.toggle_lesson_track("F01_BASICS") == "FREE"
 
     # 4) Quiz & progress tracking -> certificate eligibility
-    wrong = academy.submit_quiz_answer(uid_acad, "F01_BASICS", 2)
+    f01 = academy.get_lesson("F01_BASICS")
+    wrong_idx = (int(f01["quiz"][0]["ans"]) + 1) % len(f01["quiz"][0]["opts"])
+    wrong = academy.submit_quiz_answer(uid_acad, "F01_BASICS", wrong_idx, q_idx=0)
     assert wrong["ok"] is True and wrong["correct"] is False
     assert academy.user_progress(uid_acad)["free_done"] == 0
 
     for les in free_les:
-        ans_idx = int(les["quiz"][0]["ans"])
-        res = academy.submit_quiz_answer(uid_acad, les["code"], ans_idx)
-        assert res["correct"] is True
+        for qi, qitem in enumerate(les["quiz"]):
+            res = academy.submit_quiz_answer(uid_acad, les["code"], int(qitem["ans"]), q_idx=qi)
+            assert res["correct"] is True
 
     prog = academy.user_progress(uid_acad)
     assert prog["free_done"] == 5 and prog["free_pct"] == 100.0

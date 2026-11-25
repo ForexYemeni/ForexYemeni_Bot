@@ -30,6 +30,14 @@ jobs:
           python -m pytest -q
       - name: Build and verify ForexYemeni1.zip + SHA-256
         run: |
+          python -c "
+          import os
+          from fysb import config
+          tag = os.environ['GITHUB_REF_NAME']
+          expected = f'v{config.VERSION}'
+          assert tag == expected, f'Release tag mismatch: tag={tag!r} != config.VERSION={expected!r}!'
+          print('Verified tag matches config.VERSION:', expected)
+          "
           git archive --format=zip --prefix=ForexYemeni_Bot/ -o ForexYemeni1.zip HEAD
           python -c "
           import pathlib, updater

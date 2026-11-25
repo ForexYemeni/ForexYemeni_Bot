@@ -35,9 +35,9 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent
 
 # --- ما لا تلمسه عملية التحديث أبداً (بيئة التشغيل المحلية) ------------------
-PRESERVE_EXACT = {".env", "fysb.lock", ".DS_Store", "spot_calibration.json"}
+PRESERVE_EXACT = {".env", "fysb.lock", ".DS_Store", "spot_calibration.json", ".last_boot_update.json"}
 PRESERVE_SUFFIXES = (".db", ".db-journal", ".db-wal", ".db-shm", ".log", ".pyc")
-PRESERVE_DIRS = {"logs", "backups", "__pycache__", ".git", ".pytest_cache", "node_modules"}
+PRESERVE_DIRS = {"logs", "backups", "__pycache__", ".git", ".pytest_cache", "node_modules", ".bin", ".local", ".cache"}
 
 TIMEOUT_JSON = 25      # ثوانٍ — فحص الإصدار
 TIMEOUT_ZIP = 180      # ثوانٍ — تنزيل الحزمة
@@ -415,13 +415,17 @@ def _clear_pycache(root) -> None:
 
 ROLLBACK_PREFIX = "update_rollback_v"
 ROLLBACK_KEEP = 5
-_SNAPSHOT_SKIP_DIRS = PRESERVE_DIRS | {".venv", "venv", ".mypy_cache", ".ruff_cache"}
+_SNAPSHOT_SKIP_DIRS = PRESERVE_DIRS | {
+    ".venv", "venv", ".mypy_cache", ".ruff_cache",
+    ".bin", ".local", ".cache", ".pip", ".npm", "dist", "build",
+}
+_SNAPSHOT_MAX_FILE_BYTES = 5 * 1024 * 1024   # never compress 30-40MB binaries like ngrok/cloudflared
 
 
 def create_rollback_snapshot(dest_root, version_label: str = "") -> pathlib.Path | None:
     """أخذ نسخة احتياطية فورية لكود النسخة الحالية قبل التحديث للتراجع الفوري.
 
-    لا تتضمن أبداً .env أو قواعد البيانات أو السجلات — ملفات الكود فقط.
+    لا تتضمن أبداً .env أو قواعد البيانات أو السجلات أو الملفات التنفيذية الكبيرة (.bin/ngrok).
     تُحفظ داخل backups/update_rollback_v<ver>_<ts>.zip مع الإبقاء على أحدث 5 نسخ.
     """
     root = pathlib.Path(dest_root).resolve()
@@ -442,6 +446,11 @@ def create_rollback_snapshot(dest_root, version_label: str = "") -> pathlib.Path
                 if any(part in _SNAPSHOT_SKIP_DIRS for part in parts):
                     continue
                 if parts[-1] in PRESERVE_EXACT or parts[-1].endswith(PRESERVE_SUFFIXES):
+                    continue
+                try:
+                    if p.stat().st_size > _SNAPSHOT_MAX_FILE_BYTES:
+                        continue
+                except OSError:
                     continue
                 z.write(p, f"ForexYemeni_Bot/{rel.as_posix()}")
         if not validate_package(snap):
@@ -614,12 +623,25 @@ def self_update(dest_root=None, target_tag: str = "", force: bool = False) -> di
 
 
 def _prepare_for_restart() -> None:
-    """Flush DB state and release fysb.lock cleanly before os.execve().
+    """Flush DB state, stop tunnel child processes, and release fysb.lock cleanly before os.execve().
 
     Critical on Linux: os.execve() keeps the exact same PID and /proc start
-    tick. Releasing fysb.lock + flushing SQLite WAL / closing PG pool prevents
-    lock self-deadlock and ensures zero in-flight DB corruption on /update.
+    tick. Releasing fysb.lock + stopping child tunnel (ngrok/cloudflared) +
+    flushing SQLite WAL / closing PG pool prevents lock self-deadlock and
+    orphan tunnel processes holding Ngrok static domains.
     """
+    # 0. Terminate active HTTPS tunnel child process cleanly (ngrok / cloudflared / ssh)
+    try:
+        if "fysb.webapp.tunnel" in sys.modules:
+            from fysb.webapp import tunnel as _tun
+            proc = _tun._STATE.get("proc")
+            if proc is not None and getattr(proc, "returncode", None) is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+    except Exception:
+        pass
     # 1. Flush SQLite WAL or close PostgreSQL connection pool (best-effort)
     try:
         if "fysb.db" in sys.modules:
@@ -661,16 +683,65 @@ def restart() -> None:
     os.execve(python, [python, str(ROOT / "main.py")], env)
 
 
+_BOOT_LOOP_WINDOW_SEC = 600
+
+
+def _boot_stamp_path(root=None) -> pathlib.Path:
+    return pathlib.Path(root or ROOT) / ".last_boot_update.json"
+
+
+def _boot_loop_blocked(remote_tag: str, root=None) -> bool:
+    """Circuit breaker: never re-apply the exact same remote tag in a tight boot loop."""
+    if not remote_tag:
+        return False
+    sp = _boot_stamp_path(root)
+    try:
+        if not sp.is_file():
+            return False
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        if str(data.get("tag") or "") == str(remote_tag):
+            age = time.time() - float(data.get("ts") or 0)
+            if 0 <= age < _BOOT_LOOP_WINDOW_SEC:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _record_boot_stamp(remote_tag: str, root=None) -> None:
+    try:
+        _boot_stamp_path(root).write_text(
+            json.dumps({"tag": str(remote_tag), "ts": time.time()}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def boot_check() -> dict:
     """نقطة الإقلاع — تستدعى من main.py قبل تحميل أي كود من fysb.
 
     يوجد تحديث أحدث ⇒ تثبيته ثم إعادة تشغيل فورية (الدالة لا تعود).
     بلا تحديث أو عند أي فشل ⇒ سطر BOOT واضح ثم متابعة الإقلاع الطبيعي.
+    حماية قاطع الدائرة (v7.4.6): يمنع حلقة التحديث اللانهائية لو تطابق التاغ خلال 10 دقائق.
     """
     t0 = time.monotonic()
+    # Quick pre-check against boot-loop stamp before downloading anything
+    try:
+        rel_peek = latest_release()
+        if rel_peek and _boot_loop_blocked(rel_peek.get("tag") or ""):
+            dt = int((time.monotonic() - t0) * 1000)
+            print(
+                f"BOOT: UPDATE — تخطي حلقة التحديث المتكررة ({rel_peek.get('tag')}) "
+                f"| {dt}ms — متابعة الإقلاع بالنسخة المثبتة"
+            )
+            return {"status": "loop_guarded", "remote": rel_peek.get("tag") or ""}
+    except Exception:
+        pass
     res = self_update()
     dt = int((time.monotonic() - t0) * 1000)
     if res["status"] == "updated":
+        _record_boot_stamp(res.get("remote") or "")
         print(f"BOOT: UPDATE ✓ v{res['local']} → {res['remote']} | {res['files']} ملف | {dt}ms — إعادة تشغيل للكود الجديد...")
         sys.stdout.flush()
         restart()                            # لا يعود أبداً

@@ -453,6 +453,12 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_leaderboard_publish(q, uid, context, bot, arg or "30d")
     elif act == "strength":
         await admin_trading.admin_strength(q, uid, context, bot)
+    elif act == "chartstoggle":
+        await admin_trading.admin_charts_toggle(q, uid, context, bot)
+    elif act == "sigchart":
+        await admin_trading.admin_signal_chart(q, uid, context, bot, int(arg or 0))
+    elif act == "sigproof":
+        await admin_trading.admin_signal_proof_publish(q, uid, context, bot, int(arg or 0))
     elif act == "backtest":
         await admin_trading.admin_backtest(q, uid, context, bot)
     elif act == "btrun":

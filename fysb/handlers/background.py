@@ -276,9 +276,17 @@ async def market_engine_loop(app):
         generate_signal,
     )
 
-    async def bot_send(uid: int, text: str):
+    async def bot_send(uid: int, text: str, reply_markup=None):
         # Return the sent Message — emit_to_users pins its chat/message ids so
         # the tracker can edit this exact original card live later.
+        if reply_markup is not None:
+            try:
+                return await app.bot.send_message(uid, text, reply_markup=reply_markup, parse_mode="HTML")
+            except Exception:
+                from fysb.ui.keyboards import strip_button_styles
+                return await app.bot.send_message(
+                    uid, text, reply_markup=strip_button_styles(reply_markup), parse_mode="HTML",
+                )
         return await app.bot.send_message(uid, text, parse_mode="HTML")
 
     bot_send._bot = app.bot
@@ -333,6 +341,19 @@ async def market_engine_loop(app):
                                             admin_msg = await app.bot.send_message(config.ADMIN_ID, card, parse_mode="HTML")
                                             # v6.24.0 (#4): pin Admin message_id for live tracker edits!
                                             await afn.run(_pin_admin_delivery, result["signal_id"], admin_msg)
+                                            # v6.26.0 (#13): auto zero-cost institutional signal chart PNG
+                                            from fysb.ui import charts as _charts
+                                            if await afn.run(_charts.charts_enabled):
+                                                from fysb.handlers.user_pages import _build_signal_chart_png
+                                                png_b, _ = await asyncio.to_thread(_build_signal_chart_png, dict(sig), False)
+                                                if png_b:
+                                                    import io as _io
+                                                    await app.bot.send_photo(
+                                                        chat_id=config.ADMIN_ID,
+                                                        photo=_io.BytesIO(png_b),
+                                                        caption=f"📊 شارت الإشارة الآلية #{seq} · <b>{m['symbol']}</b> {sig['direction']} ({tf})",
+                                                        parse_mode="HTML",
+                                                    )
                                         except Exception:
                                             pass
                                 # v6.24.0 (#6): deliver companion FREE-tier pick if one was created
@@ -422,6 +443,34 @@ async def tracker_loop(app):
                 await _safe_send(app.bot, uid, text)
             for uid, chat_id, message_id, text in result.get("edits", []):
                 await _safe_edit(app.bot, chat_id, message_id, text)
+            # v6.26.0 (#14): Auto Before/After Verified Proof Chart on TP2_HIT / TP3_HIT
+            for ps in result.get("proof_signals", []):
+                try:
+                    from fysb.ui import charts as _charts
+                    from fysb.ui import keyboards as _kb
+                    if config.ADMIN_ID and await afn.run(_charts.charts_enabled):
+                        png = await asyncio.to_thread(_charts.render_proof_chart, ps, ps.get("candles") or [])
+                        if png:
+                            import io as _io
+                            sid = int(ps["id"])
+                            pips = float(ps.get("pips_result") or 0.0)
+                            cap = (
+                                f"🏆 <b>شارت إثبات صفقة رابحة #{sid}</b> — "
+                                f"<b>{ps['symbol']}</b> {ps['direction']} · <b>{pips:+.1f} pips</b> ({ps['status']})\n"
+                                "<i>اضغط أدناه لنشر الإثبات في جميع قنواتك المفعّلة بضغطة واحدة.</i>"
+                            )
+                            pub_kb = _kb.InlineKeyboardMarkup([[
+                                _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sid}", style="success"),
+                            ]])
+                            await app.bot.send_photo(
+                                chat_id=config.ADMIN_ID,
+                                photo=_io.BytesIO(png),
+                                caption=cap,
+                                reply_markup=pub_kb,
+                                parse_mode="HTML",
+                            )
+                except Exception:
+                    pass
             expired, expiry_edits, expiry_notes = await afn.run(tracker.expire_with_alerts)
             for uid, chat_id, message_id, text in expiry_edits:
                 await _safe_edit(app.bot, chat_id, message_id, text)

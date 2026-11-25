@@ -615,6 +615,10 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             kb.btn("🧭 قوة العملات", "u:strength", style="primary"),
             kb.btn("📰 الأخبار", "u:news", style="primary"),
         ])
+        rows_kb.append([
+            kb.btn("🛡 ملف المخاطرة واللوت", "u:risk", style="primary"),
+            kb.btn("📓 مفكرة التداول", "u:journal", style="success"),
+        ])
 
         if is_today:
             scope_label = _sa.ar_date_label(_sa.today_iso())
@@ -751,7 +755,13 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         # v6.14.0: deliver signal card as its own dedicated message AND pin
         # chat_id/message_id in signal_deliveries so the tracker updates this
         # card live on TP1/TP2/TP3/SL/price moves!
-        nav_btns = (
+        action_rows = [
+            [kb.btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
+             kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary")],
+            [kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success"),
+             kb.btn("❌ تجاهلتها", f"u:jskip:{sid}", style="danger")],
+        ]
+        nav_btns = action_rows + (
             [[kb.btn("📅 إشارات اليوم", "u:sigday:today:0"), kb.btn("🗓 أرشيف التواريخ", "u:sigdates:0")]]
             if is_signal_closed(sig_d)
             else [[kb.btn("🧪 متابعة تجريبية", f"u:demoopen:{sid}", style="success"),
@@ -1481,6 +1491,154 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         ]
         await render(q, body, kb.user_nav(rows_kb), bot)
 
+    # --- v6.26.0 Risk Profile, 1-Tap Lot Calculator, Daily DD Guard, Journal & Charts ---
+    elif action == "risk" or action.startswith(("rbal:", "rrisk:", "rlev:", "rdd:")):
+        from fysb.services import risk_journal as _rj
+        if action.startswith("rbal:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, balance=val)
+        elif action.startswith("rrisk:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, risk_pct=val)
+        elif action.startswith("rlev:"):
+            val = _safe_int(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, leverage=val)
+        elif action.startswith("rdd:"):
+            val = _safe_float(action.split(":", 1)[1])
+            if val:
+                await afn.run(_rj.update_risk_profile, uid, max_daily_dd_pct=val)
+        prof = await afn.run(_rj.get_risk_profile, uid)
+        body = await afn.run(_rj.render_risk_profile_card, uid)
+        rows_kb = [
+            [
+                kb.btn(f"{'✅ ' if prof['balance'] == 250 else ''}$250", "u:rbal:250"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 1000 else ''}$1K", "u:rbal:1000"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 5000 else ''}$5K", "u:rbal:5000"),
+                kb.btn(f"{'✅ ' if prof['balance'] == 10000 else ''}$10K", "u:rbal:10000"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 0.5 else ''}0.5%", "u:rrisk:0.5"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 1.0 else ''}1%", "u:rrisk:1"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 2.0 else ''}2%", "u:rrisk:2"),
+                kb.btn(f"{'✅ ' if prof['risk_pct'] == 3.0 else ''}3%", "u:rrisk:3"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['leverage'] == 50 else ''}1:50", "u:rlev:50"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 100 else ''}1:100", "u:rlev:100"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 200 else ''}1:200", "u:rlev:200"),
+                kb.btn(f"{'✅ ' if prof['leverage'] == 500 else ''}1:500", "u:rlev:500"),
+            ],
+            [
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 2.0 else ''}سحب 2%", "u:rdd:2", style="danger"),
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 3.0 else ''}سحب 3%", "u:rdd:3", style="danger"),
+                kb.btn(f"{'✅ ' if prof['max_daily_dd_pct'] == 5.0 else ''}سحب 5%", "u:rdd:5", style="danger"),
+            ],
+            [kb.btn("📓 مفكرة التداول التلقائية", "u:journal", style="success"), kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "journal" or action.startswith("journal:"):
+        days = _safe_int(action.split(":", 1)[1]) if ":" in action else 30
+        if days not in (7, 30, 90):
+            days = 30
+        from fysb.services import risk_journal as _rj
+        body = await afn.run(_rj.render_journal_card, uid, days)
+        rows_kb = [
+            [
+                kb.btn("📅 7 أيام" + (" ✓" if days == 7 else ""), "u:journal:7", style="success" if days == 7 else "primary"),
+                kb.btn("📆 30 يوماً" + (" ✓" if days == 30 else ""), "u:journal:30", style="success" if days == 30 else "primary"),
+                kb.btn("📚 90 يوماً" + (" ✓" if days == 90 else ""), "u:journal:90", style="success" if days == 90 else "primary"),
+            ],
+            [kb.btn("🛡 تعديل ملف المخاطرة", "u:risk", style="primary"), kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("lotcalc:"):
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        from fysb.services import risk_journal as _rj
+        mrow = await afn.run(_market_row, sig["symbol"])
+        body = await afn.run(_rj.render_lot_calculator_card, uid, dict(sig), mrow)
+        rows_kb = [
+            [kb.btn("🛡 تعديل رصيدي ومخاطرتي", "u:risk", style="primary"),
+             kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success")],
+            [kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary"),
+             kb.btn("↩️ الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith(("jtake:", "jskip:")):
+        is_take = action.startswith("jtake:")
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        from fysb.services import risk_journal as _rj
+        res = await afn.run(_rj.log_journal_action, uid, dict(sig), "TAKEN" if is_take else "SKIPPED")
+        dd = res.get("drawdown") or {}
+        if is_take:
+            dd_warn = (
+                f"\n▎🚨 <b>تحذير حارس السحب اليومي:</b> خسارة يومك {dd.get('today_loss_pct', 0):.2f}% "
+                f"(تجاوزت حدك {dd.get('max_daily_dd_pct', 3):g}%)!"
+                if dd.get("breached") else ""
+            )
+            body = (
+                f"✅ <b><u>تم تسجيل دخولك الصفقة في مفكرة التداول</u></b>\n"
+                f"<blockquote>"
+                f"▎📌 الأداة: <b>{esc(sig['symbol'])}</b> {sig['direction']} · ⏱ {esc(sig['timeframe'])}\n"
+                f"▎📦 اللوت المحسوب من ملف مخاطرتك: <code>{res['lots']:.2f} lot</code> (مخاطرة: <b>{res['risk_usd']:,.2f} $</b>)\n"
+                f"▎🔄 ستُحدّث نتيجتك في المفكرة تلقائياً فور إغلاق الصفقة.{dd_warn}"
+                f"</blockquote>"
+            )
+        else:
+            body = (
+                f"❌ <b>تم تسجيل تجاهل الصفقة في مفكرتك ({esc(sig['symbol'])} {sig['direction']})</b>\n"
+                "<blockquote>▎يساعدك ذلك في قياس انضباطك ومقارنة الصفقات التي دخلتها بتلك التي تجاهلتها.</blockquote>"
+            )
+        rows_kb = [
+            [kb.btn("📓 عرض مفكرة التداول", "u:journal", style="success"),
+             kb.btn("🧮 حاسبة اللوت", f"u:lotcalc:{sid}", style="primary")],
+            [kb.btn("📡 الإشارات", "u:signals")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("sigchart:"):
+        sid = _safe_int(action.split(":", 1)[1])
+        sig = await afn.run(_signal_row, sid) if sid else None
+        if not sig:
+            await render(q, "الإشارة غير متاحة.", kb.user_nav(), bot)
+            return
+        png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, dict(sig), False)
+        if not png_bytes:
+            await render(
+                q,
+                "⚠️ تعذر توليد الشارت اللحظي حالياً (بيانات الشموع غير متوفرة مؤقتاً) — يمكنك متابعة مستويات الإشارة النصية.",
+                kb.user_nav([[kb.btn("↩️ الإشارات", "u:signals")]]),
+                bot,
+            )
+            return
+        cap = (
+            f"{'🏆 شارت إثبات موثّق' if is_proof else '📊 شارت الإشارة الملكي'} — "
+            f"<b>{esc(sig['symbol'])}</b> {sig['direction']} · {esc(sig['timeframe'])} · {esc(sig['strategy'])}"
+        )
+        try:
+            import io as _io
+            await bot.send_photo(
+                chat_id=uid,
+                photo=_io.BytesIO(png_bytes),
+                caption=cap,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await render(q, "⚠️ تعذر إرسال صورة الشارت حالياً.", kb.user_nav([[kb.btn("↩️ الإشارات", "u:signals")]]), bot)
+
     elif action == "help":
         await render(q,
                      "❓ <b>مركز المساعدة</b>\n\n"
@@ -1502,6 +1660,34 @@ def _safe_int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_float(v):
+    try:
+        val = float(v)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_signal_chart_png(sig: dict, force_proof: bool = False) -> tuple[bytes | None, bool]:
+    """Fetch fresh real OHLC candles for `sig` and render local PNG chart (0 cost)."""
+    from fysb.engines import market_data
+    from fysb.ui import charts
+    sym = str(sig.get("symbol") or "XAUUSD")
+    tf = str(sig.get("timeframe") or "H1")
+    row = _market_row(sym)
+    try:
+        candles, _src = market_data.fetch_candles(sym, tf, count=72)
+    except Exception:
+        candles = []
+    st = str(sig.get("status") or "").upper()
+    is_proof = force_proof or st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "CLOSED")
+    if is_proof:
+        png = charts.render_proof_chart(sig, candles, row=row)
+        return png, True
+    png = charts.render_signal_chart(sig, candles, row=row)
+    return png, False
 
 
 def _plans_for_sale():

@@ -60,6 +60,14 @@ def personal_block(sig: dict, user_id: int, row=None, acc: dict | None = None) -
             profit = abs(instruments.pnl(symbol, sig["direction"], lots, entry, float(tp), row))
             lines.append(f"▎🏁 ربح متوقع عند TP{i}: <b>{profit:+,.2f} $</b>")
         lines.append(f"▎🤖 التنفيذ التلقائي: <b>{'مفعّل — تُفتح الصفقة في حسابك تلقائياً' if acc.get('auto_trade') else 'متوقف — فعّله من إعدادات التجريبي'}</b>")
+        # v6.26.0 (#22): append real-account Risk Profile lot recommendation if configured
+        try:
+            from fysb.services import risk_journal as _rj
+            real_snip = _rj.compact_risk_snippet(user_id, sig, row=row)
+            if real_snip:
+                lines.append(real_snip)
+        except Exception:
+            pass
         return "\n".join(lines)
     except Exception:
         return ""

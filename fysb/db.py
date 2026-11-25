@@ -331,6 +331,30 @@ CREATE TABLE IF NOT EXISTS free_trial_reminders(
   sent_at TEXT NOT NULL,
   PRIMARY KEY(user_id, stage)
 );
+CREATE TABLE IF NOT EXISTS user_risk_profiles(
+  user_id INTEGER PRIMARY KEY,
+  balance REAL NOT NULL DEFAULT 1000.0,
+  risk_pct REAL NOT NULL DEFAULT 1.0,
+  leverage INTEGER NOT NULL DEFAULT 100,
+  max_daily_dd_pct REAL NOT NULL DEFAULT 3.0,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trade_journal(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  signal_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  action TEXT NOT NULL,
+  lots REAL NOT NULL DEFAULT 0.01,
+  risk_usd REAL NOT NULL DEFAULT 0.0,
+  realized_pips REAL NOT NULL DEFAULT 0.0,
+  realized_usd REAL NOT NULL DEFAULT 0.0,
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  created_at TEXT NOT NULL,
+  closed_at TEXT DEFAULT '',
+  UNIQUE(user_id, signal_id)
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -492,6 +516,8 @@ DEFAULT_SETTINGS = {
     # v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
     "news_guard_enabled": "1",
     "news_guard_minutes": "30",
+    # v6.26.0 Local zero-cost institutional charts (Pillow)
+    "charts_enabled": "1",
 }
 
 SEED_MARKETS = [

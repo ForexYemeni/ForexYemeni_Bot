@@ -203,6 +203,21 @@ def user_menu_signal_buttons(rows) -> InlineKeyboardMarkup:
     return user_nav(kb)
 
 
+def signal_action_keyboard(signal_id: int) -> InlineKeyboardMarkup:
+    """v6.26.0 (#21/#13/#24): Interactive 2-row action bar under every signal card."""
+    sid = int(signal_id)
+    return InlineKeyboardMarkup([
+        [
+            btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
+            btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary"),
+        ],
+        [
+            btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success"),
+            btn("❌ تجاهلتها", f"u:jskip:{sid}", style="danger"),
+        ],
+    ])
+
+
 # --- Admin Command Center (clean 4-row Home + 5 focused sub-hubs, 100% styled)
 def admin_menu() -> InlineKeyboardMarkup:
     """Luxury Admin Command Center — 4 crisp rows, 100% native Bot API 9.4 colors."""

@@ -409,6 +409,10 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
     rows_kb = []
     if sig_open:
         rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
+    rows_kb.append([
+        kb.btn("📊 شارت الإشارة", f"a:sigchart:{sid}", style="primary"),
+        kb.btn("🏆 نشر إثبات للقنوات", f"a:sigproof:{sid}", style="success"),
+    ])
     rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
     rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
     body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم.{live_note}"
@@ -570,7 +574,7 @@ async def admin_engine(q, uid, context, bot):
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
         [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success")],
-        [kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
+        [kb.btn("📊 شارتات الإشارات (تبديل)", "a:chartstoggle", style="primary"), kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
@@ -730,6 +734,86 @@ async def admin_strength(q, uid, context, bot):
         [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+# --- v6.26.0 Local Zero-Cost Pillow Charts & Before/After Proof Publisher -----
+def _toggle_charts_sync() -> bool:
+    cur = (db.get_setting("charts_enabled", "1") or "1") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting("charts_enabled", nxt)
+    return nxt == "1"
+
+
+async def admin_charts_toggle(q, uid, context, bot):
+    enabled = await afn.run(_toggle_charts_sync)
+    await afn.run(audit_log.log, uid, f"charts_enabled:{int(enabled)}")
+    state_txt = "🟢 مفعّلة (توليد شارتات إشارات وإثباتات محلياً مجاناً 100%)" if enabled else "⚪ متوقفة"
+    await render(
+        q,
+        f"📊 <b><u>حالة شارتات الإشارات المحلية</u></b>\n<blockquote>▎الحالة الجديدة: <b>{state_txt}</b></blockquote>",
+        kb.admin_nav([[kb.btn("↩️ المحرك", "a:engine")]]),
+        bot,
+    )
+
+
+async def admin_signal_chart(q, uid, context, bot, sid: int):
+    r, _ = await afn.run(_signal_with_deliveries, sid)
+    if not r:
+        await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
+        return
+    from fysb.handlers.user_pages import _build_signal_chart_png
+    sig = dict(r)
+    png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, sig, False)
+    if not png_bytes:
+        await render(q, "⚠️ تعذر توليد الشارت حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+        return
+    import io as _io
+    cap = f"{'🏆 إثبات صفقة' if is_proof else '📊 شارت الإشارة'} #{sid} · <b>{esc(sig['symbol'])}</b> {sig['direction']} ({esc(sig['timeframe'])})"
+    try:
+        await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+    except Exception:
+        await render(q, "⚠️ تعذر إرسال صورة الشارت.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+
+
+async def admin_signal_proof_publish(q, uid, context, bot, sid: int):
+    r, _ = await afn.run(_signal_with_deliveries, sid)
+    if not r:
+        await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
+        return
+    from fysb.handlers.user_pages import _build_signal_chart_png
+    sig = dict(r)
+    png_bytes, _ = await asyncio.to_thread(_build_signal_chart_png, sig, True)
+    if not png_bytes:
+        await render(q, "⚠️ تعذر توليد شارت الإثبات حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
+        return
+    pips = float(sig.get("pips_result") or 0.0)
+    cap = (
+        f"🏆 <b><u>إثبات صفقة موثّق — ForexYemeni Royal</u></b>\n"
+        f"▎📌 <b>{esc(sig['symbol'])}</b> {sig['direction']} · ⏱ {esc(sig['timeframe'])} · {esc(sig['strategy'])}\n"
+        f"▎🎯 النتيجة: <b>{pips:+.1f} pips</b> ({esc(sig.get('status') or '')})\n"
+        f"▎🛡 شارت قبل/بعد موثّق تلقائياً من محرك ForexYemeni."
+    )
+    import io as _io
+    sent, failed = 0, 0
+    try:
+        await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+    except Exception:
+        pass
+    chat_ids = await afn.run(_enabled_channel_ids_sync)
+    for cid in chat_ids:
+        try:
+            target = int(cid) if cid.lstrip("-").isdigit() else cid
+            await bot.send_photo(chat_id=target, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+    await afn.run(audit_log.log, uid, f"signal_proof_publish:{sid}:sent={sent}")
+    await render(
+        q,
+        f"🏆 <b>تم توليد شارت الإثبات ونشره!</b>\n<blockquote>▎📤 تم الإرسال إليك وإلى <b>{sent}</b> قناة نشطة (فشل: {failed}).</blockquote>",
+        kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]),
+        bot,
+    )
 
 
 def _enabled_backtest_markets() -> list[str]:

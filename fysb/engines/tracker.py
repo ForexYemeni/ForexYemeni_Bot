@@ -188,6 +188,7 @@ def check_open_signals(api_key: str) -> dict:
     stats = {"checked": 0, "updated": 0, "refreshed": 0, "skipped_stale": 0, "errors": 0}
     notifications: list[tuple[int, str]] = []
     edits: list[tuple[int, str, int, str]] = []
+    proof_signals: list[dict] = []
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
@@ -293,6 +294,13 @@ def check_open_signals(api_key: str) -> dict:
             notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
             notifications.extend(notes)
             edits.extend(new_edits)
+            if transition in ("TP2_HIT", "TP3_HIT"):
+                proof_signals.append({
+                    **sig,
+                    "status": transition,
+                    "pips_result": result_pips,
+                    "candles": candles[-72:],
+                })
             continue
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified,
         # strictly while RUNNING — never fires retroactively after TP1/TP2 is already banked)
@@ -327,7 +335,8 @@ def check_open_signals(api_key: str) -> dict:
                               (live_px, payload["last_candle_iso"], sig["id"]))
                 stats["refreshed"] += 1
     return {"stats": stats, "notifications": notifications,
-            "admin_notice": admin_notice, "edits": edits}
+            "admin_notice": admin_notice, "edits": edits,
+            "proof_signals": proof_signals}
 
 
 def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:

@@ -938,12 +938,17 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             stats["skipped_quota"] += 1
             continue
 
-        # 4) deliver: pre-rendered luxury card + personal plan block (single message)
+        # 4) deliver: pre-rendered luxury card + personal plan block + interactive action bar
         acc = demo_map.get(uid)
         personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
         text = base_card + ("\n\n<blockquote>" + personal + "</blockquote>" if personal else "")
         try:
-            msg = await bot_send(uid, text)
+            from fysb.ui import keyboards as _kb
+            action_kb = _kb.signal_action_keyboard(sig["id"])
+            try:
+                msg = await bot_send(uid, text, reply_markup=action_kb)
+            except TypeError:
+                msg = await bot_send(uid, text)
             stats["sent"] += 1
             record_delivery_refs(uid, sig["id"], msg)
         except Exception:

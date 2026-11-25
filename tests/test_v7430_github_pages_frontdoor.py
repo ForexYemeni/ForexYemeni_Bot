@@ -185,3 +185,43 @@ def test_admin_1tap_ghpages_button_clears_blocked_workers_dev_and_activates(tmp_
     assert config.WEBAPP_GH_PAGES_ENABLED is False
     first_btn_direct = captured["markup"].inline_keyboard[0][0]
     assert first_btn_direct.web_app.url == "https://trombone-blitz-chain.ngrok-free.dev/admin"
+
+
+def test_updater_rollback_skips_bin_ngrok_and_large_files(tmp_path):
+    """v7.4.6 regression: rollback snapshot must NEVER compress 68MB .bin/ngrok & cloudflared binaries."""
+    import zipfile
+    import updater
+
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "fysb").mkdir()
+    (tmp_path / "fysb" / "config.py").write_text('VERSION = "7.4.6"\n', encoding="utf-8")
+    bin_dir = tmp_path / ".bin"
+    bin_dir.mkdir()
+    (bin_dir / "ngrok").write_bytes(b"X" * 1024)
+    (bin_dir / "cloudflared").write_bytes(b"Y" * 1024)
+    # Also a huge >5MB stray file in project root
+    (tmp_path / "huge_dump.bin").write_bytes(b"\0" * (6 * 1024 * 1024))
+
+    snap = updater.create_rollback_snapshot(tmp_path, "7.4.6")
+    assert snap is not None and snap.is_file()
+    with zipfile.ZipFile(snap) as z:
+        names = z.namelist()
+    assert not any(".bin/" in n or "ngrok" in n or "cloudflared" in n for n in names)
+    assert not any("huge_dump.bin" in n for n in names)
+
+
+def test_updater_boot_check_circuit_breaker_prevents_infinite_loop(tmp_path, monkeypatch):
+    """v7.4.6 regression: boot_check never re-installs the same remote tag in a tight loop."""
+    import updater
+
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    updater._record_boot_stamp("v7.4.6", tmp_path)
+    assert updater._boot_loop_blocked("v7.4.6", tmp_path) is True
+    assert updater._boot_loop_blocked("v7.4.7", tmp_path) is False
+
+    monkeypatch.setattr(updater, "latest_release", lambda: {"tag": "v7.4.6", "url": "https://example.com/a.zip"})
+    called = {"self_update": False}
+    monkeypatch.setattr(updater, "self_update", lambda *a, **kw: called.update(self_update=True) or {})
+    res = updater.boot_check()
+    assert res["status"] == "loop_guarded"
+    assert called["self_update"] is False

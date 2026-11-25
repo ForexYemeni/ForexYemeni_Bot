@@ -1418,12 +1418,15 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         body.append(f"\n⚙️ <b>إعداداتك:</b> مخاطرة <b>{s['risk_pct']:g}%</b> · اللوت: "
                     f"<b>{lot_word}</b> · "
                     f"التنفيذ التلقائي: <b>{'مفعل 🤖' if s['auto_trade'] else 'متوقف'}</b>")
+        from fysb.services import auto_bridge as _ab
+        br_visible = await afn.run(_ab.is_bridge_visible_to_user, uid)
         demo_rows = [
-            [kb.btn("⚡ جسر النسخ للمنصات (cTrader / TradeLocker / Deriv / MT5)", "u:bridge", style="success")],
             [kb.btn("🚀 فتح صفقة تجريبية", "u:demopick"), kb.btn("📂 الصفقات المفتوحة", "u:demoopen_list")],
             [kb.btn("📜 سجل الصفقات", "u:demohistory"), kb.btn("🔄 تصفير الحساب", "u:demoreset")],
             [kb.btn("⚙️ إعدادات حسابي التجريبي", "u:demoset")],
         ]
+        if br_visible:
+            demo_rows.insert(0, [kb.btn("⚡ جسر النسخ للمنصات (cTrader / TradeLocker / Deriv / MT5)", "u:bridge", style="success")])
         if config.webapp_ready():
             demo_rows.insert(0, [kb.webapp_btn(
                 "🎮 متابعة حسابي التجريبي على الشارت الحي",

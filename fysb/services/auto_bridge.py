@@ -182,6 +182,16 @@ def user_can_copy(user_id: int, account_mode: str = "DEMO") -> tuple[bool, str]:
     return False, f"🔒 النسخ الآلي متاح لباقات ({allowed_txt}) — أو بتفعيل خاص من الإدارة"
 
 
+def is_bridge_visible_to_user(user_id: int) -> bool:
+    """Return True iff the Auto-Bridge UI/buttons should be visible to `user_id`.
+    When Admin disables Bridge (enabled=0 / kill_switch=1 / mode=OFF), or blocks/excludes
+    a user (DENY / SELECTED / non-eligible plan), it is hidden 100% from the user account."""
+    if int(user_id) == int(config.ADMIN_ID or 0):
+        return True
+    ok, _ = user_can_copy(user_id, "DEMO")
+    return bool(ok)
+
+
 # ---------------------------------------------------------------------------
 # 2. Encrypted Connections CRUD
 # ---------------------------------------------------------------------------

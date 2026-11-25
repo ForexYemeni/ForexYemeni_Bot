@@ -729,10 +729,12 @@ def dispatch_request(
             else:
                 partner_payload = {"is_channel_partner": False}
 
+            from fysb.services import auto_bridge as _ab
             return _json_resp(200, {
                 "ok": True,
                 "user_id": uid,
                 "is_admin": principal["is_admin"],
+                "bridge_visible": _ab.is_bridge_visible_to_user(uid),
                 "auto_signals": auto_sig_on,
                 "plan": {"code": plan.get("code", "FREE"), "title": plan.get("title", "FREE")},
                 "quota": {"used": used, "limit": lim},
@@ -935,10 +937,21 @@ def dispatch_request(
         # --- v7.7.0 USER ROYAL AUTO-BRIDGE APIs ---
         if m == "GET" and path == "/api/bridge/overview":
             from fysb.services import auto_bridge as _ab
+            visible = _ab.is_bridge_visible_to_user(uid)
+            if not visible:
+                return _json_resp(200, {
+                    "ok": True,
+                    "bridge_visible": False,
+                    "can_copy_demo": False,
+                    "can_copy_live": False,
+                    "connections": [],
+                    "orders": [],
+                })
             can_demo, reason_demo = _ab.user_can_copy(uid, "DEMO")
             can_live, reason_live = _ab.user_can_copy(uid, "LIVE")
             return _json_resp(200, {
                 "ok": True,
+                "bridge_visible": True,
                 "can_copy_demo": can_demo,
                 "reason_demo": reason_demo,
                 "can_copy_live": can_live,

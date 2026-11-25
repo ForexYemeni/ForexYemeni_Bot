@@ -64,7 +64,7 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "7.1.0"
+VERSION = "7.2.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 
@@ -76,20 +76,56 @@ REPO_OWNER = os.getenv("REPO_OWNER", "ForexYemeni").strip()
 REPO_NAME = os.getenv("REPO_NAME", "ForexYemeni_Bot").strip()
 UPDATE_ASSET = os.getenv("UPDATE_ASSET", "ForexYemeni1.zip").strip()
 
-# --- Telegram Mini App & Admin Web Panel (v7.0.0) ---------------------------
-# Telegram requires a valid HTTPS URL (SSL) for Mini Apps. When WEBAPP_URL is
-# unset, all classic Telegram bot menus continue working with zero breakage.
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+# --- Telegram Mini App & Admin Web Panel (v7.0.0 / v7.2.0 Auto-HTTPS) -------
+# Telegram requires a valid HTTPS URL (SSL) for Mini Apps.
+# On Bot-Hosting / VPS without a domain, Auto-HTTPS Tunnel (`fysb/webapp/tunnel.py`)
+# obtains a free Cloudflare HTTPS URL automatically and injects it at runtime!
+def _detect_static_webapp_url() -> str:
+    direct = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+    if direct:
+        return direct
+    for env_k in ("RENDER_EXTERNAL_URL", "RAILWAY_PUBLIC_DOMAIN", "KOYEB_PUBLIC_DOMAIN"):
+        val = os.getenv(env_k, "").strip().rstrip("/")
+        if val:
+            return val if val.startswith(("http://", "https://")) else f"https://{val}"
+    return ""
+
+
+WEBAPP_URL_STATIC = _detect_static_webapp_url()
+WEBAPP_URL = WEBAPP_URL_STATIC
+WEBAPP_TUNNEL_SOURCE = "env" if WEBAPP_URL_STATIC else ""
 WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0").strip()
 try:
-    WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or "8080")
+    _raw_port = (
+        os.getenv("WEBAPP_PORT", "").strip()
+        or os.getenv("SERVER_PORT", "").strip()
+        or os.getenv("PORT", "").strip()
+        or "8080"
+    )
+    WEBAPP_PORT = int(_raw_port)
 except ValueError:
     WEBAPP_PORT = 8080
 WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "1").strip() == "1"
+WEBAPP_AUTO_TUNNEL = os.getenv("WEBAPP_AUTO_TUNNEL", "1").strip() == "1"
+
+
+def set_runtime_webapp_url(url: str, source: str = "auto_tunnel") -> None:
+    """Update live HTTPS Mini App URL in memory (used by Bot-Hosting auto-tunnel)."""
+    global WEBAPP_URL, WEBAPP_TUNNEL_SOURCE
+    clean = (url or "").strip().rstrip("/")
+    if clean:
+        WEBAPP_URL = clean
+        WEBAPP_TUNNEL_SOURCE = source
+    elif WEBAPP_URL_STATIC:
+        WEBAPP_URL = WEBAPP_URL_STATIC
+        WEBAPP_TUNNEL_SOURCE = "env"
+    else:
+        WEBAPP_URL = ""
+        WEBAPP_TUNNEL_SOURCE = ""
 
 
 def webapp_ready() -> bool:
-    """True only when a valid HTTPS WEBAPP_URL is configured for Telegram Mini Apps."""
+    """True only when a valid HTTPS WEBAPP_URL is configured or auto-tunneled."""
     return bool(WEBAPP_ENABLED and WEBAPP_URL.lower().startswith("https://"))
 
 BACKUP_DIR = BASE_DIR / "backups"

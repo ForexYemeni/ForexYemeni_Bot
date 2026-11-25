@@ -659,6 +659,8 @@ DEFAULT_SETTINGS = {
     "affiliate_min_payout_usd": "20",
     # v6.28.0 Free Crypto Exchange API Integration (Binance/Bybit/OKX)
     "crypto_api_enabled": "1",
+    # v7.2.0 Zero-Config Bot-Hosting Auto-HTTPS Tunnel for Telegram Mini App
+    "webapp_auto_tunnel": "1",
 }
 
 SEED_MARKETS = [

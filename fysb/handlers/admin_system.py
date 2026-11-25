@@ -784,36 +784,83 @@ def _plan_code_title_rows():
         return c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
 
 
-async def admin_webapp_info(q, uid, context, bot):
-    """v7.0.0 Telegram Mini App & Admin Web Panel status + HTTPS launch buttons."""
+async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
+    """v7.2.0 Telegram Mini App & Admin Web Panel status + Bot-Hosting Zero-Config Auto-HTTPS Tunnel."""
+    from fysb.webapp import tunnel as _tun
     ready = config.webapp_ready()
+    auto_on = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+    st = _tun.tunnel_status()
     rows_kb = []
     if ready:
         rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{config.WEBAPP_URL}/admin", style="success")])
         rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", f"{config.WEBAPP_URL}/", style="primary")])
+        src_txt = (
+            "⚡ نفق HTTPS تلقائي مجاني (Bot-Hosting بدون أي موقع)"
+            if config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel"
+            else "🔗 رابط HTTPS مخصص (.env)"
+        )
         body = (
-            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.0.0)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.2.0)</u></b>\n"
             "<blockquote>"
             f"▎🟢 الحالة: <b>مفعّل وجاهز عبر HTTPS</b>\n"
+            f"▎🛰 المصدر: <b>{src_txt}</b>\n"
             f"▎🔗 الرابط: <code>{esc(config.WEBAPP_URL)}</code>\n"
-            f"▎🖥 الخادم المدمج: <code>{esc(config.WEBAPP_HOST)}:{config.WEBAPP_PORT}</code>\n"
+            f"▎🖥 الخادم المدمج: <code>127.0.0.1:{config.WEBAPP_PORT}</code>\n"
             "▎🔐 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
             "</blockquote>"
         )
     else:
+        err_line = f"\n▎⚠️ آخر ملاحظة: <code>{esc(st['last_error'])}</code>" if st.get("last_error") else ""
         body = (
-            "🌐 <b><u>إعداد التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.0.0)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.2.0)</u></b>\n"
             "<blockquote>"
-            "▎⚪ الحالة: <b>غير مفعّل بعد (جميع قوائم تيليغرام الكلاسيكية تعمل 100% بلا تأثر)</b>\n"
-            "▎⚠️ <b>متطلب تيليغرام الرسمي:</b> يشترط تيليغرام رابط <b>HTTPS (SSL)</b> صالح لفتح التطبيق المصغر.\n\n"
-            "▎🛠 <b>خطوات التفعيل السريع في <code>.env</code>:</b>\n"
-            "  <code>WEBAPP_URL=https://your-domain.com</code>\n"
-            "  <code>WEBAPP_PORT=8080</code>\n"
-            "▎ثم وجّه Nginx أو Cloudflare Tunnel مجانياً إلى <code>http://127.0.0.1:8080</code> وأعد تشغيل البوت."
+            f"▎⏳ الحالة: <b>{'جاري تهيئة النفق التلقائي...' if auto_on else 'متوقف حالياً'}</b>\n"
+            "▎🚀 <b>وضع Bot-Hosting (بدون أي موقع أو دومين):</b>\n"
+            "  اضغط <b>«🔄 تشغيل / تجديد نفق HTTPS الآن»</b> ليتم إنشاء رابط HTTPS مجاني تلقائياً خلال ثوانٍ!"
+            f"{err_line}"
             "</blockquote>"
         )
+    if notice:
+        body += f"\n\n<i>{esc(notice)}</i>"
+    if not config.WEBAPP_URL_STATIC:
+        rows_kb.append([kb.btn("🔄 تشغيل / تجديد نفق HTTPS الآن", "a:webapptunnel_restart", style="success")])
+        rows_kb.append([kb.btn(
+            f"🛰 النفق التلقائي على Bot-Hosting: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
+            "a:webapptunnel_toggle",
+            style="primary" if auto_on else "danger",
+        )])
     rows_kb.append([kb.btn("↩️ النظام والأمان", "a:hub:system")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_webapp_tunnel_toggle(q, uid, context, bot):
+    from fysb.webapp import tunnel as _tun
+    cur = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+    nxt = not cur
+    await afn.run(db.set_setting, "webapp_auto_tunnel", "1" if nxt else "0")
+    await afn.run(audit_log.log, uid, f"webapp_auto_tunnel:{int(nxt)}")
+    if not nxt:
+        await _tun.stop_tunnel()
+        await admin_webapp_info(q, uid, context, bot, notice="⏹ تم إيقاف النفق التلقائي للتطبيق المصغّر.")
+    else:
+        await admin_webapp_tunnel_restart(q, uid, context, bot)
+
+
+async def admin_webapp_tunnel_restart(q, uid, context, bot):
+    from fysb.handlers import background as _bg
+    from fysb.webapp import server as _wsrv
+    from fysb.webapp import tunnel as _tun
+    await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
+    if getattr(_bg.post_init, "_webapp_srv", None) is None:
+        _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
+    await _tun.stop_tunnel()
+    url = await _tun.start_tunnel(port=config.WEBAPP_PORT, timeout=40.0)
+    if url:
+        await afn.run(audit_log.log, uid, f"webapp_tunnel_started:{url}")
+        await admin_webapp_info(q, uid, context, bot, notice="✅ تم تشغيل رابط HTTPS المجاني بنجاح! التطبيق جاهز الآن.")
+    else:
+        err = _tun.tunnel_status().get("last_error") or "تعذر الاتصال بـ Cloudflare حالياً"
+        await admin_webapp_info(q, uid, context, bot, notice=f"⚠️ {err}")
 
 
 def _audit_total() -> int:

@@ -159,6 +159,8 @@ def strip_button_styles(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMa
                 new_row.append(InlineKeyboardButton(b.text, callback_data=b.callback_data))
             elif getattr(b, "url", None) is not None:
                 new_row.append(InlineKeyboardButton(b.text, url=b.url))
+            elif getattr(b, "web_app", None) is not None and WebAppInfo is not None:
+                new_row.append(InlineKeyboardButton(b.text, web_app=b.web_app))
             elif getattr(b, "copy_text", None) is not None and _HAS_COPY_TEXT:
                 new_row.append(InlineKeyboardButton(b.text, copy_text=b.copy_text))
             else:
@@ -175,7 +177,10 @@ def lux(label: str, data: str, color: str = "sapphire") -> InlineKeyboardButton:
 # --- User menus (6 luxury rows, 100% native Bot API 9.4 colored buttons) -----
 def user_menu() -> InlineKeyboardMarkup:
     """Luxury 6-row user menu (100% Bot API 9.4 native styled buttons, v6.20.8):
-    Row 1 puts Signal Now & Analysis Now front and center for instant 1-tap access."""
+    Row 1 puts Signal Now & Analysis Now front and center for instant 1-tap access.
+    When Mini App HTTPS URL is live (e.g. via Bot-Hosting Auto-Tunnel), prepends
+    a 1-tap Royal Mini App launch button."""
+    from fysb import config as _cfg
     rows = [
         [btn("⚡ إشارة الآن", "u:signow", style="success"),
          btn("🔬 تحليل الآن", "u:analytics", style="primary")],
@@ -190,6 +195,8 @@ def user_menu() -> InlineKeyboardMarkup:
         [btn("🔔 الإشعارات", "u:notifications", style="primary"),
          btn("🎧 الدعم والمساعدة", "u:support", style="primary")],
     ]
+    if _cfg.webapp_ready():
+        rows.insert(0, [webapp_btn("📱 فتح التطبيق التفاعلي الملكي (Mini App)", f"{_cfg.WEBAPP_URL}/", style="success")])
     return InlineKeyboardMarkup(rows)
 
 

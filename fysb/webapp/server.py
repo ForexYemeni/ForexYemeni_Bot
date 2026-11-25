@@ -65,13 +65,20 @@ def dispatch_request(
     qs = dict(urllib.parse.parse_qsl(parsed.query))
     hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
-    # 1) Public static HTML & healthcheck
-    if m == "GET" and path == "/health":
-        return _json_resp(200, {"ok": True, "version": config.VERSION, "brand": config.BRAND})
-    if m == "GET" and path in ("/", "/app"):
-        return _html_resp(200, templates.render_user_miniapp_html())
-    if m == "GET" and path == "/admin":
-        return _html_resp(200, templates.render_admin_panel_html())
+    # 1) Public static HTML & healthcheck (incl. HEAD/OPTIONS/favicon for tunnels)
+    if m == "OPTIONS":
+        return 204, "text/plain; charset=utf-8", b""
+    if m in ("GET", "HEAD") and path == "/health":
+        st, ct, body_b = _json_resp(200, {"ok": True, "version": config.VERSION, "brand": config.BRAND})
+        return st, ct, (b"" if m == "HEAD" else body_b)
+    if m in ("GET", "HEAD") and path in ("/", "/app"):
+        st, ct, body_b = _html_resp(200, templates.render_user_miniapp_html())
+        return st, ct, (b"" if m == "HEAD" else body_b)
+    if m in ("GET", "HEAD") and path == "/admin":
+        st, ct, body_b = _html_resp(200, templates.render_admin_panel_html())
+        return st, ct, (b"" if m == "HEAD" else body_b)
+    if m == "GET" and path == "/favicon.ico":
+        return 204, "image/x-icon", b""
 
     # 2) Authenticated API routes require valid Telegram WebApp initData HMAC
     if path.startswith("/api/"):
@@ -268,7 +275,10 @@ def dispatch_request(
     return _json_resp(404, {"ok": False, "error": "Not Found"})
 
 
-_STATUS_TEXT = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error"}
+_STATUS_TEXT = {
+    200: "OK", 204: "No Content", 400: "Bad Request",
+    401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error",
+}
 
 
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

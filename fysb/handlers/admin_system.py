@@ -794,15 +794,16 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
     if ready:
         rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{config.WEBAPP_URL}/admin", style="success")])
         rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", f"{config.WEBAPP_URL}/", style="primary")])
+        prov = st.get("provider") or "HTTPS"
         src_txt = (
-            "⚡ نفق HTTPS تلقائي مجاني (Bot-Hosting بدون أي موقع)"
+            f"⚡ نفق HTTPS تلقائي مفحوص ({esc(prov)} · HTTP 200 ✅)"
             if config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel"
             else "🔗 رابط HTTPS مخصص (.env)"
         )
         body = (
-            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.2.0)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.2.1)</u></b>\n"
             "<blockquote>"
-            f"▎🟢 الحالة: <b>مفعّل وجاهز عبر HTTPS</b>\n"
+            f"▎🟢 الحالة: <b>مفعّل ومفحوص حياً عبر HTTPS</b>\n"
             f"▎🛰 المصدر: <b>{src_txt}</b>\n"
             f"▎🔗 الرابط: <code>{esc(config.WEBAPP_URL)}</code>\n"
             f"▎🖥 الخادم المدمج: <code>127.0.0.1:{config.WEBAPP_PORT}</code>\n"
@@ -810,14 +811,19 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
             "</blockquote>"
         )
     else:
-        err_line = f"\n▎⚠️ آخر ملاحظة: <code>{esc(st['last_error'])}</code>" if st.get("last_error") else ""
+        err_line = f"\n▎⚠️ التشخيص: <code>{esc(st['last_error'])}</code>" if st.get("last_error") else ""
+        tail_logs = st.get("logs") or []
+        log_line = (
+            f"\n▎🧾 آخر سجل: <code>{esc(tail_logs[-1][:140])}</code>"
+            if tail_logs else ""
+        )
         body = (
-            "🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.2.0)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.2.1)</u></b>\n"
             "<blockquote>"
-            f"▎⏳ الحالة: <b>{'جاري تهيئة النفق التلقائي...' if auto_on else 'متوقف حالياً'}</b>\n"
+            f"▎⏳ الحالة: <b>{'جاري تهيئة وفحص نفق HTTPS التلقائي...' if auto_on else 'متوقف حالياً'}</b>\n"
             "▎🚀 <b>وضع Bot-Hosting (بدون أي موقع أو دومين):</b>\n"
-            "  اضغط <b>«🔄 تشغيل / تجديد نفق HTTPS الآن»</b> ليتم إنشاء رابط HTTPS مجاني تلقائياً خلال ثوانٍ!"
-            f"{err_line}"
+            "  يختبر تلقائياً Cloudflare (http2/quic) ثم Serveo (بورت 443) و Localhost.run ويتحقق من HTTP 200 قبل التفعيل!"
+            f"{err_line}{log_line}"
             "</blockquote>"
         )
     if notice:

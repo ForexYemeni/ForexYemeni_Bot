@@ -1,9 +1,10 @@
-"""Regression tests for v7.2.0: Zero-Config Bot-Hosting Auto-HTTPS Tunnel for Mini App."""
+"""Regression tests for v7.2.0 & v7.2.1:
+Verified Zero-Config Bot-Hosting Auto-HTTPS Tunnel (Error 1033 prevention + port-443 failover).
+"""
 from __future__ import annotations
 
 import asyncio
 import socket
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +18,7 @@ from fysb.webapp import tunnel
 
 @pytest.fixture
 def isolated_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_FILE", tmp_path / "v7200.db")
+    monkeypatch.setattr(config, "DB_FILE", tmp_path / "v7201.db")
     monkeypatch.setattr(config, "DATABASE_URL", "")
     monkeypatch.setattr(config, "WEBAPP_URL_STATIC", "")
     monkeypatch.setattr(config, "WEBAPP_URL", "")
@@ -30,12 +31,10 @@ def isolated_env(tmp_path, monkeypatch):
 
 
 def test_runtime_webapp_url_and_user_menu_webapp_button(isolated_env):
-    # Initially off -> compact 6-row user menu
     assert config.webapp_ready() is False
     m0 = kb.user_menu()
     assert len(m0.inline_keyboard) == 6
 
-    # Runtime auto-tunnel URL injected -> WebApp button appears automatically on row 0!
     config.set_runtime_webapp_url("https://demo-royal.trycloudflare.com", source="auto_tunnel")
     assert config.webapp_ready() is True
     m1 = kb.user_menu()
@@ -44,18 +43,15 @@ def test_runtime_webapp_url_and_user_menu_webapp_button(isolated_env):
     assert getattr(top_btn, "web_app", None) is not None
     assert top_btn.web_app.url == "https://demo-royal.trycloudflare.com/"
 
-    # strip_button_styles preserves WebApp button intact
     stripped = kb.strip_button_styles(m1)
     assert getattr(stripped.inline_keyboard[0][0], "web_app", None) is not None
 
-    # Clearing resets cleanly
     config.set_runtime_webapp_url("", source="")
     assert config.webapp_ready() is False
 
 
 def test_start_webapp_server_falls_back_to_free_port_when_busy(isolated_env):
     async def _run():
-        # Occupy a local port first
         blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         blocker.bind(("127.0.0.1", 0))
         blocker.listen(1)
@@ -73,32 +69,85 @@ def test_start_webapp_server_falls_back_to_free_port_when_busy(isolated_env):
     asyncio.run(_run())
 
 
-def test_tunnel_parses_trycloudflare_url_and_cleans_up(isolated_env, monkeypatch, tmp_path):
-    # Create a tiny fake executable script that emits a trycloudflare URL on stderr and sleeps
-    fake_bin = tmp_path / "fake_cloudflared.sh"
+def test_webapp_head_and_options_routes(isolated_env):
+    st, _, body = webapp_server.dispatch_request("HEAD", "/health", {})
+    assert st == 200 and body == b""
+    st2, _, body2 = webapp_server.dispatch_request("OPTIONS", "/api/me", {})
+    assert st2 == 204 and body2 == b""
+    st3, _, _ = webapp_server.dispatch_request("GET", "/favicon.ico", {})
+    assert st3 == 204
+
+
+def test_tunnel_requires_edge_registration_and_health_check(isolated_env, monkeypatch, tmp_path):
+    # Fake cloudflared that prints BOTH the URL AND "Registered tunnel connection"
+    fake_bin = tmp_path / "fake_cloudflared_ok.sh"
     fake_bin.write_text(
         "#!/bin/sh\n"
-        "echo 'INF | +---------------------------------------------------------+' >&2\n"
         "echo 'INF |  https://forexyemeni-live-test.trycloudflare.com          |' >&2\n"
+        "echo 'INF Registered tunnel connection connIndex=0 protocol=http2' >&2\n"
         "sleep 30\n",
         encoding="utf-8",
     )
     fake_bin.chmod(0o755)
     monkeypatch.setattr(tunnel, "ensure_cloudflared_binary", lambda: fake_bin)
 
+    async def _fake_verify_ok(url, retries=7, delay=2.0):
+        return True, "OK"
+
+    monkeypatch.setattr(tunnel, "verify_https_health", _fake_verify_ok)
+
     async def _run():
         url = await tunnel.start_tunnel(port=18080, timeout=10.0)
         assert url == "https://forexyemeni-live-test.trycloudflare.com"
         assert config.WEBAPP_URL == url
         assert config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel"
-        assert config.webapp_ready() is True
         assert tunnel.is_tunnel_alive() is True
         st = tunnel.tunnel_status()
-        assert st["active"] is True and st["port"] == 18080
+        assert st["verified"] is True and st["provider"] == "Cloudflare-http2"
 
         await tunnel.stop_tunnel()
         assert tunnel.is_tunnel_alive() is False
         assert config.WEBAPP_URL == ""
+
+    asyncio.run(_run())
+
+
+def test_tunnel_rejects_error_1033_unregistered_cf_and_fails_over_to_serveo_443(isolated_env, monkeypatch, tmp_path):
+    # Fake cloudflared that prints URL but NEVER registers edge connection (Error 1033 case!)
+    bad_cf = tmp_path / "bad_cf.sh"
+    bad_cf.write_text(
+        "#!/bin/sh\n"
+        "echo 'INF |  https://broken-1033.trycloudflare.com |' >&2\n"
+        "echo 'ERR Failed to dial edge port 7844' >&2\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    bad_cf.chmod(0o755)
+
+    # Fake ssh binary simulating Serveo port-443 HTTPS tunnel success!
+    good_ssh = tmp_path / "fake_ssh.sh"
+    good_ssh.write_text(
+        "#!/bin/sh\n"
+        "echo 'Forwarding HTTP traffic from https://royal-fallback.serveo.net'\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    good_ssh.chmod(0o755)
+
+    monkeypatch.setattr(tunnel, "ensure_cloudflared_binary", lambda: bad_cf)
+    monkeypatch.setattr(tunnel.shutil, "which", lambda name: str(good_ssh) if name == "ssh" else None)
+
+    async def _fake_verify_ok(url, retries=7, delay=2.0):
+        return True, "OK"
+
+    monkeypatch.setattr(tunnel, "verify_https_health", _fake_verify_ok)
+
+    async def _run():
+        url = await tunnel.start_tunnel(port=18081, timeout=1.5)
+        assert url == "https://royal-fallback.serveo.net"
+        assert tunnel.tunnel_status()["provider"] == "Serveo-443"
+        assert tunnel.is_tunnel_alive() is True
+        await tunnel.stop_tunnel()
 
     asyncio.run(_run())
 
@@ -120,7 +169,7 @@ def test_admin_webapp_info_renders_live_tunnel_controls(isolated_env):
     assert len(q.message.replied) == 1
     txt = q.message.replied[0]["text"]
     assert "live-bot-hosting.trycloudflare.com" in txt
-    assert "Bot-Hosting" in txt
+    assert "HTTP 200" in txt
     cbs = [getattr(b, "callback_data", "") for row in q.message.replied[0]["reply_markup"].inline_keyboard for b in row]
     assert "a:webapptunnel_restart" in cbs
     assert "a:webapptunnel_toggle" in cbs

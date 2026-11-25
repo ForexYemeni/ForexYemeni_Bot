@@ -20,13 +20,10 @@ def render_user_miniapp_html() -> str:
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#06080f"/>
 <title>{config.BRAND} — Royal Mini App v{config.VERSION}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet"/>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
+html{{background:#06080f;color:#f1f5f9}}
 :root {{
   --bg:#06080f;
   --bg2:#0a0e18;
@@ -438,11 +435,50 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
 </div>
 
 <script>
-const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) {{ tg.ready(); tg.expand(); try{{ tg.setHeaderColor('#06080f'); tg.setBackgroundColor('#06080f'); }}catch(_e){{}} }}
-const INIT_DATA = (tg && tg.initData) || '';
+// v7.4.4: Zero-blocking Telegram bridge — renders instantly (<50ms) even when telegram.org/unpkg/fonts are blocked by ISP!
+function notifyTgNative(){{
+  try{{
+    if(window.Telegram && window.Telegram.WebApp){{
+      const t = window.Telegram.WebApp;
+      t.ready(); t.expand();
+      try{{ t.setHeaderColor('#06080f'); t.setBackgroundColor('#06080f'); }}catch(_e){{}}
+      return;
+    }}
+  }}catch(_e){{}}
+  try{{
+    if(window.TelegramWebviewProxy && window.TelegramWebviewProxy.postEvent){{
+      window.TelegramWebviewProxy.postEvent('web_app_ready', '');
+      window.TelegramWebviewProxy.postEvent('web_app_expand', '');
+      window.TelegramWebviewProxy.postEvent('web_app_set_header_color', JSON.stringify({{color:'#06080f'}}));
+      window.TelegramWebviewProxy.postEvent('web_app_set_background_color', JSON.stringify({{color:'#06080f'}}));
+    }} else if(window.parent && window.parent !== window){{
+      window.parent.postMessage(JSON.stringify({{eventType:'web_app_ready',eventData:''}}), '*');
+      window.parent.postMessage(JSON.stringify({{eventType:'web_app_expand',eventData:''}}), '*');
+    }}
+  }}catch(_e){{}}
+}}
+function getInitData(){{
+  try{{
+    const t = window.Telegram && window.Telegram.WebApp;
+    if(t && t.initData) return t.initData;
+  }}catch(_e){{}}
+  try{{
+    const rawHash = (window.location.hash || '').replace(/^#/, '');
+    if(rawHash){{
+      const d = new URLSearchParams(rawHash).get('tgWebAppData');
+      if(d){{ try{{ sessionStorage.setItem('fysb_tg_init', d); }}catch(_e){{}} return d; }}
+    }}
+  }}catch(_e){{}}
+  try{{
+    const d = new URLSearchParams(window.location.search || '').get('tgWebAppData');
+    if(d) return d;
+  }}catch(_e){{}}
+  try{{ return sessionStorage.getItem('fysb_tg_init') || ''; }}catch(_e){{ return ''; }}
+}}
+notifyTgNative();
+const INIT_DATA = getInitData();
 
-let chart, series, priceLines = [];
+let chart, series, priceLines = [], lastCandles = [], lastOverlaySig = null;
 let curSym = 'XAUUSD', curTf = 'H1', allSignals = [], sigFilter = 'all', partnerRefLink = '';
 
 function copyText(txt, okMsg){{
@@ -457,7 +493,8 @@ function copyText(txt, okMsg){{
 function shareLink(url){{
   if(!url || url==='—') return toast('الرابط غير متاح بعد', true);
   const sh = 'https://t.me/share/url?url=' + encodeURIComponent(url);
-  if(tg && tg.openTelegramLink) tg.openTelegramLink(sh);
+  const tgObj = window.Telegram && window.Telegram.WebApp;
+  if(tgObj && tgObj.openTelegramLink) tgObj.openTelegramLink(sh);
   else window.open(sh, '_blank');
 }}
 
@@ -577,18 +614,69 @@ function pickTf(tf, btn){{
   loadCandles(curSym, curTf);
 }}
 
-async function loadCandles(sym, tf='H1', overlaySig=null){{
-  if(!series) return;
-  document.getElementById('chartSymLbl').textContent = sym + ' · ' + tf;
-  const d = await api('/api/candles?symbol='+encodeURIComponent(sym)+'&tf='+encodeURIComponent(tf));
-  if(d && d.candles && d.candles.length){{
-    series.setData(d.candles);
-    const first = d.candles[0], last = d.candles[d.candles.length-1];
-    document.getElementById('chartPriceNow').textContent = Number(last.close).toFixed(last.close<10?5:2);
-    const pct = first.open ? ((last.close - first.open)/first.open*100) : 0;
-    const chgEl = document.getElementById('chartChg');
-    chgEl.textContent = (pct>=0?'▲ +':'▼ ') + pct.toFixed(2) + '%';
-    chgEl.className = 'chg-pill ' + (pct>=0?'chg-up':'chg-dn');
+function drawFallbackCanvas(candles, overlaySig){{
+  const el = document.getElementById('tvChart');
+  if(!el || !candles || !candles.length) return;
+  el.innerHTML = '';
+  const w = Math.max(el.clientWidth || 320, 260), h = el.clientHeight || 270;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  el.appendChild(cv);
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = '#080c14'; ctx.fillRect(0, 0, w, h);
+  const slice = candles.slice(-60);
+  let lo = Infinity, hi = -Infinity;
+  slice.forEach(c => {{ if(c.low < lo) lo = c.low; if(c.high > hi) hi = c.high; }});
+  if(overlaySig){{
+    [overlaySig.entry, overlaySig.stop, overlaySig.tp1, overlaySig.tp2, overlaySig.tp3].forEach(v => {{
+      if(+v > 0){{ if(+v < lo) lo = +v; if(+v > hi) hi = +v; }}
+    }});
+  }}
+  const padY = 18, padR = 54, plotW = w - padR - 8, plotH = h - padY * 2;
+  const rng = Math.max(hi - lo, 1e-6);
+  const yOf = p => padY + (1 - (p - lo) / rng) * plotH;
+  ctx.strokeStyle = 'rgba(36,48,74,.45)'; ctx.lineWidth = 1;
+  for(let i = 0; i <= 4; i++){{
+    const gy = padY + plotH * i / 4;
+    ctx.beginPath(); ctx.moveTo(6, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
+    const gp = hi - rng * i / 4;
+    ctx.fillStyle = '#94a3b8'; ctx.font = '10px monospace';
+    ctx.fillText(gp.toFixed(gp < 10 ? 4 : 1), w - padR + 4, gy + 3);
+  }}
+  const step = plotW / Math.max(slice.length, 1);
+  const bw = Math.max(2, Math.min(8, step * 0.65));
+  slice.forEach((c, idx) => {{
+    const cx = 8 + idx * step + step * 0.5;
+    const up = c.close >= c.open;
+    const col = up ? '#16c784' : '#f04452';
+    ctx.strokeStyle = col; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, yOf(c.high)); ctx.lineTo(cx, yOf(c.low)); ctx.stroke();
+    const y1 = yOf(Math.max(c.open, c.close)), y2 = yOf(Math.min(c.open, c.close));
+    ctx.fillStyle = col;
+    ctx.fillRect(cx - bw / 2, y1, bw, Math.max(1.5, y2 - y1));
+  }});
+  if(overlaySig){{
+    [[overlaySig.entry,'#f7de8c','E'],[overlaySig.stop,'#f04452','SL'],[overlaySig.tp1,'#16c784','TP1'],[overlaySig.tp2,'#2ed59b','TP2']].forEach(([px,col,lbl])=>{{
+      if(+px > 0){{
+        const y = yOf(+px);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([4,3]);
+        ctx.beginPath(); ctx.moveTo(6, y); ctx.lineTo(w - padR, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = col; ctx.font = 'bold 10px monospace';
+        ctx.fillText(lbl, 10, Math.max(12, y - 3));
+      }}
+    }});
+  }}
+}}
+
+function renderCandlesToChart(candles, overlaySig){{
+  if(!candles || !candles.length) return;
+  lastCandles = candles; lastOverlaySig = overlaySig || null;
+  if(series && chart){{
+    series.setData(candles);
     clearPriceLines();
     if(overlaySig){{
       const lvls = [
@@ -601,11 +689,31 @@ async function loadCandles(sym, tf='H1', overlaySig=null){{
       lvls.forEach(([px, col, title, style])=>{{
         if(+px > 0) priceLines.push(series.createPriceLine({{price:+px,color:col,lineWidth:2,lineStyle:style,axisLabelVisible:true,title}}));
       }});
+    }}
+    chart.timeScale().fitContent();
+  }} else {{
+    drawFallbackCanvas(candles, overlaySig);
+  }}
+}}
+
+async function loadCandles(sym, tf='H1', overlaySig=null){{
+  document.getElementById('chartSymLbl').textContent = sym + ' · ' + tf;
+  const d = await api('/api/candles?symbol='+encodeURIComponent(sym)+'&tf='+encodeURIComponent(tf));
+  if(d && d.candles && d.candles.length){{
+    const first = d.candles[0], last = d.candles[d.candles.length-1];
+    document.getElementById('chartPriceNow').textContent = Number(last.close).toFixed(last.close<10?5:2);
+    const pct = first.open ? ((last.close - first.open)/first.open*100) : 0;
+    const chgEl = document.getElementById('chartChg');
+    chgEl.textContent = (pct>=0?'▲ +':'▼ ') + pct.toFixed(2) + '%';
+    chgEl.className = 'chg-pill ' + (pct>=0?'chg-up':'chg-dn');
+    if(overlaySig){{
       const note = document.getElementById('overlayNote');
       note.textContent = `👑 مستويات الإشارة مرسومة حية: ${{overlaySig.symbol}} ${{overlaySig.direction}} · دخول ${{overlaySig.entry}} · SL ${{overlaySig.stop}} · TP1 ${{overlaySig.tp1}}`;
       note.style.display='block';
+    }} else {{
+      document.getElementById('overlayNote').style.display='none';
     }}
-    chart.timeScale().fitContent();
+    renderCandlesToChart(d.candles, overlaySig);
   }}
 }}
 
@@ -767,6 +875,7 @@ async function boot(){{
     }}
   }} else {{
     renderMarketChips();
+    if(me && me.error) toast('⚠️ ' + me.error, true);
   }}
   loadCandles(curSym, curTf);
 
@@ -781,7 +890,41 @@ async function boot(){{
     openTab(reqTab, document.getElementById('tab-' + reqTab));
   }}
 }}
+function loadOptionalAssets(){{
+  // Non-blocking fonts & chart CDN — NEVER delays first paint even if ISP blocks external CDNs!
+  try{{
+    const ln = document.createElement('link');
+    ln.rel = 'stylesheet';
+    ln.href = 'https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap';
+    document.head.appendChild(ln);
+  }}catch(_e){{}}
+  try{{
+    const ts = document.createElement('script');
+    ts.async = true; ts.src = 'https://telegram.org/js/telegram-web-app.js';
+    ts.onload = ()=>{{ notifyTgNative(); }};
+    document.body.appendChild(ts);
+  }}catch(_e){{}}
+  const cdns = [
+    'https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js',
+    'https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js'
+  ];
+  const tryChartCdn = (i)=>{{
+    if(i >= cdns.length || window.LightweightCharts) return;
+    const s = document.createElement('script');
+    s.async = true; s.src = cdns[i];
+    s.onload = ()=>{{
+      const el = document.getElementById('tvChart');
+      if(el) el.innerHTML = '';
+      initChart();
+      if(lastCandles.length) renderCandlesToChart(lastCandles, lastOverlaySig);
+    }};
+    s.onerror = ()=>tryChartCdn(i + 1);
+    document.body.appendChild(s);
+  }};
+  tryChartCdn(0);
+}}
 boot();
+setTimeout(loadOptionalAssets, 50);
 </script>
 </body>
 </html>"""
@@ -793,12 +936,10 @@ def render_admin_panel_html() -> str:
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#06080f"/>
 <title>{config.BRAND} — Super Admin Web Panel v{config.VERSION}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet"/>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
+html{{background:#06080f;color:#f1f5f9}}
 :root{{
   --bg:#06080f;--glass:rgba(16,22,36,.82);--border:rgba(148,163,184,.16);
   --gold:#d9b04c;--gold2:#f7de8c;--gold-line:rgba(217,176,76,.35);
@@ -917,12 +1058,51 @@ input:focus,select:focus{{border-color:var(--gold)}}
   <div class="card"><h3>💸 طلبات سحب الشركاء المعلقة</h3><div id="payoutBox">—</div></div>
 </div>
 <script>
-const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) {{ tg.ready(); tg.expand(); try{{ tg.setHeaderColor('#06080f'); tg.setBackgroundColor('#06080f'); }}catch(_e){{}} }}
-const INIT_DATA = (tg && tg.initData) || '';
+// v7.4.4: Zero-blocking Telegram Admin bridge — instant paint even when telegram.org is blocked!
+function notifyTgNative(){{
+  try{{
+    if(window.Telegram && window.Telegram.WebApp){{
+      const t = window.Telegram.WebApp;
+      t.ready(); t.expand();
+      try{{ t.setHeaderColor('#06080f'); t.setBackgroundColor('#06080f'); }}catch(_e){{}}
+      return;
+    }}
+  }}catch(_e){{}}
+  try{{
+    if(window.TelegramWebviewProxy && window.TelegramWebviewProxy.postEvent){{
+      window.TelegramWebviewProxy.postEvent('web_app_ready', '');
+      window.TelegramWebviewProxy.postEvent('web_app_expand', '');
+      window.TelegramWebviewProxy.postEvent('web_app_set_header_color', JSON.stringify({{color:'#06080f'}}));
+      window.TelegramWebviewProxy.postEvent('web_app_set_background_color', JSON.stringify({{color:'#06080f'}}));
+    }} else if(window.parent && window.parent !== window){{
+      window.parent.postMessage(JSON.stringify({{eventType:'web_app_ready',eventData:''}}), '*');
+      window.parent.postMessage(JSON.stringify({{eventType:'web_app_expand',eventData:''}}), '*');
+    }}
+  }}catch(_e){{}}
+}}
+function getInitData(){{
+  try{{
+    const t = window.Telegram && window.Telegram.WebApp;
+    if(t && t.initData) return t.initData;
+  }}catch(_e){{}}
+  try{{
+    const rawHash = (window.location.hash || '').replace(/^#/, '');
+    if(rawHash){{
+      const d = new URLSearchParams(rawHash).get('tgWebAppData');
+      if(d){{ try{{ sessionStorage.setItem('fysb_tg_init', d); }}catch(_e){{}} return d; }}
+    }}
+  }}catch(_e){{}}
+  try{{
+    const d = new URLSearchParams(window.location.search || '').get('tgWebAppData');
+    if(d) return d;
+  }}catch(_e){{}}
+  try{{ return sessionStorage.getItem('fysb_tg_init') || ''; }}catch(_e){{ return ''; }}
+}}
+notifyTgNative();
+const INIT_DATA = getInitData();
 function toast(m,e=false){{const el=document.getElementById('toast');el.textContent=m;el.style.background=e?'#f04452':'#16c784';el.style.color=e?'#fff':'#04120c';el.style.display='block';setTimeout(()=>el.style.display='none',2800);}}
 const API_BASE=(()=>{{try{{const q=new URLSearchParams(window.location.search).get('api')||'';const c=q.trim().replace(/\\/+$/,'');if(c&&/^https?:\\/\\//i.test(c))return c;}}catch(_e){{}}return '';}})();
-async function api(p,o={{}}){{const h=Object.assign({{'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'}},o.headers||{{}});try{{const r=await fetch(API_BASE+p,Object.assign({{}},o,{{headers:h}}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {{ok:false,error:'HTTP '+r.status}};return await r.json();}}catch(err){{return {{ok:false,error:'تعذر الاتصال بالخادم'}};}}}}
+async function api(p,o={{}}){{const h=Object.assign({{'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'}},o.headers||{{}});try{{const r=await fetch(API_BASE+p,Object.assign({{}},o,{{headers:h}}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {{ok:false,status:r.status,error:'HTTP '+r.status}};const j=await r.json();j._status=r.status;return j;}}catch(err){{return {{ok:false,netErr:true,error:'تعذر الاتصال بخادم البوت ('+(API_BASE||'same-origin')+')'}};}}}}
 
 async function toggleKey(key){{
   const r = await api('/api/admin/toggle',{{method:'POST',body:JSON.stringify({{key}})}});
@@ -971,10 +1151,18 @@ async function genGift(){{
 async function loadAdmin(){{
   const d = await api('/api/admin/overview');
   if(!d || !d.ok){{
-    document.getElementById('authErr').style.display='block';
+    const errEl = document.getElementById('authErr');
+    if(d && d.netErr){{
+      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + (d.error||'') + '</span>';
+    }} else if(d && d.error && d._status !== 401 && d._status !== 403){{
+      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + d.error;
+    }}
+    errEl.style.display='block';
     document.getElementById('adminBody').style.display='none';
     return;
   }}
+  document.getElementById('authErr').style.display='none';
+  document.getElementById('adminBody').style.display='block';
   document.getElementById('kUsers').textContent = d.kpis.users;
   document.getElementById('kSubs').textContent = d.kpis.active_paid_subs;
   document.getElementById('kOpen').textContent = d.kpis.open_signals;
@@ -1053,6 +1241,20 @@ async function loadAdmin(){{
   ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات سحب معلقة.</div>';
 }}
 loadAdmin();
+setTimeout(()=>{{
+  try{{
+    const ln = document.createElement('link');
+    ln.rel = 'stylesheet';
+    ln.href = 'https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap';
+    document.head.appendChild(ln);
+  }}catch(_e){{}}
+  try{{
+    const ts = document.createElement('script');
+    ts.async = true; ts.src = 'https://telegram.org/js/telegram-web-app.js';
+    ts.onload = ()=>{{ notifyTgNative(); }};
+    document.body.appendChild(ts);
+  }}catch(_e){{}}
+}}, 50);
 </script>
 </body>
 </html>"""

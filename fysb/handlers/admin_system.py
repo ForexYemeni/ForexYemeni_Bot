@@ -785,24 +785,34 @@ def _plan_code_title_rows():
 
 
 async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
-    """v7.4.1 Telegram Mini App & Admin Web Panel status + Ngrok-443 Static Domain + Cloudflare Worker Zero-Warning Mode."""
+    """v7.4.2 Telegram Mini App & Admin Web Panel — Universal Any-Token (Cloudflare/Ngrok/Pinggy) + Any HTTPS URL."""
     from fysb.webapp import tunnel as _tun
     ready = config.webapp_ready()
     auto_on = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
     has_ngrok = bool(await afn.run(_tun.get_ngrok_token))
+    has_cf = bool(await afn.run(_tun.get_cf_tunnel_token))
+    has_pg = bool(await afn.run(_tun.get_pinggy_token))
     ng_dom = await afn.run(_tun.get_ngrok_domain)
     st = _tun.tunnel_status()
+    tok_parts = []
+    if has_cf:
+        tok_parts.append("☁️ Cloudflare")
+    if has_ngrok:
+        tok_parts.append("🔑 Ngrok")
+    if has_pg:
+        tok_parts.append("⚡ Pinggy")
+    tok_status = " + ".join(tok_parts) if tok_parts else "⚪ تلقائي بدون توكن"
     rows_kb = []
     if ready:
         rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{config.WEBAPP_URL}/admin", style="success")])
         rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", f"{config.WEBAPP_URL}/", style="primary")])
         prov = st.get("provider") or "HTTPS"
         if config.WEBAPP_TUNNEL_SOURCE == "worker_proxy":
-            src_txt = f"☁️ واجهة Cloudflare Worker الملكية (بلا رسالة تحذير ✅ · الخلفية: {esc(prov)})"
+            src_txt = f"☁️ واجهة HTTPS مخصصة / Worker (بلا تحذير ✅ · الخلفية: {esc(prov)})"
         elif config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel":
             src_txt = f"⚡ نفق HTTPS تلقائي مفحوص ({esc(prov)} · HTTP 200 ✅)"
         elif config.WEBAPP_TUNNEL_SOURCE == "db_custom":
-            src_txt = "🔗 رابط HTTPS محفوظ ومفحوص في قاعدة البيانات"
+            src_txt = "🔗 رابط HTTPS مخصص محفوظ في قاعدة البيانات"
         else:
             src_txt = "🔗 رابط HTTPS مخصص (.env)"
         back_line = f"\n▎🛰 النفق الخلفي: <code>{esc(st['url'])}</code>" if st.get("url") and st.get("url") != config.WEBAPP_URL else ""
@@ -810,12 +820,12 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
         body = (
             f"🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v{config.VERSION})</u></b>\n"
             "<blockquote>"
-            f"▎🟢 الحالة: <b>مفعّل ومفحوص حياً عبر HTTPS</b>\n"
+            f"▎🟢 الحالة: <b>مفعّل عبر HTTPS</b>\n"
             f"▎🛰 المصدر: <b>{src_txt}</b>\n"
             f"▎🔗 الرابط الفعّال: <code>{esc(config.WEBAPP_URL)}</code>{back_line}{dom_line}\n"
             f"▎🖥 الخادم المدمج: <code>127.0.0.1:{config.WEBAPP_PORT}</code>\n"
-            f"▎🔑 Ngrok-443: <b>{'🟢 مضبوط' if has_ngrok else '⚪ غير مضبوط'}</b>\n"
-            "▎🔐 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
+            f"▎🔐 التوكنات المضبوطة: <b>{tok_status}</b>\n"
+            "▎🛡 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
             "</blockquote>"
         )
     else:
@@ -826,19 +836,19 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
             f"🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v{config.VERSION})</u></b>\n"
             "<blockquote>"
             f"▎⏳ الحالة: <b>{'جاري محاولة الاتصال بنفق HTTPS...' if auto_on else 'متوقف حالياً'}</b>\n"
-            f"▎🔑 Ngrok-443 (مضمون على Bot-Hosting): <b>{'🟢 مضبوط' if has_ngrok else '⚪ غير مضبوط'}</b>\n"
-            "▎🛡 <b>ملاحظة Bot-Hosting:</b> اضغط <b>«🔑 ربط Ngrok المجاني (بورت 443)»</b> بالأسفل — ثم اضغط <b>«☁️ كود Cloudflare Worker»</b> لإلغاء رسالة تحذير Ngrok للأبد مجاناً!"
+            f"▎🔐 التوكنات المضبوطة: <b>{tok_status}</b>\n"
+            "▎✨ يمكنك لصق <b>أي توكن</b> (Cloudflare Zero Trust / Ngrok + دومين ثابت / Pinggy) أو <b>أي رابط https://</b> وسيعمل البوت به فوراً!"
             f"{err_line}{log_line}"
             "</blockquote>"
         )
     if notice:
         body += f"\n\n<i>{esc(notice)}</i>"
     if not config.WEBAPP_URL_STATIC:
-        rows_kb.append([kb.btn("🔑 ربط Ngrok المجاني (بورت 443)", "a:webapp_setngrok", style="success")])
+        rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="success")])
         rows_kb.append([kb.btn("☁️ كود Cloudflare Worker (إلغاء التحذير للأبد)", "a:webapp_worker", style="success")])
         rows_kb.append([
             kb.btn("🔄 تشغيل / تجديد النفق", "a:webapptunnel_restart", style="primary"),
-            kb.btn("🔗 لصق رابط HTTPS", "a:webapp_seturl", style="primary"),
+            kb.btn("🔗 لصق أي رابط HTTPS", "a:webapp_seturl", style="primary"),
         ])
         rows_kb.append([kb.btn(
             f"🛰 النفق التلقائي: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
@@ -853,17 +863,17 @@ async def admin_webapp_set_ngrok(q, uid, context, bot):
     context.user_data["awaiting_ngrok_token"] = True
     await render(
         q,
-        "🔑 <b><u>ربط Ngrok المجاني + الدومين الثابت مدى الحياة (بورت 443)</u></b>\n"
+        "🔑 <b><u>ربط أي توكن نفق (Cloudflare / Ngrok / Pinggy) — كشف تلقائي ذكي</u></b>\n"
         "<blockquote>"
-        "▎1) انسخ التوكن المجاني من:\n"
-        "   <code>https://dashboard.ngrok.com/get-started/your-authtoken</code>\n"
-        "▎2) <b>(مُوصى به جداً — مجاني مدى الحياة!)</b> أنشئ دومين ثابت مجاني واحد من:\n"
-        "   <code>https://dashboard.ngrok.com/domains</code>\n"
-        "▎3) أرسل هنا الآن إما:\n"
-        "   • التوكن فقط: <code>YOUR_AUTHTOKEN</code>\n"
-        "   • أو التوكن + الدومين الثابت معاً:\n"
-        "     <code>YOUR_AUTHTOKEN your-name.ngrok-free.app</code>\n"
-        "▎<i>(أرسل <code>clear</code> لإزالة التوكن)</i>"
+        "▎أرسل في رسالة واحدة أياً من التالي:\n"
+        "▎1️⃣ <b>Cloudflare Tunnel Token</b> (مجاني مدى الحياة بلا تحذير):\n"
+        "   <code>eyJhIjo...</code> (أو الصق أمر <code>cloudflared</code> كاملاً)\n"
+        "▎2️⃣ <b>Ngrok Authtoken</b> (+ دومينك الثابت المجاني اختيارياً):\n"
+        "   <code>YOUR_TOKEN your-name.ngrok-free.app</code>\n"
+        "▎3️⃣ <b>Pinggy Token</b>:\n"
+        "   <code>pinggy:YOUR_TOKEN</code>\n"
+        "▎4️⃣ أو حتى <b>أي رابط https://</b> مباشرةً!\n"
+        "▎<i>(أرسل <code>clear</code> لمسح جميع التوكنات)</i>"
         "</blockquote>",
         kb.admin_nav([[kb.btn("❌ إلغاء", "a:webapp", style="danger")]]),
         bot,
@@ -871,26 +881,31 @@ async def admin_webapp_set_ngrok(q, uid, context, bot):
 
 
 async def admin_webapp_worker_guide(q, uid, context, bot):
-    """Show the exact ready-to-paste Cloudflare Worker proxy script that strips Ngrok/Pinggy warnings."""
+    """Show the exact ready-to-paste Cloudflare Worker proxy script (uses native <pre> copy — NEVER exceeds CopyTextButton 256-char limit!)."""
     from fysb.webapp import tunnel as _tun
     st = _tun.tunnel_status()
     ng_dom = await afn.run(_tun.get_ngrok_domain)
-    origin = (f"https://{ng_dom}" if ng_dom else (st.get("url") or "https://YOUR-STATIC-DOMAIN.ngrok-free.app"))
+    raw_st_url = str(st.get("url") or "")
+    origin = (
+        f"https://{ng_dom}"
+        if ng_dom
+        else (raw_st_url if raw_st_url.startswith("https://") else "https://YOUR-STATIC-DOMAIN.ngrok-free.app")
+    )
     code = _tun.build_cloudflare_worker_code(origin)
     body = (
         "☁️ <b><u>كود Cloudflare Worker الملكي (إزالة رسالة تحذير Ngrok/Pinggy نهائياً 100%)</u></b>\n"
         "<blockquote>"
         "▎1) افتح Worker الخاص بك في Cloudflare (مثلاً <code>forexyemeni.mshay2024m.workers.dev</code>) واضغط <b>Edit Code</b>.\n"
-        "▎2) امسح كود <code>Hello World!</code> بالكامل والصق الكود التالي ثم اضغط <b>Deploy</b>:\n"
+        "▎2) <b>اضغط على المربع البرمجي بالأسفل لنسخ الكود بالكامل بضغطة واحدة</b>، ثم احذف <code>Hello World!</code> والصقه واضغط <b>Deploy</b>:\n"
         "</blockquote>\n"
-        f"<pre>{esc(code)}</pre>\n"
+        f'<pre><code class="language-javascript">{esc(code)}</code></pre>\n'
         "<blockquote>"
-        "▎3) بعدها اضغط زر <b>«🔗 لصق رابط HTTPS»</b> بالأسفل وأرسل رابط الـ Worker الخاص بك — سيفحصه البوت حياً (HTTP 200) ويبقي نفق Ngrok شغالاً بصمت في الخلفية بدون أي رسالة غير لائقة أبداً!"
+        "▎3) بعدها اضغط <b>«🔗 لصق أي رابط HTTPS»</b> وأرسل رابط الـ Worker — سيعتمده البوت فوراً ويبقي النفق الخلفي شغالاً بصمت بدون أي رسالة تحذير!"
         "</blockquote>"
     )
     rows_kb = [
-        [kb.copy_btn("📋 نسخ كود Cloudflare Worker", code, style="success")],
-        [kb.btn("🔗 لصق رابط Worker الآن", "a:webapp_seturl", style="primary")],
+        [kb.copy_btn("📋 نسخ رابط الأصل (ORIGIN)", origin, style="primary")],
+        [kb.btn("🔗 لصق رابط Worker الآن", "a:webapp_seturl", style="success")],
         [kb.btn("↩️ إعدادات التطبيق المصغر", "a:webapp")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)
@@ -900,11 +915,11 @@ async def admin_webapp_set_url(q, uid, context, bot):
     context.user_data["awaiting_webapp_url"] = True
     await render(
         q,
-        "🔗 <b><u>ضبط رابط HTTPS مخصص / Cloudflare Worker للتطبيق المصغّر</u></b>\n"
+        "🔗 <b><u>ضبط أي رابط HTTPS مخصص أو توكن للتطبيق المصغّر</u></b>\n"
         "<blockquote>"
-        "▎أرسل رابط <b>https://...</b> المباشر الآن (مثلاً رابط Cloudflare Worker بعد عمل Deploy).\n"
-        "▎🛡 سيفحص البوت الرابط حياً عبر <code>/health</code> قبل اعتماده.\n"
-        "▎☁️ لروابط <code>*.workers.dev</code> سيبقي البوت نفق الخلفية يعمل تلقائياً بصمت.\n"
+        "▎أرسل <b>أي رابط https://...</b> الآن (مثل Cloudflare Worker أو دومينك الخاص) — سيحفظه البوت ويفعّله فوراً!\n"
+        "▎☁️ لروابط <code>*.workers.dev</code> أو عند وجود توكن نفق، سيبقي البوت النفق الخلفي يعمل تلقائياً.\n"
+        "▎🔑 ويمكنك أيضاً لصق أي توكن (Cloudflare / Ngrok / Pinggy) هنا مباشرةً.\n"
         "▎<i>(أرسل <code>clear</code> لإزالته والعودة للنفق التلقائي)</i>"
         "</blockquote>",
         kb.admin_nav([[kb.btn("❌ إلغاء", "a:webapp", style="danger")]]),

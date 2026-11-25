@@ -499,7 +499,8 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             f"Cache-Control: no-store\r\n"
             f"Access-Control-Allow-Origin: *\r\n"
             f"Access-Control-Allow-Methods: GET, POST, OPTIONS, HEAD\r\n"
-            f"Access-Control-Allow-Headers: Content-Type, X-Telegram-Init-Data, ngrok-skip-browser-warning\r\n"
+            f"Access-Control-Allow-Headers: Content-Type, X-Telegram-Init-Data, ngrok-skip-browser-warning, X-Pinggy-No-Screen\r\n"
+            f"Access-Control-Max-Age: 86400\r\n"
             f"Connection: close\r\n\r\n"
         ).encode("ascii") + data
         writer.write(resp)

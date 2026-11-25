@@ -208,11 +208,11 @@ def detect_and_parse_tunnel_input(raw: str) -> dict:
 
 
 def is_proxy_frontdoor_url(url: str) -> bool:
-    """True when custom URL needs the local tunnel kept alive behind it (e.g. Cloudflare Worker / Named Tunnel / Ngrok)."""
+    """True when custom URL needs the local tunnel kept alive behind it (e.g. GitHub Pages / Cloudflare Worker / Named Tunnel / Ngrok)."""
     u = (url or "").strip().lower()
     if not u.startswith("https://"):
         return False
-    if ".workers.dev" in u or ".pages.dev" in u:
+    if ".workers.dev" in u or ".pages.dev" in u or ".github.io" in u or ".gitlab.io" in u:
         return True
     return bool(get_cf_tunnel_token() or get_ngrok_token() or get_pinggy_token())
 

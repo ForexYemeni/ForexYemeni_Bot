@@ -512,7 +512,7 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
          kb.btn(f"💸 طلب سحب ({st.get('earned_pending', 0):.2f}$)", "p:payout", style="success")],
     ]
     if config.webapp_ready():
-        rows_kb.insert(0, [kb.webapp_btn("📱 فتح بوابة الشريك الملكي (Mini App)", f"{config.WEBAPP_URL}/?tab=partner", style="success")])
+        rows_kb.insert(0, [kb.webapp_btn("📱 فتح بوابة الشريك الملكي (Mini App)", config.webapp_page_url("/", {"tab": "partner"}), style="success")])
     for c in chans:
         dot = "🟢" if c["enabled"] else "⚪"
         vip = " 🔐VIP" if c.get("is_vip_gate") else ""

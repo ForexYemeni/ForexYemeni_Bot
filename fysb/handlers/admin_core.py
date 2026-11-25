@@ -718,9 +718,18 @@ async def admin_payment_approve(q, uid, context, bot, pid: int):
     p = res["payment"]
     await afn.run(audit_log.log, uid, f"payment_approved:{pid}")
     try:
-        await bot.send_message(p["user_id"],
-                               f"✅ تمت الموافقة على طلبك #{pid} وتفعيل باقة <b>{esc(p['plan_code'])}</b>.",
-                               parse_mode="HTML")
+        if str(p.get("plan_code") or "").upper() == "ACADEMY":
+            await bot.send_message(
+                p["user_id"],
+                f"🎉 <b><u>تمت الموافقة على طلبك #{pid} وفتح المسار الاحترافي في أكاديمية ForexYemeni!</u></b>\n"
+                "<blockquote>▎👑 وصولك الكامل لجميع الدروس الاحترافية والمرفقات والاختبارات والشهادة الملكية مفعّل الآن!</blockquote>",
+                reply_markup=kb.user_nav([[kb.btn("🎓 دخول الأكاديمية الاحترافية الآن", "u:acadtrack:PAID", style="success")]]),
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(p["user_id"],
+                                   f"✅ تمت الموافقة على طلبك #{pid} وتفعيل باقة <b>{esc(p['plan_code'])}</b>.",
+                                   parse_mode="HTML")
     except Exception:
         pass
     try:

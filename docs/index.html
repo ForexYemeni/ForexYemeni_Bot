@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Royal Mini App v7.5.1</title>
+<title>FOREXYEMENI — Royal Mini App v7.6.0</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root {
@@ -261,7 +261,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.5.1</div>
+      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.6.0</div>
     </div>
   </div>
   <div class="top-right">
@@ -330,6 +330,29 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
       <div class="overlay-note" id="overlayNote"></div>
     </div>
 
+    <div class="card gold-edge">
+      <div class="card-hdr">
+        <h3>⚡ توليد إشارة فورية الآن</h3>
+        <span class="badge b-gold">LIVE SCAN</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <select id="sigNowSym" style="width:100%;padding:9px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="XAUUSD">XAUUSD (الذهب)</option>
+          <option value="EURUSD">EURUSD</option>
+          <option value="GBPUSD">GBPUSD</option>
+          <option value="BTCUSD">BTCUSD</option>
+          <option value="US30">US30</option>
+        </select>
+        <select id="sigNowTf" style="width:100%;padding:9px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="M5">M5 (سكالبينج)</option>
+          <option value="M15" selected>M15 (متوازن)</option>
+          <option value="H1">H1 (يومي)</option>
+          <option value="H4">H4 (سوينج)</option>
+        </select>
+      </div>
+      <button class="btn gold" id="sigNowBtn" style="width:100%;padding:11px" onclick="runSignalNow()">⚡ فحص السوق وتوليد إشارة على الشارت الآن</button>
+    </div>
+
     <div class="card">
       <div class="card-hdr">
         <h3>📡 الإشارات الملكية الحية</h3>
@@ -357,6 +380,14 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
         <div class="hm"><div class="l">الرصيد العائم Equity</div><div class="v cyan" id="demoEqHero">$10,000</div></div>
         <div class="hm"><div class="l">الربح العائم</div><div class="v green" id="demoFloatHero">$0.00</div></div>
         <div class="hm"><div class="l">نسبة النجاح</div><div class="v gold" id="demoWrHero">—</div></div>
+      </div>
+      <div class="autosig-bar" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:11.5px;font-weight:800">🤖 النسخ التلقائي الذكي: <span id="demoAutoLbl" style="color:var(--muted)">متوقف</span></div>
+        <button class="autosig-btn off-start" id="demoAutoBtn" onclick="toggleDemoAutoCopy('auto_trade')">🤖 تفعيل النسخ</button>
+      </div>
+      <div class="autosig-bar" style="margin-top:6px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:11.5px;font-weight:800">🛡 إغلاق 50% عند TP1 + BE: <span id="demoPbeLbl" style="color:var(--green)">مفعّل</span></div>
+        <button class="autosig-btn on-stop" id="demoPbeBtn" onclick="toggleDemoAutoCopy('partial_tp_be')">🔕 إيقاف التأمين</button>
       </div>
     </div>
     <div class="card gold-edge">
@@ -834,6 +865,7 @@ function renderSignals(){
         </div>
         <div class="btn-row">
           <button class="btn ghost" onclick="viewSigOnChart(${s.id})">📊 شارت</button>
+          <button class="btn ghost" onclick="openShareCard('signal',${s.id})">🖼 بطاقة</button>
           <button class="btn green" onclick="logJournal(${s.id},'TAKEN')">✅ دخلت</button>
           <button class="btn red" onclick="logJournal(${s.id},'SKIPPED')">❌ تجاهلت</button>
         </div>
@@ -926,12 +958,16 @@ function renderDemoDeck(ov){
         </div>
         <div class="sig-meta" style="margin-bottom:8px">🛑 SL: ${p.sl||'—'} · 🏁 TP: ${p.tp||'—'}</div>
         <div class="btn-row">
-          <button class="btn gold" onclick="focusDemoPosOnChart(${p.id})">📈 عرض على الشارت</button>
-          <button class="btn ghost" onclick="breakevenDemoPos(${p.id})">🛡 تأمين BE</button>
+          <button class="btn gold" onclick="focusDemoPosOnChart(${p.id})">📈 شارت</button>
+          <button class="btn ghost" onclick="openShareCard('demo',${p.id})">🖼 بطاقة</button>
+          <button class="btn ghost" onclick="breakevenDemoPos(${p.id})">🛡 BE</button>
           <button class="btn red" onclick="closeDemoPos(${p.id})">✖ إغلاق</button>
         </div>
       </div>`;
   }).join('') : '<div class="empty">لا توجد صفقات تجريبية مفتوحة — اضغط «🎮 تجريبي الآن» على أي إشارة لتفعيلها ومتابعتها لحظياً!</div>';
+
+  const st = ov.settings || {};
+  renderDemoSmartSwitches(!!st.auto_trade, st.partial_tp_be !== false);
 
   const closedArr = ov.closed || [];
   const clBox = document.getElementById('demoClosedList');
@@ -939,7 +975,10 @@ function renderDemoDeck(ov){
     const pnl = +(p.pnl || 0);
     return `<div class="news-item">
       <div><b>${p.symbol}</b> <span style="font-size:11px;color:var(--muted)">${p.direction} · ${p.lots} لوت · ${p.reason||p.status}</span></div>
-      <b style="font-family:var(--mono);color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</b>
+      <div style="display:flex;align-items:center;gap:6px">
+        <b style="font-family:var(--mono);color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</b>
+        <button class="btn ghost" style="flex:0;padding:4px 8px;font-size:10.5px" onclick="openShareCard('demo',${p.id})">🖼</button>
+      </div>
     </div>`;
   }).join('') : '<div class="empty">لا توجد صفقات مغلقة بعد.</div>';
 
@@ -1018,6 +1057,101 @@ async function breakevenDemoPos(pid){
 
 function closeActiveDemo(){ if(activeDemoPos) closeDemoPos(activeDemoPos.id); }
 function breakevenActiveDemo(){ if(activeDemoPos) breakevenDemoPos(activeDemoPos.id); }
+
+function renderDemoSmartSwitches(autoOn, pbeOn){
+  const al = document.getElementById('demoAutoLbl'), ab = document.getElementById('demoAutoBtn');
+  if(al && ab){
+    al.textContent = autoOn ? 'مفعّل 🟢' : 'متوقف ⚪';
+    al.style.color = autoOn ? 'var(--green)' : 'var(--muted)';
+    ab.className = autoOn ? 'autosig-btn on-stop' : 'autosig-btn off-start';
+    ab.textContent = autoOn ? '🔕 إيقاف النسخ' : '🤖 تفعيل النسخ';
+    ab.dataset.val = autoOn ? '1' : '0';
+  }
+  const pl = document.getElementById('demoPbeLbl'), pb = document.getElementById('demoPbeBtn');
+  if(pl && pb){
+    pl.textContent = pbeOn ? 'مفعّل 🟢' : 'متوقف ⚪';
+    pl.style.color = pbeOn ? 'var(--green)' : 'var(--muted)';
+    pb.className = pbeOn ? 'autosig-btn on-stop' : 'autosig-btn off-start';
+    pb.textContent = pbeOn ? '🔕 إيقاف التأمين' : '🛡 تفعيل التأمين';
+    pb.dataset.val = pbeOn ? '1' : '0';
+  }
+}
+
+async function toggleDemoAutoCopy(field){
+  const curAuto = (document.getElementById('demoAutoBtn')?.dataset.val === '1');
+  const curPbe = (document.getElementById('demoPbeBtn')?.dataset.val !== '0');
+  const body = field === 'auto_trade' ? {auto_trade: !curAuto} : {partial_tp_be: !curPbe};
+  const r = await api('/api/demo/auto-copy', {method:'POST', body:JSON.stringify(body)});
+  if(r && r.ok){
+    if(r.overview) renderDemoDeck(r.overview);
+    toast(field === 'auto_trade'
+      ? (r.settings.auto_trade ? '🤖 تم تفعيل النسخ التلقائي الذكي للتجريبي' : '⚪ تم إيقاف النسخ التلقائي')
+      : (r.settings.partial_tp_be ? '🛡 تم تفعيل تأمين 50% عند TP1 + BE' : '⚪ تم إيقاف التأمين الجزئي'));
+  } else toast((r && r.error) || 'تعذر التحديث', true);
+}
+
+async function runSignalNow(){
+  const sym = (document.getElementById('sigNowSym')?.value || 'XAUUSD').toUpperCase();
+  const tf = (document.getElementById('sigNowTf')?.value || 'M15').toUpperCase();
+  const btn = document.getElementById('sigNowBtn');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ جارٍ فحص السوق الحقيقي...'; }
+  try{
+    const r = await api('/api/signal-now', {method:'POST', body:JSON.stringify({symbol:sym, timeframe:tf})});
+    if(r && r.ok && r.signal){
+      const s = r.signal;
+      if(!allSignals.some(x => Number(x.id) === Number(s.id))) allSignals.unshift(s);
+      renderSignals();
+      curSym = s.symbol; curTf = s.timeframe || tf;
+      loadCandles(s.symbol, curTf, s);
+      toast(`⚡ تم توليد إشارة ${s.symbol} ${s.direction} ورسمها على الشارت!`);
+      window.scrollTo({top:0, behavior:'smooth'});
+    } else {
+      toast((r && r.error) || 'لا توجد فرصة مطابقة للجودة الآن', true);
+    }
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = '⚡ فحص السوق وتوليد إشارة على الشارت الآن'; }
+  }
+}
+
+let _lastShareBlobUrl = null;
+async function openShareCard(kind, id){
+  toast('🎨 جارٍ تصميم بطاقة الربح الملكية...');
+  const ep = kind === 'demo' ? `/api/share-card/demo?id=${id}` : `/api/share-card/signal?id=${id}`;
+  try{
+    const res = await fetch(API_BASE + ep, {
+      headers: {'X-Telegram-Init-Data': INIT_DATA, 'ngrok-skip-browser-warning': 'true'}
+    });
+    if(!res.ok){ toast('تعذر توليد بطاقة الربح', true); return; }
+    const blob = await res.blob();
+    if(_lastShareBlobUrl) URL.revokeObjectURL(_lastShareBlobUrl);
+    _lastShareBlobUrl = URL.createObjectURL(blob);
+    let modal = document.getElementById('shareCardModal');
+    if(!modal){
+      modal = document.createElement('div');
+      modal.id = 'shareCardModal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(4,7,12,.88);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:16px';
+      modal.innerHTML = `<div style="max-width:520px;width:100%;background:var(--card);border:1px solid rgba(212,175,55,.4);border-radius:20px;padding:14px;box-shadow:0 24px 60px rgba(0,0,0,.7)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح الملكية للمشاركة</b>
+          <button onclick="closeShareModal()" style="background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-weight:800">✖</button>
+        </div>
+        <img id="shareCardImg" style="width:100%;border-radius:14px;border:1px solid var(--border);display:block;margin-bottom:10px"/>
+        <div class="btn-row">
+          <a id="shareCardDl" download="forexyemeni-pnl-card.png" class="btn gold" style="text-align:center;text-decoration:none">⬇️ حفظ البطاقة PNG</a>
+          <button class="btn ghost" onclick="closeShareModal()">إغلاق</button>
+        </div>
+      </div>`;
+      document.body.appendChild(modal);
+    }
+    document.getElementById('shareCardImg').src = _lastShareBlobUrl;
+    document.getElementById('shareCardDl').href = _lastShareBlobUrl;
+    modal.style.display = 'flex';
+  } catch(_e){ toast('تعذر تحميل البطاقة', true); }
+}
+function closeShareModal(){
+  const m = document.getElementById('shareCardModal');
+  if(m) m.style.display = 'none';
+}
 
 async function logJournal(sid, action){
   const r = await api('/api/journal', {method:'POST', body:JSON.stringify({signal_id:sid, action})});

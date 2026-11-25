@@ -178,6 +178,18 @@ def approve_request(pid: int, actor: int) -> dict:
         )
     except Exception:
         pass
+    # v7.6.0: Redeem attached promo code (if any) atomically on approval
+    try:
+        pr_code = str(p_dict.get("promo_code") or "").strip()
+        pr_pct = int(p_dict.get("discount_pct") or 0)
+        if pr_code and pr_pct > 0:
+            from fysb.services import promos as _promos
+            orig_amt = float((dict(plan).get("price") if plan else 0) or 0)
+            saved_amt = max(0.0, round(orig_amt - float(p_dict.get("amount") or 0), 2))
+            _promos.redeem_promo(pr_code, int(p_dict["user_id"]), payment_id=pid,
+                                 plan_code=str(p_dict.get("plan_code") or ""), saved_amount=saved_amt)
+    except Exception:
+        pass
     from fysb.services.audit import log as audit_log
     audit_log(actor, f"payment_approved:{pid}")
     return {"ok": True, "payment": p_dict, "commission": grant_res.get("commission"), "affiliate_commission": aff_comm}

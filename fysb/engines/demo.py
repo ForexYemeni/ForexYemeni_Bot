@@ -32,14 +32,16 @@ def get_or_create_account(user_id: int) -> dict:
                         (user_id, bal, bal, config.now()))
         return {"id": cur.lastrowid, "user_id": user_id, "balance": bal, "peak_equity": bal,
                 "currency": "USD", "leverage": 100, "created_at": config.now(),
-                "risk_pct": 1.0, "lot_mode": "auto", "fixed_lot": 0.01, "auto_trade": 0}
+                "risk_pct": 1.0, "lot_mode": "auto", "fixed_lot": 0.01, "auto_trade": 0, "partial_tp_be": 1}
 
 
 def demo_settings(user_id: int) -> dict:
     acc = get_or_create_account(user_id)
+    ptb = acc.get("partial_tp_be")
     return {"balance": acc["balance"], "risk_pct": float(acc.get("risk_pct") or 1.0),
             "lot_mode": (acc.get("lot_mode") or "auto"), "fixed_lot": float(acc.get("fixed_lot") or 0.01),
-            "auto_trade": bool(acc.get("auto_trade") or 0)}
+            "auto_trade": bool(acc.get("auto_trade") or 0),
+            "partial_tp_be": True if ptb is None else bool(ptb)}
 
 
 def set_balance(user_id: int, amount: float) -> dict:
@@ -82,6 +84,104 @@ def set_auto_trade(user_id: int, enabled: bool) -> None:
     acc = get_or_create_account(user_id)
     with db.conn() as c:
         c.execute("UPDATE demo_accounts SET auto_trade=? WHERE id=?", (1 if enabled else 0, acc["id"]))
+
+
+def set_partial_tp_be(user_id: int, enabled: bool) -> None:
+    """Toggle Smart 50% Partial TP1 + Automatic Breakeven protection."""
+    acc = get_or_create_account(user_id)
+    with db.conn() as c:
+        c.execute("UPDATE demo_accounts SET partial_tp_be=? WHERE id=?", (1 if enabled else 0, acc["id"]))
+
+
+def auto_copy_signal_for_subscribers(sig: dict, api_key: str = "") -> list[dict]:
+    """v7.6.0 Smart Demo Auto-Copy: open a demo position for every non-blocked user
+    who enabled `auto_trade = 1` and doesn't already hold this signal."""
+    if not sig or not sig.get("id"):
+        return []
+    sid = int(sig["id"])
+    opened: list[dict] = []
+    with db.conn() as c:
+        rows = c.execute(
+            """SELECT da.user_id, da.id AS account_id
+               FROM demo_accounts da
+               LEFT JOIN users u ON u.user_id = da.user_id
+               WHERE da.auto_trade = 1
+                 AND COALESCE(u.is_blocked, 0) = 0""",
+        ).fetchall()
+    for r in rows:
+        uid = int(r["user_id"])
+        try:
+            with db.conn() as c:
+                dup = c.execute(
+                    "SELECT id FROM demo_positions WHERE user_id=? AND signal_id=? AND status='OPEN'",
+                    (uid, sid),
+                ).fetchone()
+            if dup:
+                continue
+            res = open_signal_interactive(uid, sid, api_key=api_key)
+            if res.get("ok") and not res.get("already_open"):
+                pos_d = res.get("position") or {}
+                opened.append({
+                    "user_id": uid,
+                    "position_id": int(res.get("position_id") or pos_d.get("id") or 0),
+                    "lots": float(pos_d.get("lots") or 0.01),
+                    "symbol": str(sig.get("symbol") or ""),
+                    "direction": str(sig.get("direction") or ""),
+                    "signal_id": sid,
+                })
+        except Exception as exc:
+            log.warning("smart demo auto-copy skipped uid=%s sig=%s err=%s", uid, sid, exc)
+    return opened
+
+
+def share_card_payload_for_position(user_id: int, position_id: int, bot_username: str = "") -> dict | None:
+    """Build a render_pnl_share_card payload for any Demo position (open or closed)."""
+    with db.conn() as c:
+        pos = c.execute(
+            "SELECT p.*, a.balance AS acc_bal FROM demo_positions p "
+            "JOIN demo_accounts a ON a.id=p.account_id "
+            "WHERE p.id=? AND p.user_id=?",
+            (int(position_id), int(user_id)),
+        ).fetchone()
+        if not pos:
+            return None
+        pos = dict(pos)
+        row = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (pos["symbol"],)).fetchone()
+        sig = c.execute("SELECT * FROM signals WHERE id=?", (int(pos.get("signal_id") or 0),)).fetchone() if pos.get("signal_id") else None
+    entry = float(pos.get("entry") or 0.0)
+    exit_px = float(pos.get("exit_price") or 0.0)
+    if exit_px <= 0:
+        exit_px = market_data.cached_price(pos["symbol"], max_age_seconds=300.0) or entry
+    pnl_usd = float(pos.get("pnl") or 0.0)
+    if pos.get("status") == "OPEN" and exit_px > 0:
+        pnl_usd = instruments.pnl(pos["symbol"], pos["direction"], float(pos.get("lots") or 0.01), entry, exit_px, dict(row) if row else None)
+    if exit_px > 0:
+        raw_pips = instruments.pips(pos["symbol"], entry, exit_px, dict(row) if row else None)
+        is_gain = (exit_px >= entry) if pos["direction"] == "BUY" else (exit_px <= entry)
+        pips = raw_pips if is_gain else -raw_pips
+    else:
+        pips = 0.0
+    bal = max(1.0, float(pos.get("acc_bal") or DEMO_DEFAULT_BALANCE))
+    pnl_pct = (pnl_usd / bal) * 100.0
+    bn = (bot_username or config.BRAND or "ForexYemeniBot").lstrip("@")
+    return {
+        "kind": "demo",
+        "symbol": pos["symbol"],
+        "direction": pos["direction"],
+        "strategy": (dict(sig).get("strategy") if sig else "DEMO PRO"),
+        "timeframe": (dict(sig).get("timeframe") if sig else "LIVE"),
+        "entry": entry,
+        "exit_price": exit_px,
+        "tp1": float(pos.get("tp") or 0.0),
+        "sl": float(pos.get("sl") or 0.0),
+        "tp_label": str(pos.get("status") or "OPEN").upper(),
+        "pips": round(pips, 1),
+        "pnl_usd": round(pnl_usd, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "ref_link": f"t.me/{bn}?start=ref_{user_id}",
+        "ref_label": f"DEMO TRADER #{user_id} • FOREXYEMENI ROYAL",
+        "timestamp": str(pos.get("closed_at") or pos.get("opened_at") or config.now()),
+    }
 
 
 def reset_account(user_id: int) -> dict:
@@ -430,8 +530,10 @@ def sync_positions_with_real_prices(user_id: int, api_key: str = "") -> list[dic
                                "exit": exit_price, "symbol": symbol})
             continue
 
-        # 2) half-TP1 secure-profit for auto-traded signal positions
-        if pos["signal_id"] and not pos["partials_done"] and tp:
+        # 2) Smart 50% Partial TP1 + Breakeven protection (controlled by partial_tp_be, default ON)
+        ptb_val = acc.get("partial_tp_be")
+        partial_be_on = True if ptb_val is None else bool(ptb_val)
+        if partial_be_on and pos["signal_id"] and not pos["partials_done"] and tp:
             # Resolve the signal's true TP1 (preloaded in batch) so HALF_TP1
             # triggers at 50% of entry->TP1, falling back to pos.tp.
             tp1_target = tp
@@ -518,12 +620,14 @@ def account_overview(user_id: int, api_key: str = "") -> dict:
     drawdown = (peak - equity) / peak * 100 if peak > 0 else 0.0
     total_closed = int(agg["total"] or 0) if agg else 0
     total_wins = int(agg["wins"] or 0) if agg else 0
+    ptb = acc.get("partial_tp_be")
     settings_dict = {
         "balance": float(acc.get("balance") or DEMO_DEFAULT_BALANCE),
         "risk_pct": float(acc.get("risk_pct") or 1.0),
         "lot_mode": (acc.get("lot_mode") or "auto"),
         "fixed_lot": float(acc.get("fixed_lot") or 0.01),
         "auto_trade": bool(acc.get("auto_trade") or 0),
+        "partial_tp_be": True if ptb is None else bool(ptb),
     }
     return {"balance": acc["balance"], "equity": equity, "floating": floating,
             "drawdown_pct": drawdown, "open": open_pos, "closed": closed_pos,

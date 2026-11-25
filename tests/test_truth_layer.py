@@ -67,7 +67,8 @@ class TestGoldCalibration(unittest.TestCase):
         md._cache.clear()
         md._fail_streak.clear()
         raw = [_candle(i) for i in range(0, 240)]     # 240 fake 15m candles
-        with patch.object(md, "_fetch_binance_candles", return_value=raw), \
+        with patch.object(md, "_fetch_yahoo_candles", side_effect=RuntimeError("offline")), \
+             patch.object(md, "_fetch_binance_candles", return_value=raw), \
              patch.object(md, "_gold_offset_now", return_value=-13.49):
             payload = md.fetch_candles("XAUUSD", "15min", "", 120, use_cache=False)
         self.assertAlmostEqual(payload["values"][-1]["close"] - raw[-1]["close"], -13.49)

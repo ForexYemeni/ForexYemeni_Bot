@@ -122,7 +122,7 @@ def redeem_code(user_id: int, raw_code: str) -> dict:
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
 
-    with db.conn() as c:
+    with db.tx(immediate=True) as c:
         row = c.execute("SELECT * FROM gift_codes WHERE UPPER(code)=?", (code,)).fetchone()
         if not row:
             return {"ok": False, "error": "كود الهدية غير موجود — تأكد من كتابته بدقة."}
@@ -147,7 +147,7 @@ def redeem_code(user_id: int, raw_code: str) -> dict:
         if already:
             return {"ok": False, "error": "لقد استخدمت هذا الكود مسبقاً بالفعل."}
 
-        # Atomic increment & redemption log
+        # Atomic increment & redemption log inside IMMEDIATE write lock
         cur = c.execute(
             "UPDATE gift_codes SET uses_count = uses_count + 1 WHERE id=? AND uses_count < max_uses AND active=1",
             (g["id"],),

@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Super Admin Web Panel v7.7.4</title>
+<title>FOREXYEMENI — Super Admin Web Panel v8.0.0</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root{
@@ -178,7 +178,7 @@ input:focus,select:focus{border-color:var(--gold)}
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ADMIN</div>
-      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v7.7.4</div>
+      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v8.0.0</div>
     </div>
   </div>
   <div class="top-actions">
@@ -449,7 +449,14 @@ input:focus,select:focus{border-color:var(--gold)}
 </div>
 
 <script>
-// v7.5.1: Zero-blocking Telegram Admin Multi-Page App — instant paint & smooth 5-page executive UX
+// v8.0.0: Zero-blocking Telegram Admin Multi-Page App + strict XSS sanitizer
+function esc(v){
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function copyBtnVal(btn, msg){
+  const val = btn && btn.dataset ? (btn.dataset.copy || '') : '';
+  if(val) copyVal(val, msg || '✅ تم النسخ');
+}
 function notifyTgNative(){
   try{
     if(window.Telegram && window.Telegram.WebApp){
@@ -711,16 +718,17 @@ async function loadAdminUsers(){
   if(!arr.length){ box.innerHTML = '<div class="empty">لا يوجد أعضاء مطابقون للبحث.</div>'; return; }
   box.innerHTML = arr.map(u => {
     const pBadge = u.plan_code === 'ROYAL' ? '' : (u.plan_code === 'FREE' ? 'cyan' : 'green');
-    const expTxt = u.plan_expires ? ` · ينتهي ${String(u.plan_expires).slice(0,10)}` : '';
-    const unTxt = u.username ? `@${u.username}` : `ID:${u.user_id}`;
+    const expTxt = u.plan_expires ? ` · ينتهي ${esc(String(u.plan_expires).slice(0,10))}` : '';
+    const unTxt = u.username ? `@${esc(u.username)}` : `ID:${Number(u.user_id)||0}`;
     const brOv = (u.bridge_override || 'AUTO').toUpperCase();
     const brPill = brOv === 'ALLOW' ? '<span class="pill green">⚡ نسخ: مسموح</span>' : (brOv === 'DENY' ? '<span class="pill red">🚫 نسخ: ممنوع</span>' : '<span class="pill">⚙️ نسخ: تلقائي</span>');
+    const uidN = Number(u.user_id) || 0;
     return `<div class="sig-card ${u.is_blocked?'loss':(u.plan_code!=='FREE'?'win':'live')}">
       <div class="sig-top">
         <div>
-          <div class="sig-sym">${u.full_name || 'مستخدم'} <span class="pill ${pBadge}">${u.plan_code}</span> ${brPill} ${u.is_blocked?'<span class="pill red">محظور</span>':''}</div>
-          <div class="sig-meta">${unTxt} · <code>${u.user_id}</code>${expTxt}</div>
-          <div class="sig-meta">📊 اليوم: ${u.used_today||0} إشارة · 💰 مدفوع: $${u.total_paid_usd||0} · 🔌 جسر: ${u.bridge_connections||0} حساب</div>
+          <div class="sig-sym">${esc(u.full_name || 'مستخدم')} <span class="pill ${pBadge}">${esc(u.plan_code)}</span> ${brPill} ${u.is_blocked?'<span class="pill red">محظور</span>':''}</div>
+          <div class="sig-meta">${unTxt} · <code>${uidN}</code>${expTxt}</div>
+          <div class="sig-meta">📊 اليوم: ${Number(u.used_today)||0} إشارة · 💰 مدفوع: $${Number(u.total_paid_usd)||0} · 🔌 جسر: ${Number(u.bridge_connections)||0} حساب</div>
         </div>
       </div>
       <div class="row-form" style="margin-bottom:7px">
@@ -828,14 +836,14 @@ async function loadAdminBridge(){
   if(cBox){
     cBox.innerHTML = conns.length ? conns.map(c => `
       <div class="item">
-        <div>${c.admin_frozen?'❄️':(c.enabled?'🟢':'⏸')} <b>${c.full_name||c.username||('UID '+c.user_id)}</b>
-          <span class="pill ${c.account_mode==='DEMO'?'green':'cyan'}">${c.platform} · ${c.account_mode}</span>
-          <div style="font-size:11px;color:var(--muted)">UID ${c.user_id} · رصيد $${(+(c.last_balance||0)).toLocaleString()} · ${c.last_status}</div>
+        <div>${c.admin_frozen?'❄️':(c.enabled?'🟢':'⏸')} <b>${esc(c.full_name||c.username||('UID '+c.user_id))}</b>
+          <span class="pill ${c.account_mode==='DEMO'?'green':'cyan'}">${esc(c.platform)} · ${esc(c.account_mode)}</span>
+          <div style="font-size:11px;color:var(--muted)">UID ${Number(c.user_id)||0} · رصيد $${(+(c.last_balance||0)).toLocaleString()} · ${esc(c.last_status)}</div>
         </div>
         <div style="display:flex;gap:5px">
-          <button class="btn ghost" style="padding:5px 8px" onclick="adminBridgeConnOp(${c.id},'test')">🔍</button>
-          <button class="btn ${c.admin_frozen?'on':'danger'}" style="padding:5px 8px" onclick="adminBridgeConnOp(${c.id},'${c.admin_frozen?'unfreeze':'freeze'}')">${c.admin_frozen?'🔥 فك':'❄️ تجميد'}</button>
-          <button class="btn danger" style="padding:5px 8px" onclick="adminBridgeConnOp(${c.id},'delete')">🗑</button>
+          <button class="btn ghost" style="padding:5px 8px" onclick="adminBridgeConnOp(${Number(c.id)||0},'test')">🔍</button>
+          <button class="btn ${c.admin_frozen?'on':'danger'}" style="padding:5px 8px" onclick="adminBridgeConnOp(${Number(c.id)||0},'${c.admin_frozen?'unfreeze':'freeze'}')">${c.admin_frozen?'🔥 فك':'❄️ تجميد'}</button>
+          <button class="btn danger" style="padding:5px 8px" onclick="adminBridgeConnOp(${Number(c.id)||0},'delete')">🗑</button>
         </div>
       </div>`).join('') : '<div class="empty">لا توجد حسابات وسيط مربوطة بعد.</div>';
   }
@@ -845,10 +853,10 @@ async function loadAdminBridge(){
   if(oBox){
     oBox.innerHTML = ords.length ? ords.slice(0,12).map(o => `
       <div class="item">
-        <div><b>${o.symbol}</b> <span class="pill ${o.direction==='BUY'?'green':'red'}">${o.action_type==='PARTIAL_BE'?'🛡 50%+BE':o.direction}</span> · UID <code>${o.user_id}</code>
-          <div style="font-size:10.5px;color:var(--muted)">${o.platform} (${o.account_mode}) · ${o.lots} لوت · ${o.detail||''}</div>
+        <div><b>${esc(o.symbol)}</b> <span class="pill ${o.direction==='BUY'?'green':'red'}">${o.action_type==='PARTIAL_BE'?'🛡 50%+BE':esc(o.direction)}</span> · UID <code>${Number(o.user_id)||0}</code>
+          <div style="font-size:10.5px;color:var(--muted)">${esc(o.platform)} (${esc(o.account_mode)}) · ${Number(o.lots)||0} لوت · ${esc(o.detail||'')}</div>
         </div>
-        <span class="pill">${o.status}</span>
+        <span class="pill">${esc(o.status)}</span>
       </div>`).join('') : '<div class="empty">لا توجد أوامر مسجلة بعد.</div>';
   }
 }
@@ -887,7 +895,7 @@ async function genGift(){
     max_uses:+document.getElementById('gUses').value
   })});
   if(r.ok){
-    document.getElementById('giftOut').innerHTML = `🎟 الكود: <span>${r.code}</span> <button class="btn ghost" style="padding:4px 9px;margin-right:6px" onclick="copyVal('${r.code}','✅ تم نسخ كود الهدية')">📋 نسخ</button>`;
+    document.getElementById('giftOut').innerHTML = `🎟 الكود: <span>${esc(r.code)}</span> <button class="btn ghost" style="padding:4px 9px;margin-right:6px" data-copy="${esc(r.code)}" onclick="copyBtnVal(this,'✅ تم نسخ كود الهدية')">📋 نسخ</button>`;
     toast('🎁 تم إصدار الكود الملكي');
   } else toast(r.error||'خطأ', true);
 }
@@ -897,9 +905,9 @@ async function loadAdmin(){
   if(!d || !d.ok){
     const errEl = document.getElementById('authErr');
     if(d && d.netErr){
-      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + (d.error||'') + '</span>';
+      errEl.innerHTML = '⚠️ <b>تعذر الاتصال بخادم البوت عبر النفق</b><br><span style="font-size:12px;color:#cbd5e1">' + esc(d.error||'') + '</span>';
     } else if(d && d.error && d._status !== 401 && d._status !== 403){
-      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + d.error;
+      errEl.innerHTML = '⚠️ <b>خطأ من خادم البوت:</b> ' + esc(d.error);
     }
     errEl.style.display='block';
     document.getElementById('adminBody').style.display='none';
@@ -972,14 +980,14 @@ async function loadAdmin(){
   if(pBox){
     pBox.innerHTML = promos.length ? promos.map(pr => `
       <div class="item">
-        <div>${pr.active?'🟢':'⚪'} <b style="font-family:var(--mono);color:var(--gold2)">${pr.code}</b>
-          <span class="pill green">-${pr.discount_pct}%</span>
-          <span style="font-size:11px;color:var(--muted)"> · استخدام ${pr.used_count||0}/${pr.max_uses||0}</span>
+        <div>${pr.active?'🟢':'⚪'} <b style="font-family:var(--mono);color:var(--gold2)">${esc(pr.code)}</b>
+          <span class="pill green">-${Number(pr.discount_pct)||0}%</span>
+          <span style="font-size:11px;color:var(--muted)"> · استخدام ${Number(pr.used_count)||0}/${Number(pr.max_uses)||0}</span>
         </div>
         <div style="display:flex;gap:5px">
-          <button class="btn ghost" style="padding:5px 8px" onclick="copyVal('${pr.code}','✅ تم نسخ كود الخصم')">📋</button>
-          <button class="btn ${pr.active?'on':'off'}" style="padding:5px 8px" onclick="promoOp('toggle','${pr.code}')">${pr.active?'مفعّل':'متوقف'}</button>
-          <button class="btn danger" style="padding:5px 8px" onclick="promoOp('delete','${pr.code}')">🗑</button>
+          <button class="btn ghost" style="padding:5px 8px" data-copy="${esc(pr.code)}" onclick="copyBtnVal(this,'✅ تم نسخ كود الخصم')">📋</button>
+          <button class="btn ${pr.active?'on':'off'}" style="padding:5px 8px" data-code="${esc(pr.code)}" onclick="promoOp('toggle',this.dataset.code)">${pr.active?'مفعّل':'متوقف'}</button>
+          <button class="btn danger" style="padding:5px 8px" data-code="${esc(pr.code)}" onclick="promoOp('delete',this.dataset.code)">🗑</button>
         </div>
       </div>`).join('') : '<div class="empty">لا توجد أكواد خصم نسبية بعد — أنشئ كودك الأول أعلاه.</div>';
   }
@@ -1005,12 +1013,12 @@ async function loadAdmin(){
   document.getElementById('chCountPill').textContent = cchs.length + ' قناة';
   document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
     `<div class="item">
-      <div>${c.enabled?'🟢':'⚪'} <b>${c.title||c.chat_id}</b> <span class="pill">${c.markets||'ALL'}</span>
-        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${c.chat_id}</div>
+      <div>${c.enabled?'🟢':'⚪'} <b>${esc(c.title||c.chat_id)}</b> <span class="pill">${esc(c.markets||'ALL')}</span>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${esc(c.chat_id)}</div>
       </div>
       <div style="display:flex;gap:6px">
-        <button class="btn ${c.enabled?'on':'off'}" onclick="chartChOp('toggle',${c.id})">${c.enabled?'مفعّلة':'متوقفة'}</button>
-        <button class="btn danger" onclick="chartChOp('delete',${c.id})">🗑</button>
+        <button class="btn ${c.enabled?'on':'off'}" onclick="chartChOp('toggle',${Number(c.id)||0})">${c.enabled?'مفعّلة':'متوقفة'}</button>
+        <button class="btn danger" onclick="chartChOp('delete',${Number(c.id)||0})">🗑</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه.</div>';
@@ -1021,12 +1029,12 @@ async function loadAdmin(){
   if(nev.length){
     document.getElementById('adminNewsBox').innerHTML = nev.slice(0,10).map(e=>
       `<div class="item">
-        <div><span class="pill red">${e.currency}</span> <b>${e.title}</b></div>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${e.time_utc||''}</span>
+        <div><span class="pill red">${esc(e.currency)}</span> <b>${esc(e.title)}</b></div>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${esc(e.time_utc||'')}</span>
       </div>`
     ).join('');
   } else if(d.news_feed_error){
-    document.getElementById('adminNewsBox').innerHTML = `<div class="empty" style="color:var(--red)">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${d.news_feed_error}</div>`;
+    document.getElementById('adminNewsBox').innerHTML = `<div class="empty" style="color:var(--red)">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${esc(d.news_feed_error)}</div>`;
   } else {
     document.getElementById('adminNewsBox').innerHTML = '<div class="empty">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
   }
@@ -1038,8 +1046,8 @@ async function loadAdmin(){
   document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,10).map((r,i)=>
     `<div class="lb-row">
       <div class="lb-top">
-        <span>${medals[i]||'🔹'} <b>${r.name||r.strategy||r.code}</b> <span class="pill">${r.code}</span></span>
-        <span style="font-family:var(--mono)">${r.win_rate}% · <b style="color:${r.net_pips>=0?'var(--green)':'var(--red)'}">${r.net_pips>0?'+':''}${r.net_pips}p</b> (${r.trades})</span>
+        <span>${medals[i]||'🔹'} <b>${esc(r.name||r.strategy||r.code)}</b> <span class="pill">${esc(r.code)}</span></span>
+        <span style="font-family:var(--mono)">${Number(r.win_rate)||0}% · <b style="color:${r.net_pips>=0?'var(--green)':'var(--red)'}">${r.net_pips>0?'+':''}${Number(r.net_pips)||0}p</b> (${Number(r.trades)||0})</span>
       </div>
       <div class="lb-bar"><div class="lb-fill" style="width:${Math.min(100,Math.max(4,Math.round(r.win_rate||0)))}%"></div></div>
     </div>`
@@ -1050,23 +1058,23 @@ async function loadAdmin(){
   document.getElementById('payoutBadgePill').textContent = pendOut.length;
   document.getElementById('payBox').innerHTML = pendPay.length ? pendPay.map(p=>
     `<div class="item">
-      <div><b style="color:var(--gold2)">#${p.id}</b> · UID <code>${p.user_id}</code> · <span class="pill green">${p.plan_code}</span> · <b>${p.amount}$</b></div>
+      <div><b style="color:var(--gold2)">#${Number(p.id)||0}</b> · UID <code>${Number(p.user_id)||0}</code> · <span class="pill green">${esc(p.plan_code)}</span> · <b>${Number(p.amount)||0}$</b></div>
       <div class="btn-row" style="width:100%;margin-top:6px">
-        <button class="btn on" onclick="actPay(${p.id},'approve')">✅ اعتماد وتفعيل الباقة</button>
-        <button class="btn danger" style="flex:0;min-width:84px" onclick="actPay(${p.id},'reject')">❌ رفض</button>
+        <button class="btn on" onclick="actPay(${Number(p.id)||0},'approve')">✅ اعتماد وتفعيل الباقة</button>
+        <button class="btn danger" style="flex:0;min-width:84px" onclick="actPay(${Number(p.id)||0},'reject')">❌ رفض</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">✅ لا توجد طلبات دفع معلقة حالياً.</div>';
 
   document.getElementById('payoutBox').innerHTML = pendOut.length ? pendOut.map(p=>
     `<div class="item">
-      <div><b style="color:var(--gold2)">#${p.id}</b> · UID <code>${p.user_id}</code> · <b style="color:var(--green)">${p.amount_usd}$</b>
-        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${p.wallet_address}</div>
+      <div><b style="color:var(--gold2)">#${Number(p.id)||0}</b> · UID <code>${Number(p.user_id)||0}</code> · <b style="color:var(--green)">${Number(p.amount_usd)||0}$</b>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${esc(p.wallet_address)}</div>
       </div>
       <div class="btn-row" style="width:100%;margin-top:6px">
-        <button class="btn ghost" style="flex:0;min-width:74px" onclick="copyVal('${p.wallet_address}','✅ تم نسخ عنوان المحفظة')">📋 نسخ</button>
-        <button class="btn on" onclick="actPayout(${p.id},'approve')">✅ اعتماد الصرف</button>
-        <button class="btn danger" style="flex:0;min-width:74px" onclick="actPayout(${p.id},'reject')">❌ رفض</button>
+        <button class="btn ghost" style="flex:0;min-width:74px" data-copy="${esc(p.wallet_address)}" onclick="copyBtnVal(this,'✅ تم نسخ عنوان المحفظة')">📋 نسخ</button>
+        <button class="btn on" onclick="actPayout(${Number(p.id)||0},'approve')">✅ اعتماد الصرف</button>
+        <button class="btn danger" style="flex:0;min-width:74px" onclick="actPayout(${Number(p.id)||0},'reject')">❌ رفض</button>
       </div>
     </div>`
   ).join('') : '<div class="empty">✅ لا توجد طلبات سحب معلقة حالياً.</div>';

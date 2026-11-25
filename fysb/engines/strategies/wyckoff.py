@@ -33,8 +33,10 @@ sweep beyond boundary +22 · close back inside +14 · volume surge +8 (only with
 real volume data) · kill zone +6 · volatility regime +4 · RR(TP1)>=2 +8.
 Base 40. Cap 95. Minimum 55 to fire — a weak spring is no spring at all.
 """
-from fysb.engines.analysis import atr, atr_pct, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 RANGE_WINDOW = 26          # candles defining the trading range (excluding the event)
 RANGE_MAX_ATR = 3.0        # range width ceiling in ATR — consolidation, not drift
@@ -80,25 +82,23 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         return None
 
     checks: dict = {}
-    score = 32.0
+    earned = 0.0
+    max_pts = 76.0
     reasons: list[str] = []
 
-    # 1) a REAL sideways range — not a trend wearing a costume
     width_ok = (range_high - range_low) <= RANGE_MAX_ATR * a
     checks["range_ok"] = width_ok
     if not width_ok:
         return None
-    score += 10
+    earned += 10
     reasons.append(f"range {range_low:.5g}–{range_high:.5g} (width {(range_high - range_low) / a:.2f} ATR)")
 
-    # two-sided auction: the close must have traded BOTH sides of the midline
     alts = _alternations([float(c["close"]) for c in window], mid)
     checks["alternations"] = alts
     if alts < MIN_ALTERNATIONS:
         return None
-    score += 8
+    earned += 8
 
-    # 2) the Wyckoff event — exactly one direction can qualify
     inside_prev = range_low <= float(prev["close"]) <= range_high
     checks["range_intact_before"] = inside_prev
     if not inside_prev:
@@ -107,42 +107,47 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     lo = float(event["low"])
     hi = float(event["high"])
     if lo < range_low and close > range_low:
-        direction = "BUY"       # SPRING — sweep of the sell-side liquidity
+        direction = "BUY"
         wick_extreme = lo
     elif hi > range_high and close < range_high:
-        direction = "SELL"      # UPTHRUST — sweep of the buy-side liquidity
+        direction = "SELL"
         wick_extreme = hi
     else:
         return None
     checks["event"] = "SPRING" if direction == "BUY" else "UPTHRUST"
-    score += 16
+    checks["sweep"] = True
+    earned += 16
     reasons.append(f"{checks['event']}: wick swept {'below support' if direction == 'BUY' else 'above resistance'} then closed back inside")
 
-    # close confirmed back inside the range
     checks["close_inside"] = range_low <= close <= range_high
-    score += 8
+    earned += 8 if checks["close_inside"] else 0
 
-    # 4) effort vs result — volume surge on the event (only with real data)
     if _real_volume(candles[-RANGE_WINDOW - 1:]):
         avg_v = sum(float(c.get("volume") or 0) for c in window) / len(window)
         surge = float(event.get("volume") or 0) >= VOLUME_SURGE * avg_v
         checks["volume_surge"] = surge
         if surge:
-            score += 8
+            earned += 8
             reasons.append(f"event volume {float(event.get('volume') or 0):.0f} >= {VOLUME_SURGE:g}× window average {avg_v:.0f}")
     else:
-        checks["volume_surge"] = None   # skipped honestly — no usable volume feed
+        checks["volume_surge"] = None
+        max_pts -= 8  # Don't penalize FX instruments that lack tick volume
         reasons.append("volume data absent — effort check skipped (honest)")
+
+    # v8.0.0: Real HTF bias check from ctx.bias_candles
+    bias = structure_labels(ctx.bias_candles)
+    htf_ok = (bias["trend"] == "up" and direction == "BUY") or (bias["trend"] == "down" and direction == "SELL")
+    checks["htf_bias"] = htf_ok
+    earned += 12 if htf_ok else 0
 
     kz = ctx.kill_zone or (kill_zone(event["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
 
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
 
-    # 6) stop beyond the event's wick extreme
     entry = close
     if direction == "BUY":
         stop = wick_extreme - 0.5 * a
@@ -153,30 +158,29 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    # 7) targets — opposite boundary floored at 2R, measured move, 1.618× extension
-    # v6.20.0 FIX: scale minimum TP separation by risk (never hardcoded 0.01 which is 100 pips on FX!)
     min_step = max(0.5 * risk, 1e-6)
     if direction == "BUY":
-        tp1 = max(range_high, entry + 2.0 * risk)
-        tp2 = max(tp1 + min_step, entry + height)
-        tp3 = max(tp2 + min_step, entry + 1.618 * height)
+        raw_tp1 = max(range_high, entry + 2.0 * risk)
+        raw_tp2 = max(raw_tp1 + min_step, entry + height)
+        raw_tp3 = max(raw_tp2 + min_step, entry + 1.618 * height)
     else:
-        tp1 = min(range_low, entry - 2.0 * risk)
-        tp2 = min(tp1 - min_step, entry - height)
-        tp3 = min(tp2 - min_step, entry - 1.618 * height)
-    rr = round(abs(tp1 - entry) / risk, 2)
+        raw_tp1 = min(range_low, entry - 2.0 * risk)
+        raw_tp2 = min(raw_tp1 - min_step, entry - height)
+        raw_tp3 = min(raw_tp2 - min_step, entry - 1.618 * height)
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(entry, stop, raw_tp1, raw_tp2, raw_tp3, direction)
     checks["rr_ok"] = rr >= 2.0
-    score += 4 if checks["rr_ok"] else 0
+    earned += 4 if checks["rr_ok"] else 0
 
+    score = normalized_score(earned, max_pts)
     if score < MIN_SCORE:
         return None
 
-    reasons.append(f"stop beyond event wick = {stop:.5g}")
+    reasons.append(f"HTF bias={bias['trend']} · stop beyond event wick = {stop:.5g}")
     reasons.append(f"targets 2R/measure/1.618ext = {tp1:.5g} / {tp2:.5g} / {tp3:.5g}")
     reasons.append(f"kill zone: {kz}" if kz else "outside kill zones")
     reasons.append(f"RR(TP1)=1:{rr:.2f}")
     return StrategyResult(
         code="WYCKOFF", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

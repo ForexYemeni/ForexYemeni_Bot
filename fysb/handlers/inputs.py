@@ -1274,7 +1274,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """v7.6.0 Telegram Stars (XTR) Pre-Checkout Gate."""
+    """v8.0.0 Hardened Telegram Stars (XTR) Pre-Checkout Gate (non-blocking + amount check)."""
     pcq = update.pre_checkout_query
     if not pcq:
         return
@@ -1282,18 +1282,42 @@ async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not payload.startswith("plan:"):
         await pcq.answer(ok=False, error_message="طلب دفع غير صالح.")
         return
+    raw_ccy = getattr(pcq, "currency", None)
+    if raw_ccy is not None and str(raw_ccy).upper() != "XTR":
+        await pcq.answer(ok=False, error_message="عملة الدفع غير مدعومة (يلزم XTR).")
+        return
     parts = payload.split(":")
     plan_code = parts[1].upper() if len(parts) > 1 else ""
-    with db.conn() as c:
-        row = c.execute("SELECT code FROM plans WHERE code=? AND enabled=1", (plan_code,)).fetchone()
-    if not row:
-        await pcq.answer(ok=False, error_message="هذه الباقة غير متاحة حالياً.")
+    promo_code = parts[2].upper() if len(parts) > 2 else ""
+    uid = int(pcq.from_user.id) if getattr(pcq, "from_user", None) else 0
+    raw_amt = getattr(pcq, "total_amount", None)
+
+    def _validate():
+        from fysb.services import promos as _promos
+        with db.conn() as c:
+            row = c.execute("SELECT code, price FROM plans WHERE code=? AND enabled=1", (plan_code,)).fetchone()
+        if not row:
+            return False, "هذه الباقة غير متاحة حالياً."
+        orig_usd = float(row["price"] or 0.0)
+        final_usd = orig_usd
+        if promo_code:
+            v = _promos.validate_promo(promo_code, user_id=uid)
+            if v.get("ok"):
+                final_usd, _ = _promos.apply_discount(orig_usd, int(v["discount_pct"]))
+        expected_stars = _promos.plan_stars_price(final_usd)
+        if raw_amt is not None and expected_stars > 0 and int(raw_amt) < expected_stars:
+            return False, "قيمة النجوم لا تطابق سعر الباقة الحالي."
+        return True, ""
+
+    ok, err_msg = await afn.run(_validate)
+    if not ok:
+        await pcq.answer(ok=False, error_message=err_msg)
         return
     await pcq.answer(ok=True)
 
 
 async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """v7.6.0 Telegram Stars (XTR) Instant Activation on Successful Payment."""
+    """v8.0.0 Telegram Stars (XTR) Idempotent Instant Activation + Affiliate Commission."""
     msg = update.effective_message
     u = update.effective_user
     if not msg or not msg.successful_payment or not u:
@@ -1312,6 +1336,13 @@ async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
 
     def _activate():
         with db.conn() as c:
+            if charge_id:
+                dup = c.execute(
+                    "SELECT id FROM payments WHERE txid=? AND chain='XTR'",
+                    (charge_id,),
+                ).fetchone()
+                if dup:
+                    return {"duplicate": True, "pid": int(dup["id"])}
             p = c.execute("SELECT * FROM plans WHERE code=?", (plan_code,)).fetchone()
         if not p:
             return None
@@ -1341,10 +1372,19 @@ async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
             amount=final_usd,
             currency="USD",
         )
+        # v8.0.0: Credit affiliate commission for Stars purchases unless a Channel Partner already earned it
+        if not (isinstance(sub_res, dict) and sub_res.get("commission")):
+            try:
+                from fysb.services import affiliates as _aff
+                _aff.record_commission_on_payment(int(u.id), float(final_usd), payment_id=pid)
+            except Exception as exc:
+                log.debug("stars affiliate commission skipped: %s", exc)
         return {"plan": p, "pid": pid, "sub": sub_res, "final_usd": final_usd, "pct": pct}
 
     res = await afn.run(_activate)
     context.user_data.pop("active_promo", None)
+    if isinstance(res, dict) and res.get("duplicate"):
+        return
     if not res:
         await msg.reply_text("✅ تم استلام الدفع بنجوم تيليجرام — يرجى التواصل مع الإدارة لتأكيد الباقة.")
         return

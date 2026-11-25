@@ -43,6 +43,58 @@ def clamp_score(score: float) -> int:
     return int(max(0, min(95, round(score))))
 
 
+def normalized_score(
+    earned: float,
+    max_possible: float,
+    *,
+    floor: float = 42.0,
+    ceiling: float = 95.0,
+) -> int:
+    """v8.0.0 Fair Merit Score Normalizer shared across ALL 13 strategies.
+
+    Eliminates structural base-score bias (previously Base=50 for ICT/SMC/PA vs
+    Base=32 for Wyckoff/Ichimoku/Trend/SK/Classic) so every methodology competes
+    strictly on the fraction of its own institutional checklist passed.
+    """
+    if max_possible <= 0:
+        return clamp_score(floor)
+    ratio = max(0.0, min(1.0, float(earned) / float(max_possible)))
+    return clamp_score(floor + ratio * (ceiling - floor))
+
+
+def ensure_min_tp_rr(
+    entry: float,
+    stop: float,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    direction: str,
+    *,
+    min_rr1: float = 2.0,
+    min_rr2: float = 3.0,
+    min_rr3: float = 4.5,
+) -> tuple[float, float, float, float]:
+    """v8.0.0 Royal Target Floor — guarantees TP1 >= 2.0 * risk (twice SL!),
+    TP2 >= 3.0 * risk, TP3 >= 4.5 * risk, strictly monotonic in trade direction.
+    Returns (tp1, tp2, tp3, rr1)."""
+    e = float(entry)
+    s = float(stop)
+    risk = abs(e - s)
+    if risk <= 1e-12:
+        return float(tp1), float(tp2), float(tp3), 0.0
+    d = (direction or "BUY").upper()
+    if d == "BUY":
+        t1 = max(float(tp1), e + risk * min_rr1)
+        t2 = max(float(tp2), t1 + risk * 0.5, e + risk * min_rr2)
+        t3 = max(float(tp3), t2 + risk * 0.75, e + risk * min_rr3)
+    else:
+        t1 = min(float(tp1), e - risk * min_rr1)
+        t2 = min(float(tp2), t1 - risk * 0.5, e - risk * min_rr2)
+        t3 = min(float(tp3), t2 - risk * 0.75, e - risk * min_rr3)
+    rr1 = round(abs(t1 - e) / risk, 2)
+    return t1, t2, t3, rr1
+
+
 def safe_rr(entry: float, stop: float, tp: float, direction: str) -> float:
     risk = abs(entry - stop)
     if risk <= 0:

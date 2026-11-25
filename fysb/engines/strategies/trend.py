@@ -22,7 +22,9 @@ pullback visit +16 · resumption candle +14 · momentum (close vs EMA9) +6 ·
 kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone
-from fysb.engines.strategies.base import Ctx, StrategyResult, cap_stop, clamp_score
+from fysb.engines.strategies.base import (
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+)
 
 STACK_ATR = 0.25      # each EMA layer must be separated by >= 0.25 ATR —
                       # an EMAs-equal market is NOT a trend, never chase noise
@@ -46,9 +48,9 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     e9, e21, e50 = _stack(candles)
     checks: dict = {}
-    score = 32.0
+    earned = 0.0
+    max_pts = 67.0
 
-    # 1) entry-TF stack — real separation, both directions, exactly one wins
     direction = ""
     if e9 > e21 + STACK_ATR * a and e21 > e50 + STACK_ATR * a:
         direction = "BUY"
@@ -57,17 +59,15 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["stack"] = bool(direction)
     if not direction:
         return None
-    score += 14
+    earned += 14
 
-    # 2) HTF bias with the same stack rule (trend-with-trend only)
     b9, b21, b50 = _stack(ctx.bias_candles)
     bias_ok = (direction == "BUY" and b21 > b50 + 0.1 * a) or (direction == "SELL" and b21 < b50 - 0.1 * a)
     checks["htf_bias"] = bias_ok
     if not bias_ok:
         return None
-    score += 10
+    earned += 10
 
-    # 3) pullback visit: last 6 candles touched the EMA21 value zone
     visited = False
     for c in candles[-6:]:
         if direction == "BUY":
@@ -81,29 +81,26 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["pullback"] = visited
     if not visited:
         return None
-    score += 12
+    earned += 12
 
-    # 4) resumption candle: closes back in the trend direction, past EMA9
     resumed = (close > e9 and float(last["close"]) > float(last["open"])) if direction == "BUY" \
         else (close < e9 and float(last["close"]) < float(last["open"]))
     checks["resumption"] = resumed
     if not resumed:
         return None
-    score += 10
+    earned += 10
 
-    # 5) momentum bonus: distance travelled away from the value zone
     momentum = abs(close - e21) >= 0.25 * a
     checks["momentum"] = momentum
-    score += 6 if momentum else 0
+    earned += 6 if momentum else 0
 
     kz = ctx.kill_zone or (kill_zone(last["datetime"]) or "")
     checks["kill_zone"] = bool(kz)
-    score += 6 if kz else 0
+    earned += 6 if kz else 0
     vol = atr_pct(candles)
     checks["vol_ok"] = 0.05 < vol < 6.0
-    score += 4 if checks["vol_ok"] else 0
+    earned += 4 if checks["vol_ok"] else 0
 
-    # 6) stop beyond the pullback extreme
     recent = candles[-8:]
     if direction == "BUY":
         stop = min(float(c["low"]) for c in recent) - 0.5 * a
@@ -115,15 +112,18 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    # 7) measured continuation ladder 2R/3R/5R
-    tp1 = entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0
-    tp2 = entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0
-    tp3 = entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0
-    rr = 2.0
-    checks["rr_ok"] = True
-    score += 5
+    tp1, tp2, tp3, rr = ensure_min_tp_rr(
+        entry, stop,
+        entry + risk * 2.0 if direction == "BUY" else entry - risk * 2.0,
+        entry + risk * 3.0 if direction == "BUY" else entry - risk * 3.0,
+        entry + risk * 5.0 if direction == "BUY" else entry - risk * 5.0,
+        direction,
+    )
+    checks["rr_ok"] = rr >= 2.0
+    earned += 5 if checks["rr_ok"] else 0
 
-    if score < 55:
+    score = normalized_score(earned, max_pts)
+    if score < 58:
         return None
 
     reasons = [
@@ -139,5 +139,5 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     return StrategyResult(
         code="TREND", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,
-        score=clamp_score(score), reasons=reasons, checks=checks,
+        score=score, reasons=reasons, checks=checks,
     )

@@ -353,9 +353,17 @@ def open_signal_interactive(user_id: int, signal_id: int, api_key: str = "",
     # Try real live market execution first
     res = open_position(user_id, symbol, direction, lots, sl=sl, tp=tp, api_key=api_key, signal_id=sid)
     if not res.get("ok"):
-        # If duplicate closed position existed or provider/spread momentarily blocked, insert clean live-entry position
+        # v8.0.0 (EXEC-5): NEVER bypass SL/TP directional geometry or risk/leverage caps!
+        # Only fall back to entry_ref when the live price feed is briefly offline OR when
+        # re-opening a signal whose previous demo trade already closed — while STILL enforcing
+        # strict SL/TP side validation and demo risk/leverage limits!
         err_low = str(res.get("error") or "").lower()
-        if any(k in err_low for k in ("already opened", "unavailable", "not enabled", "sl must", "tp must")):
+        if any(k in err_low for k in ("sl must", "tp must")):
+            return {
+                "ok": False,
+                "error": "⚠️ السعر الحي تجاوز بالفعل وقف الخسارة أو الهدف لهذه الإشارة — لا يمكن فتحها بوقف/هدف معكوس.",
+            }
+        if any(k in err_low for k in ("already opened", "unavailable", "not enabled")):
             fill_px = entry_ref
             try:
                 prov = (row or {}).get("provider_symbol") or symbol
@@ -364,6 +372,29 @@ def open_signal_interactive(user_id: int, signal_id: int, api_key: str = "",
                     fill_px = float(q["price"])
             except Exception:
                 pass
+            # Enforce strict SL/TP geometry on fill_px
+            if sl > 0:
+                if (direction == "BUY" and sl >= fill_px) or (direction == "SELL" and sl <= fill_px):
+                    return {
+                        "ok": False,
+                        "error": "⚠️ السعر الحي تجاوز منطقة وقف الخسارة لهذه الإشارة — تم منع فتح صفقة مكسورة.",
+                    }
+            if tp > 0:
+                if (direction == "BUY" and tp <= fill_px) or (direction == "SELL" and tp >= fill_px):
+                    return {
+                        "ok": False,
+                        "error": "⚠️ السعر الحي وصل بالفعل لمنطقة الهدف — فات وقت الدخول التجريبي.",
+                    }
+            from fysb.engines import risk as _risk
+            bal = max(1.0, float(acc["balance"] or DEMO_DEFAULT_BALANCE))
+            est_loss = abs(instruments.pnl(symbol, direction, lots, fill_px, sl, row)) if sl > 0 else 0.0
+            actual_risk_pct = max(0.01, (est_loss / bal) * 100.0) if est_loss > 0 else 0.5
+            gate = _risk.check_demo_trade(user_id, actual_risk_pct)
+            if not gate.allowed:
+                return {"ok": False, "error": gate.reason}
+            notional = instruments.notional_usd(symbol, lots, fill_px, row)
+            if notional > bal * 50:
+                return {"ok": False, "error": "حجم الصفقة يتجاوز سقف الرافعة التجريبية"}
             with db.tx() as c:
                 cur = c.execute(
                     """INSERT INTO demo_positions(account_id,user_id,symbol,direction,lots,initial_lots,entry,sl,tp,

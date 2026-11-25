@@ -197,21 +197,43 @@ def affiliate_stats(user_id: int) -> dict:
 
 
 def request_payout(user_id: int, wallet_address: str, amount_usd: float | None = None) -> dict:
+    import math
     wallet = (wallet_address or "").strip()
     if len(wallet) < 8:
         return {"ok": False, "error": "يرجى إدخال عنوان محفظة (USDT TRC20 أو حساب استلام) صحيح."}
-    st = affiliate_stats(user_id)
-    avail = st["available_usd"]
-    min_p = st["min_payout_usd"]
-    req_amt = round(float(amount_usd), 2) if amount_usd is not None else avail
-    if req_amt < min_p:
-        return {"ok": False, "error": f"الحد الأدنى لطلب السحب هو {min_p:g}$ (رصيدك المتاح حالياً: {avail:.2f}$)."}
-    if req_amt > avail:
-        return {"ok": False, "error": f"المبلغ المطلوب ({req_amt:.2f}$) يتجاوز رصيدك المتاح ({avail:.2f}$)."}
-    with db.conn() as c:
+    uid = int(user_id)
+    min_p = min_payout_usd()
+    with db.tx(immediate=True) as c:
+        earned = float(c.execute(
+            "SELECT COALESCE(SUM(commission_usd), 0) s FROM affiliate_commissions WHERE referrer_id=? AND status='CREDITED'",
+            (uid,),
+        ).fetchone()["s"] or 0.0)
+        paid_out = float(c.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) s FROM affiliate_payouts WHERE user_id=? AND status='APPROVED'",
+            (uid,),
+        ).fetchone()["s"] or 0.0)
+        pending_out = float(c.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) s FROM affiliate_payouts WHERE user_id=? AND status='PENDING'",
+            (uid,),
+        ).fetchone()["s"] or 0.0)
+        avail = round(max(0.0, earned - paid_out - pending_out), 2)
+        if amount_usd is not None:
+            try:
+                raw_amt = float(amount_usd)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "مبلغ السحب غير صالح."}
+            if not math.isfinite(raw_amt) or raw_amt <= 0:
+                return {"ok": False, "error": "مبلغ السحب غير صالح."}
+            req_amt = round(raw_amt, 2)
+        else:
+            req_amt = avail
+        if req_amt < min_p:
+            return {"ok": False, "error": f"الحد الأدنى لطلب السحب هو {min_p:g}$ (رصيدك المتاح حالياً: {avail:.2f}$)."}
+        if req_amt > avail:
+            return {"ok": False, "error": f"المبلغ المطلوب ({req_amt:.2f}$) يتجاوز رصيدك المتاح ({avail:.2f}$)."}
         cur = c.execute(
             "INSERT INTO affiliate_payouts(user_id,amount_usd,wallet_address,status,created_at) VALUES(?,?,?,'PENDING',?)",
-            (int(user_id), req_amt, wallet[:160], config.now()),
+            (uid, req_amt, wallet[:160], config.now()),
         )
         pid = int(cur.lastrowid)
     return {"ok": True, "payout_id": pid, "amount_usd": req_amt, "wallet_address": wallet[:160]}

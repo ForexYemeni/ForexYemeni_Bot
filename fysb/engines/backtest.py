@@ -171,9 +171,10 @@ def _simulate_trade(symbol: str, cand, future: list[dict], start_idx: int,
 
 
 def _market_catalog_defaults(symbol: str) -> tuple[float, str]:
-    """Resolve real per-market (spread_pips, provider_symbol) from `market_catalog`."""
+    """Resolve real per-market (spread_pips, provider_symbol) from `market_catalog`
+    with per-asset realistic fallback from `instruments.typical_spread_pips()` (v8.0.0)."""
     sym = (symbol or "XAUUSD").strip().upper()
-    mkt_spread = 0.5
+    mkt_spread = instruments.typical_spread_pips(sym)
     prov_sym = sym
     try:
         with db.conn() as c:
@@ -184,7 +185,7 @@ def _market_catalog_defaults(symbol: str) -> tuple[float, str]:
         if r:
             if r["provider_symbol"]:
                 prov_sym = str(r["provider_symbol"])
-            if r["spread_pips"] is not None and float(r["spread_pips"]) >= 0:
+            if r["spread_pips"] is not None and float(r["spread_pips"]) > 0:
                 mkt_spread = float(r["spread_pips"])
     except Exception:
         pass
@@ -255,7 +256,9 @@ def run_backtest(
             i += 1
             continue
         cand = None
+        from fysb.engines import structural_tp as _stp
         for r in filtered:
+            _stp.apply_structural_targets(r, window, htf_window)
             if r.rr < min_rr:
                 continue
             ok_q, _q_reason = evaluate_quality_gate(

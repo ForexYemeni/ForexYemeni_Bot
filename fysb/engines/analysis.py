@@ -329,18 +329,77 @@ def confirmed_candles(candles: list[dict], timeframe: str, now_utc: Optional[dat
     return candles
 
 
-# --- ICT session (kill zones) — only when candle timestamps are usable --------
-def kill_zone(dt_iso: str) -> Optional[str]:
-    """Return the active ICT kill zone for a UTC timestamp, else None.
-    London: 07-10 UTC | New York: 13-16 UTC (approximation, documented)."""
+def _parse_utc_dt(dt_iso: str) -> Optional[datetime]:
+    if not dt_iso:
+        return None
     try:
-        dt = datetime.fromisoformat(dt_iso.replace("Z", "+00:00"))
-        hour = dt.hour
+        from datetime import timezone
+        dt = datetime.fromisoformat(str(dt_iso).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
-    if 7 <= hour < 10:
+
+
+def ny_hour(dt_iso: str) -> Optional[int]:
+    """v8.0.0: Exact DST-aware America/New_York hour (0..23) for any UTC candle timestamp."""
+    dt_utc = _parse_utc_dt(dt_iso)
+    if dt_utc is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return dt_utc.astimezone(ZoneInfo("America/New_York")).hour
+    except Exception:
+        # Fallback approximation (EST = UTC-5) if system lacks tzdata
+        return (dt_utc.hour - 5) % 24
+
+
+def session_levels(candles: list[dict]) -> dict:
+    """v8.0.0: Extract Previous Day High/Low (PDH/PDL) and Asian Session High/Low (00-06 UTC)."""
+    if not candles or len(candles) < 10:
+        return {"pdh": None, "pdl": None, "asian_high": None, "asian_low": None}
+    last_dt = _parse_utc_dt(candles[-1].get("datetime", ""))
+    if last_dt is None:
+        return {"pdh": None, "pdl": None, "asian_high": None, "asian_low": None}
+    cur_day = last_dt.date()
+    prev_day_bars = []
+    asian_bars = []
+    seen_prev_date = None
+    for c in reversed(candles):
+        dt = _parse_utc_dt(c.get("datetime", ""))
+        if dt is None:
+            continue
+        d = dt.date()
+        if d == cur_day and 0 <= dt.hour < 6:
+            asian_bars.append(c)
+        elif d < cur_day:
+            if seen_prev_date is None:
+                seen_prev_date = d
+            if d == seen_prev_date:
+                prev_day_bars.append(c)
+            elif d < seen_prev_date:
+                break
+    return {
+        "pdh": max(float(c["high"]) for c in prev_day_bars) if prev_day_bars else None,
+        "pdl": min(float(c["low"]) for c in prev_day_bars) if prev_day_bars else None,
+        "asian_high": max(float(c["high"]) for c in asian_bars) if len(asian_bars) >= 2 else None,
+        "asian_low": min(float(c["low"]) for c in asian_bars) if len(asian_bars) >= 2 else None,
+    }
+
+
+# --- ICT session (kill zones) — DST-aware New York clock (v8.0.0) ------------
+def kill_zone(dt_iso: str) -> Optional[str]:
+    """Return the active ICT kill zone using DST-aware America/New_York time:
+      London Killzone:   02:00–05:00 NY (07-10 UTC winter / 06-09 UTC summer)
+      New York Killzone: 07:00–10:00 NY (12-15 UTC winter / 11-14 UTC summer)
+    """
+    h = ny_hour(dt_iso)
+    if h is None:
+        return None
+    if 2 <= h < 5:
         return "LONDON"
-    if 13 <= hour < 16:
+    if 7 <= h < 10:
         return "NEW_YORK"
     return None
 

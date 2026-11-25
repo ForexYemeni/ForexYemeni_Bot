@@ -60,7 +60,7 @@ def daily_signal_pnl_pct(conn_obj=None) -> tuple[float, int]:
         return c.execute(
             """SELECT status, hit_tp, rr FROM signals
                WHERE (source IS NULL OR source NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW'))
-                 AND closed_at>=? AND status IN ('SL_HIT','TP1_HIT','TP2_HIT','TP3_HIT')""",
+                 AND closed_at>=? AND status IN ('SL_HIT','TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE')""",
             (day_start,),
         ).fetchall()
     if conn_obj is not None:
@@ -77,9 +77,9 @@ def daily_signal_pnl_pct(conn_obj=None) -> tuple[float, int]:
         if st == "SL_HIT" and hit == 0:
             net_r -= 1.0
             sl_hits += 1
-        elif st == "TP1_HIT" or (st == "SL_HIT" and hit == 1):
+        elif st in ("TP1_HIT", "TP1_BE") or (st == "SL_HIT" and hit == 1):
             net_r += base_rr * 0.5
-        elif st == "TP2_HIT" or (st == "SL_HIT" and hit == 2):
+        elif st in ("TP2_HIT", "TP2_BE") or (st == "SL_HIT" and hit == 2):
             net_r += base_rr * 1.0
         elif st == "TP3_HIT":
             net_r += base_rr * 1.5

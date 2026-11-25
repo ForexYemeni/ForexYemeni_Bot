@@ -387,8 +387,8 @@ def _fetch_venue_gold_candles(venue_symbol: str, interval: str, outputsize: int)
         vals = _fetch_binance_candles(venue_symbol, interval, outputsize)
         if len(vals) >= MIN_CANDLES:
             return vals
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("binance gold candles fallback to bybit: %s", exc)
     return _fetch_bybit_candles(venue_symbol, interval, outputsize)
 
 
@@ -575,11 +575,33 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
         try:
             if provider == "venue-gold":
                 v = BINANCE_MAP[internal]
-                values = _fetch_venue_gold_candles(v, interval, outputsize)
-                offset = _gold_offset_now(internal, v)
-                if offset is None:
-                    offset = _persisted_offset(internal) or 0.0
-                values = _apply_offset(values, offset)
+                # v8.0.0 (SIG-3): Prefer real CME Gold Futures (`GC=F`) via Yahoo first
+                # (zero crypto PAXG depeg!), then fail over to PAXG + GoldAPI spot offset.
+                used_futures = False
+                values = []
+                try:
+                    yvals = _fetch_yahoo_candles("GC=F", interval, outputsize)
+                    if len(yvals) >= MIN_CANDLES:
+                        values = yvals
+                        used_futures = True
+                except Exception as y_exc:
+                    log.debug("yahoo GC=F gold candles unavailable, failing over to PAXG: %s", y_exc)
+                if not used_futures:
+                    values = _fetch_venue_gold_candles(v, interval, outputsize)
+                    offset = _gold_offset_now(internal, v)
+                    if offset is None:
+                        offset = _persisted_offset(internal) or 0.0
+                    values = _apply_offset(values, offset)
+                else:
+                    try:
+                        spot_t = GOLD_API_MAP.get(internal)
+                        if spot_t and values:
+                            spot_px = _fetch_goldapi_price(spot_t)["price"]
+                            last_c = float(values[-1]["close"])
+                            if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
+                                values = _apply_offset(values, spot_px - last_c)
+                    except Exception as s_exc:
+                        log.debug("gold futures spot calibration skipped: %s", s_exc)
             elif provider == "fx-ref":
                 values = _fetch_yahoo_candles(YAHOO_FX_MAP[internal], interval, outputsize)
             elif provider == "binance":

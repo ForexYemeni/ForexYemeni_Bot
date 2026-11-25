@@ -77,6 +77,7 @@ class TestPipeline(unittest.TestCase):
         with patch.object(market_data, "fetch_candles", return_value=payload), \
              patch.object(market_data, "fetch_price", side_effect=RuntimeError("no quote in tests")), \
              patch.object(signal_engine, "is_stale_entry", return_value=(False, "")), \
+             patch("fysb.engines.intelligence.dxy_bias_check", return_value={"delta": 0, "note": ""}), \
              patch("fysb.engines.signal_engine._allowed_strategies", return_value=["PRICE_ACTION"]):
             with db.conn() as c:
                 c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,

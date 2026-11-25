@@ -657,6 +657,11 @@ DEFAULT_SETTINGS = {
     # v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
     "news_guard_enabled": "1",
     "news_guard_minutes": "30",
+    "news_auto_broadcast": "0",
+    "news_broadcast_users": "1",
+    "news_broadcast_partners": "1",
+    "news_broadcast_channels": "1",
+    "news_lead_minutes": "30",
     # v6.26.0 Local zero-cost institutional charts (Pillow) + v7.0.2 scheduler
     "charts_enabled": "1",
     "chart_schedule_minutes": "0",

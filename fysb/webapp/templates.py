@@ -1,9 +1,11 @@
-"""Ultra-Luxury Royal Obsidian-Gold Glassmorphic RTL Arabic HTML Templates (v7.3.0):
+"""Ultra-Luxury Royal Obsidian-Gold Glassmorphic RTL Arabic HTML Templates (v7.4.0):
   1. User Telegram Mini App (`/`) — Royal VIP Terminal with TradingView Lightweight
      Charts + Signal Overlay Price Lines + Live Market & Timeframe Pills + Live
-     Risk/Lot Preview + Journal Analytics + Strategy Leaderboard + News Shield +
-     Academy + Gift Codes + Affiliates + Floating Glass Dock
-  2. Super Admin Executive Web Panel (`/admin`) — Live KPIs, 1-Tap System Controls,
+     Risk/Lot Preview + Journal Analytics + Ultra-Luxury Royal Partner Hub (Channel
+     Partner Studio + Tiered Affiliate Studio + Direct Payouts + Channel Controls) +
+     Academy + Gift Codes + Floating Glass Dock
+  2. Super Admin Executive Web Panel (`/admin`) — Live KPIs, 1-Tap System & News
+     Auto-Broadcast Controls, 1-Tap Luxury News Broadcast, Admin Strategy Leaderboard,
      Market-Filtered Chart-Only Channels Studio, Pending Payments, Affiliate Payouts,
      & Instant Gift Code Generator
 """
@@ -340,28 +342,83 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
     </div>
   </div>
 
-  <!-- PANE 3: INTELLIGENCE & NEWS -->
-  <div id="pane-intel" class="pane">
-    <div class="card gold-edge">
-      <div class="card-hdr"><h3>🏆 مصفوفة الاستراتيجيات (30 يوماً)</h3></div>
-      <div id="lbBox"><div class="empty">⏳ جارٍ التحميل...</div></div>
+  <!-- PANE 3: ULTRA-LUXURY ROYAL PARTNER HUB (v7.4.0) -->
+  <div id="pane-partner" class="pane">
+    <!-- Channel Partner Executive Studio (shown when user is an approved Channel Partner) -->
+    <div id="chPartnerWrap" style="display:none">
+      <div class="hero">
+        <div class="hero-top">
+          <div>
+            <div class="hero-title">👑 بوابة الشريك الملكي المعتمد (Channel Partner)</div>
+            <div class="hero-plan" id="pBrandTitle">—</div>
+          </div>
+          <span class="badge b-gold" id="pCommPill">🥇 0%</span>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+          <span class="badge b-status" id="pModePill">الوضع: —</span>
+          <span class="badge b-buy" id="pVipPill" style="display:none">🔐 بوابة VIP مفعّلة</span>
+        </div>
+        <div class="hero-metrics" style="grid-template-columns:repeat(2,1fr)">
+          <div class="hm"><div class="l">👥 المدعوون / التحويل</div><div class="v cyan" id="pInvited">0</div></div>
+          <div class="hm"><div class="l">✅ المشتركون المحوّلون</div><div class="v green" id="pConverted">0</div></div>
+          <div class="hm"><div class="l">💰 أرباح جاهزة للسحب</div><div class="v gold" id="pPending">$0.00</div></div>
+          <div class="hm"><div class="l">🏦 إجمالي الأرباح / قنوات</div><div class="v green" id="pTotalCh">$0 · 0</div></div>
+        </div>
+        <div style="margin-top:11px;display:flex;gap:7px">
+          <button class="btn gold" onclick="copyText(partnerRefLink,'✅ تم نسخ رابط الشريك الملكي')">📋 نسخ رابط الشريك</button>
+          <button class="btn ghost" onclick="shareLink(partnerRefLink)">📤 مشاركة</button>
+        </div>
+      </div>
+
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>📺 قنوات الشريك المربوطة (تحكم لحظي)</h3>
+          <span class="badge b-gold" id="pQuotaLbl">الحصة اليومية</span>
+        </div>
+        <div id="pChannelsList"><div class="empty">لا توجد قنوات مربوطة بعد — اربط قناتك من أمر /partner.</div></div>
+      </div>
     </div>
+
+    <!-- Royal Affiliate Studio (available to EVERY user & partner) -->
+    <div class="card gold-edge">
+      <div class="card-hdr">
+        <h3>🤝 برنامج الشركاء والعمولات التراكمي</h3>
+        <span class="badge b-gold" id="affTierPill">🥉 برونزي</span>
+      </div>
+      <div class="grid2" style="margin-bottom:10px">
+        <div class="stat-tile"><div class="l">إجمالي الإحالات</div><div class="v cyan" id="afInv">0</div></div>
+        <div class="stat-tile"><div class="l">الاشتراكات المحوّلة</div><div class="v green" id="afConv">0</div></div>
+        <div class="stat-tile"><div class="l">الرصيد المتاح للسحب</div><div class="v gold" id="afAvail">$0.00</div></div>
+        <div class="stat-tile"><div class="l">إجمالي ما تم دفعه</div><div class="v green" id="afPaid">$0.00</div></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px" id="afNextTierTxt">التقدم نحو الرتبة التالية</div>
+      <div class="qbar" style="margin-top:0;margin-bottom:12px"><div class="qbar-fill" id="afTierBar" style="width:12%"></div></div>
+      <div class="field">
+        <label>رابط الدعوة الخاص بك (عمولة فورية تلقائية)</label>
+        <input id="affLinkInput" readonly value="—"/>
+      </div>
+      <div class="btn-row">
+        <button class="btn gold" onclick="copyText(document.getElementById('affLinkInput').value,'✅ تم نسخ رابط الإحالة الخاص بك')">📋 نسخ الرابط</button>
+        <button class="btn ghost" onclick="shareLink(document.getElementById('affLinkInput').value)">📤 مشاركة الرابط</button>
+      </div>
+    </div>
+
     <div class="card">
-      <div class="card-hdr"><h3>📰 التقويم الاقتصادي ودرع الأخبار</h3></div>
-      <div id="newsBox"><div class="empty">⏳ جارٍ التحميل...</div></div>
+      <div class="card-hdr"><h3>💸 طلب سحب الأرباح (USDT / محفظة)</h3></div>
+      <div class="grid2">
+        <div class="field"><label>عنوان المحفظة (TRC20 / BEP20)</label><input id="poWallet" placeholder="T... أو 0x..."/></div>
+        <div class="field"><label>المبلغ ($) — اتركه فارغاً لسحب الكل</label><input id="poAmt" type="number" step="0.5" placeholder="الرصيد المتاح"/></div>
+      </div>
+      <button class="btn green" style="width:100%" onclick="requestPartnerPayout()">💸 إرسال طلب السحب للإدارة</button>
     </div>
   </div>
 
-  <!-- PANE 4: ACADEMY, GIFTS & AFFILIATES -->
+  <!-- PANE 4: ACADEMY & GIFTS -->
   <div id="pane-more" class="pane">
     <div class="card gold-edge">
       <div class="card-hdr"><h3>🎓 أكاديمية ForexYemeni الاحترافية</h3></div>
       <div id="acadBox" style="font-size:13px;margin-bottom:8px">—</div>
       <div class="qbar"><div class="qbar-fill" id="acadFill" style="width:0%"></div></div>
-    </div>
-    <div class="card">
-      <div class="card-hdr"><h3>🤝 برنامج الشركاء والعمولات</h3></div>
-      <div id="affBox" style="font-size:13px">—</div>
     </div>
     <div class="card">
       <div class="card-hdr"><h3>🎁 تفعيل كود هدية VIP</h3></div>
@@ -373,10 +430,10 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
 
 <div class="dock-wrap">
   <div class="dock">
-    <button class="tab active" onclick="openTab('signals',this)"><span class="ic">📡</span><span>الإشارات</span></button>
-    <button class="tab" onclick="openTab('risk',this)"><span class="ic">🛡</span><span>المخاطرة</span></button>
-    <button class="tab" onclick="openTab('intel',this)"><span class="ic">🏆</span><span>الذكاء</span></button>
-    <button class="tab" onclick="openTab('more',this)"><span class="ic">👑</span><span>الملكي</span></button>
+    <button class="tab active" id="tab-signals" onclick="openTab('signals',this)"><span class="ic">📡</span><span>الإشارات</span></button>
+    <button class="tab" id="tab-risk" onclick="openTab('risk',this)"><span class="ic">🛡</span><span>المخاطرة</span></button>
+    <button class="tab" id="tab-partner" onclick="openTab('partner',this)"><span class="ic">🤝</span><span>الشريك</span></button>
+    <button class="tab" id="tab-more" onclick="openTab('more',this)"><span class="ic">👑</span><span>الملكي</span></button>
   </div>
 </div>
 
@@ -386,7 +443,40 @@ if (tg) {{ tg.ready(); tg.expand(); try{{ tg.setHeaderColor('#06080f'); tg.setBa
 const INIT_DATA = (tg && tg.initData) || '';
 
 let chart, series, priceLines = [];
-let curSym = 'XAUUSD', curTf = 'H1', allSignals = [], sigFilter = 'all';
+let curSym = 'XAUUSD', curTf = 'H1', allSignals = [], sigFilter = 'all', partnerRefLink = '';
+
+function copyText(txt, okMsg){{
+  if(!txt || txt==='—') return toast('الرابط غير متاح بعد', true);
+  if(navigator.clipboard && navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(txt).then(()=>toast(okMsg||'✅ تم النسخ')).catch(()=>toast(txt));
+  }} else {{
+    toast(okMsg||'✅ تم النسخ');
+  }}
+}}
+
+function shareLink(url){{
+  if(!url || url==='—') return toast('الرابط غير متاح بعد', true);
+  const sh = 'https://t.me/share/url?url=' + encodeURIComponent(url);
+  if(tg && tg.openTelegramLink) tg.openTelegramLink(sh);
+  else window.open(sh, '_blank');
+}}
+
+async function togglePartnerChannel(chId){{
+  const r = await api('/api/partner/channel-toggle', {{method:'POST', body:JSON.stringify({{channel_id:chId}})}});
+  toast(r.ok ? (r.enabled ? '🟢 تم تفعيل القناة' : '⚪ تم إيقاف القناة') : (r.error||'خطأ'), !r.ok);
+  if(r.ok) boot();
+}}
+
+async function requestPartnerPayout(){{
+  const wallet = document.getElementById('poWallet').value.trim();
+  const rawAmt = document.getElementById('poAmt').value.trim();
+  if(!wallet) return toast('أدخل عنوان المحفظة أولاً', true);
+  const body = {{wallet_address: wallet}};
+  if(rawAmt) body.amount_usd = +rawAmt;
+  const r = await api('/api/partner/payout', {{method:'POST', body:JSON.stringify(body)}});
+  toast(r.ok ? `✅ تم رفع طلب سحب $${{r.amount_usd}} للمراجعة` : (r.error||'تعذر إرسال الطلب'), !r.ok);
+  if(r.ok){{ document.getElementById('poAmt').value=''; boot(); }}
+}}
 
 function toast(msg, err=false){{
   const el=document.getElementById('toast');
@@ -608,13 +698,55 @@ async function boot(){{
     document.getElementById('jPips').textContent = `${{(j.net_pips||0)>0?'+':''}}${{j.net_pips||0}}`;
     document.getElementById('jUsd').textContent = `$${{j.net_usd||0}}`;
 
-    const ac = me.academy || {{}}, af = me.affiliate || {{}};
+    const ac = me.academy || {{}}, af = me.affiliate || {{}}, pr = me.partner || {{}};
     document.getElementById('kAcad').textContent = `${{ac.overall_pct||0}}%`;
     document.getElementById('acadBox').innerHTML =
       `التقدم العام: <b style="color:var(--gold2)">${{ac.overall_pct||0}}%</b> · الدروس المكتملة: <b>${{ac.total_done||0}} / ${{ac.total_all||15}}</b>`;
     document.getElementById('acadFill').style.width = (ac.overall_pct||0) + '%';
-    document.getElementById('affBox').innerHTML =
-      `الرتبة: <b style="color:var(--gold2)">${{(af.tier&&af.tier.label)||'برونزي'}}</b> (${{(af.tier&&af.tier.rate_pct)||15}}%) · المتاح للسحب: <b style="color:var(--green)">$${{af.available_usd||0}}</b>`;
+
+    // Render Royal Affiliate Partner Studio
+    const tier = af.tier || {{}};
+    document.getElementById('affTierPill').textContent = `${{tier.label||'برونزي'}} · ${{tier.rate_pct||15}}%`;
+    document.getElementById('afInv').textContent = af.invited || 0;
+    document.getElementById('afConv').textContent = af.converted || 0;
+    document.getElementById('afAvail').textContent = `$${{(+af.available_usd||0).toFixed(2)}}`;
+    document.getElementById('afPaid').textContent = `$${{(+af.paid_usd||0).toFixed(2)}}`;
+    document.getElementById('affLinkInput').value = af.referral_link || '—';
+    const nextNeed = (af.next_tier && af.next_tier.min_converted) || 0;
+    const convN = af.converted || 0;
+    const tPct = nextNeed > 0 ? Math.min(100, Math.max(8, Math.round(convN / nextNeed * 100))) : 100;
+    document.getElementById('afTierBar').style.width = tPct + '%';
+    document.getElementById('afNextTierTxt').textContent = af.next_tier
+      ? `التقدم نحو رتبة ${{af.next_tier.label}} (${{af.next_tier.rate_pct}}%): ${{convN}} / ${{nextNeed}} مشترك`
+      : '👑 وصلت لأعلى رتبة عمولات ملكية!';
+
+    // Render Executive Channel Partner Studio if registered partner
+    if(pr.is_channel_partner){{
+      document.getElementById('chPartnerWrap').style.display = 'block';
+      partnerRefLink = pr.referral_link || '';
+      const pst = pr.stats || {{}}, pq = pr.manual_quota || {{}};
+      document.getElementById('pBrandTitle').textContent = pr.brand_label || pr.title || 'شريك ملكي';
+      document.getElementById('pCommPill').textContent = `🥇 عمولة ${{pr.commission_pct||0}}%`;
+      document.getElementById('pModePill').textContent = `الوضع: ${{pr.post_mode_ar||pr.post_mode}}`;
+      document.getElementById('pVipPill').style.display = pr.perm_vip_gatekeeper ? 'inline-block' : 'none';
+      document.getElementById('pInvited').textContent = `${{pst.invited||0}} (${{pst.conv_rate_pct||0}}%)`;
+      document.getElementById('pConverted').textContent = pst.converted || 0;
+      document.getElementById('pPending').textContent = `$${{(+pst.earned_pending||0).toFixed(2)}}`;
+      document.getElementById('pTotalCh').textContent = `$${{(+pst.total_earned||0).toFixed(0)}} · ${{pst.channels_count||0}} قناة`;
+      document.getElementById('pQuotaLbl').textContent = `تحليل ${{pq.analysis_used||0}}/${{pq.analysis_limit||0}} · إشارة ${{pq.signal_used||0}}/${{pq.signal_limit||0}}`;
+      const chs = pr.channels || [];
+      document.getElementById('pChannelsList').innerHTML = chs.length ? chs.map(c =>
+        `<div class="news-item">
+          <div>
+            <b>${{c.enabled?'🟢':'⚪'}} ${{c.title}}</b>
+            <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${{c.markets||'ALL'}} · ${{c.post_mode}}${{c.is_vip_gate?' · 🔐 VIP':''}}</div>
+          </div>
+          <button class="btn ${{c.enabled?'green':'ghost'}}" style="flex:0;min-width:74px;padding:6px 10px" onclick="togglePartnerChannel(${{c.id}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
+        </div>`
+      ).join('') : '<div class="empty">لا توجد قنوات مربوطة بعد — اربط قناتك عبر /partner.</div>';
+    }} else {{
+      document.getElementById('chPartnerWrap').style.display = 'none';
+    }}
   }} else {{
     renderMarketChips();
   }}
@@ -624,32 +756,11 @@ async function boot(){{
   allSignals = (sigs && sigs.signals) ? sigs.signals : [];
   renderSignals();
 
-  const lb = await api('/api/leaderboard?period=30d');
-  if(lb && lb.rows && lb.rows.length){{
-    const medals = ['🥇','🥈','🥉'];
-    document.getElementById('lbBox').innerHTML = lb.rows.slice(0,8).map((r,i)=>
-      `<div class="lb-row">
-        <div class="lb-top">
-          <b>${{medals[i]||'🔹'}} ${{r.strategy}}</b>
-          <span style="font-family:var(--mono)">${{r.win_rate}}% · <b style="color:${{r.net_pips>=0?'var(--green)':'var(--red)'}}">${{r.net_pips>0?'+':''}}${{r.net_pips}}p</b> (${{r.trades}})</span>
-        </div>
-        <div class="lb-bar"><div class="lb-fill" style="width:${{Math.min(100,Math.max(4,r.win_rate||0))}}%"></div></div>
-      </div>`
-    ).join('');
-  }} else {{
-    document.getElementById('lbBox').innerHTML = '<div class="empty">لا توجد بيانات استراتيجيات كافية بعد.</div>';
-  }}
-
-  const nw = await api('/api/news');
-  if(nw && nw.events && nw.events.length){{
-    document.getElementById('newsBox').innerHTML = nw.events.slice(0,8).map(e=>
-      `<div class="news-item">
-        <div><span class="badge b-sell" style="margin-left:6px">${{e.currency}}</span><b>${{e.title}}</b></div>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{e.time_utc||''}}</span>
-      </div>`
-    ).join('');
-  }} else {{
-    document.getElementById('newsBox').innerHTML = '<div class="empty">🟢 الأجواء الاقتصادية هادئة — لا توجد أخبار حمراء قريبة.</div>';
+  // Deep-link tab support (e.g. /?tab=partner from /partner command)
+  const reqTab = new URLSearchParams(window.location.search).get('tab');
+  if(reqTab && document.getElementById('pane-' + reqTab) && !window._tabApplied){{
+    window._tabApplied = true;
+    openTab(reqTab, document.getElementById('tab-' + reqTab));
   }}
 }}
 boot();
@@ -750,8 +861,19 @@ input:focus,select:focus{{border-color:var(--gold)}}
     <div class="kpi"><div class="lbl">طلبات دفع معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
   </div>
   <div class="card gold-edge">
-    <h3>⚡ مفاتيح التحكم السريع (1-Tap)</h3>
+    <h3>⚡ مفاتيح التحكم السريع وبث الأخبار (1-Tap)</h3>
     <div class="toggles" id="togglesBox"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn gold" style="flex:1" onclick="sendLuxuryNewsNow()">📤 إرسال نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+    </div>
+  </div>
+  <div class="card gold-edge">
+    <h3><span>📰 التقويم الاقتصادي الحقيقي (للإدارة فقط)</span><span class="pill" id="newsCountPill">0 خبر</span></h3>
+    <div id="adminNewsBox"><div style="color:var(--muted)">—</div></div>
+  </div>
+  <div class="card">
+    <h3><span>🏆 مصفوفة أداء الاستراتيجيات — 30 يوماً (للإدارة فقط)</span><span class="pill" id="lbSumPill">—</span></h3>
+    <div id="adminLbBox"><div style="color:var(--muted)">—</div></div>
   </div>
   <div class="card gold-edge">
     <h3><span>📊 قنوات الشارت فقط (حسب السوق)</span><span class="pill" id="schedBadge">⏱ يدوي</span></h3>
@@ -786,6 +908,11 @@ async function api(p,o={{}}){{const h=Object.assign({{'X-Telegram-Init-Data':INI
 async function toggleKey(key){{
   const r = await api('/api/admin/toggle',{{method:'POST',body:JSON.stringify({{key}})}});
   toast(r.ok ? '✅ تم تحديث الإعداد' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}}
+async function sendLuxuryNewsNow(){{
+  const r = await api('/api/admin/news-broadcast',{{method:'POST',body:'{{}}'}});
+  toast(r.ok ? '📤 تم إرسال نشرة الأخبار الفاخرة للمستلمين المحددين' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }}
 async function addChartCh(){{
@@ -855,7 +982,9 @@ async function loadAdmin(){{
 
   const labels = {{
     engine_enabled:'🧠 المحرك الآلي', global_kill_switch:'🛑 مفتاح الطوارئ',
-    news_guard_enabled:'📰 درع الأخبار', charts_enabled:'📊 الشارتات المحلية',
+    news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
+    news_broadcast_users:'👥 بث للمستخدمين', news_broadcast_partners:'🤝 بث للشركاء',
+    news_broadcast_channels:'📺 بث للقنوات', charts_enabled:'📊 الشارتات المحلية',
     academy_enabled:'🎓 الأكاديمية', crypto_api_enabled:'🔗 منصات الكريبتو'
   }};
   document.getElementById('togglesBox').innerHTML = Object.entries(labels).map(([k,lbl])=>{{
@@ -863,6 +992,34 @@ async function loadAdmin(){{
     const cls = k==='global_kill_switch' ? (on?'danger':'off') : (on?'on':'off');
     return `<button class="btn ${{cls}}" onclick="toggleKey('${{k}}')">${{lbl}}: ${{on?'🟢 مفعّل':'⚪ متوقف'}}</button>`;
   }}).join('');
+
+  // Admin-Only News Calendar & Honest Feed Status
+  const nev = d.news_events || [];
+  document.getElementById('newsCountPill').textContent = nev.length + ' خبر قوي';
+  if(nev.length){{
+    document.getElementById('adminNewsBox').innerHTML = nev.slice(0,8).map(e=>
+      `<div class="item">
+        <span><span class="pill" style="background:rgba(240,68,82,.18);border-color:rgba(240,68,82,.4);color:#f04452">${{e.currency}}</span> <b>${{e.title}}</b></span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{e.time_utc||''}}</span>
+      </div>`
+    ).join('');
+  }} else if(d.news_feed_error){{
+    document.getElementById('adminNewsBox').innerHTML = `<div style="color:#f04452;font-size:13px">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${{d.news_feed_error}}</div>`;
+  }} else {{
+    document.getElementById('adminNewsBox').innerHTML = '<div style="color:var(--muted);font-size:13px">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
+  }}
+
+  // Admin-Only Strategy Leaderboard (fixed real list)
+  const lb = d.leaderboard || {{}};
+  const lbRows = lb.strategies || [];
+  document.getElementById('lbSumPill').textContent = `${{lb.total_trades||0}} صفقة · نجاح ${{lb.overall_win_rate||0}}%`;
+  const medals = ['🥇','🥈','🥉'];
+  document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,8).map((r,i)=>
+    `<div class="item">
+      <span>${{medals[i]||'🔹'}} <b>${{r.name||r.strategy||r.code}}</b> <span class="pill">${{r.code}}</span></span>
+      <span style="font-family:var(--mono);font-size:12px">${{r.win_rate}}% · <b style="color:${{r.net_pips>=0?'var(--green)':'var(--red)'}}">${{r.net_pips>0?'+':''}}${{r.net_pips}}p</b> (${{r.trades}})</span>
+    </div>`
+  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد صفقات مغلقة كافية في الفترة المختارة بعد.</div>';
 
   document.getElementById('payBox').innerHTML = d.pending_payments.length ? d.pending_payments.map(p=>
     `<div class="item"><span>#${{p.id}} · UID ${{p.user_id}} · <b>${{p.plan_code}}</b> · ${{p.amount}}$</span>

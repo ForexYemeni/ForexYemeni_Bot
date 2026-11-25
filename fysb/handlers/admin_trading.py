@@ -626,13 +626,15 @@ async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
     await admin_scan_tfs(q, uid, context, bot)
 
 
-# --- v6.25.0 Live News Guard, Strategy Leaderboard & Currency Strength ---------
-def _news_guard_state_sync() -> tuple[bool, int, str]:
+# --- v6.25.0 / v7.4.0 Live News Guard, Auto-Broadcast, Leaderboard & Strength -
+def _news_guard_state_sync(force_refresh: bool = False) -> tuple[bool, int, bool, dict, str]:
     from fysb.engines import news_guard as _ng
     on = _ng.is_enabled()
     win = _ng.window_minutes()
-    body = _ng.render_news_calendar_html(enabled=on, buf_min=win)
-    return on, win, body
+    auto_b = _ng.auto_broadcast_enabled()
+    dests = _ng.broadcast_destinations()
+    body = _ng.render_news_calendar_html(enabled=on, buf_min=win, force_refresh=force_refresh)
+    return on, win, auto_b, dests, body
 
 
 def _news_guard_toggle_sync() -> bool:
@@ -648,18 +650,58 @@ def _news_guard_set_win_sync(mins: int) -> int:
     return m
 
 
-async def admin_news_guard(q, uid, context, bot):
-    on, win, body = await afn.run(_news_guard_state_sync)
+def _news_auto_toggle_sync() -> bool:
+    cur = (db.get_setting("news_auto_broadcast", "0") or "0") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting("news_auto_broadcast", nxt)
+    return nxt == "1"
+
+
+def _news_dest_toggle_sync(dest: str) -> bool:
+    key_map = {
+        "users": "news_broadcast_users",
+        "partners": "news_broadcast_partners",
+        "channels": "news_broadcast_channels",
+    }
+    k = key_map.get((dest or "").lower())
+    if not k:
+        return False
+    cur = (db.get_setting(k, "1") or "1") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting(k, nxt)
+    return nxt == "1"
+
+
+async def admin_news_guard(q, uid, context, bot, *, force_refresh: bool = False, notice: str = ""):
+    on, win, auto_b, dests, body = await afn.run(_news_guard_state_sync, force_refresh)
+    if notice:
+        body = f"<blockquote>{esc(notice)}</blockquote>\n\n" + body
     rows_kb = [
-        [kb.btn("⏹ إيقاف درع الأخبار" if on else "▶️ تفعيل درع الأخبار", "a:newsguardtoggle",
-                style="danger" if on else "success")],
+        [
+            kb.btn("⏹ إيقاف الدرع" if on else "▶️ تفعيل الدرع", "a:newsguardtoggle",
+                   style="danger" if on else "success"),
+            kb.btn(
+                "📢 البث التلقائي: 🟢 مفعّل" if auto_b else "📢 البث التلقائي: ⚪ متوقف",
+                "a:newsauto",
+                style="success" if auto_b else "primary",
+            ),
+        ],
+        [
+            kb.btn(f"{'🟢' if dests['users'] else '⚪'} المستخدمون", "a:newsdest:users",
+                   style="success" if dests["users"] else "primary"),
+            kb.btn(f"{'🟢' if dests['partners'] else '⚪'} الشركاء", "a:newsdest:partners",
+                   style="success" if dests["partners"] else "primary"),
+            kb.btn(f"{'🟢' if dests['channels'] else '⚪'} القنوات", "a:newsdest:channels",
+                   style="success" if dests["channels"] else "primary"),
+        ],
         [
             kb.btn(f"{'✅ ' if win == 15 else ''}±15د", "a:newsguardwin:15", style="success" if win == 15 else "primary"),
             kb.btn(f"{'✅ ' if win == 30 else ''}±30د", "a:newsguardwin:30", style="success" if win == 30 else "primary"),
             kb.btn(f"{'✅ ' if win == 45 else ''}±45د", "a:newsguardwin:45", style="success" if win == 45 else "primary"),
             kb.btn(f"{'✅ ' if win == 60 else ''}±60د", "a:newsguardwin:60", style="success" if win == 60 else "primary"),
         ],
-        [kb.btn("🔄 تحديث التقويم", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
+        [kb.btn("📤 إرسال نشرة الأخبار الفاخرة الآن", "a:newssendnow", style="success")],
+        [kb.btn("🔄 تحديث التقويم الآن", "a:newsrefresh", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
@@ -674,6 +716,35 @@ async def admin_news_guard_win(q, uid, context, bot, mins: int):
     m = await afn.run(_news_guard_set_win_sync, mins)
     await afn.run(audit_log.log, uid, f"news_guard_minutes:{m}")
     await admin_news_guard(q, uid, context, bot)
+
+
+async def admin_news_auto_toggle(q, uid, context, bot):
+    nxt = await afn.run(_news_auto_toggle_sync)
+    await afn.run(audit_log.log, uid, f"news_auto_broadcast:{int(nxt)}")
+    note = "🟢 تم تفعيل البث التلقائي الفاخر للأخبار للمستلمين المحددين." if nxt else "⚪ تم إيقاف البث التلقائي للأخبار."
+    await admin_news_guard(q, uid, context, bot, notice=note)
+
+
+async def admin_news_dest_toggle(q, uid, context, bot, dest: str):
+    nxt = await afn.run(_news_dest_toggle_sync, dest)
+    await afn.run(audit_log.log, uid, f"news_broadcast_dest:{dest}={int(nxt)}")
+    await admin_news_guard(q, uid, context, bot, notice="✅ تم تحديث وجهات بث الأخبار.")
+
+
+async def admin_news_send_now(q, uid, context, bot):
+    from fysb.engines import news_guard as _ng
+    card = await afn.run(_ng.render_luxury_news_digest_card, None, force_refresh=True)
+    stats = await _ng.broadcast_news_to_targets(bot, card, include_admin=True)
+    await afn.run(
+        audit_log.log, uid,
+        f"news_broadcast_now:u={stats['users']},p={stats['partners']},c={stats['channels']},f={stats['failed']}",
+    )
+    note = (
+        f"📤 تم إرسال النشرة الاقتصادية الفاخرة الآن — "
+        f"مستخدمون: {stats['users']} · شركاء: {stats['partners']} · قنوات: {stats['channels']}"
+        + (f" · فشل: {stats['failed']}" if stats["failed"] else "")
+    )
+    await admin_news_guard(q, uid, context, bot, notice=note)
 
 
 def _active_channel_chat_ids() -> list[str]:
@@ -726,11 +797,11 @@ async def admin_leaderboard_publish(q, uid, context, bot, period: str = "30d"):
     await admin_leaderboard(q, uid, context, bot, period=period, notice=note)
 
 
-async def admin_strength(q, uid, context, bot):
+async def admin_strength(q, uid, context, bot, *, force_refresh: bool = False):
     from fysb.engines import intelligence as _intel
-    body = await afn.run(_intel.render_strength_card)
+    body = await afn.run(_intel.render_strength_card, None, force_refresh=force_refresh)
     rows_kb = [
-        [kb.btn("🔄 تحديث فوري", "a:strength", style="success"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="primary")],
+        [kb.btn("🔄 تحديث فوري (حي)", "a:strengthrefresh", style="success"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="primary")],
         [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)
@@ -1130,27 +1201,60 @@ async def admin_signal_proof_publish(q, uid, context, bot, sid: int):
 
 
 def _enabled_backtest_markets() -> list[str]:
+    """Return ALL enabled markets from market_catalog (no verified/LIMIT truncation)."""
     with db.conn() as c:
         rows = c.execute(
-            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol LIMIT 12"
+            "SELECT symbol FROM market_catalog WHERE enabled=1 ORDER BY symbol"
         ).fetchall()
-    return [r["symbol"] for r in rows] or ["XAUUSD", "EURUSD", "BTCUSD"]
+    return [str(r["symbol"]).upper() for r in rows if r["symbol"]] or ["XAUUSD", "EURUSD", "BTCUSD"]
 
 
-async def admin_backtest(q, uid, context, bot):
+def _enabled_backtest_strategies() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT code FROM strategy_catalog WHERE enabled=1 ORDER BY code"
+        ).fetchall()
+    return [str(r["code"]).upper() for r in rows if r["code"]]
+
+
+def _effective_backtest_min_score() -> int:
+    from fysb.engines.quality_gate import DEFAULT_MIN_SCORE
+    v = db.get_setting("engine_min_score", "")
+    if v and str(v).strip().isdigit():
+        return int(v)
+    return db.get_setting_int("min_signal_score", DEFAULT_MIN_SCORE)
+
+
+async def admin_backtest(q, uid, context, bot, page: int = 0):
     mkts = await afn.run(_enabled_backtest_markets)
+    per_page = 8
+    total_pages = max(1, (len(mkts) + per_page - 1) // per_page)
+    pg = max(0, min(int(page), total_pages - 1))
+    chunk = mkts[pg * per_page:(pg + 1) * per_page]
     rows_kb = []
-    for sym in mkts[:8]:
+    for sym in chunk:
         rows_kb.append([
             kb.btn(f"🧪 {sym} M15", f"a:btrun:{sym}:M15"),
-            kb.btn(f"🧪 {sym} H1", f"a:btrun:{sym}:H1"),
+            kb.btn(f"H1", f"a:btrun:{sym}:H1"),
+            kb.btn(f"H4", f"a:btrun:{sym}:H4"),
         ])
+    if total_pages > 1:
+        nav = []
+        if pg > 0:
+            nav.append(kb.btn("⬅️ السابق", f"a:backtest:{pg - 1}", style="primary"))
+        nav.append(kb.btn(f"📄 {pg + 1}/{total_pages}", f"a:backtest:{pg}", style="primary"))
+        if pg + 1 < total_pages:
+            nav.append(kb.btn("التالي ➡️", f"a:backtest:{pg + 1}", style="primary"))
+        rows_kb.append(nav)
     rows_kb.append([kb.btn("🧠 العودة للمحرك", "a:engine")])
+    min_sc = await afn.run(_effective_backtest_min_score)
+    en_strats = await afn.run(_enabled_backtest_strategies)
     body = (
         "🧪 <b><u>مختبر الاختبار التاريخي المؤسسي (Walk-Forward Backtest)</u></b>\n"
         "<blockquote>"
-        "▎📊 يختبر جميع الاستراتيجيات الـ 13 على شموع السوق التاريخية المغلقة (بلا Repainting).\n"
-        "▎🛡 يطبّق فلتر الإجماع الاتجاهي، وقاعدة SL-أولاً، وتأمين نقطة الدخول بعد TP1.\n"
+        f"▎🌐 إجمالي الأسواق المفعّلة المتاحة: <b>{len(mkts)} سوق</b> (صفحة {pg + 1}/{total_pages})\n"
+        f"▎🧠 الاستراتيجيات المفعّلة: <b>{len(en_strats)}</b> · ⭐ حد الجودة المعتمد: <b>{min_sc}/100</b>\n"
+        "▎🛡 يطبّق فلتر الإجماع، السبريد الحقيقي لكل سوق، قاعدة SL-أولاً، وتأمين الدخول بعد TP1.\n"
         "▎📈 يحسب نسبة النجاح، عامل الربح (Profit Factor)، صافي R، وأقصى تراجع (Max DD)."
         "</blockquote>\n"
         "اختر السوق والإطار الزمني لبدء الاختبار:"
@@ -1158,23 +1262,43 @@ async def admin_backtest(q, uid, context, bot):
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
-async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str):
+async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str, scope: str = "enabled"):
     from fysb.engines.backtest import format_report, run_backtest
-    from fysb.engines.quality_gate import DEFAULT_MIN_SCORE
     sym = (symbol or "XAUUSD").strip().upper()
     tf_u = (tf or "M15").strip().upper()
-    min_sc = await afn.run(db.get_setting_int, "min_signal_score", DEFAULT_MIN_SCORE)
-    await render(q, f"🧪 <b>جارٍ تشغيل الاختبار التاريخي المؤسسي لـ {esc(sym)} ({esc(tf_u)})…</b>\n<i>يُفحص حتى 800 شمعة مغلقة مع فلتر الفريم الأعلى والتذبذب — يرجى الانتظار بضع ثوانٍ.</i>", None, bot)
-    rep = await asyncio.to_thread(run_backtest, sym, tf_u, min_score=min_sc, api_key=config.market_api_key())
-    await afn.run(audit_log.log, uid, f"backtest:{sym}:{tf_u}:n={rep.filled_trades}:r={rep.net_r}")
+    sc_mode = (scope or "enabled").strip().lower()
+    min_sc = await afn.run(_effective_backtest_min_score)
+    strats = None if sc_mode == "all" else (await afn.run(_enabled_backtest_strategies) or None)
+    scope_lbl = "جميع الـ 13 استراتيجية" if sc_mode == "all" else f"الاستراتيجيات المفعّلة ({len(strats or [])})"
+    await render(
+        q,
+        f"🧪 <b>جارٍ تشغيل الاختبار التاريخي المؤسسي لـ {esc(sym)} ({esc(tf_u)})…</b>\n"
+        f"<i>النطاق: {scope_lbl} · حد الجودة: {min_sc}/100 · سبريد السوق الحقيقي — يرجى الانتظار بضع ثوانٍ.</i>",
+        None,
+        bot,
+    )
+    rep = await asyncio.to_thread(
+        run_backtest,
+        sym,
+        tf_u,
+        strategies=strats,
+        min_score=min_sc,
+        api_key=config.market_api_key(),
+    )
+    await afn.run(audit_log.log, uid, f"backtest:{sym}:{tf_u}:{sc_mode}:n={rep.filled_trades}:r={rep.net_r}")
+    alt_scope = "all" if sc_mode != "all" else "enabled"
+    alt_lbl = "🧠 اختبار كل الـ 13" if alt_scope == "all" else "✅ اختبار المفعّلة فقط"
     rows_kb = [
         [
-            kb.btn(("◉ " if tf_u == "M15" else "") + "⏱ M15", f"a:btrun:{sym}:M15"),
-            kb.btn(("◉ " if tf_u == "H1" else "") + "⏱ H1", f"a:btrun:{sym}:H1"),
-            kb.btn(("◉ " if tf_u == "H4" else "") + "⏱ H4", f"a:btrun:{sym}:H4"),
+            kb.btn(("◉ " if tf_u == "M15" else "") + "⏱ M15", f"a:btrun:{sym}:M15:{sc_mode}"),
+            kb.btn(("◉ " if tf_u == "H1" else "") + "⏱ H1", f"a:btrun:{sym}:H1:{sc_mode}"),
+            kb.btn(("◉ " if tf_u == "H4" else "") + "⏱ H4", f"a:btrun:{sym}:H4:{sc_mode}"),
         ],
-        [kb.btn(f"🔄 إعادة {sym} {tf_u}", f"a:btrun:{sym}:{tf_u}"), kb.btn("🧪 سوق آخر", "a:backtest")],
-        [kb.btn("🧠 المحرك", "a:engine"), kb.btn("📡 الإشارات", "a:signals")],
+        [
+            kb.btn(alt_lbl, f"a:btrun:{sym}:{tf_u}:{alt_scope}", style="primary"),
+            kb.btn(f"🔄 إعادة {sym}", f"a:btrun:{sym}:{tf_u}:{sc_mode}", style="success"),
+        ],
+        [kb.btn("🧪 كل الأسواق", "a:backtest:0"), kb.btn("🧠 المحرك", "a:engine")],
     ]
     await render(q, format_report(rep), kb.admin_nav(rows_kb), bot)
 

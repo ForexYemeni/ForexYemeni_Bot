@@ -17,15 +17,31 @@ from datetime import datetime, timezone
 from fysb import config, db
 from fysb.config import log
 from fysb.engines import market_data, news_guard
-from fysb.services import academy, affiliates, chart_channels, gifts, leaderboard, payments, risk_journal, subscriptions
+from fysb.services import (
+    academy, affiliates, chart_channels, gifts, leaderboard,
+    partners, payments, referrals, risk_journal, subscriptions,
+)
 from fysb.services import audit as audit_log
 from fysb.webapp import auth as wa_auth
 from fysb.webapp import templates
+
+_BOT_RUNTIME: dict = {"bot": None, "loop": None}
+
+
+def set_bot_runtime(bot, loop=None) -> None:
+    """Attach the live Telegram bot & asyncio loop so Admin Web Panel actions can broadcast."""
+    _BOT_RUNTIME["bot"] = bot
+    _BOT_RUNTIME["loop"] = loop
+
 
 ALLOWED_ADMIN_TOGGLES = (
     "engine_enabled",
     "global_kill_switch",
     "news_guard_enabled",
+    "news_auto_broadcast",
+    "news_broadcast_users",
+    "news_broadcast_partners",
+    "news_broadcast_channels",
     "charts_enabled",
     "academy_enabled",
     "crypto_api_enabled",
@@ -124,6 +140,10 @@ def dispatch_request(
                     "chart_channels": chart_channels.list_channels(False),
                     "chart_schedule_minutes": db.get_setting_int("chart_schedule_minutes", 0),
                     "markets": chart_channels.available_markets(),
+                    "leaderboard": leaderboard.compute_leaderboard("30d"),
+                    "news_events": news_guard.upcoming_high_impact(48),
+                    "news_feed_error": news_guard.last_feed_error(),
+                    "partners_count": len(partners.list_partners()),
                 })
 
             if m == "POST" and path == "/api/admin/chart-channel":
@@ -181,6 +201,26 @@ def dispatch_request(
                 audit_log.log(uid, f"webapp_payout_{dec}:{pid}")
                 return _json_resp(200, {"ok": True, "payout_id": pid, "decision": dec})
 
+            if m == "POST" and path == "/api/admin/news-broadcast":
+                card = news_guard.render_luxury_news_digest_card(force_refresh=True)
+                dests = news_guard.broadcast_destinations()
+                bot_obj = _BOT_RUNTIME.get("bot")
+                loop_obj = _BOT_RUNTIME.get("loop")
+                dispatched = False
+                if bot_obj is not None and loop_obj is not None and loop_obj.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        news_guard.broadcast_news_to_targets(bot_obj, card, include_admin=True),
+                        loop_obj,
+                    )
+                    dispatched = True
+                audit_log.log(uid, f"webapp_news_broadcast:dispatched={int(dispatched)}")
+                return _json_resp(200, {
+                    "ok": True,
+                    "dispatched": dispatched,
+                    "destinations": dests,
+                    "events_count": len(news_guard.upcoming_high_impact(48)),
+                })
+
             if m == "POST" and path == "/api/admin/gift":
                 try:
                     res = gifts.create_gift_code(
@@ -207,6 +247,49 @@ def dispatch_request(
                     (uid, day_start),
                 ).fetchone()["n"]
             lim = int(plan.get("max_signals_per_day") or 0)
+            aff_data = affiliates.affiliate_stats(uid)
+            try:
+                bot_uname = referrals.bot_username()
+            except Exception:
+                bot_uname = config.BOT_SIGNATURE.lstrip("@")
+            aff_data["referral_link"] = f"https://t.me/{bot_uname}?start=aff{uid}"
+
+            # v7.4.0: Full Channel Partner Studio payload for registered partners
+            p_row = partners.get_partner_by_user(uid)
+            if p_row and int(p_row.get("enabled") or 0) == 1:
+                p_stats = partners.partner_stats(p_row["id"])
+                p_chans = [
+                    {
+                        "id": int(ch["id"]),
+                        "title": ch.get("title") or ch.get("chat_id"),
+                        "chat_id": ch.get("chat_id") or "",
+                        "enabled": bool(ch.get("enabled")),
+                        "markets": ch.get("markets") or "ALL",
+                        "post_mode": ch.get("post_mode") or p_row.get("post_mode") or "teaser",
+                        "is_vip_gate": bool(ch.get("is_vip_gate")),
+                        "auto_signals": bool(ch.get("auto_signals")),
+                        "auto_analysis": bool(ch.get("auto_analysis")),
+                    }
+                    for ch in partners.partner_channels(p_row["id"])
+                ]
+                partner_payload = {
+                    "is_channel_partner": True,
+                    "id": int(p_row["id"]),
+                    "title": p_row.get("title") or "",
+                    "brand_label": p_row.get("brand_label") or p_row.get("title") or "",
+                    "commission_pct": float(p_row.get("commission_pct") or 0.0),
+                    "post_mode": p_row.get("post_mode") or "teaser",
+                    "post_mode_ar": partners.POST_MODE_SHORT.get(p_row.get("post_mode") or "teaser", "تشويقي"),
+                    "campaign_code": p_row.get("campaign_code") or "",
+                    "referral_link": partners.partner_link(p_row.get("campaign_code") or ""),
+                    "perm_vip_gatekeeper": bool(p_row.get("perm_vip_gatekeeper")),
+                    "stats": p_stats,
+                    "manual_quota": partners.manual_quota_status(p_row["id"], p_row),
+                    "channels": p_chans,
+                }
+            else:
+                partner_payload = {"is_channel_partner": False}
+
             return _json_resp(200, {
                 "ok": True,
                 "user_id": uid,
@@ -219,9 +302,39 @@ def dispatch_request(
                 "academy": {
                     k: v for k, v in academy.user_progress(uid).items() if k != "completed_codes"
                 },
-                "affiliate": affiliates.affiliate_stats(uid),
+                "affiliate": aff_data,
+                "partner": partner_payload,
                 "markets": chart_channels.available_markets(),
             })
+
+        if m == "POST" and path == "/api/partner/payout":
+            wallet = str(payload.get("wallet_address") or "").strip()
+            amt_raw = payload.get("amount_usd")
+            amt = float(amt_raw) if amt_raw not in (None, "") else None
+            res = affiliates.request_payout(uid, wallet, amt)
+            if res.get("ok"):
+                audit_log.log(uid, f"webapp_partner_payout:{res.get('payout_id')}:{res.get('amount_usd')}")
+            return _json_resp(200 if res.get("ok") else 400, res)
+
+        if m == "POST" and path == "/api/partner/channel-toggle":
+            p_row = partners.get_partner_by_user(uid)
+            if not p_row or int(p_row.get("enabled") or 0) != 1:
+                return _json_resp(403, {"ok": False, "error": "Partner account required"})
+            ch_id = int(payload.get("channel_id") or 0)
+            with db.tx() as c:
+                ch = c.execute(
+                    "SELECT id, enabled FROM broadcast_channels WHERE id=? AND owner_partner_id=?",
+                    (ch_id, int(p_row["id"])),
+                ).fetchone()
+                if not ch:
+                    return _json_resp(404, {"ok": False, "error": "Channel not found"})
+                nxt = 0 if int(ch["enabled"] or 0) == 1 else 1
+                c.execute(
+                    "UPDATE broadcast_channels SET enabled=?, updated_at=? WHERE id=?",
+                    (nxt, config.now(), ch_id),
+                )
+            audit_log.log(uid, f"webapp_partner_ch_toggle:{ch_id}={nxt}")
+            return _json_resp(200, {"ok": True, "channel_id": ch_id, "enabled": nxt == 1})
 
         if m == "GET" and path == "/api/signals":
             with db.conn() as c:
@@ -271,11 +384,32 @@ def dispatch_request(
             return _json_resp(200, {"ok": True, "symbol": sym, "tf": tf, "source": src, "candles": formatted})
 
         if m == "GET" and path == "/api/leaderboard":
+            if not principal["is_admin"]:
+                return _json_resp(403, {"ok": False, "error": "Forbidden: Admin analytics only"})
             period = (qs.get("period") or "30d").strip().lower()
-            return _json_resp(200, {"ok": True, "period": period, "rows": leaderboard.compute_leaderboard(period)})
+            lb_data = leaderboard.compute_leaderboard(period)
+            return _json_resp(200, {
+                "ok": True,
+                "period": period,
+                "rows": lb_data["strategies"],
+                "summary": {
+                    "total_trades": lb_data["total_trades"],
+                    "overall_win_rate": lb_data["overall_win_rate"],
+                    "total_net_pips": lb_data["total_net_pips"],
+                },
+            })
 
         if m == "GET" and path == "/api/news":
-            return _json_resp(200, {"ok": True, "enabled": news_guard.is_enabled(), "events": news_guard.upcoming_high_impact(48)})
+            if not principal["is_admin"]:
+                return _json_resp(403, {"ok": False, "error": "Forbidden: Admin analytics only"})
+            return _json_resp(200, {
+                "ok": True,
+                "enabled": news_guard.is_enabled(),
+                "auto_broadcast": news_guard.auto_broadcast_enabled(),
+                "destinations": news_guard.broadcast_destinations(),
+                "events": news_guard.upcoming_high_impact(48),
+                "feed_error": news_guard.last_feed_error(),
+            })
 
         if m == "POST" and path == "/api/risk":
             prof = risk_journal.update_risk_profile(

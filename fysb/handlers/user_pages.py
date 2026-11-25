@@ -617,11 +617,6 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
 
         rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow", style="success")])
         rows_kb.append([
-            kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="success"),
-            kb.btn("🧭 قوة العملات", "u:strength", style="primary"),
-            kb.btn("📰 الأخبار", "u:news", style="primary"),
-        ])
-        rows_kb.append([
             kb.btn("🛡 ملف المخاطرة واللوت", "u:risk", style="primary"),
             kb.btn("📓 مفكرة التداول", "u:journal", style="success"),
         ])
@@ -1462,41 +1457,34 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         from fysb.handlers import signal_now as _sn
         await _sn.stop_watch(q, uid, context, bot, _safe_int(action.split(":", 1)[1]) or 0)
 
-    elif action == "leaderboard" or action.startswith("lb:"):
-        period = action.split(":", 1)[1] if action.startswith("lb:") else "30d"
-        if period not in ("7d", "30d", "all"):
-            period = "30d"
-        from fysb.services import leaderboard as _lb
-        body = await afn.run(_lb.render_leaderboard_card, period, False)
-        p_row = [
-            kb.btn("📅 7 أيام" + (" ✓" if period == "7d" else ""), "u:lb:7d", style="success" if period == "7d" else "primary"),
-            kb.btn("📆 30 يوماً" + (" ✓" if period == "30d" else ""), "u:lb:30d", style="success" if period == "30d" else "primary"),
-            kb.btn("📚 الكل" + (" ✓" if period == "all" else ""), "u:lb:all", style="success" if period == "all" else "primary"),
-        ]
-        rows_kb = [
-            p_row,
-            [kb.btn("🧭 قوة العملات", "u:strength", style="primary"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
-            [kb.btn("📡 مركز الإشارات", "u:signals", style="primary")],
-        ]
-        await render(q, body, kb.user_nav(rows_kb), bot)
-
-    elif action == "strength":
-        from fysb.engines import intelligence as _intel
-        body = await afn.run(_intel.render_strength_card)
-        rows_kb = [
-            [kb.btn("🔄 تحديث فوري", "u:strength", style="success"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
-            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
-        ]
-        await render(q, body, kb.user_nav(rows_kb), bot)
-
-    elif action == "news":
-        from fysb.engines import news_guard as _ng
-        body = await afn.run(_ng.render_news_calendar_html)
-        rows_kb = [
-            [kb.btn("🔄 تحديث التقويم", "u:news", style="success"), kb.btn("🧭 قوة العملات", "u:strength", style="primary")],
-            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
-        ]
-        await render(q, body, kb.user_nav(rows_kb), bot)
+    elif action == "leaderboard" or action.startswith("lb:") or action in ("strength", "news"):
+        # v7.4.0: Strategy Leaderboard, Currency Strength & News Guard are Admin-only analytics.
+        # Regular users receive luxury economic news bulletins automatically when enabled by Admin.
+        if uid != config.ADMIN_ID:
+            await render(
+                q,
+                "🔒 <b><u>هذا القسم مخصّص لإدارة المنصة فقط</u></b>\n"
+                "<blockquote>"
+                "▎👑 أدوات التحليل الإداري (مصفوفة الاستراتيجيات، قوة العملات، ودرع الأخبار) متاحة للإدارة فقط.\n"
+                "▎📰 تصلك نشرات الأخبار الاقتصادية القوية تلقائياً كتنبيهات ملكية فور تفعيلها من الإدارة."
+                "</blockquote>",
+                kb.user_nav([[kb.btn("📡 مركز الإشارات", "u:signals", style="success")]]),
+                bot,
+            )
+            return
+        if action == "strength":
+            from fysb.engines import intelligence as _intel
+            body = await afn.run(_intel.render_strength_card, None, force_refresh=True)
+            await render(q, body, kb.admin_nav([[kb.btn("↩️ المحرك", "a:engine")]]), bot)
+        elif action == "news":
+            from fysb.engines import news_guard as _ng
+            body = await afn.run(_ng.render_news_calendar_html, force_refresh=True)
+            await render(q, body, kb.admin_nav([[kb.btn("↩️ درع الأخبار", "a:newsguard")]]), bot)
+        else:
+            period = action.split(":", 1)[1] if action.startswith("lb:") else "30d"
+            from fysb.services import leaderboard as _lb
+            body = await afn.run(_lb.render_leaderboard_card, period, False)
+            await render(q, body, kb.admin_nav([[kb.btn("↩️ مصفوفة الاستراتيجيات", "a:leaderboard")]]), bot)
 
     # --- v6.26.0 Risk Profile, 1-Tap Lot Calculator, Daily DD Guard, Journal & Charts ---
     elif action == "risk" or action.startswith(("rbal:", "rrisk:", "rlev:", "rdd:")):

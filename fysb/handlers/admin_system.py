@@ -858,16 +858,16 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
         body += f"\n\n<i>{esc(notice)}</i>"
     if not config.WEBAPP_URL_STATIC:
         gh_lbl = (
-            "🟢 واجهة GitHub Pages: مفعّلة (اضغط للفتح المباشر)"
+            "🔴 إيقاف واجهة GitHub Pages (العودة للفتح المباشر الآن)"
             if config.WEBAPP_GH_PAGES_ENABLED
-            else "⚪ واجهة GitHub Pages: متوقفة (فتح مباشر للرابط)"
+            else "⚪ واجهة GitHub Pages: متوقفة (الفتح المباشر مفعّل ✅)"
         )
         rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="success")])
         rows_kb.append([
             kb.btn("🔄 تشغيل / تجديد النفق", "a:webapptunnel_restart", style="primary"),
             kb.btn("🔗 لصق أي رابط HTTPS", "a:webapp_seturl", style="primary"),
         ])
-        rows_kb.append([kb.btn(gh_lbl, "a:webapp_ghpages", style="primary" if config.WEBAPP_GH_PAGES_ENABLED else "primary")])
+        rows_kb.append([kb.btn(gh_lbl, "a:webapp_ghpages", style="danger" if config.WEBAPP_GH_PAGES_ENABLED else "primary")])
         rows_kb.append([
             kb.btn("☁️ كود Cloudflare Worker", "a:webapp_worker", style="primary"),
             kb.btn(

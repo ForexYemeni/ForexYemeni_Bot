@@ -281,8 +281,60 @@ def test_demo_now_webapp_deep_link_and_live_demo_api_roundtrip(env, monkeypatch)
     assert aov["recent_signals"][0]["demo_count"] == 1
     assert "creator" in aov["recent_signals"][0]
 
-    # 4. Templates contain the v7.5.0 Live Demo HUD, Auto-Signals Toggle, & Admin Signals Board
+    # 4. Templates contain the v7.5.0 Live Demo HUD, Auto-Signals Toggle, & v7.5.1 5-Page Admin Command App
     u_html = wa_templates.render_user_miniapp_html()
     a_html = wa_templates.render_admin_panel_html()
     assert "demo_sig" in u_html and "activateDemoSignal" in u_html and "toggleAutoSignals" in u_html
     assert "adminSignalsBox" in a_html and "openSigDemoChart" in a_html
+    for pane_id in ("apane-home", "apane-signals", "apane-finance", "apane-channels", "apane-analytics"):
+        assert f'id="{pane_id}"' in a_html
+    for tab_id in ("atab-home", "atab-signals", "atab-finance", "atab-channels", "atab-analytics"):
+        assert f'id="{tab_id}"' in a_html
+    assert "function openAdminTab(" in a_html
+
+
+def test_clear_and_new_token_always_reset_stuck_gh_pages_flag(env, monkeypatch):
+    """v7.5.1 regression: `clear` and pasting a new URL/token MUST reset `webapp_gh_pages_enabled` to 0."""
+    from fysb.handlers import inputs
+    from fysb.webapp import tunnel as _tun
+
+    db.set_setting("webapp_gh_pages_enabled", "1")
+    config.WEBAPP_GH_PAGES_ENABLED = True
+    monkeypatch.setattr(_tun, "stop_tunnel", lambda: asyncio.sleep(0))
+
+    replies = []
+
+    async def _reply(text, **kw):
+        replies.append((text, kw))
+
+    upd = SimpleNamespace(
+        effective_user=SimpleNamespace(id=ADMIN_UID, username="boss", full_name="Admin Boss"),
+        effective_message=SimpleNamespace(text="clear", reply_text=_reply),
+    )
+    ctx = SimpleNamespace(user_data={"awaiting_webapp_url": True}, bot=SimpleNamespace())
+    handled = asyncio.run(inputs._admin_text(upd, ctx, ADMIN_UID, "clear"))
+    assert handled is True
+    assert db.get_setting("webapp_gh_pages_enabled", "1") == "0"
+    assert config.WEBAPP_GH_PAGES_ENABLED is False
+
+    # Also verify pasting a custom URL resets a stuck GH Pages flag to 0
+    db.set_setting("webapp_gh_pages_enabled", "1")
+    config.WEBAPP_GH_PAGES_ENABLED = True
+
+    async def _fake_health(u, **kw):
+        return True, "HTTP 200"
+
+    monkeypatch.setattr(_tun, "verify_https_health", _fake_health)
+    upd2 = SimpleNamespace(
+        effective_user=SimpleNamespace(id=ADMIN_UID, username="boss", full_name="Admin Boss"),
+        effective_message=SimpleNamespace(text="https://trombone-blitz-chain.ngrok-free.dev", reply_text=_reply),
+    )
+    ctx2 = SimpleNamespace(user_data={"awaiting_webapp_url": True}, bot=SimpleNamespace())
+    handled2 = asyncio.run(inputs._admin_text(upd2, ctx2, ADMIN_UID, "https://trombone-blitz-chain.ngrok-free.dev"))
+    assert handled2 is True
+    assert db.get_setting("webapp_gh_pages_enabled", "1") == "0"
+    assert config.WEBAPP_GH_PAGES_ENABLED is False
+    # Direct Ngrok URL in the reply button (NOT forexyemeni.github.io)
+    last_kb = replies[-1][1]["reply_markup"]
+    assert last_kb.inline_keyboard[0][0].web_app.url == "https://trombone-blitz-chain.ngrok-free.dev/admin"
+

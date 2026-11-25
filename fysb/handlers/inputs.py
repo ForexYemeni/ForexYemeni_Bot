@@ -348,14 +348,16 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
 
         if kind == "clear":
             await afn.run(db.set_setting, "webapp_custom_url", "")
+            await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
             await afn.run(db.set_setting, "ngrok_authtoken", "")
             await afn.run(db.set_setting, "ngrok_domain", "")
             await afn.run(db.set_setting, "cf_tunnel_token", "")
             await afn.run(db.set_setting, "pinggy_token", "")
             await _tun.stop_tunnel()
+            config.WEBAPP_GH_PAGES_ENABLED = False
             config.set_runtime_webapp_url("", source="")
             await update.effective_message.reply_text(
-                "✅ تمت إزالة الرابط المخصص وجميع توكنات الأنفاق والعودة للوضع التلقائي.",
+                "✅ تمت إزالة الرابط المخصص وجميع توكنات الأنفاق وإيقاف واجهة GitHub Pages والعودة للوضع التلقائي المباشر.",
                 reply_markup=kb_ui.admin_nav([[kb_ui.btn("🌐 التطبيق المصغر", "a:webapp")]]),
             )
             return True
@@ -363,8 +365,10 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         if kind == "custom_url":
             u_txt = parsed_in["url"]
             is_frontdoor = await afn.run(_tun.is_proxy_frontdoor_url, u_txt)
-            # ALWAYS save & activate the Admin's chosen HTTPS URL immediately!
+            # ALWAYS save & activate the Admin's chosen HTTPS URL directly (never hijacked by stale GH Pages flag)!
             await afn.run(db.set_setting, "webapp_custom_url", u_txt)
+            await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
+            config.WEBAPP_GH_PAGES_ENABLED = False
             if not is_frontdoor:
                 await _tun.stop_tunnel()
                 config.set_runtime_webapp_url(u_txt, source="db_custom")
@@ -390,7 +394,6 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 reply_markup=kb_ui.admin_nav([
                     [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", config.webapp_page_url("/admin", base_url=u_txt), style="success")],
                     [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", config.webapp_page_url("/", base_url=u_txt), style="primary")],
-                    [kb_ui.btn("🌐 تفعيل واجهة GitHub Pages المجانية", "a:webapp_ghpages", style="success")],
                     [kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")],
                 ]),
                 parse_mode="HTML",
@@ -417,7 +420,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 await afn.run(audit_log.log, uid, "pinggy_token_set")
 
             await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
-            config.WEBAPP_GH_PAGES_ENABLED = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"
+            # v7.5.1: Binding a fresh tunnel token always opens directly 100% (never hijacked by stale GH Pages flag)
+            await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
+            config.WEBAPP_GH_PAGES_ENABLED = False
             await update.effective_message.reply_text(
                 f"⏳ تم حفظ توكن <b>{esc(lbl)}</b> — جاري التشغيل والتحقق الحي (10-20 ثانية)...",
                 parse_mode="HTML",
@@ -432,7 +437,6 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 if show_url:
                     rows_ok.append([kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", config.webapp_page_url("/admin", base_url=show_url), style="success")])
                     rows_ok.append([kb_ui.webapp_btn("📱 فتح التطبيق المصغر", config.webapp_page_url("/", base_url=show_url), style="primary")])
-                rows_ok.append([kb_ui.btn("🌐 تفعيل واجهة GitHub Pages المجانية", "a:webapp_ghpages", style="success")])
                 rows_ok.append([kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")])
                 await update.effective_message.reply_text(
                     f"🎉 <b><u>تم تشغيل {esc(lbl)} بنجاح!</u></b>\n"

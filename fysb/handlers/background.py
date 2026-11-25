@@ -812,6 +812,12 @@ async def webapp_tunnel_loop(app):
     fail_backoff = 0
     while True:
         try:
+            # v7.5.1 one-time self-healing: clear any stuck GitHub Pages flag from earlier sessions
+            # where `clear` failed to reset `webapp_gh_pages_enabled`, restoring direct Ngrok/HTTPS immediately.
+            if (await afn.run(db.get_setting, "v751_ghpages_reset_done", "") or "") != "1":
+                await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
+                await afn.run(db.set_setting, "v751_ghpages_reset_done", "1")
+                config.WEBAPP_GH_PAGES_ENABLED = False
             custom_db = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip().rstrip("/")
             auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
             config.WEBAPP_GH_PAGES_ENABLED = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"

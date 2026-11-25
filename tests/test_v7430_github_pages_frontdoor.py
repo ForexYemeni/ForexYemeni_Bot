@@ -23,6 +23,16 @@ def _prep(tmp_path, monkeypatch):
     users.ensure_user(SimpleNamespace(id=777001, username="admin", full_name="Admin"))
 
 
+def test_default_ngrok_opens_directly_without_github_pages_hijack(monkeypatch):
+    """v7.4.5 regression: by default (opt-in OFF), Ngrok URL MUST open directly — never silently hijacked to github.io!"""
+    monkeypatch.setattr(config, "WEBAPP_GH_PAGES_ENABLED", False)
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://trombone-blitz-chain.ngrok-free.dev")
+
+    assert config.webapp_page_url("/") == "https://trombone-blitz-chain.ngrok-free.dev/"
+    assert config.webapp_page_url("/admin") == "https://trombone-blitz-chain.ngrok-free.dev/admin"
+    assert config.webapp_page_url("/", {"tab": "partner"}) == "https://trombone-blitz-chain.ngrok-free.dev/?tab=partner"
+
+
 def test_webapp_page_url_wraps_ngrok_and_pinggy_via_github_pages(monkeypatch):
     monkeypatch.setattr(config, "WEBAPP_GH_PAGES_ENABLED", True)
     monkeypatch.setattr(config, "WEBAPP_GH_PAGES_URL", "https://forexyemeni.github.io/ForexYemeni_Bot")
@@ -156,14 +166,22 @@ def test_admin_1tap_ghpages_button_clears_blocked_workers_dev_and_activates(tmp_
     upd = SimpleNamespace(callback_query=q, effective_user=q.from_user)
     ctx = SimpleNamespace(user_data={}, bot=SimpleNamespace())
 
+    # 1st tap: toggles ON -> clears blocked workers.dev and activates GitHub Pages Front-Door
     asyncio.run(dispatcher.buttons(upd, ctx))
 
+    assert db.get_setting("webapp_gh_pages_enabled", "0") == "1"
     assert db.get_setting("webapp_custom_url", "") == ""
     assert config.WEBAPP_URL == "https://trombone-blitz-chain.ngrok-free.dev"
     assert "GitHub Pages" in captured["text"]
-    # First WebApp button must open GitHub Pages Admin with ?api=<ngrok>
     first_btn = captured["markup"].inline_keyboard[0][0]
     assert first_btn.web_app is not None
     assert first_btn.web_app.url.startswith(
         "https://forexyemeni.github.io/ForexYemeni_Bot/admin/?api=https%3A%2F%2Ftrombone-blitz-chain.ngrok-free.dev"
     )
+
+    # 2nd tap: toggles OFF -> immediately returns to direct Ngrok URL!
+    asyncio.run(dispatcher.buttons(upd, ctx))
+    assert db.get_setting("webapp_gh_pages_enabled", "0") == "0"
+    assert config.WEBAPP_GH_PAGES_ENABLED is False
+    first_btn_direct = captured["markup"].inline_keyboard[0][0]
+    assert first_btn_direct.web_app.url == "https://trombone-blitz-chain.ngrok-free.dev/admin"

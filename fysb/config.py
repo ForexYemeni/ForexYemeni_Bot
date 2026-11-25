@@ -114,7 +114,9 @@ WEBAPP_GH_PAGES_URL = (
     os.getenv("WEBAPP_FRONTDOOR_URL", "").strip().rstrip("/")
     or f"https://{REPO_OWNER.lower()}.github.io/{REPO_NAME}"
 )
-WEBAPP_GH_PAGES_ENABLED = os.getenv("WEBAPP_GH_PAGES", "1").strip() != "0"
+# v7.4.5: Strictly OPT-IN (default OFF) so direct Ngrok / Pinggy / custom HTTPS URLs
+# ALWAYS open directly as configured and are NEVER silently redirected to github.io!
+WEBAPP_GH_PAGES_ENABLED = os.getenv("WEBAPP_GH_PAGES", "0").strip() == "1"
 
 _INTERSTITIAL_HOSTS = (
     ".ngrok-free.dev",

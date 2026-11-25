@@ -804,6 +804,7 @@ async def webapp_tunnel_loop(app):
         try:
             custom_db = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip().rstrip("/")
             auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+            config.WEBAPP_GH_PAGES_ENABLED = (await afn.run(db.get_setting, "webapp_gh_pages_enabled", "0") or "0") == "1"
             is_frontdoor = bool(custom_db and await afn.run(_tun.is_proxy_frontdoor_url, custom_db))
 
             if custom_db.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:

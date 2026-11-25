@@ -673,6 +673,16 @@ async def post_init(app):
         asyncio.create_task(crypto_ws_loop(app), name="fysb-crypto-ws"),
     ]
     post_init._tasks_ref = _TASKS
+    # v7.0.0: start lightweight embedded Mini App & Admin Web Panel HTTP server
+    # only when WEBAPP_URL is configured (or WEBAPP_ENABLED with valid port),
+    # never failing bot boot if port is unavailable.
+    post_init._webapp_srv = None
+    if config.WEBAPP_ENABLED and config.WEBAPP_URL:
+        try:
+            from fysb.webapp.server import start_webapp_server
+            post_init._webapp_srv = await start_webapp_server()
+        except Exception:
+            log.warning("webapp server startup skipped")
     log.info("background loops started (7)")
 
 
@@ -693,6 +703,13 @@ def _warm_pg() -> None:
 
 
 async def post_shutdown(app):
+    srv = getattr(post_init, "_webapp_srv", None)
+    if srv is not None:
+        try:
+            srv.close()
+            await srv.wait_closed()
+        except Exception:
+            pass
     for t in getattr(post_init, "_tasks_ref", []) or []:
         t.cancel()
     for t in getattr(post_init, "_tasks_ref", []) or []:

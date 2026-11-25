@@ -784,6 +784,38 @@ def _plan_code_title_rows():
         return c.execute("SELECT code,title FROM plans ORDER BY price").fetchall()
 
 
+async def admin_webapp_info(q, uid, context, bot):
+    """v7.0.0 Telegram Mini App & Admin Web Panel status + HTTPS launch buttons."""
+    ready = config.webapp_ready()
+    rows_kb = []
+    if ready:
+        rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{config.WEBAPP_URL}/admin", style="success")])
+        rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", f"{config.WEBAPP_URL}/", style="primary")])
+        body = (
+            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.0.0)</u></b>\n"
+            "<blockquote>"
+            f"▎🟢 الحالة: <b>مفعّل وجاهز عبر HTTPS</b>\n"
+            f"▎🔗 الرابط: <code>{esc(config.WEBAPP_URL)}</code>\n"
+            f"▎🖥 الخادم المدمج: <code>{esc(config.WEBAPP_HOST)}:{config.WEBAPP_PORT}</code>\n"
+            "▎🔐 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
+            "</blockquote>"
+        )
+    else:
+        body = (
+            "🌐 <b><u>إعداد التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.0.0)</u></b>\n"
+            "<blockquote>"
+            "▎⚪ الحالة: <b>غير مفعّل بعد (جميع قوائم تيليغرام الكلاسيكية تعمل 100% بلا تأثر)</b>\n"
+            "▎⚠️ <b>متطلب تيليغرام الرسمي:</b> يشترط تيليغرام رابط <b>HTTPS (SSL)</b> صالح لفتح التطبيق المصغر.\n\n"
+            "▎🛠 <b>خطوات التفعيل السريع في <code>.env</code>:</b>\n"
+            "  <code>WEBAPP_URL=https://your-domain.com</code>\n"
+            "  <code>WEBAPP_PORT=8080</code>\n"
+            "▎ثم وجّه Nginx أو Cloudflare Tunnel مجانياً إلى <code>http://127.0.0.1:8080</code> وأعد تشغيل البوت."
+            "</blockquote>"
+        )
+    rows_kb.append([kb.btn("↩️ النظام والأمان", "a:hub:system")])
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
 def _audit_total() -> int:
     """(v6.11.0 thread-offload helper) total audit rows for pagination."""
     with db.conn() as c:

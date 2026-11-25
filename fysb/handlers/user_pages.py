@@ -273,14 +273,17 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                 f"🛡 وضع المنصة: <b>{esc(snap['trading_mode'])}</b>\n"
                 f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
-        await render(q, body, kb.user_nav([
+        dash_rows = [
             [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
             [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
             [kb.btn("🎓 الأكاديمية المستقلة", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
             [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans")],
             [kb.btn("🛡 ملف المخاطرة", "u:risk"), kb.btn("📓 مفكرة التداول", "u:journal")],
             [kb.btn("🔗 ربط منصات الكريبتو (Binance/Bybit/OKX)", "u:exchange", style="primary")],
-        ]), bot)
+        ]
+        if config.webapp_ready():
+            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", f"{config.WEBAPP_URL}/", style="success")])
+        await render(q, body, kb.user_nav(dash_rows), bot)
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
     elif action == "analytics":

@@ -620,6 +620,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_audit(q, uid, context, bot, int(arg or 0))
     elif act == "health":
         await admin_system.admin_health(q, uid, context, bot)
+    elif act == "webapp":
+        await admin_system.admin_webapp_info(q, uid, context, bot)
     elif act == "updates":
         await admin_system.admin_updates(q, uid, context, bot)
     elif act == "updlatest":

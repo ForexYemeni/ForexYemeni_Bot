@@ -19,6 +19,11 @@ try:
 except ImportError:  # pragma: no cover — PTB < 21.6 compatibility
     CopyTextButton = None
 
+try:
+    from telegram import WebAppInfo
+except ImportError:  # pragma: no cover
+    WebAppInfo = None
+
 from fysb.theme import ICON
 
 # Runtime capability detection so the bot NEVER crashes with TypeError if a
@@ -295,9 +300,22 @@ def admin_hub_system() -> InlineKeyboardMarkup:
          btn("💾 النسخ الاحتياطي", "a:backup", style="primary")],
         [btn("⚙️ الإعدادات", "a:settings", style="primary"),
          btn("🧾 سجل الإدارة", "a:audit", style="primary")],
+        [btn("🌐 تطبيق الويب (Mini App)", "a:webapp", style="success")],
         [btn("🔄 إدارة التحديثات", "a:updates", style="primary"),
          btn("🖥 حالة النظام", "a:health", style="success")],
     ])
+
+
+def webapp_btn(text: str, url: str, style: str | None = "success") -> InlineKeyboardButton:
+    """Native Telegram Mini App button (`WebAppInfo`) with graceful fallback."""
+    kwargs: dict = {}
+    if WebAppInfo is not None and (url or "").lower().startswith("https://"):
+        kwargs["web_app"] = WebAppInfo(url=url)
+    else:
+        kwargs["url"] = url
+    if _HAS_STYLE and style in VALID_STYLES:
+        kwargs["style"] = style
+    return InlineKeyboardButton(text, **kwargs)
 
 
 ADMIN_HUBS = {

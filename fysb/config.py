@@ -64,7 +64,7 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "6.28.0"
+VERSION = "7.0.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 
@@ -75,6 +75,22 @@ PAGE_SIZE = 8
 REPO_OWNER = os.getenv("REPO_OWNER", "ForexYemeni").strip()
 REPO_NAME = os.getenv("REPO_NAME", "ForexYemeni_Bot").strip()
 UPDATE_ASSET = os.getenv("UPDATE_ASSET", "ForexYemeni1.zip").strip()
+
+# --- Telegram Mini App & Admin Web Panel (v7.0.0) ---------------------------
+# Telegram requires a valid HTTPS URL (SSL) for Mini Apps. When WEBAPP_URL is
+# unset, all classic Telegram bot menus continue working with zero breakage.
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0").strip()
+try:
+    WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or "8080")
+except ValueError:
+    WEBAPP_PORT = 8080
+WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "1").strip() == "1"
+
+
+def webapp_ready() -> bool:
+    """True only when a valid HTTPS WEBAPP_URL is configured for Telegram Mini Apps."""
+    return bool(WEBAPP_ENABLED and WEBAPP_URL.lower().startswith("https://"))
 
 BACKUP_DIR = BASE_DIR / "backups"
 LOG_DIR = BASE_DIR / "logs"

@@ -139,6 +139,30 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await admin_partners.handle_partner_brand_input(update, context, uid, text):
             return
 
+    # ---------- User: Promo Code (%) input (v7.6.0) ----------
+    promo_plan = ud.pop("awaiting_promo_code", None)
+    if promo_plan:
+        from fysb.services import promos as _promos
+        from fysb.ui import keyboards as _kb
+        res = await afn.run(_promos.validate_promo, text, uid)
+        if not res.get("ok"):
+            await update.effective_message.reply_text(
+                f"❌ {esc(res.get('error') or 'كود الخصم غير صالح')}",
+                reply_markup=_kb.user_nav([[_kb.btn("↩️ العودة للباقة", f"u:planview:{promo_plan}", style="primary")]]),
+                parse_mode="HTML",
+            )
+            return
+        ud["active_promo"] = {"code": res["code"], "discount_pct": int(res["discount_pct"])}
+        await update.effective_message.reply_text(
+            f"🎟 <b>تم تطبيق كود الخصم بنجاح!</b>\n"
+            f"▎🏷 الكود: <code>{esc(res['code'])}</code>\n"
+            f"▎🔥 نسبة الخصم: <b>{int(res['discount_pct'])}%</b>\n"
+            f"▎اضغط أدناه لإتمام الاشتراك بالسعر المخفّض فوراً:",
+            reply_markup=_kb.user_nav([[_kb.btn("💎 فتح الباقة بالسعر المخفّض", f"u:planview:{promo_plan}", style="success")]]),
+            parse_mode="HTML",
+        )
+        return
+
     # ---------- User: own demo balance ----------
     if ud.pop("awaiting_demo_bal_user", False):
         try:
@@ -1241,4 +1265,109 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from fysb.handlers import academy_growth
         if await academy_growth.handle_growth_media_input(update, context, uid):
             return
+
+
+async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v7.6.0 Telegram Stars (XTR) Pre-Checkout Gate."""
+    pcq = update.pre_checkout_query
+    if not pcq:
+        return
+    payload = str(pcq.invoice_payload or "")
+    if not payload.startswith("plan:"):
+        await pcq.answer(ok=False, error_message="طلب دفع غير صالح.")
+        return
+    parts = payload.split(":")
+    plan_code = parts[1].upper() if len(parts) > 1 else ""
+    with db.conn() as c:
+        row = c.execute("SELECT code FROM plans WHERE code=? AND enabled=1", (plan_code,)).fetchone()
+    if not row:
+        await pcq.answer(ok=False, error_message="هذه الباقة غير متاحة حالياً.")
+        return
+    await pcq.answer(ok=True)
+
+
+async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v7.6.0 Telegram Stars (XTR) Instant Activation on Successful Payment."""
+    msg = update.effective_message
+    u = update.effective_user
+    if not msg or not msg.successful_payment or not u:
+        return
+    sp = msg.successful_payment
+    payload = str(sp.invoice_payload or "")
+    parts = payload.split(":")
+    plan_code = parts[1].upper() if len(parts) > 1 else "VIP"
+    promo_code = parts[2].upper() if len(parts) > 2 else ""
+    stars_paid = int(sp.total_amount or 0)
+    charge_id = str(sp.telegram_payment_charge_id or "")[:64]
+
+    from fysb.services import promos as _promos
+    from fysb.services.subscriptions import grant_subscription
+    from fysb.ui import keyboards as _kb
+
+    def _activate():
+        with db.conn() as c:
+            p = c.execute("SELECT * FROM plans WHERE code=?", (plan_code,)).fetchone()
+        if not p:
+            return None
+        p = dict(p)
+        orig_usd = float(p.get("price") or 0.0)
+        final_usd, saved_usd, pct = orig_usd, 0.0, 0
+        if promo_code:
+            v = _promos.validate_promo(promo_code, user_id=u.id)
+            if v.get("ok"):
+                pct = int(v["discount_pct"])
+                final_usd, saved_usd = _promos.apply_discount(orig_usd, pct)
+        pid = payments_service.create_request(u.id, plan_code, final_usd, f"TELEGRAM_STARS ({stars_paid}⭐)")
+        with db.tx() as c:
+            c.execute(
+                "UPDATE payments SET status='APPROVED', txid=?, chain='XTR', confirmed_at=?, "
+                "promo_code=?, discount_pct=? WHERE id=?",
+                (charge_id, config.now(), promo_code if pct else "", pct, pid),
+            )
+        if pct and promo_code:
+            _promos.redeem_promo(promo_code, u.id, payment_id=pid, plan_code=plan_code, saved_amount=saved_usd)
+        sub_res = grant_subscription(
+            u.id,
+            plan_code,
+            source="TELEGRAM_STARS",
+            actor=u.id,
+            payment_id=pid,
+            amount=final_usd,
+            currency="USD",
+        )
+        return {"plan": p, "pid": pid, "sub": sub_res, "final_usd": final_usd, "pct": pct}
+
+    res = await afn.run(_activate)
+    context.user_data.pop("active_promo", None)
+    if not res:
+        await msg.reply_text("✅ تم استلام الدفع بنجوم تيليجرام — يرجى التواصل مع الإدارة لتأكيد الباقة.")
+        return
+    p = res["plan"]
+    await msg.reply_text(
+        "👑 <b>تم تفعيل باقتك فوراً عبر نجوم تيليجرام ⭐!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"▎💎 الباقة: <b>{esc(p['title'])}</b>\n"
+        f"▎⭐ المدفوع: <b>{stars_paid} نجمة XTR</b>\n"
+        + (f"▎🎟 خصم مطبّق: <b>{res['pct']}% ({esc(promo_code)})</b>\n" if res["pct"] else "")
+        + f"▎📅 المدة: <b>{int(p.get('duration_days') or 30)} يوماً</b>\n"
+        "▎🚀 جميع صلاحيات باقتك مفتوحة الآن تلقائياً!",
+        reply_markup=_kb.user_menu(),
+        parse_mode="HTML",
+    )
+    if config.ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=config.ADMIN_ID,
+                text=(
+                    f"⭐ <b>اشتراك فوري جديد عبر نجوم تيليجرام!</b>\n"
+                    f"▎👤 العضو: <code>{u.id}</code> ({esc(u.full_name or '')})\n"
+                    f"▎💎 الباقة: <b>{esc(p['title'])}</b>\n"
+                    f"▎⭐ المبلغ: <b>{stars_paid} XTR</b> (~${res['final_usd']:.2f})\n"
+                    f"▎🧾 طلب #{res['pid']}"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
 

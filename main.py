@@ -78,7 +78,10 @@ def main() -> int:
     try:
         if not preflight():
             return 1
-        from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+        from telegram.ext import (
+            Application, CallbackQueryHandler, CommandHandler, MessageHandler,
+            PreCheckoutQueryHandler, filters,
+        )
 
         from fysb.handlers import inputs, admin_partners
         from fysb.handlers import common
@@ -113,6 +116,8 @@ def main() -> int:
         app.add_handler(CommandHandler("partner", admin_partners.partner_command))
         app.add_handler(CommandHandler("backup", backup_command))
         app.add_handler(CallbackQueryHandler(buttons))
+        app.add_handler(PreCheckoutQueryHandler(inputs.on_pre_checkout))
+        app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, inputs.on_successful_payment))
         app.add_handler(MessageHandler(filters.PHOTO, inputs.on_photo))
         app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, inputs.on_media))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inputs.on_text))

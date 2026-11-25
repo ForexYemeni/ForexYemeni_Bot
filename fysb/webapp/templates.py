@@ -347,6 +347,29 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
       <div class="overlay-note" id="overlayNote"></div>
     </div>
 
+    <div class="card gold-edge">
+      <div class="card-hdr">
+        <h3>⚡ توليد إشارة فورية الآن</h3>
+        <span class="badge b-gold">LIVE SCAN</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <select id="sigNowSym" style="width:100%;padding:9px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="XAUUSD">XAUUSD (الذهب)</option>
+          <option value="EURUSD">EURUSD</option>
+          <option value="GBPUSD">GBPUSD</option>
+          <option value="BTCUSD">BTCUSD</option>
+          <option value="US30">US30</option>
+        </select>
+        <select id="sigNowTf" style="width:100%;padding:9px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="M5">M5 (سكالبينج)</option>
+          <option value="M15" selected>M15 (متوازن)</option>
+          <option value="H1">H1 (يومي)</option>
+          <option value="H4">H4 (سوينج)</option>
+        </select>
+      </div>
+      <button class="btn gold" id="sigNowBtn" style="width:100%;padding:11px" onclick="runSignalNow()">⚡ فحص السوق وتوليد إشارة على الشارت الآن</button>
+    </div>
+
     <div class="card">
       <div class="card-hdr">
         <h3>📡 الإشارات الملكية الحية</h3>
@@ -374,6 +397,14 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
         <div class="hm"><div class="l">الرصيد العائم Equity</div><div class="v cyan" id="demoEqHero">$10,000</div></div>
         <div class="hm"><div class="l">الربح العائم</div><div class="v green" id="demoFloatHero">$0.00</div></div>
         <div class="hm"><div class="l">نسبة النجاح</div><div class="v gold" id="demoWrHero">—</div></div>
+      </div>
+      <div class="autosig-bar" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:11.5px;font-weight:800">🤖 النسخ التلقائي الذكي: <span id="demoAutoLbl" style="color:var(--muted)">متوقف</span></div>
+        <button class="autosig-btn off-start" id="demoAutoBtn" onclick="toggleDemoAutoCopy('auto_trade')">🤖 تفعيل النسخ</button>
+      </div>
+      <div class="autosig-bar" style="margin-top:6px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:11.5px;font-weight:800">🛡 إغلاق 50% عند TP1 + BE: <span id="demoPbeLbl" style="color:var(--green)">مفعّل</span></div>
+        <button class="autosig-btn on-stop" id="demoPbeBtn" onclick="toggleDemoAutoCopy('partial_tp_be')">🔕 إيقاف التأمين</button>
       </div>
     </div>
     <div class="card gold-edge">
@@ -851,6 +882,7 @@ function renderSignals(){{
         </div>
         <div class="btn-row">
           <button class="btn ghost" onclick="viewSigOnChart(${{s.id}})">📊 شارت</button>
+          <button class="btn ghost" onclick="openShareCard('signal',${{s.id}})">🖼 بطاقة</button>
           <button class="btn green" onclick="logJournal(${{s.id}},'TAKEN')">✅ دخلت</button>
           <button class="btn red" onclick="logJournal(${{s.id}},'SKIPPED')">❌ تجاهلت</button>
         </div>
@@ -943,12 +975,16 @@ function renderDemoDeck(ov){{
         </div>
         <div class="sig-meta" style="margin-bottom:8px">🛑 SL: ${{p.sl||'—'}} · 🏁 TP: ${{p.tp||'—'}}</div>
         <div class="btn-row">
-          <button class="btn gold" onclick="focusDemoPosOnChart(${{p.id}})">📈 عرض على الشارت</button>
-          <button class="btn ghost" onclick="breakevenDemoPos(${{p.id}})">🛡 تأمين BE</button>
+          <button class="btn gold" onclick="focusDemoPosOnChart(${{p.id}})">📈 شارت</button>
+          <button class="btn ghost" onclick="openShareCard('demo',${{p.id}})">🖼 بطاقة</button>
+          <button class="btn ghost" onclick="breakevenDemoPos(${{p.id}})">🛡 BE</button>
           <button class="btn red" onclick="closeDemoPos(${{p.id}})">✖ إغلاق</button>
         </div>
       </div>`;
   }}).join('') : '<div class="empty">لا توجد صفقات تجريبية مفتوحة — اضغط «🎮 تجريبي الآن» على أي إشارة لتفعيلها ومتابعتها لحظياً!</div>';
+
+  const st = ov.settings || {{}};
+  renderDemoSmartSwitches(!!st.auto_trade, st.partial_tp_be !== false);
 
   const closedArr = ov.closed || [];
   const clBox = document.getElementById('demoClosedList');
@@ -956,7 +992,10 @@ function renderDemoDeck(ov){{
     const pnl = +(p.pnl || 0);
     return `<div class="news-item">
       <div><b>${{p.symbol}}</b> <span style="font-size:11px;color:var(--muted)">${{p.direction}} · ${{p.lots}} لوت · ${{p.reason||p.status}}</span></div>
-      <b style="font-family:var(--mono);color:${{pnl>=0?'var(--green)':'var(--red)'}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</b>
+      <div style="display:flex;align-items:center;gap:6px">
+        <b style="font-family:var(--mono);color:${{pnl>=0?'var(--green)':'var(--red)'}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</b>
+        <button class="btn ghost" style="flex:0;padding:4px 8px;font-size:10.5px" onclick="openShareCard('demo',${{p.id}})">🖼</button>
+      </div>
     </div>`;
   }}).join('') : '<div class="empty">لا توجد صفقات مغلقة بعد.</div>';
 
@@ -1035,6 +1074,101 @@ async function breakevenDemoPos(pid){{
 
 function closeActiveDemo(){{ if(activeDemoPos) closeDemoPos(activeDemoPos.id); }}
 function breakevenActiveDemo(){{ if(activeDemoPos) breakevenDemoPos(activeDemoPos.id); }}
+
+function renderDemoSmartSwitches(autoOn, pbeOn){{
+  const al = document.getElementById('demoAutoLbl'), ab = document.getElementById('demoAutoBtn');
+  if(al && ab){{
+    al.textContent = autoOn ? 'مفعّل 🟢' : 'متوقف ⚪';
+    al.style.color = autoOn ? 'var(--green)' : 'var(--muted)';
+    ab.className = autoOn ? 'autosig-btn on-stop' : 'autosig-btn off-start';
+    ab.textContent = autoOn ? '🔕 إيقاف النسخ' : '🤖 تفعيل النسخ';
+    ab.dataset.val = autoOn ? '1' : '0';
+  }}
+  const pl = document.getElementById('demoPbeLbl'), pb = document.getElementById('demoPbeBtn');
+  if(pl && pb){{
+    pl.textContent = pbeOn ? 'مفعّل 🟢' : 'متوقف ⚪';
+    pl.style.color = pbeOn ? 'var(--green)' : 'var(--muted)';
+    pb.className = pbeOn ? 'autosig-btn on-stop' : 'autosig-btn off-start';
+    pb.textContent = pbeOn ? '🔕 إيقاف التأمين' : '🛡 تفعيل التأمين';
+    pb.dataset.val = pbeOn ? '1' : '0';
+  }}
+}}
+
+async function toggleDemoAutoCopy(field){{
+  const curAuto = (document.getElementById('demoAutoBtn')?.dataset.val === '1');
+  const curPbe = (document.getElementById('demoPbeBtn')?.dataset.val !== '0');
+  const body = field === 'auto_trade' ? {{auto_trade: !curAuto}} : {{partial_tp_be: !curPbe}};
+  const r = await api('/api/demo/auto-copy', {{method:'POST', body:JSON.stringify(body)}});
+  if(r && r.ok){{
+    if(r.overview) renderDemoDeck(r.overview);
+    toast(field === 'auto_trade'
+      ? (r.settings.auto_trade ? '🤖 تم تفعيل النسخ التلقائي الذكي للتجريبي' : '⚪ تم إيقاف النسخ التلقائي')
+      : (r.settings.partial_tp_be ? '🛡 تم تفعيل تأمين 50% عند TP1 + BE' : '⚪ تم إيقاف التأمين الجزئي'));
+  }} else toast((r && r.error) || 'تعذر التحديث', true);
+}}
+
+async function runSignalNow(){{
+  const sym = (document.getElementById('sigNowSym')?.value || 'XAUUSD').toUpperCase();
+  const tf = (document.getElementById('sigNowTf')?.value || 'M15').toUpperCase();
+  const btn = document.getElementById('sigNowBtn');
+  if(btn){{ btn.disabled = true; btn.textContent = '⏳ جارٍ فحص السوق الحقيقي...'; }}
+  try{{
+    const r = await api('/api/signal-now', {{method:'POST', body:JSON.stringify({{symbol:sym, timeframe:tf}})}});
+    if(r && r.ok && r.signal){{
+      const s = r.signal;
+      if(!allSignals.some(x => Number(x.id) === Number(s.id))) allSignals.unshift(s);
+      renderSignals();
+      curSym = s.symbol; curTf = s.timeframe || tf;
+      loadCandles(s.symbol, curTf, s);
+      toast(`⚡ تم توليد إشارة ${{s.symbol}} ${{s.direction}} ورسمها على الشارت!`);
+      window.scrollTo({{top:0, behavior:'smooth'}});
+    }} else {{
+      toast((r && r.error) || 'لا توجد فرصة مطابقة للجودة الآن', true);
+    }}
+  }} finally {{
+    if(btn){{ btn.disabled = false; btn.textContent = '⚡ فحص السوق وتوليد إشارة على الشارت الآن'; }}
+  }}
+}}
+
+let _lastShareBlobUrl = null;
+async function openShareCard(kind, id){{
+  toast('🎨 جارٍ تصميم بطاقة الربح الملكية...');
+  const ep = kind === 'demo' ? `/api/share-card/demo?id=${{id}}` : `/api/share-card/signal?id=${{id}}`;
+  try{{
+    const res = await fetch(API_BASE + ep, {{
+      headers: {{'X-Telegram-Init-Data': INIT_DATA, 'ngrok-skip-browser-warning': 'true'}}
+    }});
+    if(!res.ok){{ toast('تعذر توليد بطاقة الربح', true); return; }}
+    const blob = await res.blob();
+    if(_lastShareBlobUrl) URL.revokeObjectURL(_lastShareBlobUrl);
+    _lastShareBlobUrl = URL.createObjectURL(blob);
+    let modal = document.getElementById('shareCardModal');
+    if(!modal){{
+      modal = document.createElement('div');
+      modal.id = 'shareCardModal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(4,7,12,.88);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:16px';
+      modal.innerHTML = `<div style="max-width:520px;width:100%;background:var(--card);border:1px solid rgba(212,175,55,.4);border-radius:20px;padding:14px;box-shadow:0 24px 60px rgba(0,0,0,.7)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح الملكية للمشاركة</b>
+          <button onclick="closeShareModal()" style="background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-weight:800">✖</button>
+        </div>
+        <img id="shareCardImg" style="width:100%;border-radius:14px;border:1px solid var(--border);display:block;margin-bottom:10px"/>
+        <div class="btn-row">
+          <a id="shareCardDl" download="forexyemeni-pnl-card.png" class="btn gold" style="text-align:center;text-decoration:none">⬇️ حفظ البطاقة PNG</a>
+          <button class="btn ghost" onclick="closeShareModal()">إغلاق</button>
+        </div>
+      </div>`;
+      document.body.appendChild(modal);
+    }}
+    document.getElementById('shareCardImg').src = _lastShareBlobUrl;
+    document.getElementById('shareCardDl').href = _lastShareBlobUrl;
+    modal.style.display = 'flex';
+  }} catch(_e){{ toast('تعذر تحميل البطاقة', true); }}
+}}
+function closeShareModal(){{
+  const m = document.getElementById('shareCardModal');
+  if(m) m.style.display = 'none';
+}}
 
 async function logJournal(sid, action){{
   const r = await api('/api/journal', {{method:'POST', body:JSON.stringify({{signal_id:sid, action}})}});
@@ -1357,7 +1491,7 @@ input:focus,select:focus{{border-color:var(--gold)}}
   pointer-events:auto;width:100%;max-width:560px;
   background:rgba(12,17,29,.93);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
   border:1px solid var(--gold-line);border-radius:20px;
-  display:grid;grid-template-columns:repeat(5,1fr);padding:6px;gap:3px;
+  display:grid;grid-template-columns:repeat(6,1fr);padding:6px 4px;gap:2px;
   box-shadow:0 12px 38px rgba(0,0,0,.68);
 }}
 .tab{{
@@ -1411,27 +1545,27 @@ input:focus,select:focus{{border-color:var(--gold)}}
           <span class="pill green" id="partnersPill">🤝 0 شريك</span>
         </div>
         <div class="grid4" style="margin-bottom:6px">
-          <div class="kpi" onclick="openAdminTab('home')"><div class="lbl">👥 المستخدمون</div><div class="val" id="kUsers">—</div></div>
-          <div class="kpi" onclick="openAdminTab('finance')"><div class="lbl">💎 المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
+          <div class="kpi" onclick="openAdminTab('users')"><div class="lbl">👥 المستخدمون</div><div class="val" id="kUsers">—</div></div>
+          <div class="kpi" onclick="openAdminTab('users')"><div class="lbl">💎 المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
           <div class="kpi" onclick="openAdminTab('signals')"><div class="lbl">📡 مفتوحة الآن</div><div class="val" style="color:var(--cyan)" id="kOpen">—</div></div>
           <div class="kpi" onclick="openAdminTab('finance')"><div class="lbl">⏳ طلبات معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
         </div>
         <div class="quick-grid">
           <button class="qtile" onclick="openAdminTab('signals')">
             <span class="qic">📡</span>
-            <div><div class="qt">إدارة الإشارات</div><div class="qs" id="qSigSub">الأداء · المنشئ · التجريبي</div></div>
+            <div><div class="qt">إدارة ونشر الإشارات</div><div class="qs" id="qSigSub">استوديو يدوي · الأداء · التجريبي</div></div>
+          </button>
+          <button class="qtile" onclick="openAdminTab('users')">
+            <span class="qic">👥</span>
+            <div><div class="qt">إدارة الأعضاء والباقات</div><div class="qs">بحث · ترقية · تصفير · رسائل</div></div>
           </button>
           <button class="qtile" onclick="openAdminTab('finance')">
             <span class="qic">💳</span>
-            <div><div class="qt">المالية والهدايا</div><div class="qs" id="qFinSub">الدفعات · السحوبات · الأكواد</div></div>
-          </button>
-          <button class="qtile" onclick="openAdminTab('channels')">
-            <span class="qic">📺</span>
-            <div><div class="qt">القنوات والشارت</div><div class="qs" id="qChSub">قنوات الشارت · الجدولة</div></div>
+            <div><div class="qt">المالية والخصومات %</div><div class="qs" id="qFinSub">الدفعات · أكواد % · الهدايا</div></div>
           </button>
           <button class="qtile" onclick="openAdminTab('analytics')">
             <span class="qic">🏆</span>
-            <div><div class="qt">التحليلات والأخبار</div><div class="qs" id="qAnSub">مصفوفة الاستراتيجيات · التقويم</div></div>
+            <div><div class="qt">التقارير والتحليلات</div><div class="qs" id="qAnSub">تقرير PNG · الاستراتيجيات · الأخبار</div></div>
           </button>
         </div>
       </div>
@@ -1445,8 +1579,35 @@ input:focus,select:focus{{border-color:var(--gold)}}
       </div>
     </div>
 
-    <!-- PAGE 2: ROYAL SIGNALS MANAGEMENT -->
+    <!-- PAGE 2: ROYAL SIGNALS MANAGEMENT + MANUAL PUBLISHER STUDIO -->
     <div id="apane-signals" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>✨ استوديو نشر إشارة يدوية فاخرة</h3>
+          <button class="btn ghost" style="padding:5px 10px;font-size:11px" onclick="fetchAdminQuote()">⚡ جلب السعر الحي</button>
+        </div>
+        <div class="row-form">
+          <select id="manSym" style="flex:1;min-width:115px">
+            <option value="XAUUSD">XAUUSD</option><option value="EURUSD">EURUSD</option>
+            <option value="GBPUSD">GBPUSD</option><option value="BTCUSD">BTCUSD</option><option value="US30">US30</option>
+          </select>
+          <select id="manDir" style="width:110px"><option value="BUY">🟢 شراء BUY</option><option value="SELL">🔴 بيع SELL</option></select>
+          <select id="manTf" style="width:82px"><option value="M5">M5</option><option value="M15" selected>M15</option><option value="H1">H1</option><option value="H4">H4</option></select>
+          <input id="manStrat" value="SMC" placeholder="الاستراتيجية" style="width:92px"/>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:9px">
+          <input id="manEntry" type="number" step="any" placeholder="الدخول" style="width:100%;padding:8px 5px;font-size:11.5px"/>
+          <input id="manSl" type="number" step="any" placeholder="الوقف SL" style="width:100%;padding:8px 5px;font-size:11.5px"/>
+          <input id="manTp1" type="number" step="any" placeholder="TP1" style="width:100%;padding:8px 5px;font-size:11.5px"/>
+          <input id="manTp2" type="number" step="any" placeholder="TP2" style="width:100%;padding:8px 5px;font-size:11.5px"/>
+          <input id="manTp3" type="number" step="any" placeholder="TP3" style="width:100%;padding:8px 5px;font-size:11.5px"/>
+        </div>
+        <div class="btn-row">
+          <button class="btn gold" onclick="publishAdminSignal(true)">🚀 نشر وبث الإشارة للجميع الآن</button>
+          <button class="btn ghost" style="flex:0;min-width:96px" onclick="publishAdminSignal(false)">💾 حفظ فقط</button>
+        </div>
+      </div>
+
       <div class="card gold-edge">
         <div class="card-hdr">
           <h3>📡 مركز إدارة الإشارات الملكي</h3>
@@ -1469,7 +1630,29 @@ input:focus,select:focus{{border-color:var(--gold)}}
       </div>
     </div>
 
-    <!-- PAGE 3: FINANCE, PAYOUTS & VIP GIFTS -->
+    <!-- PAGE 3: ROYAL MEMBERS & SUBSCRIPTION MANAGEMENT (v7.6.0) -->
+    <div id="apane-users" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>👥 إدارة الأعضاء والباقات المباشرة</h3>
+          <span class="pill cyan" id="usersCountPill">0 عضو</span>
+        </div>
+        <div class="row-form">
+          <input id="userSearch" style="flex:1;min-width:180px;font-family:'Cairo',sans-serif" placeholder="🔍 ابحث بالـ ID أو @username أو الاسم..." oninput="debouncedLoadUsers()"/>
+          <button class="btn gold" style="flex:0;min-width:74px" onclick="loadAdminUsers()">🔍 بحث</button>
+        </div>
+        <div class="filter-bar">
+          <button class="fchip active" onclick="setUserPlanFilter('ALL',this)">الكل</button>
+          <button class="fchip" onclick="setUserPlanFilter('ROYAL',this)">👑 ROYAL</button>
+          <button class="fchip" onclick="setUserPlanFilter('VIP',this)">💎 VIP</button>
+          <button class="fchip" onclick="setUserPlanFilter('PRO',this)">⭐ PRO</button>
+          <button class="fchip" onclick="setUserPlanFilter('FREE',this)">🆓 FREE</button>
+        </div>
+        <div id="adminUsersBox"><div class="empty">⏳ جارٍ تحميل قائمة الأعضاء...</div></div>
+      </div>
+    </div>
+
+    <!-- PAGE 4: FINANCE, PROMO CODES (%) & VIP GIFTS -->
     <div id="apane-finance" class="apane">
       <div class="card gold-edge">
         <div class="card-hdr"><h3>💳 طلبات الدفع المعلقة</h3><span class="pill red" id="payBadgePill">0</span></div>
@@ -1478,6 +1661,17 @@ input:focus,select:focus{{border-color:var(--gold)}}
       <div class="card gold-edge">
         <div class="card-hdr"><h3>💸 طلبات سحب الشركاء المعلقة</h3><span class="pill" id="payoutBadgePill">0</span></div>
         <div id="payoutBox"><div class="empty">لا توجد طلبات سحب معلقة.</div></div>
+      </div>
+      <div class="card gold-edge">
+        <div class="card-hdr"><h3>🎟 استوديو أكواد الخصم النسبية (%) + نجوم ⭐</h3><span class="pill" id="starsRatePill">50⭐ / $1</span></div>
+        <div class="row-form">
+          <input id="prCode" placeholder="الكود (مثال: ROYAL30)" style="flex:1;min-width:130px;text-transform:uppercase"/>
+          <input id="prPct" type="number" value="25" min="1" max="95" style="width:76px" placeholder="% خصم"/>
+          <input id="prUses" type="number" value="50" min="1" style="width:74px" placeholder="حد"/>
+          <input id="prDays" type="number" value="30" min="1" style="width:74px" placeholder="أيام"/>
+        </div>
+        <button class="btn gold" style="width:100%;margin-bottom:10px" onclick="createAdminPromo()">🎟 إنشاء كود خصم نسبي (%) الآن</button>
+        <div id="promosBox"><div class="empty">لا توجد أكواد خصم نسبية بعد.</div></div>
       </div>
       <div class="card">
         <div class="card-hdr"><h3>🎁 استوديو إصدار أكواد الهدايا VIP</h3></div>
@@ -1511,8 +1705,28 @@ input:focus,select:focus{{border-color:var(--gold)}}
       </div>
     </div>
 
-    <!-- PAGE 5: ANALYTICS, LEADERBOARD & ECONOMIC CALENDAR -->
+    <!-- PAGE 6: EXECUTIVE DIGESTS, LEADERBOARD & ECONOMIC CALENDAR -->
     <div id="apane-analytics" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>📊 التقارير التنفيذية التلقائية (PNG + قنوات)</h3>
+          <span class="pill green" id="dig7Pill">7 أيام</span>
+        </div>
+        <div class="stats-strip" id="dig7Strip">
+          <div class="st-box"><div class="l">إشارات 7ي</div><div class="v" id="dgTot">0</div></div>
+          <div class="st-box"><div class="l">نسبة النجاح</div><div class="v" style="color:var(--green)" id="dgWr">0%</div></div>
+          <div class="st-box"><div class="l">صافي النقاط</div><div class="v" style="color:var(--gold2)" id="dgPips">0p</div></div>
+          <div class="st-box"><div class="l">الأقوى</div><div class="v" style="color:var(--cyan);font-size:12px" id="dgBest">—</div></div>
+        </div>
+        <div class="btn-row" style="margin-bottom:7px">
+          <button class="btn gold" onclick="sendDigestNow(7)">📤 بث التقرير الأسبوعي الآن</button>
+          <button class="btn on" onclick="sendDigestNow(30)">📆 بث التقرير الشهري الآن</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=7','📊 التقرير الأسبوعي الفاخر PNG')">🖼 معاينة الأسبوعي PNG</button>
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=30','📆 التقرير الشهري الفاخر PNG')">🖼 معاينة الشهري PNG</button>
+        </div>
+      </div>
       <div class="card gold-edge">
         <div class="card-hdr">
           <h3>🏆 مصفوفة أداء الاستراتيجيات (30 يوماً)</h3>
@@ -1532,11 +1746,12 @@ input:focus,select:focus{{border-color:var(--gold)}}
   </div>
 </div>
 
-<!-- FLOATING FROSTED GLASS 5-PAGE DOCK -->
+<!-- FLOATING FROSTED GLASS 6-PAGE DOCK -->
 <div class="dock-wrap">
   <div class="dock">
     <button class="tab active" id="atab-home" onclick="openAdminTab('home',this)"><span class="ic">📊</span><span>القيادة</span></button>
     <button class="tab" id="atab-signals" onclick="openAdminTab('signals',this)"><span class="cnt-dot" id="sigDot" style="background:var(--cyan);color:#04120c">0</span><span class="ic">📡</span><span>الإشارات</span></button>
+    <button class="tab" id="atab-users" onclick="openAdminTab('users',this)"><span class="ic">👥</span><span>الأعضاء</span></button>
     <button class="tab" id="atab-finance" onclick="openAdminTab('finance',this)"><span class="cnt-dot" id="finDot">0</span><span class="ic">💳</span><span>المالية</span></button>
     <button class="tab" id="atab-channels" onclick="openAdminTab('channels',this)"><span class="ic">📺</span><span>القنوات</span></button>
     <button class="tab" id="atab-analytics" onclick="openAdminTab('analytics',this)"><span class="ic">🏆</span><span>التحليلات</span></button>
@@ -1600,6 +1815,7 @@ function openAdminTab(name, btnEl){{
   if(pane) pane.classList.add('active');
   const tab = btnEl || document.getElementById('atab-' + name);
   if(tab) tab.classList.add('active');
+  if(name === 'users' && !window._usersLoaded) loadAdminUsers();
   window.scrollTo({{top:0, behavior:'smooth'}});
 }}
 
@@ -1665,8 +1881,9 @@ function renderAdminSignals(){{
           <div class="lvl"><span>TP3</span><b style="color:var(--gold2)">${{s.tp3}}</b></div>
         </div>
         <div class="btn-row">
-          <button class="btn on" onclick="openSigDemoChart(${{s.id}})">🎮 تجريبي على الشارت</button>
-          ${{isOpen ? `<button class="btn danger" style="flex:0;min-width:96px" onclick="cancelAdminSig(${{s.id}})">🚫 إلغاء</button>` : ''}}
+          <button class="btn on" onclick="openSigDemoChart(${{s.id}})">🎮 تجريبي</button>
+          <button class="btn ghost" style="flex:0;min-width:86px" onclick="previewAdminPng('/api/share-card/signal?id=${{s.id}}','🏆 بطاقة ربح الإشارة #${{s.seq||s.id}}')">🖼 بطاقة</button>
+          ${{isOpen ? `<button class="btn danger" style="flex:0;min-width:84px" onclick="cancelAdminSig(${{s.id}})">🚫 إلغاء</button>` : ''}}
         </div>
       </div>`;
   }}).join('');
@@ -1711,6 +1928,176 @@ async function cancelAdminSig(id){{
   toast(r.ok ? '🚫 تم إلغاء الإشارة #' + id : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }}
+let _adminPngBlob = null;
+async function previewAdminPng(endpoint, title){{
+  toast('🎨 جارٍ تجهيز البطاقة عالية الدقة...');
+  try{{
+    const r = await fetch(API_BASE + endpoint, {{
+      headers: {{'X-Telegram-Init-Data': INIT_DATA, 'ngrok-skip-browser-warning': '1', 'X-Pinggy-No-Screen': '1'}}
+    }});
+    if(!r.ok){{ toast('تعذر توليد الصورة', true); return; }}
+    const blob = await r.blob();
+    if(_adminPngBlob) URL.revokeObjectURL(_adminPngBlob);
+    _adminPngBlob = URL.createObjectURL(blob);
+    let m = document.getElementById('admPngModal');
+    if(!m){{
+      m = document.createElement('div');
+      m.id = 'admPngModal';
+      m.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(4,7,12,.9);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:14px';
+      m.innerHTML = `<div style="max-width:540px;width:100%;background:var(--card);border:1px solid var(--gold-line);border-radius:20px;padding:14px;box-shadow:0 24px 60px rgba(0,0,0,.75)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <b id="admPngTitle" style="color:var(--gold2);font-size:13.5px"></b>
+          <button onclick="document.getElementById('admPngModal').style.display='none'" style="background:rgba(255,255,255,.08);color:#fff;border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-weight:800">✖</button>
+        </div>
+        <img id="admPngImg" style="width:100%;border-radius:14px;border:1px solid var(--border);display:block;margin-bottom:10px"/>
+        <div class="btn-row">
+          <a id="admPngDl" download="forexyemeni-royal-card.png" class="btn gold" style="text-align:center;text-decoration:none">⬇️ حفظ الصورة PNG</a>
+          <button class="btn ghost" onclick="document.getElementById('admPngModal').style.display='none'">إغلاق</button>
+        </div>
+      </div>`;
+      document.body.appendChild(m);
+    }}
+    document.getElementById('admPngTitle').textContent = title || '🏆 بطاقة ملكية PNG';
+    document.getElementById('admPngImg').src = _adminPngBlob;
+    document.getElementById('admPngDl').href = _adminPngBlob;
+    m.style.display = 'flex';
+  }} catch(_e){{ toast('تعذر عرض الصورة', true); }}
+}}
+
+async function fetchAdminQuote(){{
+  const sym = document.getElementById('manSym').value;
+  const dir = document.getElementById('manDir').value;
+  toast('⏳ جارٍ جلب السعر اللحظي لـ ' + sym + '...');
+  const r = await api('/api/admin/quote?symbol=' + encodeURIComponent(sym));
+  if(!r || !r.ok){{ toast((r && r.error) || 'تعذر جلب السعر الحي', true); return; }}
+  const s = dir === 'BUY' ? r.suggested_buy : r.suggested_sell;
+  document.getElementById('manEntry').value = s.entry;
+  document.getElementById('manSl').value = s.sl;
+  document.getElementById('manTp1').value = s.tp1;
+  document.getElementById('manTp2').value = s.tp2;
+  document.getElementById('manTp3').value = s.tp3;
+  toast(`⚡ تم تعبئة سعر ${{sym}} الحي (${{r.price}}) بنجاح`);
+}}
+
+async function publishAdminSignal(broadcast){{
+  const body = {{
+    symbol: document.getElementById('manSym').value,
+    direction: document.getElementById('manDir').value,
+    timeframe: document.getElementById('manTf').value,
+    strategy: document.getElementById('manStrat').value || 'MANUAL',
+    entry: +document.getElementById('manEntry').value,
+    sl: +document.getElementById('manSl').value,
+    tp1: +document.getElementById('manTp1').value,
+    tp2: +document.getElementById('manTp2').value || 0,
+    tp3: +document.getElementById('manTp3').value || 0,
+    broadcast: !!broadcast,
+  }};
+  const r = await api('/api/admin/publish-signal', {{method:'POST', body:JSON.stringify(body)}});
+  if(r && r.ok){{
+    toast(`🚀 تم نشر الإشارة #${{r.signal.seq||r.signal.id}} (${{r.signal.symbol}})` + (r.auto_copied_count ? ` · نُسخت لـ ${{r.auto_copied_count}} تجريبي` : ''));
+    ['manEntry','manSl','manTp1','manTp2','manTp3'].forEach(id => document.getElementById(id).value = '');
+    loadAdmin();
+  }} else toast((r && r.error) || 'تحقق من مستويات الإشارة', true);
+}}
+
+let adminUserPlanFilter = 'ALL';
+let _usrTimer = null;
+function debouncedLoadUsers(){{ clearTimeout(_usrTimer); _usrTimer = setTimeout(loadAdminUsers, 280); }}
+function setUserPlanFilter(plan, btn){{
+  adminUserPlanFilter = plan;
+  btn.parentElement.querySelectorAll('.fchip').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  loadAdminUsers();
+}}
+
+async function loadAdminUsers(){{
+  window._usersLoaded = true;
+  const q = (document.getElementById('userSearch')?.value || '').trim();
+  const r = await api(`/api/admin/users?q=${{encodeURIComponent(q)}}&plan=${{encodeURIComponent(adminUserPlanFilter)}}&limit=40`);
+  const box = document.getElementById('adminUsersBox');
+  if(!r || !r.ok){{ box.innerHTML = '<div class="empty">تعذر تحميل الأعضاء.</div>'; return; }}
+  const arr = r.users || [];
+  document.getElementById('usersCountPill').textContent = arr.length + ' عضو';
+  if(!arr.length){{ box.innerHTML = '<div class="empty">لا يوجد أعضاء مطابقون للبحث.</div>'; return; }}
+  box.innerHTML = arr.map(u => {{
+    const pBadge = u.plan_code === 'ROYAL' ? '' : (u.plan_code === 'FREE' ? 'cyan' : 'green');
+    const expTxt = u.plan_expires ? ` · ينتهي ${{String(u.plan_expires).slice(0,10)}}` : '';
+    const unTxt = u.username ? `@${{u.username}}` : `ID:${{u.user_id}}`;
+    return `<div class="sig-card ${{u.is_blocked?'loss':(u.plan_code!=='FREE'?'win':'live')}}">
+      <div class="sig-top">
+        <div>
+          <div class="sig-sym">${{u.full_name || 'مستخدم'}} <span class="pill ${{pBadge}}">${{u.plan_code}}</span> ${{u.is_blocked?'<span class="pill red">محظور</span>':''}}</div>
+          <div class="sig-meta">${{unTxt}} · <code>${{u.user_id}}</code>${{expTxt}}</div>
+          <div class="sig-meta">📊 اليوم: ${{u.used_today||0}} إشارة · 💰 مدفوع: $${{u.total_paid_usd||0}} · ${{u.auto_signals?'📡 تلقائي':'🔕 متوقف'}} · ${{u.demo_auto_copy?'🤖 نسخ تجريبي':''}}</div>
+        </div>
+      </div>
+      <div class="row-form" style="margin-bottom:7px">
+        <select id="up_${{u.user_id}}" style="flex:1;min-width:90px;padding:6px 8px;font-size:11.5px">
+          <option value="FREE" ${{u.plan_code==='FREE'?'selected':''}}>FREE</option>
+          <option value="PRO" ${{u.plan_code==='PRO'?'selected':''}}>PRO</option>
+          <option value="VIP" ${{u.plan_code==='VIP'?'selected':''}}>VIP</option>
+          <option value="ROYAL" ${{u.plan_code==='ROYAL'?'selected':''}}>ROYAL</option>
+        </select>
+        <input id="ud_${{u.user_id}}" type="number" value="30" min="1" max="3650" style="width:68px;padding:6px;font-size:11.5px" placeholder="أيام"/>
+        <button class="btn gold" style="flex:0;padding:6px 10px" onclick="adminSetUserPlan(${{u.user_id}})">💎 تفعيل</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" onclick="adminUserAction(${{u.user_id}},'reset_quota')">🔄 تصفير الحصة</button>
+        <button class="btn ghost" onclick="adminPromptDm(${{u.user_id}})">💬 رسالة</button>
+        <button class="btn ${{u.is_blocked?'on':'danger'}}" style="flex:0;min-width:76px" onclick="adminUserAction(${{u.user_id}},'${{u.is_blocked?'unban':'ban'}}')">${{u.is_blocked?'✅ فك':'🚫 حظر'}}</button>
+      </div>
+    </div>`;
+  }}).join('');
+}}
+
+async function adminSetUserPlan(uid){{
+  const plan_code = document.getElementById('up_' + uid).value;
+  const days = +document.getElementById('ud_' + uid).value || 30;
+  await adminUserAction(uid, 'set_plan', {{plan_code, days}});
+}}
+
+async function adminPromptDm(uid){{
+  const msg = window.prompt('أدخل الرسالة المباشرة للعضو ' + uid + ':');
+  if(!msg || !msg.trim()) return;
+  await adminUserAction(uid, 'dm', {{message: msg.trim()}});
+}}
+
+async function adminUserAction(user_id, op, extra={{}}){{
+  const r = await api('/api/admin/user-action', {{method:'POST', body:JSON.stringify(Object.assign({{user_id, op}}, extra))}});
+  if(r && r.ok){{
+    toast('✅ تم تنفيذ الإجراء على العضو ' + user_id);
+    loadAdminUsers();
+    if(op === 'set_plan') loadAdmin();
+  }} else toast((r && r.error) || 'تعذر تنفيذ الإجراء', true);
+}}
+
+async function createAdminPromo(){{
+  const code = (document.getElementById('prCode').value || '').trim().toUpperCase();
+  if(!code) return toast('أدخل اسم كود الخصم أولاً', true);
+  const r = await api('/api/admin/promo', {{method:'POST', body:JSON.stringify({{
+    op:'create', code,
+    discount_pct:+document.getElementById('prPct').value || 20,
+    max_uses:+document.getElementById('prUses').value || 50,
+    expires_days:+document.getElementById('prDays').value || 30,
+  }})}});
+  if(r && r.ok){{
+    document.getElementById('prCode').value = '';
+    toast(`🎟 تم إنشاء كود الخصم ${{r.code}} (-${{r.discount_pct}}%)`);
+    loadAdmin();
+  }} else toast((r && r.error) || 'خطأ في إنشاء الكود', true);
+}}
+
+async function promoOp(op, code){{
+  const r = await api('/api/admin/promo', {{method:'POST', body:JSON.stringify({{op, code}})}});
+  toast(r && r.ok ? '✅ تم تحديث كود الخصم' : ((r&&r.error)||'خطأ'), !(r&&r.ok));
+  loadAdmin();
+}}
+
+async function sendDigestNow(days){{
+  const r = await api('/api/admin/digest', {{method:'POST', body:JSON.stringify({{days, include_channels:true}})}});
+  toast(r && r.ok ? `📊 تم بث تقرير الأداء (${{days}} أيام) مع الصورة الفاخرة!` : ((r&&r.error)||'خطأ'), !(r&&r.ok));
+}}
+
 async function genGift(){{
   const r = await api('/api/admin/gift',{{method:'POST',body:JSON.stringify({{
     target_plan:document.getElementById('gPlan').value,
@@ -1772,13 +2159,55 @@ async function loadAdmin(){{
     news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
     news_broadcast_users:'👥 بث للمستخدمين', news_broadcast_partners:'🤝 بث للشركاء',
     news_broadcast_channels:'📺 بث للقنوات', charts_enabled:'📊 الشارتات المحلية',
-    academy_enabled:'🎓 الأكاديمية', crypto_api_enabled:'🔗 منصات الكريبتو'
+    academy_enabled:'🎓 الأكاديمية', crypto_api_enabled:'🔗 منصات الكريبتو',
+    auto_digest_enabled:'📊 التقارير التلقائية', stars_enabled:'⭐ نجوم تيليجرام XTR'
   }};
   document.getElementById('togglesBox').innerHTML = Object.entries(labels).map(([k,lbl])=>{{
     const on = !!d.toggles[k];
     const cls = k==='global_kill_switch' ? (on?'danger':'off') : (on?'on':'off');
     return `<button class="btn ${{cls}}" onclick="toggleKey('${{k}}')">${{lbl}}: ${{on?'🟢':'⚪'}}</button>`;
   }}).join('');
+
+  // Populate Manual Signal Studio & Chart Channel Markets
+  const manSel = document.getElementById('manSym');
+  if(d.markets && d.markets.length && manSel && manSel.options.length <= 5){{
+    d.markets.forEach(m => {{
+      if(![...manSel.options].some(o => o.value === m)){{
+        const o = document.createElement('option'); o.value = m; o.textContent = m; manSel.appendChild(o);
+      }}
+    }});
+  }}
+
+  // Page 4: Promo Codes (%) & Stars Rate
+  if(d.stars_per_usd && document.getElementById('starsRatePill')){{
+    document.getElementById('starsRatePill').textContent = `${{d.stars_per_usd}}⭐ / $1`;
+  }}
+  const promos = d.promos || [];
+  const pBox = document.getElementById('promosBox');
+  if(pBox){{
+    pBox.innerHTML = promos.length ? promos.map(pr => `
+      <div class="item">
+        <div>${{pr.active?'🟢':'⚪'}} <b style="font-family:var(--mono);color:var(--gold2)">${{pr.code}}</b>
+          <span class="pill green">-${{pr.discount_pct}}%</span>
+          <span style="font-size:11px;color:var(--muted)"> · استخدام ${{pr.used_count||0}}/${{pr.max_uses||0}}</span>
+        </div>
+        <div style="display:flex;gap:5px">
+          <button class="btn ghost" style="padding:5px 8px" onclick="copyVal('${{pr.code}}','✅ تم نسخ كود الخصم')">📋</button>
+          <button class="btn ${{pr.active?'on':'off'}}" style="padding:5px 8px" onclick="promoOp('toggle','${{pr.code}}')">${{pr.active?'مفعّل':'متوقف'}}</button>
+          <button class="btn danger" style="padding:5px 8px" onclick="promoOp('delete','${{pr.code}}')">🗑</button>
+        </div>
+      </div>`).join('') : '<div class="empty">لا توجد أكواد خصم نسبية بعد — أنشئ كودك الأول أعلاه.</div>';
+  }}
+
+  // Page 6: 7-day Executive Digest summary
+  const dg = d.digest_7d || {{}};
+  if(document.getElementById('dgTot')){{
+    document.getElementById('dgTot').textContent = dg.total || 0;
+    document.getElementById('dgWr').textContent = `${{dg.win_rate || 0}}%`;
+    const dp = +(dg.net_pips || 0);
+    document.getElementById('dgPips').textContent = `${{dp>=0?'+':''}}${{dp}}p`;
+    document.getElementById('dgBest').textContent = dg.best_strategy || '—';
+  }}
 
   // Page 4: Chart Channels
   const sm = d.chart_schedule_minutes || 0;

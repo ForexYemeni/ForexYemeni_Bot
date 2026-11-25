@@ -779,6 +779,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             [kb.signal_demo_launch_btn(sid)],
             [kb.btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
              kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary")],
+            [kb.btn("🖼 بطاقة ربح للمشاركة", f"u:sharecard:sig:{sid}", style="primary")],
             [kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success"),
              kb.btn("❌ تجاهلتها", f"u:jskip:{sid}", style="danger")],
         ]
@@ -1048,11 +1049,35 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             for i in range(0, len(plan_strats), 2):
                 rows_kb.append([kb.btn(f"🧠 {s}", f"u:stratinfo:{s}:{code}") for s in plan_strats[i:i + 2]])
         if code != "FREE":
-            # v6.9.1 ROYAL FAST LANE — the DOCUMENTED USDT wallets (the ✅ ones
-            # the owner configured in «محافظ USDT») now appear DIRECTLY in the
-            # user's plan page, above any manual method: one tap on the verified
-            # network → the royal chain page → TXID → on-chain instant opening.
-            # No longer hidden behind a manually-added “USDT” payment method.
+            from fysb.services import promos as _promos
+            orig_price = float(p["price"] or 0.0)
+            active_promo = context.user_data.get("active_promo") or {}
+            promo_code = ""
+            promo_pct = 0
+            final_price = orig_price
+            if active_promo.get("code"):
+                v_pr = await afn.run(_promos.validate_promo, active_promo["code"], uid)
+                if v_pr.get("ok"):
+                    promo_code = v_pr["code"]
+                    promo_pct = int(v_pr["discount_pct"])
+                    final_price, saved_usd = _promos.apply_discount(orig_price, promo_pct)
+                    body += (
+                        f"\n\n🎟 <b>كود الخصم مفعّل:</b> <code>{esc(promo_code)}</code> "
+                        f"(<b>-{promo_pct}%</b> · وفّرت <b>${saved_usd:.2f}</b>)\n"
+                        f"▎💰 السعر بعد الخصم: <b>${final_price:g} {esc(p['currency'])}</b> "
+                        f"<s>${orig_price:g}</s>"
+                    )
+                else:
+                    context.user_data.pop("active_promo", None)
+
+            if await afn.run(_promos.stars_enabled) and final_price > 0:
+                stars_amt = await afn.run(_promos.plan_stars_price, final_price)
+                rows_kb.append([kb.btn(
+                    f"⭐ دفع فوري بنجوم تيليجرام — {stars_amt} ⭐ XTR",
+                    f"u:starspay:{code}",
+                    style="success",
+                )])
+
             if chains:
                 body += (
                     "\n\n⛓ <b><u>التفعيل الفوري بالبلوكيشن — المحافظ الموثقة</u></b>\n"
@@ -1070,8 +1095,128 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     rows_kb.append([kb.btn(f"🧾 اشتراك عبر {esc(m['title'])}", f"u:requestplan:{code}:{m['id']}")])
             else:
                 rows_kb.append([kb.btn("🧾 طلب اشتراك (دفع يدوي)", f"u:requestplan:{code}:0")])
+            rows_kb.append([kb.btn(
+                f"🎟 {'تغيير' if promo_code else 'إدخال'} كود خصم (%)",
+                f"u:applypromo:{code}",
+                style="primary",
+            )])
         rows_kb.append([kb.btn("↩️ كل الباقات", "u:plans")])
         await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action.startswith("applypromo:"):
+        code = action.split(":", 1)[1]
+        context.user_data["awaiting_promo_code"] = code
+        await render(
+            q,
+            "🎟 <b>أدخل كود الخصم النسبي (%) الآن</b>\n"
+            "<i>مثال: <code>ROYAL30</code> — سيُحسب السعر المخفّض تلقائياً للـ USDT ونجوم تيليجرام.</i>",
+            kb.user_nav([[kb.btn("↩️ العودة للباقة", f"u:planview:{code}")]]),
+            bot,
+        )
+
+    elif action.startswith("starspay:"):
+        code = action.split(":", 1)[1].upper()
+        p = await afn.run(_plan_row, code)
+        if not p or code == "FREE":
+            await render(q, "الباقة غير متاحة.", kb.user_nav([[kb.btn("↩️ كل الباقات", "u:plans")]]), bot)
+            return
+        from telegram import LabeledPrice
+        from fysb.services import promos as _promos
+        orig_price = float(p["price"] or 0.0)
+        final_price = orig_price
+        promo_code = ""
+        active_promo = context.user_data.get("active_promo") or {}
+        if active_promo.get("code"):
+            v_pr = await afn.run(_promos.validate_promo, active_promo["code"], uid)
+            if v_pr.get("ok"):
+                promo_code = v_pr["code"]
+                final_price, _ = _promos.apply_discount(orig_price, int(v_pr["discount_pct"]))
+        stars_amt = await afn.run(_promos.plan_stars_price, final_price)
+        payload = f"plan:{code}:{promo_code}"
+        try:
+            await bot.send_invoice(
+                chat_id=uid,
+                title=f"{config.BRAND} — {p['title']}",
+                description=f"تفعيل فوري لباقة {p['title']} لمدة {int(p.get('duration_days') or 30)} يوماً"
+                            + (f" (خصم {promo_code})" if promo_code else ""),
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label=f"باقة {p['title']}", amount=stars_amt)],
+            )
+            await render(
+                q,
+                f"⭐ <b>تم إرسال فاتورة نجوم تيليجرام بنجاح!</b>\n"
+                f"▎💎 الباقة: <b>{esc(p['title'])}</b> · ⭐ <b>{stars_amt} XTR</b>\n"
+                f"▎⚡ اضغط زر <b>الدفع</b> في الفاتورة بالأسفل لتفعيل باقتك فوراً خلال 3 ثوانٍ.",
+                kb.user_nav([[kb.btn("↩️ الباقة", f"u:planview:{code}")]]),
+                bot,
+            )
+        except Exception as exc:
+            await render(
+                q,
+                f"⚠️ تعذر إرسال فاتورة النجوم حالياً ({esc(str(exc)[:120])}).\nيمكنك الاشتراك عبر USDT أو الدفع اليدوي.",
+                kb.user_nav([[kb.btn("↩️ الباقة", f"u:planview:{code}")]]),
+                bot,
+            )
+
+    elif action.startswith("sharecard:"):
+        # v7.6.0 Branded PNG PnL Share Card (Signal or Demo Trade)
+        parts = action.split(":")
+        kind = parts[1] if len(parts) > 1 else "sig"
+        target_id = _safe_int(parts[2] if len(parts) > 2 else "0")
+        from fysb.ui import share_cards as _sc
+        bot_un = ""
+        try:
+            me_obj = await bot.get_me()
+            bot_un = getattr(me_obj, "username", "") or ""
+        except Exception:
+            pass
+        payload = None
+        if kind == "demo" and target_id:
+            from fysb.engines import demo as _de
+            payload = await afn.run(_de.share_card_payload_for_position, uid, target_id, bot_un)
+        elif target_id:
+            sig = await afn.run(_signal_row, target_id)
+            if sig:
+                sig_d = dict(sig)
+                row = await afn.run(_market_row, sig_d["symbol"])
+                from fysb.ui import charts as _charts
+                m = _charts.live_signal_metrics(sig_d, row=row)
+                bn = (bot_un or config.BRAND or "ForexYemeniBot").lstrip("@")
+                payload = {
+                    "kind": "signal",
+                    "symbol": sig_d["symbol"],
+                    "direction": sig_d["direction"],
+                    "strategy": sig_d.get("strategy") or "ROYAL",
+                    "timeframe": sig_d.get("timeframe") or "M15",
+                    "entry": float(sig_d.get("entry") or 0),
+                    "exit_price": float(m.get("live_px") or sig_d.get("tp1") or sig_d.get("entry") or 0),
+                    "tp3": float(sig_d.get("tp3") or sig_d.get("tp1") or 0),
+                    "tp_label": str(sig_d.get("status") or "ACTIVE").upper(),
+                    "pips": float(m.get("pips") or sig_d.get("pips_result") or 0),
+                    "rr": float(sig_d.get("rr") or 0),
+                    "score": int(sig_d.get("score") or 0),
+                    "ref_link": f"t.me/{bn}?start=ref_{uid}",
+                    "ref_label": f"SHARED VIA {config.BRAND} • REF #{uid}",
+                    "timestamp": str(sig_d.get("closed_at") or sig_d.get("created_at") or config.now()),
+                }
+        png = await asyncio.to_thread(_sc.render_pnl_share_card, payload) if payload else None
+        if not png:
+            await render(q, "⚠️ تعذر إنشاء بطاقة الربح حالياً.", kb.user_nav([[kb.btn("↩️ رجوع", "u:signals")]]), bot)
+            return
+        import io as _io
+        await bot.send_photo(
+            chat_id=uid,
+            photo=_io.BytesIO(png),
+            caption=(
+                f"🏆 <b>بطاقة الربح الملكية — {esc(payload['symbol'])}</b>\n"
+                f"▎🔗 رابط إحالتك مضمّن على البطاقة: <code>{esc(payload['ref_link'])}</code>\n"
+                "<i>شاركها الآن في قنواتك وحالاتك لجلب مشتركين جدد وكسب عمولتك تلقائياً!</i>"
+            ),
+            parse_mode="HTML",
+        )
+        return
 
     elif action.startswith("stratinfo:"):
         # v6.10.0 (owner report 8) — the REAL identity page of one methodology,
@@ -1099,7 +1244,21 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             await render(q, "⛓ هذه الشبكة غير موثقة حالياً — اختر شبكة موثقة من صفحة الباقة أو تواصل مع الدعم.",
                          kb.user_nav([[kb.btn("↩️ الباقة", f"u:planview:{code}")]]), bot)
             return
-        pid = await afn.run(payments_service.create_request, uid, code, p["price"], f"USDT-{chain}")
+        from fysb.services import promos as _promos
+        final_price = float(p["price"] or 0.0)
+        promo_code, promo_pct = "", 0
+        ap = context.user_data.get("active_promo") or {}
+        if ap.get("code"):
+            vp = await afn.run(_promos.validate_promo, ap["code"], uid)
+            if vp.get("ok"):
+                promo_code, promo_pct = vp["code"], int(vp["discount_pct"])
+                final_price, _ = _promos.apply_discount(final_price, promo_pct)
+        pid = await afn.run(payments_service.create_request, uid, code, final_price, f"USDT-{chain}")
+        if promo_code and promo_pct:
+            def _tag_pr():
+                with db.tx() as c:
+                    c.execute("UPDATE payments SET promo_code=?, discount_pct=? WHERE id=?", (promo_code, promo_pct, pid))
+            await afn.run(_tag_pr)
         req = await afn.run(payments_service.get_request, pid)
         await _render_chain_payment(q, bot, req, chain)
 
@@ -1115,11 +1274,26 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             await render(q, "الباقة غير متاحة.", kb.user_nav(), bot)
             return
         method = await afn.run(payments_service.get_method, mid) if mid else None
-        pay_req = await afn.run(payments_service.create_request, uid, code, p["price"], method["title"] if method else "MANUAL")
+        from fysb.services import promos as _promos
+        final_price = float(p["price"] or 0.0)
+        promo_code, promo_pct = "", 0
+        ap = context.user_data.get("active_promo") or {}
+        if ap.get("code"):
+            vp = await afn.run(_promos.validate_promo, ap["code"], uid)
+            if vp.get("ok"):
+                promo_code, promo_pct = vp["code"], int(vp["discount_pct"])
+                final_price, _ = _promos.apply_discount(final_price, promo_pct)
+        pay_req = await afn.run(payments_service.create_request, uid, code, final_price, method["title"] if method else "MANUAL")
+        if promo_code and promo_pct:
+            def _tag_pr2():
+                with db.tx() as c:
+                    c.execute("UPDATE payments SET promo_code=?, discount_pct=? WHERE id=?", (promo_code, promo_pct, pay_req))
+            await afn.run(_tag_pr2)
         context.user_data["awaiting_receipt"] = pay_req
         body = [f"🧾 <b>طلب اشتراك #{pay_req}</b>",
                 f"💎 الباقة: <b>{esc(p['title'])}</b>",
-                f"💰 المبلغ: <b>{p['price']:g} {esc(p['currency'])}</b>"]
+                f"💰 المبلغ: <b>{final_price:g} {esc(p['currency'])}</b>"
+                + (f" (خصم {promo_pct}% · <code>{esc(promo_code)}</code>)" if promo_pct else "")]
         is_usdt = bool(method and "USDT" in (method["title"] or "").upper())
         chains = (await afn.run(payments_service.configured_chains)) if is_usdt else []
         if method:
@@ -1284,20 +1458,34 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         s = await afn.run(demo_engine.demo_settings, uid)
         lot_word = "تلقائي حسب المخاطرة ورأس المال" if s["lot_mode"] == "auto" else f"ثابت {s['fixed_lot']:g}"
         body = (
-            "⚙️ <b><u>إعدادات حسابي التجريبي</u></b>\n"
+            "⚙️ <b><u>إعدادات حسابي التجريبي الذكي</u></b>\n"
             "<blockquote>"
             f"▎💰 الرصيد الحالي: <b>{s['balance']:,.2f} USD</b>\n"
             f"▎⚖️ المخاطرة لكل صفقة: <b>{s['risk_pct']:g}%</b>\n"
             f"▎📦 حجم اللوت: <b>{lot_word}</b>\n"
-            f"▎🤖 التنفيذ التلقائي عند وصول إشارة: <b>{'مفعل — تُفتح الصفقة فوراً بحجمك ومخاطرتك' if s['auto_trade'] else 'متوقف'}</b>\n"
+            f"▎🤖 النسخ التلقائي الذكي للإشارات: <b>{'مفعّل 🟢' if s['auto_trade'] else 'متوقف ⚪'}</b>\n"
+            f"▎🛡 إغلاق 50% عند TP1 + نقل الوقف للدخول (BE): <b>{'مفعّل 🟢' if s.get('partial_tp_be', True) else 'متوقف ⚪'}</b>\n"
             f"</blockquote>\n"
-            "<i>عند تفعيل التنفيذ التلقائي: تُحسب الصفقة من رصيدك ومخاطرتك، يصلك تنبيه عند نصف الهدف الأول "
-            "ويُغلق 50% من الصفقة تلقائياً لتأمين الربح ويُنقل الوقف لنقطة الدخول، وتُحسب النتائج داخل تيليجرام.</i>")
+            "<i>عند التفعيل: أي إشارة جديدة تُنسخ تلقائياً على حسابك التجريبي بحجم مخاطرتك، وعند تحقيق الهدف الأول "
+            "يُغلق 50% تلقائياً وتُحجز الأرباح ويُؤمَّن الباقي على نقطة الدخول (BE).</i>")
         await render(q, body, kb.user_nav([
             [kb.btn("💰 تعديل الرصيد", "u:demobal"), kb.btn("⚖️ المخاطرة", "u:demorisk")],
-            [kb.btn("📦 اللوت", "u:demolot"), kb.btn(f"🤖 التنفيذ التلقائي: {'إيقاف' if s['auto_trade'] else 'تفعيل'}", "u:demoauto")],
+            [kb.btn("📦 اللوت", "u:demolot"), kb.btn(f"🤖 النسخ التلقائي: {'إيقاف' if s['auto_trade'] else 'تفعيل'}", "u:demoauto")],
+            [kb.btn(f"🛡 تأمين 50% TP1 + BE: {'إيقاف' if s.get('partial_tp_be', True) else 'تفعيل'}", "u:demopartialbe", style="primary")],
             [kb.btn("↩️ التجريبي", "u:demo")],
         ]), bot)
+
+    elif action == "demopartialbe":
+        from fysb.engines import demo as demo_engine
+        s = await afn.run(demo_engine.demo_settings, uid)
+        nxt = not s.get("partial_tp_be", True)
+        await afn.run(demo_engine.set_partial_tp_be, uid, nxt)
+        await render(
+            q,
+            f"🛡 <b>تأمين 50% عند TP1 + نقل الوقف للدخول (BE) أصبح الآن: {'مفعّل 🟢' if nxt else 'متوقف ⚪'}</b>",
+            kb.user_nav([[kb.btn("⚙️ إعدادات التجريبي", "u:demoset"), kb.btn("🧪 التجريبي", "u:demo")]]),
+            bot,
+        )
 
     elif action == "demobal":
         context.user_data["awaiting_demo_bal_user"] = True

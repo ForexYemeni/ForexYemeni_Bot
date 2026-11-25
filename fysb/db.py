@@ -483,6 +483,27 @@ CREATE TABLE IF NOT EXISTS exchange_orders(
   signal_id INTEGER DEFAULT 0,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS promo_codes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  discount_pct INTEGER NOT NULL DEFAULT 10,
+  max_uses INTEGER NOT NULL DEFAULT 100,
+  used_count INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS promo_redemptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  payment_id INTEGER NOT NULL DEFAULT 0,
+  plan_code TEXT NOT NULL DEFAULT '',
+  discount_pct INTEGER NOT NULL DEFAULT 0,
+  saved_amount REAL NOT NULL DEFAULT 0,
+  redeemed_at TEXT NOT NULL
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -522,6 +543,8 @@ ADD_COLUMNS = {
         "txid": "TEXT DEFAULT ''",
         "chain": "TEXT DEFAULT ''",
         "confirmed_at": "TEXT DEFAULT ''",
+        "promo_code": "TEXT DEFAULT ''",
+        "discount_pct": "INTEGER DEFAULT 0",
     },
     "tickets": {"type": "TEXT DEFAULT 'general'", "updated_at": "TEXT DEFAULT ''"},
     "market_catalog": {
@@ -536,6 +559,7 @@ ADD_COLUMNS = {
         "lot_mode": "TEXT DEFAULT 'auto'",
         "fixed_lot": "REAL DEFAULT 0.01",
         "auto_trade": "INTEGER DEFAULT 0",
+        "partial_tp_be": "INTEGER DEFAULT 1",
     },
     "demo_positions": {
         "signal_id": "INTEGER DEFAULT 0",

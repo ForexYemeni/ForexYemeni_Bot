@@ -45,7 +45,13 @@ ALLOWED_ADMIN_TOGGLES = (
     "charts_enabled",
     "academy_enabled",
     "crypto_api_enabled",
+    "auto_digest_enabled",
+    "stars_enabled",
 )
+
+
+def _png_resp(png: bytes) -> tuple[int, str, bytes]:
+    return 200, "image/png", png
 
 
 def _json_resp(status: int, payload: dict) -> tuple[int, str, bytes]:
@@ -153,6 +159,9 @@ def dispatch_request(
                     r["deliveries"] = deliv_cnt.get(sid_i, 0)
                     recent_signals.append(r)
                 toggles = {k: (db.get_setting(k, "0") == "1") for k in ALLOWED_ADMIN_TOGGLES}
+                from fysb.services import digest as _digest, promos as _promos
+                with db.conn() as c:
+                    plans_list = [dict(r) for r in c.execute("SELECT code, title, price, duration_days FROM plans WHERE enabled=1 ORDER BY price ASC").fetchall()]
                 return _json_resp(200, {
                     "ok": True,
                     "version": config.VERSION,
@@ -172,6 +181,261 @@ def dispatch_request(
                     "news_events": news_guard.upcoming_high_impact(48),
                     "news_feed_error": news_guard.last_feed_error(),
                     "partners_count": len(partners.list_partners()),
+                    "promos": _promos.list_promos(False),
+                    "stars_per_usd": _promos.stars_per_usd(),
+                    "plans": plans_list,
+                    "digest_7d": _digest.build_digest_data(7),
+                })
+
+            if m == "GET" and path == "/api/admin/users":
+                q_str = (qs.get("q") or "").strip()
+                plan_f = (qs.get("plan") or "").strip().upper()
+                lim = max(1, min(100, int(qs.get("limit") or 40)))
+                day_start = db.day_start_utc()
+                with db.conn() as c:
+                    sql = """
+                        SELECT u.user_id, u.username, u.full_name, u.is_blocked, u.notifications,
+                               u.joined_at, u.last_seen,
+                               COALESCE(s.plan_code, 'FREE') AS plan_code,
+                               COALESCE(s.ends_at, '') AS plan_expires,
+                               COALESCE(da.auto_trade, 0) AS demo_auto_copy,
+                               COALESCE(da.balance, 10000) AS demo_balance
+                        FROM users u
+                        LEFT JOIN subscriptions s ON s.user_id = u.user_id AND s.status = 'ACTIVE'
+                        LEFT JOIN demo_accounts da ON da.user_id = u.user_id
+                        WHERE u.user_id != ?
+                    """
+                    args: list = [int(config.ADMIN_ID or 0)]
+                    if q_str:
+                        q_clean = q_str.lstrip("@")
+                        like = f"%{q_clean}%"
+                        sql += " AND (CAST(u.user_id AS TEXT) LIKE ? OR LOWER(COALESCE(u.username,'')) LIKE LOWER(?) OR LOWER(COALESCE(u.full_name,'')) LIKE LOWER(?))"
+                        args.extend([like, like, like])
+                    if plan_f and plan_f != "ALL":
+                        sql += " AND COALESCE(s.plan_code, 'FREE') = ?"
+                        args.append(plan_f)
+                    sql += " ORDER BY u.joined_at DESC LIMIT ?"
+                    args.append(lim)
+                    rows = [dict(r) for r in c.execute(sql, tuple(args)).fetchall()]
+                    uids = [int(r["user_id"]) for r in rows]
+                    used_map: dict[int, int] = {}
+                    paid_map: dict[int, float] = {}
+                    if uids:
+                        ph = ",".join("?" * len(uids))
+                        for rr in c.execute(
+                            f"SELECT user_id, COUNT(*) n FROM signal_deliveries WHERE user_id IN ({ph}) AND delivered_at>=? GROUP BY user_id",
+                            tuple(uids) + (day_start,),
+                        ).fetchall():
+                            used_map[int(rr["user_id"])] = int(rr["n"])
+                        for rr in c.execute(
+                            f"SELECT user_id, COALESCE(SUM(amount),0) s FROM payments WHERE user_id IN ({ph}) AND status='APPROVED' GROUP BY user_id",
+                            tuple(uids),
+                        ).fetchall():
+                            paid_map[int(rr["user_id"])] = round(float(rr["s"] or 0.0), 2)
+                for r in rows:
+                    u_i = int(r["user_id"])
+                    r["used_today"] = used_map.get(u_i, 0)
+                    r["total_paid_usd"] = paid_map.get(u_i, 0.0)
+                    r["auto_signals"] = bool(r.get("notifications"))
+                    r["demo_auto_copy"] = bool(r.get("demo_auto_copy"))
+                    r["is_blocked"] = bool(r.get("is_blocked"))
+                return _json_resp(200, {"ok": True, "users": rows, "count": len(rows)})
+
+            if m == "POST" and path == "/api/admin/user-action":
+                target_uid = int(payload.get("user_id") or 0)
+                op = str(payload.get("op") or "").lower()
+                if target_uid <= 0:
+                    return _json_resp(400, {"ok": False, "error": "user_id required"})
+                if op == "set_plan":
+                    plan_code = str(payload.get("plan_code") or "VIP").strip().upper()
+                    days = max(1, min(3650, int(payload.get("days") or 30)))
+                    res = subscriptions.grant_subscription(
+                        target_uid, plan_code, source="ADMIN_WEBAPP", actor=uid, override_days=days
+                    )
+                    audit_log.log(uid, f"webapp_user_plan:{target_uid}:{plan_code}:{days}d")
+                    return _json_resp(200, {"ok": True, "user_id": target_uid, "plan_code": plan_code, "days": days, "result": res})
+                if op in ("ban", "unban"):
+                    blk = 1 if op == "ban" else 0
+                    with db.tx() as c:
+                        c.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (blk, target_uid))
+                    audit_log.log(uid, f"webapp_user_{op}:{target_uid}")
+                    return _json_resp(200, {"ok": True, "user_id": target_uid, "is_blocked": bool(blk)})
+                if op == "reset_quota":
+                    day_start = db.day_start_utc()
+                    with db.tx() as c:
+                        c.execute("DELETE FROM signal_deliveries WHERE user_id=? AND delivered_at>=?", (target_uid, day_start))
+                        c.execute("DELETE FROM analyses WHERE user_id=? AND created_at>=?", (target_uid, day_start))
+                    audit_log.log(uid, f"webapp_user_reset_quota:{target_uid}")
+                    return _json_resp(200, {"ok": True, "user_id": target_uid, "reset": True})
+                if op == "dm":
+                    msg_txt = str(payload.get("message") or "").strip()
+                    if not msg_txt:
+                        return _json_resp(400, {"ok": False, "error": "message required"})
+                    bot_obj = _BOT_RUNTIME.get("bot")
+                    loop_obj = _BOT_RUNTIME.get("loop")
+                    dispatched = False
+                    if bot_obj is not None and loop_obj is not None and loop_obj.is_running():
+                        from fysb.theme import esc
+                        asyncio.run_coroutine_threadsafe(
+                            bot_obj.send_message(
+                                chat_id=target_uid,
+                                text=f"👑 <b>رسالة مباشرة من إدارة {esc(config.BRAND)}</b>\n━━━━━━━━━━━━━━━━━━━━━\n{esc(msg_txt)}",
+                                parse_mode="HTML",
+                            ),
+                            loop_obj,
+                        )
+                        dispatched = True
+                    audit_log.log(uid, f"webapp_user_dm:{target_uid}:sent={int(dispatched)}")
+                    return _json_resp(200, {"ok": True, "user_id": target_uid, "dispatched": dispatched})
+                return _json_resp(400, {"ok": False, "error": "Unsupported user action"})
+
+            if m == "GET" and path == "/api/admin/promos":
+                from fysb.services import promos as _promos
+                return _json_resp(200, {"ok": True, "promos": _promos.list_promos(False), "stars_per_usd": _promos.stars_per_usd()})
+
+            if m == "POST" and path == "/api/admin/promo":
+                from fysb.services import promos as _promos
+                op = str(payload.get("op") or "create").lower()
+                if op == "create":
+                    res = _promos.create_promo(
+                        str(payload.get("code") or ""),
+                        int(payload.get("discount_pct") or 15),
+                        max_uses=int(payload.get("max_uses") or 100),
+                        expires_days=int(payload.get("expires_days") or 30),
+                        created_by=uid,
+                    )
+                    if res.get("ok"):
+                        audit_log.log(uid, f"webapp_promo_create:{res['code']}:{res['discount_pct']}%")
+                    return _json_resp(200 if res.get("ok") else 400, res)
+                if op == "toggle":
+                    ok_t = _promos.toggle_promo(str(payload.get("code") or ""))
+                    return _json_resp(200 if ok_t else 404, {"ok": ok_t})
+                if op == "delete":
+                    ok_d = _promos.delete_promo(str(payload.get("code") or ""))
+                    return _json_resp(200 if ok_d else 404, {"ok": ok_d})
+                return _json_resp(400, {"ok": False, "error": "Unsupported promo op"})
+
+            if m == "GET" and path == "/api/admin/digest-card":
+                from fysb.services import digest as _digest
+                days = max(1, min(90, int(qs.get("days") or 7)))
+                _, _, png = _digest.build_digest_bundle(days=days)
+                if not png:
+                    return _json_resp(503, {"ok": False, "error": "Pillow unavailable"})
+                return _png_resp(png)
+
+            if m == "POST" and path == "/api/admin/digest":
+                from fysb.services import digest as _digest
+                days = max(1, min(90, int(payload.get("days") or 7)))
+                include_ch = bool(payload.get("include_channels", True))
+                d_stats = _digest.build_digest_data(days=days)
+                bot_obj = _BOT_RUNTIME.get("bot")
+                loop_obj = _BOT_RUNTIME.get("loop")
+                dispatched = False
+                if bot_obj is not None and loop_obj is not None and loop_obj.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        _digest.publish_digest(bot_obj, days=days, include_channels=include_ch, notify_admin=True),
+                        loop_obj,
+                    )
+                    dispatched = True
+                audit_log.log(uid, f"webapp_digest:{days}d:dispatched={int(dispatched)}")
+                return _json_resp(200, {"ok": True, "days": days, "dispatched": dispatched, "stats": d_stats})
+
+            if m == "GET" and path == "/api/admin/quote":
+                sym = (qs.get("symbol") or "XAUUSD").strip().upper()
+                with db.conn() as c:
+                    mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
+                psym = mrow["provider_symbol"] if mrow else sym
+                px = market_data.cached_price(sym, max_age_seconds=60.0)
+                if px <= 0:
+                    try:
+                        q_px = market_data.fetch_price(psym, config.market_api_key())
+                        px = float((q_px or {}).get("price") or 0.0)
+                    except Exception:
+                        px = 0.0
+                if px <= 0:
+                    return _json_resp(503, {"ok": False, "error": "السعر اللحظي غير متاح الآن"})
+                step = round(px * 0.0025, 5 if px < 10 else 2)
+                return _json_resp(200, {
+                    "ok": True,
+                    "symbol": sym,
+                    "price": px,
+                    "suggested_buy": {
+                        "entry": px,
+                        "sl": round(px - step, 5 if px < 10 else 2),
+                        "tp1": round(px + step * 1.2, 5 if px < 10 else 2),
+                        "tp2": round(px + step * 2.2, 5 if px < 10 else 2),
+                        "tp3": round(px + step * 3.5, 5 if px < 10 else 2),
+                    },
+                    "suggested_sell": {
+                        "entry": px,
+                        "sl": round(px + step, 5 if px < 10 else 2),
+                        "tp1": round(px - step * 1.2, 5 if px < 10 else 2),
+                        "tp2": round(px - step * 2.2, 5 if px < 10 else 2),
+                        "tp3": round(px - step * 3.5, 5 if px < 10 else 2),
+                    },
+                })
+
+            if m == "POST" and path == "/api/admin/publish-signal":
+                from fysb.engines import demo as demo_engine
+                from fysb.engines.tracker import seq_of
+                sym = str(payload.get("symbol") or "").strip().upper()
+                direction = str(payload.get("direction") or "BUY").strip().upper()
+                if direction not in ("BUY", "SELL"):
+                    return _json_resp(400, {"ok": False, "error": "direction must be BUY or SELL"})
+                try:
+                    entry = float(payload.get("entry") or 0)
+                    sl = float(payload.get("sl") or 0)
+                    tp1 = float(payload.get("tp1") or 0)
+                    tp2 = float(payload.get("tp2") or 0)
+                    tp3 = float(payload.get("tp3") or 0)
+                except (TypeError, ValueError):
+                    return _json_resp(400, {"ok": False, "error": "أسعار غير صالحة"})
+                if not sym or entry <= 0 or sl <= 0 or tp1 <= 0:
+                    return _json_resp(400, {"ok": False, "error": "الرمز وسعر الدخول والوقف والهدف الأول مطلوبة"})
+                if direction == "BUY" and (sl >= entry or tp1 <= entry):
+                    return _json_resp(400, {"ok": False, "error": "في الشراء يجب أن يكون الوقف أسفل الدخول والهدف أعلاه"})
+                if direction == "SELL" and (sl <= entry or tp1 >= entry):
+                    return _json_resp(400, {"ok": False, "error": "في البيع يجب أن يكون الوقف أعلى الدخول والهدف أسفله"})
+                tf = str(payload.get("timeframe") or "M15").strip().upper()
+                strat = str(payload.get("strategy") or "MANUAL").strip().upper()
+                reason = str(payload.get("reason") or "إشارة احترافية من استوديو الإدارة").strip()[:300]
+                score = max(50, min(100, int(payload.get("score") or 90)))
+                risk_dist = abs(entry - sl)
+                reward_dist = abs((tp3 or tp2 or tp1) - entry)
+                rr = round(reward_dist / max(1e-9, risk_dist), 2)
+                targets_str = ",".join(f"{x:g}" for x in (tp1, tp2, tp3) if x > 0)
+                now_iso = config.now()
+                with db.tx() as c:
+                    cur = c.execute(
+                        """INSERT INTO signals(
+                            symbol, direction, entry, stop, tp1, tp2, tp3, targets, rr, score,
+                            strategy, timeframe, reason, source, status, created_by, created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'ADMIN_WEBAPP','ACTIVE',?,?)""",
+                        (sym, direction, entry, sl, tp1, tp2, tp3, targets_str, rr, score,
+                         strat, tf, reason, uid, now_iso),
+                    )
+                    sid = int(cur.lastrowid)
+                    sig_row = dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
+                copied = demo_engine.auto_copy_signal_for_subscribers(sig_row, config.market_api_key())
+                bot_obj = _BOT_RUNTIME.get("bot")
+                loop_obj = _BOT_RUNTIME.get("loop")
+                broadcasted = False
+                if bool(payload.get("broadcast", True)) and bot_obj is not None and loop_obj is not None and loop_obj.is_running():
+                    from fysb.engines.signal_engine import emit_to_users
+                    async def _send_fn(t_uid: int, txt: str, markup=None):
+                        return await bot_obj.send_message(chat_id=t_uid, text=txt, reply_markup=markup, parse_mode="HTML")
+                    asyncio.run_coroutine_threadsafe(
+                        emit_to_users(sig_row, _send_fn, bot=bot_obj, include_channels=True),
+                        loop_obj,
+                    )
+                    broadcasted = True
+                audit_log.log(uid, f"webapp_manual_signal:{sid}:{sym}:{direction}")
+                sig_row["seq"] = seq_of(sid)
+                return _json_resp(200, {
+                    "ok": True,
+                    "signal": sig_row,
+                    "auto_copied_count": len(copied),
+                    "broadcasted": broadcasted,
                 })
 
             if m == "POST" and path == "/api/admin/signal":
@@ -435,6 +699,118 @@ def dispatch_request(
                 c.execute("UPDATE demo_positions SET sl=? WHERE id=?", (float(pos["entry"]), pid))
             ov = demo_engine.account_overview(uid, config.market_api_key())
             return _json_resp(200, {"ok": True, "position_id": pid, "sl": float(pos["entry"]), "overview": ov})
+
+        if m == "POST" and path == "/api/demo/auto-copy":
+            from fysb.engines import demo as demo_engine
+            cur = demo_engine.demo_settings(uid)
+            if "auto_trade" in payload:
+                demo_engine.set_auto_trade(uid, bool(payload.get("auto_trade")))
+            elif "partial_tp_be" not in payload:
+                demo_engine.set_auto_trade(uid, not cur["auto_trade"])
+            if "partial_tp_be" in payload:
+                demo_engine.set_partial_tp_be(uid, bool(payload.get("partial_tp_be")))
+            ov = demo_engine.account_overview(uid, config.market_api_key())
+            return _json_resp(200, {"ok": True, "settings": ov["settings"], "overview": ov})
+
+        if m == "POST" and path == "/api/signal-now":
+            from fysb.engines import signal_engine
+            from fysb.engines.tracker import seq_of
+            sym = str(payload.get("symbol") or "XAUUSD").strip().upper()
+            tf = str(payload.get("timeframe") or "M15").strip().upper()
+            strat = str(payload.get("strategy") or "AUTO").strip().upper()
+            plan = dict(subscriptions.plan_for(uid))
+            max_day = int(plan.get("max_signals_per_day") or 3)
+            day_start = db.day_start_utc()
+            with db.conn() as c:
+                used = c.execute(
+                    "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
+                    (uid, day_start),
+                ).fetchone()["n"]
+                mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
+            if not principal["is_admin"] and max_day > 0 and used >= max_day:
+                return _json_resp(403, {"ok": False, "error": f"استهلكت حدك اليومي ({used}/{max_day}) — رقِّ باقتك لفتح إشارات غير محدودة"})
+            # 1) Try live engine scan for this symbol first
+            gen_sig = None
+            try:
+                res_gen = signal_engine.generate_signal(
+                    sym, timeframe=tf, force=False, api_key=config.market_api_key(),
+                )
+                if isinstance(res_gen, dict) and res_gen.get("id"):
+                    gen_sig = res_gen
+            except Exception as exc:
+                log.debug("webapp signal-now generate_signal fallback: %s", exc)
+            # 2) Fallback: latest open/active real signal for this symbol (or any market) in DB
+            if not gen_sig:
+                with db.conn() as c:
+                    cand = c.execute(
+                        "SELECT * FROM signals WHERE symbol=? AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id DESC LIMIT 1",
+                        (sym,),
+                    ).fetchone()
+                    if not cand:
+                        cand = c.execute(
+                            "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') ORDER BY id DESC LIMIT 1"
+                        ).fetchone()
+                    if cand:
+                        gen_sig = dict(cand)
+            if not gen_sig:
+                return _json_resp(200, {
+                    "ok": False,
+                    "error": f"لا توجد فرصة مطابقة لشروط الجودة الصارمة على {sym} ({tf}) في هذه اللحظة — جرّب رمزاً أو فريم آخر.",
+                })
+            sid = int(gen_sig["id"])
+            with db.tx() as c:
+                exists = c.execute("SELECT 1 FROM signal_deliveries WHERE user_id=? AND signal_id=?", (uid, sid)).fetchone()
+                if not exists:
+                    c.execute(
+                        "INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)",
+                        (sid, uid, config.now()),
+                    )
+            gen_sig["seq"] = seq_of(sid)
+            return _json_resp(200, {"ok": True, "signal": gen_sig})
+
+        if m == "GET" and path == "/api/share-card/signal":
+            from fysb.ui import charts as _charts, share_cards as _sc
+            sid = int(qs.get("id") or 0)
+            with db.conn() as c:
+                sig = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+                if not sig:
+                    return _json_resp(404, {"ok": False, "error": "Signal not found"})
+                sig_d = dict(sig)
+                mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (sig_d["symbol"],)).fetchone()
+            metrics = _charts.live_signal_metrics(sig_d, row=dict(mrow) if mrow else None)
+            bn = (config.BRAND or "ForexYemeniBot").lstrip("@")
+            png = _sc.render_pnl_share_card({
+                "kind": "signal",
+                "symbol": sig_d["symbol"],
+                "direction": sig_d["direction"],
+                "strategy": sig_d.get("strategy") or "ROYAL",
+                "timeframe": sig_d.get("timeframe") or "M15",
+                "entry": float(sig_d.get("entry") or 0),
+                "exit_price": float(metrics.get("live_px") or sig_d.get("tp1") or sig_d.get("entry") or 0),
+                "tp3": float(sig_d.get("tp3") or sig_d.get("tp1") or 0),
+                "tp_label": str(sig_d.get("status") or "ACTIVE").upper(),
+                "pips": float(metrics.get("pips") or sig_d.get("pips_result") or 0),
+                "rr": float(sig_d.get("rr") or 0),
+                "score": int(sig_d.get("score") or 0),
+                "ref_link": f"t.me/{bn}?start=ref_{uid}",
+                "ref_label": f"VERIFIED BY {config.BRAND} • REF #{uid}",
+                "timestamp": str(sig_d.get("closed_at") or sig_d.get("created_at") or config.now()),
+            })
+            if not png:
+                return _json_resp(503, {"ok": False, "error": "Pillow unavailable"})
+            return _png_resp(png)
+
+        if m == "GET" and path == "/api/share-card/demo":
+            from fysb.engines import demo as demo_engine
+            from fysb.ui import share_cards as _sc
+            pid = int(qs.get("id") or 0)
+            p_data = demo_engine.share_card_payload_for_position(uid, pid, config.BRAND)
+            if not p_data:
+                return _json_resp(404, {"ok": False, "error": "Demo position not found"})
+            png = _sc.render_pnl_share_card(p_data)
+            if not png:
+                return _json_resp(503, {"ok": False, "error": "Pillow unavailable"})
+            return _png_resp(png)
 
         if m == "POST" and path == "/api/partner/payout":
             wallet = str(payload.get("wallet_address") or "").strip()

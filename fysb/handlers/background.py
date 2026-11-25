@@ -719,6 +719,59 @@ async def scheduled_charts_loop(app):
         await asyncio.sleep(30)
 
 
+async def webapp_tunnel_loop(app):
+    """v7.2.0: Zero-config Auto-HTTPS Cloudflare Tunnel for Bot-Hosting / VPS.
+    Automatically brings Telegram Mini App & Admin Web Panel online without any
+    website, domain, or manual terminal commands whenever WEBAPP_URL is unset."""
+    from fysb.webapp import server as _wsrv
+    from fysb.webapp import tunnel as _tun
+    from fysb.ui import keyboards as _kb
+
+    notified_url = ""
+    while True:
+        try:
+            auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+            should_run = bool(
+                config.WEBAPP_ENABLED
+                and config.WEBAPP_AUTO_TUNNEL
+                and auto_db
+                and not config.WEBAPP_URL_STATIC
+            )
+            if should_run:
+                # Ensure embedded HTTP server is running before opening tunnel
+                if getattr(post_init, "_webapp_srv", None) is None:
+                    post_init._webapp_srv = await _wsrv.start_webapp_server()
+                if getattr(post_init, "_webapp_srv", None) is not None and not _tun.is_tunnel_alive():
+                    url = await _tun.start_tunnel(port=config.WEBAPP_PORT)
+                    if url and url != notified_url and config.ADMIN_ID:
+                        notified_url = url
+                        try:
+                            await app.bot.send_message(
+                                config.ADMIN_ID,
+                                "🌐 <b><u>التطبيق المصغّر الملكي يعمل الآن تلقائياً بدون أي موقع!</u></b>\n"
+                                "<blockquote>"
+                                f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
+                                "▎⚡ تم تشغيل النفق التلقائي المجاني بنجاح على Bot-Hosting.\n"
+                                "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
+                                "</blockquote>",
+                                reply_markup=_kb.InlineKeyboardMarkup([
+                                    [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
+                                    [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
+                                ]),
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
+            elif _tun.is_tunnel_alive():
+                await _tun.stop_tunnel()
+                notified_url = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("webapp_tunnel_loop failed")
+        await asyncio.sleep(20)
+
+
 async def post_init(app):
     global _TASKS
     # v6.8.2: pre-warm the PostgreSQL pool in a worker thread so the FIRST
@@ -740,18 +793,25 @@ async def post_init(app):
         asyncio.create_task(crypto_ws_loop(app), name="fysb-crypto-ws"),
         asyncio.create_task(scheduled_charts_loop(app), name="fysb-sched-charts"),
     ]
-    post_init._tasks_ref = _TASKS
-    # v7.0.0: start lightweight embedded Mini App & Admin Web Panel HTTP server
-    # only when WEBAPP_URL is configured (or WEBAPP_ENABLED with valid port),
-    # never failing bot boot if port is unavailable.
+    # v7.0.0 / v7.2.0: start embedded Mini App & Admin Web Panel HTTP server
+    # whenever WEBAPP_ENABLED=1 and either a static WEBAPP_URL or Auto-HTTPS
+    # Tunnel (Bot-Hosting) is active.
     post_init._webapp_srv = None
-    if config.WEBAPP_ENABLED and config.WEBAPP_URL:
+    auto_tun_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+    want_webapp = bool(
+        config.WEBAPP_ENABLED
+        and (config.WEBAPP_URL or (config.WEBAPP_AUTO_TUNNEL and auto_tun_db))
+    )
+    if want_webapp:
         try:
             from fysb.webapp.server import start_webapp_server
             post_init._webapp_srv = await start_webapp_server()
         except Exception:
             log.warning("webapp server startup skipped")
-    log.info("background loops started (7)")
+    if config.WEBAPP_ENABLED and config.WEBAPP_AUTO_TUNNEL and not config.WEBAPP_URL_STATIC:
+        _TASKS.append(asyncio.create_task(webapp_tunnel_loop(app), name="fysb-webapp-tunnel"))
+    post_init._tasks_ref = _TASKS
+    log.info("background loops started (%d)", len(_TASKS))
 
 
 def _warm_pg() -> None:
@@ -771,6 +831,11 @@ def _warm_pg() -> None:
 
 
 async def post_shutdown(app):
+    try:
+        from fysb.webapp import tunnel as _tun
+        await _tun.stop_tunnel()
+    except Exception:
+        pass
     srv = getattr(post_init, "_webapp_srv", None)
     if srv is not None:
         try:

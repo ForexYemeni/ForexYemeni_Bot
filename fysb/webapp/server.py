@@ -306,16 +306,35 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 
 
 async def start_webapp_server(host: str | None = None, port: int | None = None):
-    """Start embedded lightweight Mini App + Admin Web Panel HTTP server (graceful on error)."""
+    """Start embedded lightweight Mini App + Admin Web Panel HTTP server.
+    If the preferred port is occupied (common on shared Bot-Hosting nodes),
+    automatically binds an OS-assigned free local port and updates config.WEBAPP_PORT."""
     h = host or config.WEBAPP_HOST
     p = int(port if port is not None else config.WEBAPP_PORT)
     if p < 0:
         return None
     try:
         srv = await asyncio.start_server(_handle_client, h, p)
-        log.info("Royal Mini App & Admin Web Panel listening on http://%s:%s (WEBAPP_URL=%s)",
-                 h, p, config.WEBAPP_URL or "<not set>")
-        return srv
+    except OSError as exc:
+        if port is not None and port != 0:
+            log.warning("WebApp server port %s busy (%s) — falling back to auto free port", p, exc)
+        try:
+            srv = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
+        except Exception as exc2:
+            log.warning("WebApp server skipped (%s) — bot continues normally", exc2)
+            return None
     except Exception as exc:
         log.warning("WebApp server skipped on %s:%s (%s) — bot continues normally", h, p, exc)
         return None
+
+    try:
+        sock = srv.sockets[0] if srv.sockets else None
+        if sock is not None:
+            actual_port = int(sock.getsockname()[1])
+            if actual_port > 0:
+                config.WEBAPP_PORT = actual_port
+    except Exception:
+        pass
+    log.info("Royal Mini App & Admin Web Panel listening on http://%s:%s (WEBAPP_URL=%s)",
+             h, config.WEBAPP_PORT, config.WEBAPP_URL or "<auto-tunnel pending>")
+    return srv

@@ -768,16 +768,26 @@ def _open_running_signals_sync(limit: int = 3) -> list[dict]:
 
 
 async def admin_charts_menu(q, uid, context, bot, notice: str = ""):
+    from fysb.services import chart_channels as _cch
     enabled, sched, to_ch, open_n = await afn.run(_charts_settings_sync)
+    cchs = await afn.run(_cch.list_channels, False)
+    active_cchs = [c for c in cchs if int(c.get("enabled") or 0) == 1]
     sched_txt = "⏹ متوقفة (يدوي فقط)" if sched <= 0 else f"🟢 كل <b>{sched}</b> دقيقة تلقائياً"
     dest_txt = "📺 الأدمن + جميع القنوات المفعّلة" if to_ch else "👑 الأدمن فقط"
+    cch_line = (
+        f"<b>{len(active_cchs)}</b> مفعّلة من أصل <b>{len(cchs)}</b> "
+        f"({', '.join(esc(c['title'] or c['chat_id']) + ': ' + esc(_cch.format_markets_label(c['markets'])) for c in active_cchs[:3])}"
+        + (" …" if len(active_cchs) > 3 else "") + ")"
+        if active_cchs else f"<b>0</b> (اضغط لإضافة قناة تستقبل الشارت فقط حسب السوق)"
+    )
     body = (
         "📊 <b><u>مركز الشارتات الملكية والجدولة التلقائية</u></b>\n"
         "<blockquote>"
         f"▎⚡ توليد الشارتات المحلية (مجاني 100%): <b>{'🟢 مفعّل' if enabled else '⚪ متوقف'}</b>\n"
         f"▎⏱ جدولة تحديث شارتات الصفقات المفتوحة: {sched_txt}\n"
         f"▎📤 وجهة الإرسال المجدول: <b>{dest_txt}</b>\n"
-        f"▎📡 الصفقات المفتوحة الجارية الآن: <b>{open_n}</b>"
+        f"▎📡 الصفقات المفتوحة الجارية الآن: <b>{open_n}</b>\n"
+        f"▎📺 قنوات الشارت فقط (حسب السوق): {cch_line}"
         "</blockquote>"
         + (f"\n\n<i>{notice}</i>" if notice else "")
     )
@@ -787,6 +797,7 @@ async def admin_charts_menu(q, uid, context, bot, notice: str = ""):
             "a:chartstoggle",
             style="danger" if enabled else "success",
         )],
+        [kb.btn(f"📺 قنوات الشارت فقط حسب السوق ({len(active_cchs)}/{len(cchs)})", "a:chartchs", style="success")],
         [
             kb.btn(f"{'✅ ' if sched == 0 else ''}⏹ إيقاف", "a:chartsched:0", style="danger" if sched == 0 else "primary"),
             kb.btn(f"{'✅ ' if sched == 5 else ''}⏱ 5د", "a:chartsched:5", style="success" if sched == 5 else "primary"),
@@ -798,7 +809,7 @@ async def admin_charts_menu(q, uid, context, bot, notice: str = ""):
             kb.btn(f"{'✅ ' if sched == 60 else ''}⏱ 60د", "a:chartsched:60", style="success" if sched == 60 else "primary"),
         ],
         [kb.btn(
-            f"📺 النشر المجدول للقنوات: {'🟢 مفعّل' if to_ch else '⚪ للأدمن فقط'}",
+            f"📺 النشر المجدول للقنوات العامة: {'🟢 مفعّل' if to_ch else '⚪ للأدمن فقط'}",
             "a:chartschedch",
             style="success" if to_ch else "primary",
         )],
@@ -806,6 +817,181 @@ async def admin_charts_menu(q, uid, context, bot, notice: str = ""):
         [kb.btn("↩️ المحرك", "a:engine")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_chart_channels_menu(q, uid, context, bot, notice: str = ""):
+    from fysb.services import chart_channels as _cch
+    cchs = await afn.run(_cch.list_channels, False)
+    lines = []
+    rows_kb = [[kb.btn("➕ إضافة قناة شارت فقط", "a:chartch_add", style="success")]]
+    for ch in cchs:
+        st = "🟢" if int(ch.get("enabled") or 0) == 1 else "⚪"
+        mkts = _cch.format_markets_label(ch.get("markets") or "ALL")
+        title = ch.get("title") or ch.get("chat_id")
+        lines.append(f"▎{st} <b>{esc(title)}</b> (<code>{esc(ch['chat_id'])}</code>) ← <b>{esc(mkts)}</b>")
+        rows_kb.append([
+            kb.btn(f"{st} {title[:18]} · {mkts[:18]}", f"a:chartch:{ch['id']}", style="primary"),
+        ])
+    if not lines:
+        lines.append("▎لا توجد قنوات شارت مخصصة بعد.\n▎اضغط «➕ إضافة قناة شارت فقط» ثم اختر السوق (مثلاً XAUUSD أو BTCUSD أو الكل) ليرسل لها البوت الشارتات فقط تلقائياً!")
+    body = (
+        "📺 <b><u>قنوات الشارتات المخصصة حسب السوق (شارت فقط)</u></b>\n"
+        "<blockquote>"
+        + "\n".join(lines)
+        + "</blockquote>"
+        + (f"\n\n<i>{notice}</i>" if notice else "")
+    )
+    rows_kb.append([kb.btn("↩️ مركز الشارتات", "a:chartsmenu")])
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_chart_channel_add_prompt(q, uid, context, bot):
+    context.user_data["awaiting_chart_channel_add"] = True
+    body = (
+        "➕ <b><u>إضافة قناة شارت فقط (حسب السوق)</u></b>\n"
+        "<blockquote>"
+        "▎1️⃣ أضف البوت كـ <b>مشرف (Admin)</b> في القناة أو المجموعة مع صلاحية إرسال الصور.\n"
+        "▎2️⃣ أرسل الآن معرف القناة هنا (مثال: <code>@MyGoldCharts</code> أو <code>-1001234567890</code>).\n"
+        "▎💡 يمكنك كتابة اسم القناة في سطر ثانٍ اختيارياً.\n"
+        "▎3️⃣ بعدها مباشرة ستختار <b>السوق</b> الذي يرسل له الشارت فقط!"
+        "</blockquote>"
+    )
+    await render(q, body, kb.admin_nav([[kb.btn("↩️ إلغاء", "a:chartchs")]]), bot)
+
+
+async def admin_chart_channel_view(q, uid, context, bot, cid: int, notice: str = ""):
+    from fysb.services import chart_channels as _cch
+    ch = await afn.run(_cch.get_channel, cid)
+    if not ch:
+        await admin_chart_channels_menu(q, uid, context, bot, notice="⚠️ القناة غير موجودة.")
+        return
+    en = int(ch.get("enabled") or 0) == 1
+    s_sig = int(ch.get("send_on_signal") or 0) == 1
+    s_trk = int(ch.get("send_on_tracking") or 0) == 1
+    s_sch = int(ch.get("send_on_schedule") or 0) == 1
+    mkts = _cch.format_markets_label(ch.get("markets") or "ALL")
+    body = (
+        f"📺 <b><u>إدارة قناة الشارت — {esc(ch.get('title') or ch['chat_id'])}</u></b>\n"
+        "<blockquote>"
+        f"▎🆔 المعرّف: <code>{esc(ch['chat_id'])}</code>\n"
+        f"▎⚡ الحالة: <b>{'🟢 مفعّلة' if en else '⚪ متوقفة'}</b>\n"
+        f"▎🌐 الأسواق المختارة (شارت فقط): <b>{esc(mkts)}</b>\n"
+        f"▎📡 عند صدور إشارة جديدة: <b>{'🟢 نعم' if s_sig else '⚪ لا'}</b>\n"
+        f"▎🎯 عند تحديثات التتبع (TP/SL/دخول): <b>{'🟢 نعم' if s_trk else '⚪ لا'}</b>\n"
+        f"▎⏱ مع الجدولة التلقائية الدورية: <b>{'🟢 نعم' if s_sch else '⚪ لا'}</b>"
+        "</blockquote>"
+        + (f"\n\n<i>{notice}</i>" if notice else "")
+    )
+    rows_kb = [
+        [kb.btn("🌐 اختيار الأسواق لهذه القناة", f"a:chartch_mkts:{cid}", style="success")],
+        [
+            kb.btn(f"{'🟢' if en else '⚪'} الحالة", f"a:chartch_tog:{cid}", style="success" if en else "danger"),
+            kb.btn("📤 إرسال شارت الآن", f"a:chartch_test:{cid}", style="primary"),
+        ],
+        [
+            kb.btn(f"{'🟢' if s_sig else '⚪'} عند الإشارة", f"a:chartch_flg:{cid}:send_on_signal"),
+            kb.btn(f"{'🟢' if s_trk else '⚪'} عند التتبع", f"a:chartch_flg:{cid}:send_on_tracking"),
+            kb.btn(f"{'🟢' if s_sch else '⚪'} المجدول", f"a:chartch_flg:{cid}:send_on_schedule"),
+        ],
+        [kb.btn("🗑 حذف القناة", f"a:chartch_del:{cid}", style="danger")],
+        [kb.btn("↩️ قنوات الشارتات", "a:chartchs")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_chart_channel_toggle(q, uid, context, bot, cid: int):
+    from fysb.services import chart_channels as _cch
+    en = await afn.run(_cch.toggle_channel, cid)
+    await afn.run(audit_log.log, uid, f"chart_channel_toggle:{cid}:{int(en)}")
+    await admin_chart_channel_view(q, uid, context, bot, cid, notice="✅ تم تحديث حالة القناة.")
+
+
+async def admin_chart_channel_flag_toggle(q, uid, context, bot, cid: int, field: str):
+    from fysb.services import chart_channels as _cch
+    await afn.run(_cch.toggle_flag, cid, field)
+    await admin_chart_channel_view(q, uid, context, bot, cid, notice="✅ تم تحديث خيار الإرسال.")
+
+
+async def admin_chart_channel_markets(q, uid, context, bot, cid: int, notice: str = ""):
+    from fysb.services import chart_channels as _cch
+    ch = await afn.run(_cch.get_channel, cid)
+    if not ch:
+        await admin_chart_channels_menu(q, uid, context, bot, notice="⚠️ القناة غير موجودة.")
+        return
+    selected = _cch.parse_markets_csv(ch.get("markets") or "ALL")
+    is_all = selected == ["ALL"]
+    all_mkts = await afn.run(_cch.available_markets)
+    body = (
+        f"🌐 <b><u>اختر الأسواق لقناة الشارت — {esc(ch.get('title') or ch['chat_id'])}</u></b>\n"
+        "<blockquote>"
+        f"▎✅ المختار حالياً: <b>{esc(_cch.format_markets_label(ch.get('markets') or 'ALL'))}</b>\n"
+        "▎💡 اضغط على أي سوق لتفعيله أو إلغائه — ستستقبل هذه القناة <b>الشارت فقط</b> للأسواق المختارة هنا."
+        "</blockquote>"
+        + (f"\n\n<i>{notice}</i>" if notice else "")
+    )
+    rows_kb = [[
+        kb.btn(f"{'✅ ' if is_all else ''}🌐 جميع الأسواق (ALL)", f"a:chartch_mkt:{cid}:ALL", style="success" if is_all else "primary")
+    ]]
+    row_buf = []
+    for sym in all_mkts:
+        on = (not is_all) and (sym in selected)
+        row_buf.append(kb.btn(f"{'✅ ' if on else ''}{sym}", f"a:chartch_mkt:{cid}:{sym}", style="success" if on else "primary"))
+        if len(row_buf) == 3:
+            rows_kb.append(row_buf)
+            row_buf = []
+    if row_buf:
+        rows_kb.append(row_buf)
+    rows_kb.append([kb.btn("✔️ حفظ والعودة للقناة", f"a:chartch:{cid}", style="success")])
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_chart_channel_market_toggle(q, uid, context, bot, cid: int, sym: str):
+    from fysb.services import chart_channels as _cch
+    mkts = await afn.run(_cch.toggle_market, cid, sym)
+    await afn.run(audit_log.log, uid, f"chart_channel_markets:{cid}:{mkts}")
+    await admin_chart_channel_markets(q, uid, context, bot, cid, notice=f"✅ الأسواق المحددة الآن: {esc(_cch.format_markets_label(mkts))}")
+
+
+async def admin_chart_channel_test(q, uid, context, bot, cid: int):
+    import io as _io
+    from fysb.handlers.user_pages import build_signal_chart_bundle
+    from fysb.services import chart_channels as _cch
+    ch = await afn.run(_cch.get_channel, cid)
+    if not ch:
+        await admin_chart_channels_menu(q, uid, context, bot, notice="⚠️ القناة غير موجودة.")
+        return
+    sigs = await afn.run(_open_running_signals_sync, 15)
+    matched = [s for s in sigs if _cch.market_matches(ch.get("markets") or "ALL", s.get("symbol") or "")]
+    if not matched:
+        # Fall back to latest signal matching the channel's markets
+        def _latest_matching():
+            with db.conn() as c:
+                rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 30").fetchall()]
+            return [r for r in rows if _cch.market_matches(ch.get("markets") or "ALL", r.get("symbol") or "")]
+        matched = await afn.run(_latest_matching)
+    if not matched:
+        await admin_chart_channel_view(q, uid, context, bot, cid, notice="⚠️ لا توجد إشارة مطابقة لأسواق هذه القناة بعد.")
+        return
+    sig = matched[0]
+    b = await asyncio.to_thread(build_signal_chart_bundle, sig, False)
+    if not b or not b.get("png"):
+        await admin_chart_channel_view(q, uid, context, bot, cid, notice="⚠️ تعذر توليد الشارت حالياً (تحقق من مزود الشموع).")
+        return
+    cap = _cch.build_luxury_signal_chart_caption(sig, b.get("metrics"))
+    try:
+        target = int(ch["chat_id"]) if str(ch["chat_id"]).lstrip("-").isdigit() else ch["chat_id"]
+        await bot.send_photo(chat_id=target, photo=_io.BytesIO(b["png"]), caption=cap, parse_mode="HTML")
+        await afn.run(_cch.touch_last_sent, [cid])
+        await admin_chart_channel_view(q, uid, context, bot, cid, notice=f"✅ تم إرسال شارت {esc(sig['symbol'])} إلى القناة بنجاح!")
+    except Exception as exc:
+        await admin_chart_channel_view(q, uid, context, bot, cid, notice=f"❌ تعذر الإرسال للقناة ({esc(str(exc)[:80])}) — تأكد أن البوت مشرف.")
+
+
+async def admin_chart_channel_delete(q, uid, context, bot, cid: int):
+    from fysb.services import chart_channels as _cch
+    await afn.run(_cch.delete_channel, cid)
+    await afn.run(audit_log.log, uid, f"chart_channel_deleted:{cid}")
+    await admin_chart_channels_menu(q, uid, context, bot, notice="🗑 تم حذف قناة الشارت.")
 
 
 async def admin_charts_toggle(q, uid, context, bot):
@@ -831,15 +1017,16 @@ async def admin_chart_sched_ch_toggle(q, uid, context, bot):
 
 
 async def admin_chart_send_now(q, uid, context, bot):
-    sigs = await afn.run(_open_running_signals_sync, 3)
+    sigs = await afn.run(_open_running_signals_sync, 10)
     if not sigs:
         await admin_charts_menu(q, uid, context, bot, notice="ℹ️ لا توجد صفقات مفتوحة جارية حالياً لإرسال شارتها.")
         return
     from fysb.handlers.user_pages import build_signal_chart_bundle
+    from fysb.services import chart_channels as _cch
     import io as _io
     to_ch = (await afn.run(db.get_setting, "chart_schedule_channels", "0") or "0") == "1"
     chat_ids = await afn.run(_active_channel_chat_ids) if to_ch else []
-    sent_admin, sent_ch = 0, 0
+    sent_admin, sent_ch, sent_cch = 0, 0, 0
     for sig in sigs:
         b = await asyncio.to_thread(build_signal_chart_bundle, sig, sig.get("pips_result", 0) > 0)
         if not b["png"]:
@@ -850,14 +1037,15 @@ async def admin_chart_send_now(q, uid, context, bot):
             f"{b['pips_line']}\n"
             f"▎🛡 متابعة مباشرة من محرك ForexYemeni Royal."
         )
-        try:
-            pub_kb = kb.InlineKeyboardMarkup([[
-                kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
-            ]])
-            await bot.send_photo(chat_id=uid, photo=_io.BytesIO(b["png"]), caption=cap, reply_markup=pub_kb, parse_mode="HTML")
-            sent_admin += 1
-        except Exception:
-            pass
+        if sent_admin < 5:
+            try:
+                pub_kb = kb.InlineKeyboardMarkup([[
+                    kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
+                ]])
+                await bot.send_photo(chat_id=uid, photo=_io.BytesIO(b["png"]), caption=cap, reply_markup=pub_kb, parse_mode="HTML")
+                sent_admin += 1
+            except Exception:
+                pass
         for cid in chat_ids:
             try:
                 target = int(cid) if cid.lstrip("-").isdigit() else cid
@@ -865,10 +1053,15 @@ async def admin_chart_send_now(q, uid, context, bot):
                 sent_ch += 1
             except Exception:
                 pass
-    await admin_charts_menu(
-        q, uid, context, bot,
-        notice=f"✅ تم إرسال {sent_admin} شارت حي لك" + (f" و {sent_ch} شارت للقنوات." if to_ch else "."),
-    )
+        sent_cch += await _cch.deliver_chart_to_matching_channels(
+            bot, sig, b["png"], cap, mode="schedule", skip_private=True
+        )
+    parts = [f"✅ تم إرسال {sent_admin} شارت حي لك"]
+    if sent_cch:
+        parts.append(f"{sent_cch} لقنوات الشارت المخصصة")
+    if to_ch:
+        parts.append(f"{sent_ch} للقنوات العامة")
+    await admin_charts_menu(q, uid, context, bot, notice=" · ".join(parts) + ".")
 
 
 async def admin_signal_chart(q, uid, context, bot, sid: int):

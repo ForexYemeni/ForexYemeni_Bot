@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from fysb import config, db
 from fysb.config import log
 from fysb.engines import market_data, news_guard
-from fysb.services import academy, affiliates, gifts, leaderboard, payments, risk_journal, subscriptions
+from fysb.services import academy, affiliates, chart_channels, gifts, leaderboard, payments, risk_journal, subscriptions
 from fysb.services import audit as audit_log
 from fysb.webapp import auth as wa_auth
 from fysb.webapp import templates
@@ -121,7 +121,35 @@ def dispatch_request(
                     "toggles": toggles,
                     "pending_payments": payments.list_requests("PENDING", 15),
                     "pending_payouts": affiliates.list_payouts("PENDING", 15),
+                    "chart_channels": chart_channels.list_channels(False),
+                    "chart_schedule_minutes": db.get_setting_int("chart_schedule_minutes", 0),
+                    "markets": chart_channels.available_markets(),
                 })
+
+            if m == "POST" and path == "/api/admin/chart-channel":
+                op = str(payload.get("op") or "").lower()
+                if op == "add":
+                    chat_id = str(payload.get("chat_id") or "").strip()
+                    title = str(payload.get("title") or "").strip()
+                    mkts = str(payload.get("markets") or "ALL").strip()
+                    if not chat_id:
+                        return _json_resp(400, {"ok": False, "error": "chat_id required"})
+                    cid = chart_channels.add_channel(chat_id, title, mkts)
+                    audit_log.log(uid, f"webapp_chart_channel_add:{cid}:{chat_id}")
+                    return _json_resp(200, {"ok": True, "id": cid, "channels": chart_channels.list_channels(False)})
+                if op == "toggle":
+                    cid = int(payload.get("id") or 0)
+                    en = chart_channels.toggle_channel(cid)
+                    return _json_resp(200, {"ok": True, "id": cid, "enabled": en})
+                if op == "markets":
+                    cid = int(payload.get("id") or 0)
+                    mkts = chart_channels.set_markets(cid, str(payload.get("markets") or "ALL"))
+                    return _json_resp(200, {"ok": True, "id": cid, "markets": mkts})
+                if op == "delete":
+                    cid = int(payload.get("id") or 0)
+                    ok_del = chart_channels.delete_channel(cid)
+                    return _json_resp(200 if ok_del else 404, {"ok": ok_del, "id": cid})
+                return _json_resp(400, {"ok": False, "error": "Unsupported op"})
 
             if m == "POST" and path == "/api/admin/toggle":
                 key = str(payload.get("key") or "").strip()
@@ -192,6 +220,7 @@ def dispatch_request(
                     k: v for k, v in academy.user_progress(uid).items() if k != "completed_codes"
                 },
                 "affiliate": affiliates.affiliate_stats(uid),
+                "markets": chart_channels.available_markets(),
             })
 
         if m == "GET" and path == "/api/signals":

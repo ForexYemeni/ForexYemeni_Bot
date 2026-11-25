@@ -248,6 +248,15 @@ CREATE TABLE IF NOT EXISTS broadcast_channels(
   strategies TEXT DEFAULT 'ALL', interval_minutes INTEGER DEFAULT 60,
   last_sent TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chart_channels(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL,
+  title TEXT DEFAULT '', markets TEXT DEFAULT 'ALL',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  send_on_signal INTEGER NOT NULL DEFAULT 1,
+  send_on_tracking INTEGER NOT NULL DEFAULT 1,
+  send_on_schedule INTEGER NOT NULL DEFAULT 1,
+  last_sent TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS signal_watchers(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
   symbol TEXT NOT NULL, timeframe TEXT NOT NULL, strategy TEXT NOT NULL,

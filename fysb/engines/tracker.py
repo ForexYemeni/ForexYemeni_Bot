@@ -189,12 +189,36 @@ def check_open_signals(api_key: str) -> dict:
     notifications: list[tuple[int, str]] = []
     edits: list[tuple[int, str, int, str]] = []
     proof_signals: list[dict] = []
+    chart_events: list[dict] = []
     admin_notice = ""
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             "SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') "
             "AND (closed_at IS NULL OR closed_at='') ORDER BY id").fetchall()]
     catalog_map = _load_market_catalog_map() if rows else {}
+
+    def _record_chart_event(s: dict, ev_name: str, pay: dict, lpx: float, res_pips: float, notes_list: list):
+        chart_bars = list((pay or {}).get("values") or [])[-60:]
+        if len(chart_bars) < 5:
+            return
+        targets = [t for t, _ in (notes_list or [])]
+        eff_status = {"TP1_BE": "TP1_HIT", "TP2_BE": "TP2_HIT", "HALFWAY": "RUNNING"}.get(ev_name, ev_name)
+        eff_hit = {"TP1_HIT": 1, "TP1_BE": 1, "TP2_HIT": 2, "TP2_BE": 2, "TP3_HIT": 3}.get(ev_name, int(s.get("hit_tp") or 0))
+        chart_events.append({
+            "sig": {
+                **s,
+                "status": eff_status,
+                "hit_tp": eff_hit,
+                "pips_result": res_pips if res_pips != 0.0 else float(s.get("pips_result") or 0.0),
+                "live_px": lpx,
+            },
+            "event": ev_name,
+            "candles": chart_bars,
+            "targets": targets,
+            "live_px": lpx,
+            "pips": res_pips if res_pips != 0.0 else (drift_pips(s["symbol"], s["direction"], float(s["entry"]), lpx) if lpx else 0.0),
+        })
+
     for sig in rows:
         stats["checked"] += 1
         symbol = sig["symbol"]
@@ -230,11 +254,19 @@ def check_open_signals(api_key: str) -> dict:
                 # already ended.
                 transition = _evaluate_signal(sig, candles, cutoff=fill_c["datetime"])
                 if transition:
-                    notes, _, new_edits = _apply_transition(
+                    notes, res_pips, new_edits = _apply_transition(
                         sig, transition, payload, live_px, filled_at=fill_c["datetime"])
                     notifications.extend(notes)
                     edits.extend(new_edits)
                     sig["status"] = transition
+                    _record_chart_event(sig, transition, payload, live_px, res_pips, notes)
+                    if transition in ("TP2_HIT", "TP3_HIT"):
+                        proof_signals.append({
+                            **sig,
+                            "status": transition,
+                            "pips_result": res_pips,
+                            "candles": list(payload["values"])[-72:],
+                        })
                     continue
                 notes, _, new_edits = _apply_transition(
                     sig, "RUNNING", payload, live_px, filled_at=fill_c["datetime"])
@@ -244,6 +276,7 @@ def check_open_signals(api_key: str) -> dict:
                 # Same-pass half-TP1 check (post-fill candles only) — mirrors
                 # the standing pass below; the activation edit already
                 # refreshed the card, so only notes are extended.
+                half_fired = False
                 if not sig.get("half_notified"):
                     try:
                         post = [c for c in candles
@@ -252,10 +285,14 @@ def check_open_signals(api_key: str) -> dict:
                             with db.conn() as c:
                                 c.execute("UPDATE signals SET half_notified=1 WHERE id=? AND half_notified=0",
                                           (sig["id"],))
-                            notes, _ = _halfway_notes(sig, post, live_px)
-                            notifications.extend(notes)
+                            h_notes, _ = _halfway_notes(sig, post, live_px)
+                            notifications.extend(h_notes)
+                            _record_chart_event(sig, "HALFWAY", payload, live_px, 0.0, h_notes)
+                            half_fired = True
                     except Exception:
                         pass
+                if not half_fired:
+                    _record_chart_event(sig, "RUNNING", payload, live_px, 0.0, notes)
                 continue
             if missed_target(sig, candles):
                 stats["updated"] += 1
@@ -294,12 +331,13 @@ def check_open_signals(api_key: str) -> dict:
             notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
             notifications.extend(notes)
             edits.extend(new_edits)
+            _record_chart_event(sig, transition, payload, live_px, result_pips, notes)
             if transition in ("TP2_HIT", "TP3_HIT"):
                 proof_signals.append({
                     **sig,
                     "status": transition,
                     "pips_result": result_pips,
-                    "candles": candles[-72:],
+                    "candles": list(payload["values"])[-72:],
                 })
             continue
         # Half-TP1 secure-profit advisory (one-time per signal, data-verified,
@@ -314,6 +352,7 @@ def check_open_signals(api_key: str) -> dict:
                     notes, new_edits = _halfway_notes(sig, post, live_px)
                     notifications.extend(notes)
                     edits.extend(new_edits)
+                    _record_chart_event(sig, "HALFWAY", payload, live_px, 0.0, notes)
             except Exception:
                 pass
         # v6.25.0 (#10): Early Invalidation Warning (one-time per RUNNING trade)
@@ -336,7 +375,7 @@ def check_open_signals(api_key: str) -> dict:
                 stats["refreshed"] += 1
     return {"stats": stats, "notifications": notifications,
             "admin_notice": admin_notice, "edits": edits,
-            "proof_signals": proof_signals}
+            "proof_signals": proof_signals, "chart_events": chart_events}
 
 
 def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:

@@ -154,7 +154,7 @@ def _draw_pill(draw, x: int, y: int, text: str, bg, fg, font, pad_x: int = 10, p
     return tw + pad_x * 2
 
 
-def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = False) -> bytes | None:
+def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = False, tracking_event: str = "") -> bytes | None:
     if not sig:
         return None
     bars = list(candles or [])[-48:]
@@ -171,9 +171,10 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
 
     f_brand = _load_font(22, "bold")
     f_title = _load_font(26, "bold")
-    f_sub = _load_font(15, "reg")
+    f_sub = _load_font(14, "reg")
     f_mono = _load_font(14, "mono")
     f_badge = _load_font(15, "bold")
+    f_hud = _load_font(13, "bold")
     f_wm = _load_font(54, "bold")
 
     symbol = str(sig.get("symbol") or "XAUUSD").upper()
@@ -188,48 +189,102 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
     tp2 = float(sig.get("tp2") or 0.0)
     tp3 = float(sig.get("tp3") or 0.0)
     status = str(sig.get("status") or "ACTIVE").upper()
-    pips_res = float(sig.get("pips_result") or 0.0)
+    hit_tp = int(sig.get("hit_tp") or 0)
+    ev_u = str(tracking_event or "").upper()
 
-    # Outer luxury gold frame
-    draw.rounded_rectangle([8, 8, W - 9, H - 9], radius=16, outline=(52, 62, 86, 255), width=2)
-    draw.rectangle([10, 10, W - 11, 92], fill=HEADER_BG)
-    draw.line([(10, 92), (W - 11, 92)], fill=BORDER_GOLD, width=2)
+    # Outer luxury double-accent gold frame + subtle top metallic sheen
+    draw.rounded_rectangle([6, 6, W - 7, H - 7], radius=18, outline=(46, 56, 80, 255), width=2)
+    draw.rounded_rectangle([10, 10, W - 11, H - 11], radius=15, outline=(212, 175, 55, 70), width=1)
+    draw.rectangle([12, 12, W - 13, 94], fill=HEADER_BG)
+    # Subtle royal gold top-left / top-right corner accent bars
+    draw.line([(12, 12), (260, 12)], fill=BORDER_GOLD, width=3)
+    draw.line([(W - 260, 12), (W - 13, 12)], fill=BORDER_GOLD, width=3)
+    draw.line([(12, 94), (W - 13, 94)], fill=BORDER_GOLD, width=2)
 
     # Header Left: Brand + Symbol + Direction Pill
-    draw.text((28, 18), "FOREXYEMENI", fill=BORDER_GOLD, font=f_brand)
-    draw.text((28, 48), f"{symbol}  ·  {tf}", fill=TEXT_LIGHT, font=f_title)
+    draw.text((28, 18), "FOREXYEMENI  ROYAL", fill=BORDER_GOLD, font=f_brand)
+    draw.text((28, 49), f"{symbol}  ·  {tf}", fill=TEXT_LIGHT, font=f_title)
 
     dir_bg = BULL_COLOR if direction == "BUY" else BEAR_COLOR
     px_cursor = 290
-    px_cursor += _draw_pill(draw, px_cursor, 48, f"{direction}", dir_bg, BG_DARK, f_badge, 12, 4) + 10
-    px_cursor += _draw_pill(draw, px_cursor, 48, f"{strat}", (36, 46, 70, 255), GOLD_SOFT, f_badge, 10, 4) + 10
+    px_cursor += _draw_pill(draw, px_cursor, 49, f"{direction}", dir_bg, BG_DARK, f_badge, 12, 4) + 10
+    px_cursor += _draw_pill(draw, px_cursor, 49, f"{strat}", (36, 46, 70, 255), GOLD_SOFT, f_badge, 10, 4) + 10
     if score > 0:
-        px_cursor += _draw_pill(draw, px_cursor, 48, f"SCORE {score}/100", (30, 42, 62, 255), TEXT_LIGHT, f_badge, 10, 4) + 10
+        px_cursor += _draw_pill(draw, px_cursor, 49, f"SCORE {score}/100", (30, 42, 62, 255), TEXT_LIGHT, f_badge, 10, 4) + 10
     if rr > 0:
-        _draw_pill(draw, px_cursor, 48, f"R:R 1:{rr:.2f}", (30, 42, 62, 255), TP_COLOR, f_badge, 10, 4)
+        _draw_pill(draw, px_cursor, 49, f"R:R 1:{rr:.2f}", (30, 42, 62, 255), TP_COLOR, f_badge, 10, 4)
 
-    # Header Right: Proof Victory Ribbon or Live Status Badge (uses REAL live floating pips on RUNNING trades!)
+    # Header Right: Event / Proof Victory Ribbon or Live Status Badge
     metrics = live_signal_metrics(sig, bars, row=row)
     eff_pips = metrics["display_pips"]
-    if proof_mode:
-        usd_001 = instruments.usd_move(symbol, eff_pips, 0.01, px=metrics["live_px"] or tp3 or tp2 or tp1 or entry, row=row)
+    live_px = float(metrics["live_px"] or 0.0)
+    usd_001 = instruments.usd_move(symbol, eff_pips, 0.01, px=live_px or tp3 or tp2 or tp1 or entry, row=row)
+
+    event_labels = {
+        "RUNNING": ("LIVE ENTRY ACTIVE", (56, 189, 248, 255), BG_DARK),
+        "HALFWAY": ("50% SECURE PROFIT", GOLD_SOFT, BG_DARK),
+        "TP1_HIT": ("TP1 SMASHED", TP_COLOR, BG_DARK),
+        "TP2_HIT": ("TP2 VERIFIED WIN", BORDER_GOLD, BG_DARK),
+        "TP3_HIT": ("TP3 FULL ROYAL WIN", BORDER_GOLD, BG_DARK),
+        "TP1_BE": ("TP1 BREAKEVEN LOCKED", GOLD_SOFT, BG_DARK),
+        "TP2_BE": ("TP2 BREAKEVEN LOCKED", GOLD_SOFT, BG_DARK),
+        "SL_HIT": ("SL RISK PROTECTED", BEAR_COLOR, TEXT_LIGHT),
+    }
+    if ev_u in event_labels:
+        ev_lbl, r_bg, r_fg = event_labels[ev_u]
+        ribbon_txt = f"{ev_lbl}  {eff_pips:+.1f}P  ({usd_001:+,.2f}$)"
+        _draw_pill(draw, W - 465, 28, ribbon_txt, r_bg, r_fg, f_badge, 14, 9)
+    elif proof_mode:
         tag_lbl = "LIVE PROFIT" if (metrics["is_floating"] and eff_pips >= 0) else (
             "LIVE P&L" if metrics["is_floating"] else ("VERIFIED WIN" if eff_pips >= 0 else "CLOSED")
         )
         ribbon_bg = BORDER_GOLD if eff_pips >= 0 else BEAR_COLOR
         ribbon_txt = f"{tag_lbl}  {eff_pips:+.1f} PIPS  ({usd_001:+,.2f}$ / 0.01)"
-        _draw_pill(draw, W - 445, 28, ribbon_txt, ribbon_bg, BG_DARK, f_badge, 14, 9)
+        _draw_pill(draw, W - 455, 28, ribbon_txt, ribbon_bg, BG_DARK, f_badge, 14, 9)
     else:
-        pip_part = f"  {eff_pips:+.1f}P" if (metrics["live_px"] > 0 or eff_pips != 0.0) else ""
+        pip_part = f"  {eff_pips:+.1f}P" if (live_px > 0 or eff_pips != 0.0) else ""
         badge_txt = f"{status}{pip_part}"
-        _draw_pill(draw, W - 285, 30, badge_txt, (28, 38, 58, 255), TP_COLOR if eff_pips > 0 else GOLD_SOFT, f_badge, 12, 8)
+        _draw_pill(draw, W - 295, 30, badge_txt, (28, 38, 58, 255), TP_COLOR if eff_pips > 0 else GOLD_SOFT, f_badge, 12, 8)
+
+    # Luxury Live Tracking Milestone HUD Strip (between header and chart plot)
+    hud_l, hud_t, hud_r, hud_b = 34, 104, W - 24, 134
+    draw.rounded_rectangle([hud_l, hud_t, hud_r, hud_b], radius=8, fill=(18, 24, 38, 255), outline=(40, 52, 76, 255), width=1)
+    # Milestone pills: ENTRY -> TP1 -> TP2 -> TP3
+    is_live = status in ("RUNNING", "TP1_HIT", "TP2_HIT", "TP3_HIT") or ev_u in ("RUNNING", "HALFWAY", "TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE")
+    eff_hit = max(hit_tp, {"TP1_HIT": 1, "TP1_BE": 1, "TP2_HIT": 2, "TP2_BE": 2, "TP3_HIT": 3}.get(ev_u, 0))
+    ms_items = [
+        ("ENTRY", is_live, GOLD_SOFT),
+        ("TP1", eff_hit >= 1, TP_COLOR),
+        ("TP2", eff_hit >= 2, TP2_COLOR),
+        ("TP3", eff_hit >= 3, BORDER_GOLD),
+    ]
+    mx = hud_l + 14
+    for idx_m, (m_lbl, reached, m_col) in enumerate(ms_items):
+        dot_col = m_col if reached else (58, 70, 96, 255)
+        draw.ellipse([mx, hud_t + 9, mx + 12, hud_t + 21], fill=dot_col)
+        draw.text((mx + 18, hud_t + 7), m_lbl, fill=m_col if reached else TEXT_MUTED, font=f_hud)
+        mx += 78
+        if idx_m < len(ms_items) - 1:
+            line_col = m_col if reached else (42, 54, 78, 255)
+            draw.line([(mx - 16, hud_t + 15), (mx - 4, hud_t + 15)], fill=line_col, width=2)
+    # Right side of HUD: Live Price + Real-Time P&L Telemetry
+    now_px_str = instruments.fmt_price(symbol, live_px, row) if live_px > 0 else "—"
+    prog_txt = ""
+    if entry > 0 and tp1 > 0 and live_px > 0:
+        tp1_d = abs(tp1 - entry)
+        if tp1_d > 0:
+            mv = (live_px - entry) if direction == "BUY" else (entry - live_px)
+            pct = max(0, min(100, int(round((mv / tp1_d) * 100))))
+            prog_txt = f"  |  TP1: {pct}%"
+    hud_telemetry = f"LIVE: {now_px_str}  |  P&L: {eff_pips:+.1f} PIPS ({usd_001:+,.2f}$){prog_txt}"
+    draw.text((hud_l + 370, hud_t + 7), hud_telemetry, fill=TP_COLOR if eff_pips >= 0 else SL_COLOR, font=f_hud)
 
     # Chart Plot Area
-    plot_l, plot_t = 34, 114
-    plot_r, plot_b = W - 215, H - 56
+    plot_l, plot_t = 34, 144
+    plot_r, plot_b = W - 215, H - 52
     plot_w = plot_r - plot_l
     plot_h = plot_b - plot_t
-    draw.rounded_rectangle([plot_l, plot_t, plot_r, plot_b], radius=10, fill=PANEL_BG, outline=GRID_COLOR, width=1)
+    draw.rounded_rectangle([plot_l, plot_t, plot_r, plot_b], radius=10, fill=PANEL_BG, outline=(42, 54, 78, 255), width=1)
 
     # Subtle Center Watermark
     odraw.text((plot_l + plot_w // 2 - 220, plot_t + plot_h // 2 - 30), "FOREXYEMENI", fill=WATERMARK_COLOR, font=f_wm)
@@ -259,9 +314,12 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
         draw.line([(plot_l + 2, gy), (plot_r - 2, gy)], fill=GRID_COLOR, width=1)
         g_price = p_hi - i * (p_hi - p_lo) / 5
         draw.text((plot_r + 10, gy - 8), instruments.fmt_price(symbol, g_price, row), fill=TEXT_MUTED, font=f_mono)
+    for j in range(1, 6):
+        gx = int(plot_l + j * plot_w / 6)
+        draw.line([(gx, plot_t + 4), (gx, plot_b - 4)], fill=(24, 31, 46, 255), width=1)
 
     # Risk & Reward shaded translucent zones (on overlay, alpha-composited)
-    zone_x0 = plot_l + int(plot_w * 0.58) if not proof_mode else plot_l + int(plot_w * 0.18)
+    zone_x0 = plot_l + int(plot_w * 0.56) if not (proof_mode or ev_u) else plot_l + int(plot_w * 0.18)
     zone_x1 = plot_r - 4
     if entry > 0 and sl > 0:
         y_e, y_s = y_of(entry), y_of(sl)
@@ -278,12 +336,14 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
     n = len(bars)
     step = (plot_w - 30) / max(n, 1)
     body_w = max(4, min(14, int(step * 0.62)))
+    last_cx = plot_r - 20
     for idx, c in enumerate(bars):
         o = float(c["open"])
         h = float(c["high"])
         l = float(c["low"])
         cl = float(c["close"])
         cx = int(plot_l + 15 + idx * step + step * 0.5)
+        last_cx = cx
         col = BULL_COLOR if cl >= o else BEAR_COLOR
         draw.line([(cx, y_of(h)), (cx, y_of(l))], fill=col, width=2)
         y_o, y_c = y_of(o), y_of(cl)
@@ -291,6 +351,15 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
         if bot_b - top_b < 2:
             bot_b = top_b + 2
         draw.rectangle([cx - body_w // 2, top_b, cx + body_w // 2, bot_b], fill=col)
+
+    # Live Market Price line & glowing pulse dot on latest candle
+    LIVE_CYAN = (56, 189, 248, 255)
+    used_y: list[int] = []
+    if live_px > 0 and p_lo <= live_px <= p_hi:
+        ly_now = y_of(live_px)
+        _draw_dashed_line(draw, plot_l + 4, plot_r - 2, ly_now, LIVE_CYAN, dash=5, gap=4, width=1)
+        draw.ellipse([last_cx - 6, ly_now - 6, last_cx + 6, ly_now + 6], outline=LIVE_CYAN, width=2)
+        draw.ellipse([last_cx - 3, ly_now - 3, last_cx + 3, ly_now + 3], fill=GOLD_SOFT)
 
     # Draw Trade Levels (Entry, SL, TP1, TP2, TP3) with right-axis tags
     levels = [
@@ -300,7 +369,6 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
         ("TP2", tp2, TP2_COLOR, instruments.signed_pips(symbol, direction, entry, tp2, row) if tp2 else 0.0),
         ("TP3", tp3, TP3_COLOR, instruments.signed_pips(symbol, direction, entry, tp3, row) if tp3 else 0.0),
     ]
-    used_y: list[int] = []
     for tag, lvl, col, spips in levels:
         if lvl <= 0 or not (p_lo <= lvl <= p_hi):
             continue
@@ -322,12 +390,28 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
         draw.rounded_rectangle([plot_r + 6, lbl_y, W - 18, lbl_y + 21], radius=5, fill=col)
         draw.text((plot_r + 12, lbl_y + 3), tag_txt[:22], fill=BG_DARK, font=f_mono)
 
+    # Right-axis NOW price pill (de-collided)
+    if live_px > 0 and p_lo <= live_px <= p_hi:
+        ly_now = y_of(live_px)
+        lbl_y = ly_now - 11
+        for prev_y in used_y:
+            if abs(lbl_y - prev_y) < 22:
+                lbl_y = prev_y + 22
+        lbl_y = max(plot_t + 2, min(plot_b - 22, lbl_y))
+        used_y.append(lbl_y)
+        now_txt = f"NOW {instruments.fmt_price(symbol, live_px, row)}"
+        draw.rounded_rectangle([plot_r + 6, lbl_y, W - 18, lbl_y + 21], radius=5, fill=LIVE_CYAN)
+        draw.text((plot_r + 12, lbl_y + 3), now_txt[:22], fill=BG_DARK, font=f_mono)
+
     # Footer bar
     last_dt = str(bars[-1].get("datetime") or sig.get("data_time") or "")[:16]
     foot_l = f"REAL MARKET OHLC  ·  LAST CANDLE: {last_dt} UTC  ·  {config.BOT_SIGNATURE}"
-    draw.text((34, H - 38), foot_l, fill=TEXT_MUTED, font=f_sub)
-    mode_tag = "VERIFIED BEFORE/AFTER PROOF" if proof_mode else "INSTITUTIONAL LIVE CHART"
-    draw.text((W - 285, H - 38), mode_tag, fill=BORDER_GOLD, font=f_sub)
+    draw.text((34, H - 36), foot_l, fill=TEXT_MUTED, font=f_sub)
+    mode_tag = (
+        f"ROYAL LIVE TRACKING · {ev_u}" if ev_u else
+        ("VERIFIED BEFORE/AFTER PROOF" if proof_mode else "INSTITUTIONAL ROYAL CHART")
+    )
+    draw.text((W - 320, H - 36), mode_tag, fill=BORDER_GOLD, font=f_sub)
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG", optimize=True)
@@ -342,6 +426,13 @@ def render_signal_chart(sig: dict, candles: list[dict], row=None) -> bytes | Non
 def render_proof_chart(sig: dict, candles: list[dict], row=None) -> bytes | None:
     """#14 Render verified BEFORE -> AFTER TP2/TP3 victory proof chart PNG."""
     return _render_board(sig, candles, row=row, proof_mode=True)
+
+
+def render_tracking_chart(sig: dict, candles: list[dict], event: str = "", row=None) -> bytes | None:
+    """v7.3.0 Render ultra-luxury live tracking candlestick chart PNG for lifecycle milestones."""
+    ev_u = str(event or "").upper()
+    is_proof = ev_u in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE", "SL_HIT")
+    return _render_board(sig, candles, row=row, proof_mode=is_proof, tracking_event=ev_u)
 
 
 # --- Zero-Dependency Pure-Python Stdlib PNG Fallback (works even without Pillow) ---

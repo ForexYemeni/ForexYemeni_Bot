@@ -329,4 +329,55 @@ def test_v773_admin_clicking_u_home_opens_admin_panel_never_user_home(env):
     assert "u:signow" not in rendered_cbs
 
 
+def test_v774_bridge_completely_hidden_from_users_when_disabled(env):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fysb.handlers import user_pages
+
+    # Default PLANS (VIP,ROYAL): VIP sees Bridge, FREE does not
+    assert ab.is_bridge_visible_to_user(VIP_UID) is True
+    assert ab.is_bridge_visible_to_user(FREE_UID) is False
+    assert ab.is_bridge_visible_to_user(ADMIN_UID) is True
+
+    # Turn Bridge OFF globally -> hidden from VIP & FREE in BOTH API and Telegram Bot!
+    wa_server.dispatch_request(
+        "POST", "/api/admin/bridge/policy", _hdr(ADMIN_UID),
+        json.dumps({"enabled": False, "access_mode": "OFF"}).encode(),
+    )
+    assert ab.is_bridge_visible_to_user(VIP_UID) is False
+    assert ab.is_bridge_visible_to_user(FREE_UID) is False
+    assert ab.is_bridge_visible_to_user(ADMIN_UID) is True
+
+    # Mini App /api/me returns bridge_visible=False for VIP
+    st, _, body = wa_server.dispatch_request("GET", "/api/me", _hdr(VIP_UID))
+    assert st == 200 and json.loads(body)["bridge_visible"] is False
+
+    # Telegram Bot u:demo hides the u:bridge button completely for VIP when OFF
+    sent = []
+    q = SimpleNamespace(
+        from_user=SimpleNamespace(id=VIP_UID, username="vip_u", full_name="VIP Member"),
+        message=SimpleNamespace(
+            chat_id=VIP_UID,
+            message_id=2,
+            edit_text=AsyncMock(),
+            reply_text=AsyncMock(side_effect=lambda *a, **kw: sent.append((a, kw))),
+        ),
+        answer=AsyncMock(),
+    )
+    ctx = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()), user_data={})
+    asyncio.run(user_pages.user_page(q, "demo", VIP_UID, ctx))
+    cbs_off = [b.callback_data for r in sent[-1][1]["reply_markup"].inline_keyboard for b in r if b.callback_data]
+    assert "u:bridge" not in cbs_off
+
+    # Re-enable Bridge for PLANS -> u:bridge reappears for VIP immediately!
+    wa_server.dispatch_request(
+        "POST", "/api/admin/bridge/policy", _hdr(ADMIN_UID),
+        json.dumps({"enabled": True, "access_mode": "PLANS", "allowed_plans": "VIP,ROYAL"}).encode(),
+    )
+    asyncio.run(user_pages.user_page(q, "demo", VIP_UID, ctx))
+    cbs_on = [b.callback_data for r in sent[-1][1]["reply_markup"].inline_keyboard for b in r if b.callback_data]
+    assert "u:bridge" in cbs_on
+
+
+
 

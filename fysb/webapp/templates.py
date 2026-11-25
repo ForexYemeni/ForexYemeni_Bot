@@ -388,7 +388,7 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
 
   <!-- PANE 2: LIVE DEMO TRADING DECK + v7.7.0 ROYAL AUTO-BRIDGE (Broker Demo & Live) -->
   <div id="pane-demo" class="pane">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:11px">
+    <div id="demoSubSwitcher" style="display:none;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:11px">
       <button class="btn gold" id="subDemoBtn" onclick="switchDemoSub('internal')">🎮 التجريبي الداخلي</button>
       <button class="btn ghost" id="subBridgeBtn" onclick="switchDemoSub('bridge')">⚡ نسخ المنصات (Demo/Live)</button>
     </div>
@@ -1444,6 +1444,18 @@ async function boot(){{
     renderAutoSigToggle(me.auto_signals !== false);
     const admBar = document.getElementById('adminJumpBar');
     if(admBar) admBar.style.display = me.is_admin ? 'block' : 'none';
+    const brSw = document.getElementById('demoSubSwitcher');
+    if(brSw){{
+      if(me.bridge_visible){{
+        brSw.style.display = 'grid';
+      }} else {{
+        brSw.style.display = 'none';
+        const dBr = document.getElementById('demoBridgeSub');
+        const dIn = document.getElementById('demoInternalSub');
+        if(dBr) dBr.style.display = 'none';
+        if(dIn) dIn.style.display = 'block';
+      }}
+    }}
     renderMarketChips(me.markets);
     if(me.risk){{
       document.getElementById('rBal').value = me.risk.balance;

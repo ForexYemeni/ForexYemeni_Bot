@@ -107,6 +107,16 @@ async def render_user_bridge_home(q, uid: int, bot) -> None:
 
 async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEFAULT_TYPE, bot) -> bool:
     """Handle all `u:bridge` and `u:br_*` callbacks natively inside Telegram."""
+    if not await afn.run(ab.is_bridge_visible_to_user, uid):
+        context.user_data.pop("bridge_draft", None)
+        await render(
+            q,
+            "🧪 <b>التداول التجريبي</b>\n\nاضغط أدناه للعودة إلى حسابك التجريبي أو القائمة الرئيسية.",
+            kb.user_nav([[kb.btn("🧪 التداول التجريبي", "u:demo", style="success")]]),
+            bot,
+        )
+        return True
+
     if action == "bridge":
         await render_user_bridge_home(q, uid, bot)
         return True

@@ -69,8 +69,11 @@ def test_02_branded_png_pnl_share_cards_signal_and_demo(env):
     st, ct, body = wa_server.dispatch_request("GET", f"/api/share-card/signal?id={sid}", _hdr(USER_UID))
     assert st == 200 and ct == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n"
 
-    # Demo trade share card PNG
-    pos_res = demo_engine.open_signal_interactive(USER_UID, sid)
+    # Demo trade share card PNG (mock live price inside signal geometry so CI never depends on live XAU spot)
+    from unittest.mock import patch
+    from fysb.engines import market_data as _md
+    with patch.object(_md, "fetch_price", return_value={"price": 2652.0, "fetched_at": config.now()}):
+        pos_res = demo_engine.open_signal_interactive(USER_UID, sid)
     assert pos_res["ok"]
     pid = pos_res["position_id"]
     st2, ct2, body2 = wa_server.dispatch_request("GET", f"/api/share-card/demo?id={pid}", _hdr(USER_UID))

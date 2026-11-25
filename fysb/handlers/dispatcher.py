@@ -469,6 +469,14 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_strength(q, uid, context, bot)
     elif act == "chartstoggle":
         await admin_trading.admin_charts_toggle(q, uid, context, bot)
+    elif act == "chartsmenu":
+        await admin_trading.admin_charts_menu(q, uid, context, bot)
+    elif act == "chartsched":
+        await admin_trading.admin_chart_sched_set(q, uid, context, bot, int(arg or 0))
+    elif act == "chartschedch":
+        await admin_trading.admin_chart_sched_ch_toggle(q, uid, context, bot)
+    elif act == "chartsendnow":
+        await admin_trading.admin_chart_send_now(q, uid, context, bot)
     elif act == "sigchart":
         await admin_trading.admin_signal_chart(q, uid, context, bot, int(arg or 0))
     elif act == "sigproof":

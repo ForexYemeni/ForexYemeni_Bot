@@ -574,7 +574,7 @@ async def admin_engine(q, uid, context, bot):
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
         [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success")],
-        [kb.btn("📊 شارتات الإشارات (تبديل)", "a:chartstoggle", style="primary"), kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
+        [kb.btn("📊 الشارتات وجدولتها", "a:chartsmenu", style="primary"), kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
@@ -744,15 +744,130 @@ def _toggle_charts_sync() -> bool:
     return nxt == "1"
 
 
+def _charts_settings_sync() -> tuple[bool, int, bool, int]:
+    enabled = (db.get_setting("charts_enabled", "1") or "1") == "1"
+    sched = max(0, db.get_setting_int("chart_schedule_minutes", 0))
+    to_ch = (db.get_setting("chart_schedule_channels", "0") or "0") == "1"
+    with db.conn() as c:
+        open_n = c.execute(
+            "SELECT COUNT(*) n FROM signals WHERE status IN ('RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
+        ).fetchone()["n"]
+    return enabled, sched, to_ch, open_n
+
+
+def _open_running_signals_sync(limit: int = 3) -> list[dict]:
+    with db.conn() as c:
+        rows = c.execute(
+            """SELECT * FROM signals
+               WHERE status IN ('RUNNING','TP1_HIT','TP2_HIT')
+                 AND (closed_at IS NULL OR closed_at='')
+               ORDER BY id DESC LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def admin_charts_menu(q, uid, context, bot, notice: str = ""):
+    enabled, sched, to_ch, open_n = await afn.run(_charts_settings_sync)
+    sched_txt = "⏹ متوقفة (يدوي فقط)" if sched <= 0 else f"🟢 كل <b>{sched}</b> دقيقة تلقائياً"
+    dest_txt = "📺 الأدمن + جميع القنوات المفعّلة" if to_ch else "👑 الأدمن فقط"
+    body = (
+        "📊 <b><u>مركز الشارتات الملكية والجدولة التلقائية</u></b>\n"
+        "<blockquote>"
+        f"▎⚡ توليد الشارتات المحلية (مجاني 100%): <b>{'🟢 مفعّل' if enabled else '⚪ متوقف'}</b>\n"
+        f"▎⏱ جدولة تحديث شارتات الصفقات المفتوحة: {sched_txt}\n"
+        f"▎📤 وجهة الإرسال المجدول: <b>{dest_txt}</b>\n"
+        f"▎📡 الصفقات المفتوحة الجارية الآن: <b>{open_n}</b>"
+        "</blockquote>"
+        + (f"\n\n<i>{notice}</i>" if notice else "")
+    )
+    rows_kb = [
+        [kb.btn(
+            "🔴 إيقاف الشارتات" if enabled else "🟢 تفعيل الشارتات",
+            "a:chartstoggle",
+            style="danger" if enabled else "success",
+        )],
+        [
+            kb.btn(f"{'✅ ' if sched == 0 else ''}⏹ إيقاف", "a:chartsched:0", style="danger" if sched == 0 else "primary"),
+            kb.btn(f"{'✅ ' if sched == 5 else ''}⏱ 5د", "a:chartsched:5", style="success" if sched == 5 else "primary"),
+            kb.btn(f"{'✅ ' if sched == 10 else ''}⏱ 10د", "a:chartsched:10", style="success" if sched == 10 else "primary"),
+        ],
+        [
+            kb.btn(f"{'✅ ' if sched == 15 else ''}⏱ 15د", "a:chartsched:15", style="success" if sched == 15 else "primary"),
+            kb.btn(f"{'✅ ' if sched == 30 else ''}⏱ 30د", "a:chartsched:30", style="success" if sched == 30 else "primary"),
+            kb.btn(f"{'✅ ' if sched == 60 else ''}⏱ 60د", "a:chartsched:60", style="success" if sched == 60 else "primary"),
+        ],
+        [kb.btn(
+            f"📺 النشر المجدول للقنوات: {'🟢 مفعّل' if to_ch else '⚪ للأدمن فقط'}",
+            "a:chartschedch",
+            style="success" if to_ch else "primary",
+        )],
+        [kb.btn("📤 إرسال شارتات الصفقات المفتوحة الآن", "a:chartsendnow", style="success")],
+        [kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
 async def admin_charts_toggle(q, uid, context, bot):
     enabled = await afn.run(_toggle_charts_sync)
     await afn.run(audit_log.log, uid, f"charts_enabled:{int(enabled)}")
-    state_txt = "🟢 مفعّلة (توليد شارتات إشارات وإثباتات محلياً مجاناً 100%)" if enabled else "⚪ متوقفة"
-    await render(
-        q,
-        f"📊 <b><u>حالة شارتات الإشارات المحلية</u></b>\n<blockquote>▎الحالة الجديدة: <b>{state_txt}</b></blockquote>",
-        kb.admin_nav([[kb.btn("↩️ المحرك", "a:engine")]]),
-        bot,
+    await admin_charts_menu(q, uid, context, bot, notice="✅ تم تحديث حالة الشارتات.")
+
+
+async def admin_chart_sched_set(q, uid, context, bot, minutes: int):
+    m = int(minutes) if int(minutes) in (0, 5, 10, 15, 30, 60) else 0
+    await afn.run(db.set_setting, "chart_schedule_minutes", str(m))
+    await afn.run(audit_log.log, uid, f"chart_schedule_minutes:{m}")
+    note = "⏹ تم إيقاف الإرسال المجدول للشارتات." if m == 0 else f"✅ تم تفعيل إرسال الشارتات تلقائياً كل {m} دقيقة."
+    await admin_charts_menu(q, uid, context, bot, notice=note)
+
+
+async def admin_chart_sched_ch_toggle(q, uid, context, bot):
+    cur = (await afn.run(db.get_setting, "chart_schedule_channels", "0") or "0") == "1"
+    nxt = "0" if cur else "1"
+    await afn.run(db.set_setting, "chart_schedule_channels", nxt)
+    await afn.run(audit_log.log, uid, f"chart_schedule_channels:{nxt}")
+    await admin_charts_menu(q, uid, context, bot, notice="✅ تم تحديث وجهة الإرسال المجدول.")
+
+
+async def admin_chart_send_now(q, uid, context, bot):
+    sigs = await afn.run(_open_running_signals_sync, 3)
+    if not sigs:
+        await admin_charts_menu(q, uid, context, bot, notice="ℹ️ لا توجد صفقات مفتوحة جارية حالياً لإرسال شارتها.")
+        return
+    from fysb.handlers.user_pages import build_signal_chart_bundle
+    import io as _io
+    to_ch = (await afn.run(db.get_setting, "chart_schedule_channels", "0") or "0") == "1"
+    chat_ids = await afn.run(_active_channel_chat_ids) if to_ch else []
+    sent_admin, sent_ch = 0, 0
+    for sig in sigs:
+        b = await asyncio.to_thread(build_signal_chart_bundle, sig, sig.get("pips_result", 0) > 0)
+        if not b["png"]:
+            continue
+        cap = (
+            f"📊 <b><u>تحديث شارت حي — {esc(sig['symbol'])} {sig['direction']}</u></b>\n"
+            f"▎⏱ {esc(sig['timeframe'])} · 🧠 {esc(sig['strategy'])}\n"
+            f"{b['pips_line']}\n"
+            f"▎🛡 متابعة مباشرة من محرك ForexYemeni Royal."
+        )
+        try:
+            pub_kb = kb.InlineKeyboardMarkup([[
+                kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
+            ]])
+            await bot.send_photo(chat_id=uid, photo=_io.BytesIO(b["png"]), caption=cap, reply_markup=pub_kb, parse_mode="HTML")
+            sent_admin += 1
+        except Exception:
+            pass
+        for cid in chat_ids:
+            try:
+                target = int(cid) if cid.lstrip("-").isdigit() else cid
+                await bot.send_photo(chat_id=target, photo=_io.BytesIO(b["png"]), caption=cap, parse_mode="HTML")
+                sent_ch += 1
+            except Exception:
+                pass
+    await admin_charts_menu(
+        q, uid, context, bot,
+        notice=f"✅ تم إرسال {sent_admin} شارت حي لك" + (f" و {sent_ch} شارت للقنوات." if to_ch else "."),
     )
 
 
@@ -761,14 +876,19 @@ async def admin_signal_chart(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
-    from fysb.handlers.user_pages import _build_signal_chart_png
+    from fysb.handlers.user_pages import build_signal_chart_bundle
     sig = dict(r)
-    png_bytes, is_proof = await asyncio.to_thread(_build_signal_chart_png, sig, False)
+    bundle = await asyncio.to_thread(build_signal_chart_bundle, sig, False)
+    png_bytes, is_proof = bundle["png"], bundle["is_proof"]
     if not png_bytes:
         await render(q, "⚠️ تعذر توليد الشارت حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
         return
     import io as _io
-    cap = f"{'🏆 إثبات صفقة' if is_proof else '📊 شارت الإشارة'} #{sid} · <b>{esc(sig['symbol'])}</b> {sig['direction']} ({esc(sig['timeframe'])})"
+    cap = (
+        f"{'🏆 إثبات صفقة' if is_proof else '📊 شارت الإشارة'} #{sid} · "
+        f"<b>{esc(sig['symbol'])}</b> {sig['direction']} ({esc(sig['timeframe'])})\n"
+        f"{bundle['pips_line']}"
+    )
     try:
         await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
     except Exception:
@@ -780,17 +900,17 @@ async def admin_signal_proof_publish(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
-    from fysb.handlers.user_pages import _build_signal_chart_png
+    from fysb.handlers.user_pages import build_signal_chart_bundle
     sig = dict(r)
-    png_bytes, _ = await asyncio.to_thread(_build_signal_chart_png, sig, True)
+    bundle = await asyncio.to_thread(build_signal_chart_bundle, sig, True)
+    png_bytes = bundle["png"]
     if not png_bytes:
         await render(q, "⚠️ تعذر توليد شارت الإثبات حالياً.", kb.admin_nav([[kb.btn("↩️ الإشارة", f"a:signalview:{sid}")]]), bot)
         return
-    pips = float(sig.get("pips_result") or 0.0)
     cap = (
         f"🏆 <b><u>إثبات صفقة موثّق — ForexYemeni Royal</u></b>\n"
         f"▎📌 <b>{esc(sig['symbol'])}</b> {sig['direction']} · ⏱ {esc(sig['timeframe'])} · {esc(sig['strategy'])}\n"
-        f"▎🎯 النتيجة: <b>{pips:+.1f} pips</b> ({esc(sig.get('status') or '')})\n"
+        f"{bundle['pips_line']}\n"
         f"▎🛡 شارت قبل/بعد موثّق تلقائياً من محرك ForexYemeni."
     )
     import io as _io
@@ -799,7 +919,7 @@ async def admin_signal_proof_publish(q, uid, context, bot, sid: int):
         await bot.send_photo(chat_id=uid, photo=_io.BytesIO(png_bytes), caption=cap, parse_mode="HTML")
     except Exception:
         pass
-    chat_ids = await afn.run(_enabled_channel_ids_sync)
+    chat_ids = await afn.run(_active_channel_chat_ids)
     for cid in chat_ids:
         try:
             target = int(cid) if cid.lstrip("-").isdigit() else cid

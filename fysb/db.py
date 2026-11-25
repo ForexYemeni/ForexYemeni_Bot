@@ -638,8 +638,10 @@ DEFAULT_SETTINGS = {
     # v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
     "news_guard_enabled": "1",
     "news_guard_minutes": "30",
-    # v6.26.0 Local zero-cost institutional charts (Pillow)
+    # v6.26.0 Local zero-cost institutional charts (Pillow) + v7.0.2 scheduler
     "charts_enabled": "1",
+    "chart_schedule_minutes": "0",
+    "chart_schedule_channels": "0",
     # v6.27.0 Independent Trading Academy + Tiered Affiliates
     "academy_enabled": "1",
     "academy_price_usd": "49",

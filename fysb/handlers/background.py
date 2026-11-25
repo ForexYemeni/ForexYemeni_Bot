@@ -652,6 +652,73 @@ async def watchers_loop(app):
         await asyncio.sleep(60)
 
 
+async def scheduled_charts_loop(app):
+    """v7.0.2: Periodic live candlestick chart updates for open RUNNING/TP1/TP2 trades
+    every N minutes (5 / 10 / 15 / 30 / 60 min) as configured by Admin."""
+    import io as _io
+    import time as _time
+    from fysb.handlers.admin_trading import _active_channel_chat_ids, _open_running_signals_sync
+    from fysb.handlers.user_pages import build_signal_chart_bundle
+    from fysb.theme import esc
+    from fysb.ui import charts as _charts
+    from fysb.ui import keyboards as _kb
+
+    last_sent_ts = 0.0
+    while True:
+        try:
+            sched_min = await afn.run(db.get_setting_int, "chart_schedule_minutes", 0)
+            enabled = await afn.run(_charts.charts_enabled)
+            now_m = _time.monotonic()
+            if enabled and sched_min >= 5 and (now_m - last_sent_ts) >= (sched_min * 60):
+                last_sent_ts = now_m
+                sigs = await afn.run(_open_running_signals_sync, 3)
+                if sigs and config.ADMIN_ID:
+                    to_ch = (await afn.run(db.get_setting, "chart_schedule_channels", "0") or "0") == "1"
+                    chat_ids = await afn.run(_active_channel_chat_ids) if to_ch else []
+                    for sig in sigs:
+                        try:
+                            b = await asyncio.to_thread(build_signal_chart_bundle, sig, False)
+                            if not b["png"]:
+                                continue
+                            # Auto-upgrade to proof banner if live floating profit >= +20 pips
+                            if b["pips"] >= 20.0 and not b["is_proof"]:
+                                b = await asyncio.to_thread(build_signal_chart_bundle, sig, True)
+                            cap = (
+                                f"📊 <b><u>تحديث شارت دوري (كل {sched_min}د) — {esc(sig['symbol'])} {sig['direction']}</u></b>\n"
+                                f"▎⏱ {esc(sig['timeframe'])} · 🧠 {esc(sig['strategy'])}\n"
+                                f"{b['pips_line']}\n"
+                                f"▎🛡 متابعة حية تلقائية من محرك ForexYemeni Royal."
+                            )
+                            pub_kb = _kb.InlineKeyboardMarkup([[
+                                _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
+                            ]])
+                            await app.bot.send_photo(
+                                chat_id=config.ADMIN_ID,
+                                photo=_io.BytesIO(b["png"]),
+                                caption=cap,
+                                reply_markup=pub_kb,
+                                parse_mode="HTML",
+                            )
+                            for cid in chat_ids:
+                                try:
+                                    target = int(cid) if cid.lstrip("-").isdigit() else cid
+                                    await app.bot.send_photo(
+                                        chat_id=target,
+                                        photo=_io.BytesIO(b["png"]),
+                                        caption=cap,
+                                        parse_mode="HTML",
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            log.exception("scheduled chart send failed for signal #%s", sig.get("id"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("scheduled_charts_loop failed")
+        await asyncio.sleep(30)
+
+
 async def post_init(app):
     global _TASKS
     # v6.8.2: pre-warm the PostgreSQL pool in a worker thread so the FIRST
@@ -671,6 +738,7 @@ async def post_init(app):
         asyncio.create_task(channels_loop(app), name="fysb-channels"),
         asyncio.create_task(watchers_loop(app), name="fysb-watchers"),
         asyncio.create_task(crypto_ws_loop(app), name="fysb-crypto-ws"),
+        asyncio.create_task(scheduled_charts_loop(app), name="fysb-sched-charts"),
     ]
     post_init._tasks_ref = _TASKS
     # v7.0.0: start lightweight embedded Mini App & Admin Web Panel HTTP server

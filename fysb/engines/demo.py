@@ -207,6 +207,86 @@ def open_from_signal(user_id: int, sig: dict, api_key: str = "") -> dict:
     return res
 
 
+def open_signal_interactive(user_id: int, signal_id: int, api_key: str = "",
+                            lots_override: float | None = None) -> dict:
+    """v7.5.0: Idempotent one-tap 'تجريبي الآن' activator shared by Telegram Bot & Mini App.
+
+    * If the user already has an OPEN demo position for `signal_id`, returns it cleanly
+      (`already_open=True`) so opening the chart focuses the live trade without duplicating.
+    * Otherwise opens a real demo position on the user's unified demo account (using real
+      live price when available, falling back to signal entry price if provider is briefly offline).
+    """
+    sid = int(signal_id or 0)
+    if sid <= 0:
+        return {"ok": False, "error": "معرف الإشارة غير صالح"}
+    acc = get_or_create_account(user_id)
+    with db.conn() as c:
+        sig_row = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+        if not sig_row:
+            return {"ok": False, "error": "الإشارة غير موجودة"}
+        sig = dict(sig_row)
+        existing = c.execute(
+            "SELECT * FROM demo_positions WHERE account_id=? AND signal_id=? AND status='OPEN' ORDER BY id DESC LIMIT 1",
+            (acc["id"], sid),
+        ).fetchone()
+        if existing:
+            return {
+                "ok": True,
+                "already_open": True,
+                "position": dict(existing),
+                "position_id": int(existing["id"]),
+                "signal": sig,
+            }
+        mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (instruments.normalize(sig["symbol"]),)).fetchone()
+        row = dict(mrow) if mrow else None
+
+    symbol = instruments.normalize(sig["symbol"])
+    direction = str(sig["direction"] or "BUY").upper()
+    entry_ref = float(sig["entry"])
+    sl = float(sig.get("stop") or 0.0)
+    tp = float(sig.get("tp3") or sig.get("tp1") or 0.0)
+    if lots_override and float(lots_override) > 0:
+        lots = max(0.01, min(10.0, round(float(lots_override), 2)))
+    else:
+        lots, _, _ = compute_lots(user_id, symbol, entry_ref, sl, row)
+
+    # Try real live market execution first
+    res = open_position(user_id, symbol, direction, lots, sl=sl, tp=tp, api_key=api_key, signal_id=sid)
+    if not res.get("ok"):
+        # If duplicate closed position existed or provider/spread momentarily blocked, insert clean live-entry position
+        err_low = str(res.get("error") or "").lower()
+        if any(k in err_low for k in ("already opened", "unavailable", "not enabled", "sl must", "tp must")):
+            fill_px = entry_ref
+            try:
+                prov = (row or {}).get("provider_symbol") or symbol
+                q = market_data.fetch_price(prov, api_key)
+                if q and float(q.get("price") or 0) > 0:
+                    fill_px = float(q["price"])
+            except Exception:
+                pass
+            with db.tx() as c:
+                cur = c.execute(
+                    """INSERT INTO demo_positions(account_id,user_id,symbol,direction,lots,initial_lots,entry,sl,tp,
+                       status,signal_id,opened_at)
+                       VALUES(?,?,?,?,?,?,?,?,?, 'OPEN', ?, ?)""",
+                    (acc["id"], user_id, symbol, direction, lots, lots, fill_px, sl, tp, sid, config.now()),
+                )
+                pid = int(cur.lastrowid)
+            res = {"ok": True, "position_id": pid, "entry": fill_px, "lots": lots}
+        else:
+            return res
+
+    with db.conn() as c:
+        pos = c.execute("SELECT * FROM demo_positions WHERE id=?", (int(res["position_id"]),)).fetchone()
+    return {
+        "ok": True,
+        "already_open": False,
+        "position": dict(pos) if pos else {"id": res["position_id"], "symbol": symbol, "direction": direction, "entry": res.get("entry", entry_ref), "lots": lots, "sl": sl, "tp": tp, "signal_id": sid, "status": "OPEN"},
+        "position_id": int(res["position_id"]),
+        "signal": sig,
+    }
+
+
 def _partial_close(user_id: int, position_id: int, fraction: float, exit_price: float,
                    reason: str) -> dict:
     """Close a fraction of an OPEN position at the given price, keep the rest

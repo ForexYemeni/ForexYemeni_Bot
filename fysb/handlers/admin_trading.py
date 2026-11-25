@@ -13,18 +13,16 @@ from fysb.handlers.inputs import BROKER_PRESETS, broker_test_connectivity, clear
 from fysb.handlers.user_pages import _safe_int
 from fysb.services import audit as audit_log
 from fysb.theme import ICON, esc, human_dt
-from fysb.ui.cards import render_signal_card, render_signal_compact
+from fysb.ui.cards import render_signal_card, render_signal_compact, signal_creator_label, signal_row_style
 from fysb.ui import keyboards as kb
-from fysb.ui.cards import render_signal_card
 
 
 # --- Signals management ----------------------------------------------------------
-# v6.10.0 (owner report 5) — the signals center now carries the FULL lifecycle
-# categories (بانتظار التنفيذ · قيد التنفيذ في السوق · أهداف جزئية · ضربت الوقف
-# · حققت الأهداف · ملغاة/منتهية) plus a REAL profit/loss accounting page per
-# instrument — every number from the banked pips the tracker recorded.
+# v7.5.0 — Luxury Executive Signals Command Center:
+# semantic color-coded non-clipping rows + full creator attribution + achieved
+# targets/pips ledger right inside the header card.
 SIG_CATS = {
-    "pending": ("⛔ بانتظار التنفيذ", "ACTIVE", "بانتظار"),
+    "pending": ("⏳ بانتظار التنفيذ", "ACTIVE", "بانتظار"),
     "running": ("🚀 قيد التنفيذ في السوق", "RUNNING", "قيد التنفيذ"),
     "partial": ("🏁 أهداف جزئية", "TP1_HIT,TP2_HIT", "أهداف جزئية"),
     "sl": ("🛑 ضربت الوقف", "SL_HIT", "ضربت الوقف"),
@@ -34,11 +32,44 @@ SIG_CATS = {
 }
 
 
-def _signals_page_body(statuses: tuple, page: int, size: int = 8, scope: str = "all") -> tuple[int, list, int, dict]:
+def _signals_page_body(statuses: tuple, page: int, size: int = 8, scope: str = "all") -> tuple[int, list, int, dict, list[str]]:
     from fysb.services import signal_archive as _sa
+    from fysb.theme import is_signal_closed, signal_status_ar, strategy_name, tf_name
     total, rows, summary = _sa.admin_signals_page(scope=scope, statuses=statuses, page=page, size=size)
-    rows_kb = [[kb.btn(render_signal_compact(r), f"a:signalview:{r['id']}")] for r in rows]
-    return total, rows_kb, len(rows), summary
+    # Batch-load creator usernames/names + demo counts in 1 lightweight checkout
+    cids = sorted({int(r.get("created_by") or 0) for r in rows if int(r.get("created_by") or 0) > 0})
+    sids = [int(r["id"]) for r in rows]
+    users_map: dict[int, dict] = {}
+    demo_cnt: dict[int, int] = {}
+    if cids or sids:
+        with db.conn() as c:
+            if cids:
+                ph = ",".join("?" * len(cids))
+                for u in c.execute(f"SELECT user_id, username, full_name FROM users WHERE user_id IN ({ph})", tuple(cids)).fetchall():
+                    users_map[int(u["user_id"])] = dict(u)
+            if sids:
+                ph = ",".join("?" * len(sids))
+                for d in c.execute(f"SELECT signal_id, COUNT(*) n FROM demo_positions WHERE signal_id IN ({ph}) GROUP BY signal_id", tuple(sids)).fetchall():
+                    demo_cnt[int(d["signal_id"])] = int(d["n"])
+
+    rows_kb = [[kb.btn(render_signal_compact(r), f"a:signalview:{r['id']}", style=signal_row_style(r))] for r in rows]
+    ledger_lines: list[str] = []
+    for r in rows:
+        seq = r.get("seq") or r["id"]
+        d_ic = "🟢" if str(r.get("direction")).upper() == "BUY" else "🔴"
+        d_ar = "شراء" if str(r.get("direction")).upper() == "BUY" else "بيع"
+        pips = float(r.get("pips_result") or 0.0)
+        pips_txt = f" · <b>{pips:+.1f}p</b>" if pips else ""
+        creator = signal_creator_label(r, users_map)
+        dc = demo_cnt.get(int(r["id"]), 0)
+        dc_txt = f" · 🎮 {dc}" if dc else ""
+        st_lbl = signal_status_ar(r)
+        ledger_lines.append(
+            f"▎<b>#{seq}</b> {d_ic} <b>{esc(r['symbol'])}</b> {d_ar} · {esc(tf_name(r['timeframe']))} · "
+            f"{esc(strategy_name(r['strategy']))} ({int(r.get('score') or 0)}/100)\n"
+            f"   ↳ {st_lbl}{pips_txt}{dc_txt} · {esc(creator)}"
+        )
+    return total, rows_kb, len(rows), summary, ledger_lines
 
 
 async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope: str = "today"):
@@ -47,15 +78,15 @@ async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope:
     statuses = tuple(s for s in st_csv.split(",") if s)
     size = 8
     counts = await afn.run(_sa.admin_scope_counts)
-    total, rows_kb, shown, summary = await afn.run(_signals_page_body, statuses, page, size, scope)
+    total, rows_kb, shown, summary, ledger_lines = await afn.run(_signals_page_body, statuses, page, size, scope)
     total_pages = max(1, (total + size - 1) // size)
 
     # Pagination row
     nav_row = []
     if page > 0:
-        nav_row.append(kb.btn("◀️ السابق", f"a:sigday:{scope}:{cat}:{page - 1}"))
+        nav_row.append(kb.btn("◀️ السابق", f"a:sigday:{scope}:{cat}:{page - 1}", style="primary"))
     if (page + 1) * size < total:
-        nav_row.append(kb.btn("التالي ▶️", f"a:sigday:{scope}:{cat}:{page + 1}"))
+        nav_row.append(kb.btn("التالي ▶️", f"a:sigday:{scope}:{cat}:{page + 1}", style="primary"))
     if nav_row:
         rows_kb.append(nav_row)
 
@@ -66,32 +97,39 @@ async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope:
     is_custom_date = bool(day_iso) and not is_today and not is_yest
     is_all = scope == "all"
     date_row = [
-        kb.btn(("◉ " if is_today else "") + f"📅 اليوم ({counts['today']})", f"a:sigday:today:{cat}:0",
-               style="primary" if is_today else None),
-        kb.btn(("◉ " if is_yest else "") + f"📆 أمس ({counts['yesterday']})", f"a:sigday:yesterday:{cat}:0",
-               style="primary" if is_yest else None),
-        kb.btn(("◉ " if is_custom_date else "") + f"🗓 بالتاريخ ({counts['days']})", "a:sigdates:0",
-               style="primary" if is_custom_date else None),
-        kb.btn(("◉ " if is_all else "") + f"🗂 الكل ({counts['total']})", f"a:sigday:all:{cat}:0",
-               style="primary" if is_all else None),
+        kb.btn(("◉ " if is_today else "") + f"اليوم ({counts['today']})", f"a:sigday:today:{cat}:0",
+               style="success" if is_today else "primary"),
+        kb.btn(("◉ " if is_yest else "") + f"أمس ({counts['yesterday']})", f"a:sigday:yesterday:{cat}:0",
+               style="success" if is_yest else "primary"),
+        kb.btn(("◉ " if is_custom_date else "") + f"تاريخ ({counts['days']})", "a:sigdates:0",
+               style="success" if is_custom_date else "primary"),
+        kb.btn(("◉ " if is_all else "") + f"الكل ({counts['total']})", f"a:sigday:all:{cat}:0",
+               style="success" if is_all else "primary"),
     ]
     # Category pills bound to active date scope
-    cat_row = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
-               for key in list(SIG_CATS)[:4]]
-    cat_row2 = [kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0")
-                for key in list(SIG_CATS)[4:]]
+    cat_row = [
+        kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0",
+               style="success" if cat == key else "primary")
+        for key in list(SIG_CATS)[:4]
+    ]
+    cat_row2 = [
+        kb.btn(("◉ " if cat == key else "") + SIG_CATS[key][2], f"a:sigday:{scope}:{key}:0",
+               style="success" if cat == key else "primary")
+        for key in list(SIG_CATS)[4:]
+    ]
     rows_kb.insert(0, date_row)
     rows_kb.insert(1, cat_row)
     rows_kb.insert(2, cat_row2)
 
     pl_cb = f"a:sigpl:{day_iso}" if is_custom_date else ("a:sigpl" if is_all else f"a:sigpl:{scope}")
-    rows_kb.append([kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl"),
-                    kb.btn("📊 محاسبة هذا اليوم", pl_cb)] if not is_all
-                   else [kb.btn("💰 محاسبة الربح والخسارة — كل الأدوات", "a:sigpl")])
-    rows_kb.append([kb.btn("⚡ إشارة الآن (بمراحل)", "a:signow", style="success"),
+    rows_kb.append([kb.btn("💰 سجل الربح والخسارة", "a:sigpl", style="success"),
+                    kb.btn("📊 محاسبة اليوم", pl_cb, style="primary")] if not is_all
+                   else [kb.btn("💰 سجل الربح والخسارة — كل الأدوات", "a:sigpl", style="success")])
+    rows_kb.append([kb.btn("⚡ إشارة الآن", "a:signow", style="success"),
                     kb.btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")])
-    rows_kb.append([kb.btn("➕ نشر إشارة يدوية", "a:newsignal"), kb.btn("🔄 فحص مفتوحة الآن", "a:tracknow")])
-    rows_kb.append([kb.btn("🧹 تنظيف الملغاة والمنتهية", "a:signalpurge")])
+    rows_kb.append([kb.btn("➕ إشارة يدوية", "a:newsignal", style="success"),
+                    kb.btn("🔄 فحص المفتوحة", "a:tracknow", style="primary")])
+    rows_kb.append([kb.btn("🧹 تنظيف المنتهية", "a:signalpurge", style="danger")])
 
     if is_today:
         scope_label = f"{_sa.ar_date_label(_sa.today_iso())} · {title}"
@@ -102,14 +140,16 @@ async def _render_signals_center(q, bot, cat: str = "all", page: int = 0, scope:
     else:
         scope_label = f"🗂 جميع التواريخ · {title}"
 
-    extra = ["▎الترقيم تسلسلي حقيقي — نفس الرقم في كل التنبيهات والبطاقات."]
+    extra = ["▎🎨 <b>الألوان:</b> 🟢 حققت أهداف · 🔵 نشطة/سوق · 🔴 وقف/منتهية — اضغط أي إشارة للتفاصيل والشارت والتجريبي."]
     if shown == 0:
         if is_today:
-            extra.append("▎✨ لا توجد إشارات مطابقة اليوم حتى الآن — جرّب «📆 أمس» أو «🗓 بالتاريخ» أو «🗂 الكل».")
+            extra.append("▎✨ لا توجد إشارات مطابقة اليوم حتى الآن — جرّب «أمس» أو «تاريخ» أو «الكل».")
         else:
             extra.append("▎لا توجد إشارات في هذا النطاق.")
 
-    body = _sa.luxury_day_header("مركز إدارة الإشارات", scope_label, summary, page, total_pages, extra)
+    body = _sa.luxury_day_header("مركز إدارة الإشارات الملكي", scope_label, summary, page, total_pages, extra)
+    if ledger_lines:
+        body += "\n\n📋 <b><u>تفاصيل الصفحة الحالية (المنشئ · الحالة · الأداء):</u></b>\n<blockquote>" + "\n".join(ledger_lines) + "</blockquote>"
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
@@ -383,39 +423,73 @@ async def admin_signal_view(q, uid, context, bot, sid: int):
     if not r:
         await render(q, "الإشارة غير موجودة.", kb.admin_nav(), bot)
         return
+    from fysb import instruments
+    from fysb.engines.tracker import seq_of
     from fysb.theme import is_signal_closed
     sig = dict(r)
+    seq = await afn.run(seq_of, sid)
+    creator_lbl = await afn.run(signal_creator_label, sig)
+
+    def _demo_count_for(signal_id: int) -> int:
+        with db.conn() as c:
+            row = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE signal_id=?", (signal_id,)).fetchone()
+            return int(row["n"] if row else 0)
+
+    demo_n = await afn.run(_demo_count_for, sid)
     live_note = ""
     sig_open = (not is_signal_closed(sig)) and sig["status"] in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT")
     if sig_open:
         try:
             quote = await asyncio.to_thread(market_data.fetch_price, sig["symbol"])
             price = float(quote["price"])
-            from fysb import instruments
             from fysb.engines.tracker import drift_pips
             entry = float(sig["entry"])
             drift = drift_pips(sig["symbol"], sig["direction"], entry, price)
+            usd01 = instruments.usd_move(sig["symbol"], drift, 0.01, px=price)
             side = "أعلى الدخول" if price > entry else ("عند الدخول" if price == entry else "أدنى الدخول")
-            live_note = (f"\n💰 <b>سعر السوق الآن:</b> <code>{instruments.fmt_price(sig['symbol'], price)}</code>"
-                         f" · {side} · <b>{drift:+.1f} pips</b>")
+            live_note = (
+                f"\n▎💰 <b>سعر السوق الحي:</b> <code>{instruments.fmt_price(sig['symbol'], price)}</code>"
+                f" · {side} · <b>{drift:+.1f} pips</b> (<code>{usd01:+,.2f}$</code> / 0.01)"
+            )
             sl = float(sig["stop"])
             beyond = price >= sl if sig["direction"] == "SELL" else price <= sl
             if beyond:
-                live_note += "\n⚠️ السعر تجاوز وقف الخسارة — اضغط «فحص مفتوحة الآن» لتحصيل الحالة فوراً."
+                live_note += "\n▎⚠️ السعر تجاوز وقف الخسارة — اضغط «🔄 فحص الآن» لتحصيل الحالة فوراً."
         except Exception:
-            live_note = "\n⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
+            live_note = "\n▎⚠️ تعذر جلب السعر اللحظي الآن (المزود غير متاح لحظياً)."
     elif sig["status"] in ("TP1_HIT", "TP2_HIT"):
-        live_note = f"\n🔒 <b>صفقة مغلقة على ربح محقق ({float(sig.get('pips_result') or 0):+.1f} pips)</b> — أُغلقت عند التأمين."
-    rows_kb = []
+        live_note = f"\n▎🔒 <b>صفقة مغلقة على ربح محقق ({float(sig.get('pips_result') or 0):+.1f} pips)</b> — أُغلقت عند التأمين."
+
+    hit_tp = int(sig.get("hit_tp") or 0)
+    tp_bar = f"TP1 {'✅' if hit_tp >= 1 else '⏳'} · TP2 {'✅' if hit_tp >= 2 else '⏳'} · TP3 {'✅' if hit_tp >= 3 else '⏳'}"
+    pips_res = float(sig.get("pips_result") or 0.0)
+    pips_usd = instruments.usd_move(sig["symbol"], pips_res, 0.01, px=float(sig["entry"])) if pips_res else 0.0
+    filled_txt = human_dt(sig["filled_at"]) if sig.get("filled_at") else "لم تتفعل بعد"
+    exec_dossier = (
+        f"\n\n👑 <b><u>بطاقة التدقيق الإداري — الإشارة #{seq}</u></b>\n"
+        f"<blockquote>"
+        f"▎👤 <b>منشئ / مصدر الإشارة:</b> <b>{esc(creator_lbl)}</b>\n"
+        f"▎🏁 <b>الأهداف المحققة:</b> {tp_bar}\n"
+        f"▎📈 <b>النتيجة المسجلة:</b> <b>{pips_res:+.1f} pips</b>"
+        + (f" (<code>{pips_usd:+,.2f}$</code> لكل 0.01 لوت)" if pips_res else "")
+        + f"\n▎⏱ <b>وقت التفعيل في السوق:</b> {filled_txt}\n"
+        f"▎📬 <b>المستلمون:</b> <b>{deliveries}</b> · 🎮 <b>صفقات تجريبية:</b> <b>{demo_n}</b>"
+        f"{live_note}"
+        f"</blockquote>"
+    )
+
+    rows_kb = [[kb.signal_demo_launch_btn(sid, "🎮 تجريبي الآن — فتح على الشارت")]]
     if sig_open:
-        rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}"), kb.btn("🔄 فحص الآن", "a:tracknow")])
+        rows_kb.append([kb.btn("🚫 إلغاء الإشارة", f"a:cancelsignal:{sid}", style="danger"),
+                        kb.btn("🔄 فحص وتحديث الآن", "a:tracknow", style="primary")])
     rows_kb.append([
         kb.btn("📊 شارت الإشارة", f"a:sigchart:{sid}", style="primary"),
         kb.btn("🏆 نشر إثبات للقنوات", f"a:sigproof:{sid}", style="success"),
     ])
-    rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}")])
-    rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}"), kb.btn("↩️ الإشارات", "a:signals")])
-    body = render_signal_card(sig) + f"\n\n📬 استلمتها <b>{deliveries}</b> نقطة مستخدم.{live_note}"
+    rows_kb.append([kb.btn("🗑 حذف نهائي للإشارة", f"a:delsignal:{sid}", style="danger")])
+    rows_kb.append([kb.btn("👥 المستلمون", f"a:signalrecipients:{sid}", style="primary"),
+                    kb.btn("↩️ مركز الإشارات", "a:signals", style="primary")])
+    body = render_signal_card(sig) + exec_dossier
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 

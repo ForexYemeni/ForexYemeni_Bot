@@ -175,12 +175,20 @@ def lux(label: str, data: str, color: str = "sapphire") -> InlineKeyboardButton:
 
 
 # --- User menus (6 luxury rows, 100% native Bot API 9.4 colored buttons) -----
-def user_menu() -> InlineKeyboardMarkup:
-    """Luxury 6-row user menu (100% Bot API 9.4 native styled buttons, v6.20.8):
+def user_menu(auto_signals_on: bool | None = None) -> InlineKeyboardMarkup:
+    """Luxury 6-row user menu (100% Bot API 9.4 native styled buttons, v7.5.0):
     Row 1 puts Signal Now & Analysis Now front and center for instant 1-tap access.
+    Row 6 puts the Royal Auto-Signals ON/OFF switch (Emerald Green when OFF to enable,
+    Ruby Red when ON to stop) right on the user's Home Screen.
     When Mini App HTTPS URL is live (e.g. via Bot-Hosting Auto-Tunnel), prepends
     a 1-tap Royal Mini App launch button."""
     from fysb import config as _cfg
+    auto_on = True if auto_signals_on is None else bool(auto_signals_on)
+    auto_btn = (
+        btn("🔕 إيقاف الإشارات التلقائية", "u:autosig_toggle", style="danger")
+        if auto_on else
+        btn("📡 تشغيل الإشارات التلقائية", "u:autosig_toggle", style="success")
+    )
     rows = [
         [btn("⚡ إشارة الآن", "u:signow", style="success"),
          btn("🔬 تحليل الآن", "u:analytics", style="primary")],
@@ -192,7 +200,7 @@ def user_menu() -> InlineKeyboardMarkup:
          btn("🧾 مدفوعاتي", "u:payments", style="primary")],
         [btn("👤 ملفي وإحصائياتي", "u:profile", style="primary"),
          btn("🤝 دعوة صديق", "u:referrals", style="success")],
-        [btn("🔔 الإشعارات", "u:notifications", style="primary"),
+        [auto_btn,
          btn("🎧 الدعم والمساعدة", "u:support", style="primary")],
     ]
     if _cfg.webapp_ready():
@@ -215,10 +223,23 @@ def user_menu_signal_buttons(rows) -> InlineKeyboardMarkup:
     return user_nav(kb)
 
 
+def signal_demo_launch_btn(signal_id: int, label: str = "🎮 تجريبي الآن — فتح على الشارت") -> InlineKeyboardButton:
+    """v7.5.0: Opens Mini App directly on the signal's live chart with auto-activated demo trade,
+    or falls back to instant in-bot Demo activation when HTTPS Mini App is not configured."""
+    from fysb import config as _cfg
+    sid = int(signal_id)
+    if _cfg.webapp_ready():
+        url = _cfg.webapp_page_url("/", query={"demo_sig": str(sid)})
+        return webapp_btn(label, url, style="success")
+    return btn("🎮 تجريبي الآن (تفعيل فوري)", f"u:demosig:{sid}", style="success")
+
+
 def signal_action_keyboard(signal_id: int) -> InlineKeyboardMarkup:
-    """v6.26.0 (#21/#13/#24): Interactive 2-row action bar under every signal card."""
+    """v7.5.0: Luxury 3-row interactive action bar under every signal card
+    (1-tap Live Demo on Chart + Lot Calc + Royal Chart + Journal)."""
     sid = int(signal_id)
     return InlineKeyboardMarkup([
+        [signal_demo_launch_btn(sid)],
         [
             btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
             btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary"),

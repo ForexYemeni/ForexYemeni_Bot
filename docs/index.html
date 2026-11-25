@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Royal Mini App v7.4.6</title>
+<title>FOREXYEMENI — Royal Mini App v7.5.0</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root {
@@ -196,26 +196,53 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
 .news-item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px}
 .news-item:last-child{border-bottom:none}
 
-/* Floating Frosted Bottom Navigation Dock */
-.dock-wrap{position:fixed;bottom:10px;left:12px;right:12px;z-index:50;display:flex;justify-content:center;pointer-events:none}
+/* Floating Frosted Bottom Navigation Dock (5 Luxury Tabs: Signals · Demo · Risk · Partner · Royal) */
+.dock-wrap{position:fixed;bottom:10px;left:10px;right:10px;z-index:50;display:flex;justify-content:center;pointer-events:none}
 .dock{
-  pointer-events:auto;width:100%;max-width:520px;
-  background:rgba(12,17,29,.88);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+  pointer-events:auto;width:100%;max-width:540px;
+  background:rgba(12,17,29,.92);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
   border:1px solid var(--gold-line);border-radius:20px;
-  display:grid;grid-template-columns:repeat(4,1fr);padding:6px;gap:4px;
-  box-shadow:0 12px 38px rgba(0,0,0,.6);
+  display:grid;grid-template-columns:repeat(5,1fr);padding:6px;gap:3px;
+  box-shadow:0 12px 38px rgba(0,0,0,.65);
 }
 .tab{
   background:none;border:none;color:var(--muted);font-family:'Cairo',sans-serif;
-  font-size:11px;font-weight:800;cursor:pointer;padding:7px 4px;border-radius:14px;
-  display:flex;flex-direction:column;align-items:center;gap:2px;transition:.18s;
+  font-size:10.5px;font-weight:800;cursor:pointer;padding:7px 2px;border-radius:14px;
+  display:flex;flex-direction:column;align-items:center;gap:2px;transition:.18s;position:relative;
 }
 .tab .ic{font-size:17px;line-height:1}
+.tab .cnt-dot{
+  position:absolute;top:3px;left:6px;background:var(--green);color:#04120c;
+  font-size:9px;font-weight:900;padding:1px 5px;border-radius:999px;font-family:var(--mono);display:none;
+}
 .tab.active{
   color:var(--gold2);
   background:linear-gradient(135deg,rgba(217,176,76,.22),rgba(217,176,76,.06));
   box-shadow:inset 0 0 0 1px rgba(217,176,76,.35);
 }
+.autosig-bar{
+  margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:8px 10px;border-radius:13px;background:rgba(6,8,15,.55);border:1px solid var(--border);
+}
+.autosig-btn{
+  border:none;border-radius:10px;padding:7px 12px;font-family:'Cairo',sans-serif;
+  font-weight:900;font-size:11.5px;cursor:pointer;transition:.18s;white-space:nowrap;
+}
+.autosig-btn.on-stop{background:linear-gradient(135deg,#dc2626,#f04452);color:#fff;box-shadow:0 4px 14px rgba(240,68,82,.35)}
+.autosig-btn.off-start{background:linear-gradient(135deg,#059669,#16c784);color:#04120c;box-shadow:0 4px 14px rgba(22,199,132,.35)}
+.demo-hud{
+  display:none;margin-bottom:10px;padding:11px 12px;border-radius:15px;
+  background:linear-gradient(135deg,rgba(22,199,132,.14),rgba(217,176,76,.10));
+  border:1px solid rgba(22,199,132,.42);
+}
+.demo-hud-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.demo-hud-pnl{font-family:var(--mono);font-size:17px;font-weight:900}
+.demo-pos-card{
+  background:rgba(6,8,15,.68);border:1px solid var(--border);border-radius:15px;
+  padding:12px;margin-bottom:9px;
+}
+.demo-pos-card.profit{border-right:3px solid var(--green)}
+.demo-pos-card.loss{border-right:3px solid var(--red)}
 .pane{display:none;animation:fadeUp .22s ease}
 .pane.active{display:block}
 @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -234,7 +261,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.4.6</div>
+      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v7.5.0</div>
     </div>
   </div>
   <div class="top-right">
@@ -261,6 +288,10 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
         <div class="hm"><div class="l">الأكاديمية</div><div class="v cyan" id="kAcad">—</div></div>
       </div>
       <div class="qbar"><div class="qbar-fill" id="qBarFill"></div></div>
+      <div class="autosig-bar">
+        <div style="font-size:12px;font-weight:800">⚡ الإشارات التلقائية: <span id="autoSigStateLbl" style="color:var(--green)">شغّالة</span></div>
+        <button class="autosig-btn on-stop" id="autoSigBtn" onclick="toggleAutoSignals()">🔕 إيقاف التلقائية</button>
+      </div>
     </div>
 
     <div class="card gold-edge">
@@ -271,6 +302,23 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
           <button class="tf-btn" onclick="pickTf('M15',this)">M15</button>
           <button class="tf-btn active" onclick="pickTf('H1',this)">H1</button>
           <button class="tf-btn" onclick="pickTf('H4',this)">H4</button>
+        </div>
+      </div>
+      <div class="demo-hud" id="activeDemoHud">
+        <div class="demo-hud-top">
+          <div>
+            <div style="font-size:11px;color:var(--gold2);font-weight:800">🎮 صفقة تجريبية حية على الشارت الآن</div>
+            <div id="hudTitle" style="font-size:14px;font-weight:900;font-family:var(--mono)">—</div>
+          </div>
+          <div style="text-align:left">
+            <div class="demo-hud-pnl" id="hudPnl">$0.00</div>
+            <div id="hudMeta" style="font-size:11px;color:var(--muted);font-family:var(--mono)">متابعة لحظية...</div>
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button class="btn gold" onclick="breakevenActiveDemo()">🛡 تأمين الدخول (BE)</button>
+          <button class="btn red" onclick="closeActiveDemo()">✖ إغلاق الصفقة</button>
+          <button class="btn ghost" onclick="openTab('demo',document.getElementById('tab-demo'))">📂 كل التجريبي</button>
         </div>
       </div>
       <div class="chip-row" id="mktChips"></div>
@@ -295,7 +343,36 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     </div>
   </div>
 
-  <!-- PANE 2: RISK & JOURNAL -->
+  <!-- PANE 2: LIVE DEMO TRADING DECK (v7.5.0 — Synced with Telegram Bot Demo Account) -->
+  <div id="pane-demo" class="pane">
+    <div class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="hero-title">🎮 الحساب التجريبي الحي (مربوط بحسابك في البوت)</div>
+          <div class="hero-plan" id="demoBalHero">$10,000.00</div>
+        </div>
+        <button class="btn ghost" style="flex:0;padding:7px 12px" onclick="loadDemoOverview(true)">🔄 تحديث</button>
+      </div>
+      <div class="hero-metrics">
+        <div class="hm"><div class="l">الرصيد العائم Equity</div><div class="v cyan" id="demoEqHero">$10,000</div></div>
+        <div class="hm"><div class="l">الربح العائم</div><div class="v green" id="demoFloatHero">$0.00</div></div>
+        <div class="hm"><div class="l">نسبة النجاح</div><div class="v gold" id="demoWrHero">—</div></div>
+      </div>
+    </div>
+    <div class="card gold-edge">
+      <div class="card-hdr">
+        <h3>📂 صفقاتي التجريبية المفتوحة الآن</h3>
+        <span class="badge b-gold" id="demoOpenBadge">0 مفتوحة</span>
+      </div>
+      <div id="demoOpenList"><div class="empty">لا توجد صفقات تجريبية مفتوحة — اضغط «🎮 تجريبي الآن» على أي إشارة لتفعيلها ومتابعتها على الشارت!</div></div>
+    </div>
+    <div class="card">
+      <div class="card-hdr"><h3>📜 أحدث الصفقات التجريبية المغلقة</h3></div>
+      <div id="demoClosedList"><div class="empty">لا يوجد سجل صفقات مغلقة بعد.</div></div>
+    </div>
+  </div>
+
+  <!-- PANE 3: RISK & JOURNAL -->
   <div id="pane-risk" class="pane">
     <div class="card gold-edge">
       <div class="card-hdr"><h3>🛡 استوديو إدارة المخاطر وحارس السحب</h3></div>
@@ -411,6 +488,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
 <div class="dock-wrap">
   <div class="dock">
     <button class="tab active" id="tab-signals" onclick="openTab('signals',this)"><span class="ic">📡</span><span>الإشارات</span></button>
+    <button class="tab" id="tab-demo" onclick="openTab('demo',this)"><span class="cnt-dot" id="demoTabDot">0</span><span class="ic">🎮</span><span>التجريبي</span></button>
     <button class="tab" id="tab-risk" onclick="openTab('risk',this)"><span class="ic">🛡</span><span>المخاطرة</span></button>
     <button class="tab" id="tab-partner" onclick="openTab('partner',this)"><span class="ic">🤝</span><span>الشريك</span></button>
     <button class="tab" id="tab-more" onclick="openTab('more',this)"><span class="ic">👑</span><span>الملكي</span></button>
@@ -731,12 +809,16 @@ function renderSignals(){
     const st = (s.status||'ACTIVE').toUpperCase();
     const pips = +s.pips_result || 0;
     const pipTxt = pips !== 0 ? ` · <b style="color:${pips>0?'var(--green)':'var(--red)'}">${pips>0?'+':''}${pips.toFixed(1)}p</b>` : '';
+    const seqLbl = s.seq ? `#${s.seq} · ` : '';
+    const creatorTxt = s.creator ? `<div style="font-size:10.5px;color:var(--muted);margin-top:2px">${s.creator}</div>` : '';
+    const demoLbl = s.demo_open ? '🟢 مفعّل بالتجريبي — عرض على الشارت' : '🎮 تجريبي الآن — فتح على الشارت';
     return `
       <div class="sig-card ${isBuy?'buy-glow':'sell-glow'}">
         <div class="sig-top">
           <div>
-            <div class="sig-sym">${s.symbol} <span class="badge ${isBuy?'b-buy':'b-sell'}">${isBuy?'▲ BUY':'▼ SELL'}</span></div>
+            <div class="sig-sym">${seqLbl}${s.symbol} <span class="badge ${isBuy?'b-buy':'b-sell'}">${isBuy?'▲ BUY':'▼ SELL'}</span></div>
             <div class="sig-meta">⏱ ${s.timeframe} · 🧠 ${s.strategy} · ⭐ ${s.score||0}/100${pipTxt}</div>
+            ${creatorTxt}
           </div>
           <span class="badge b-status">${st}</span>
         </div>
@@ -747,14 +829,195 @@ function renderSignals(){
           <div class="lvl"><span>TP2</span><b style="color:var(--green)">${s.tp2}</b></div>
           <div class="lvl"><span>TP3</span><b style="color:var(--gold2)">${s.tp3}</b></div>
         </div>
+        <div style="margin-bottom:7px">
+          <button class="btn gold" style="width:100%" onclick="activateDemoSignal(${s.id})">${demoLbl}</button>
+        </div>
         <div class="btn-row">
+          <button class="btn ghost" onclick="viewSigOnChart(${s.id})">📊 شارت</button>
           <button class="btn green" onclick="logJournal(${s.id},'TAKEN')">✅ دخلت</button>
           <button class="btn red" onclick="logJournal(${s.id},'SKIPPED')">❌ تجاهلت</button>
-          <button class="btn ghost" onclick="viewSigOnChart(${s.id})">📊 شارت + مستويات</button>
         </div>
       </div>`;
   }).join('');
 }
+
+let activeDemoPos = null;
+let demoOverviewData = null;
+let demoPollTimer = null;
+
+function renderAutoSigToggle(isOn){
+  const lbl = document.getElementById('autoSigStateLbl');
+  const btn = document.getElementById('autoSigBtn');
+  if(!lbl || !btn) return;
+  if(isOn){
+    lbl.textContent = 'شغّالة 🟢';
+    lbl.style.color = 'var(--green)';
+    btn.className = 'autosig-btn on-stop';
+    btn.textContent = '🔕 إيقاف التلقائية';
+  } else {
+    lbl.textContent = 'متوقفة 🔴';
+    lbl.style.color = 'var(--red)';
+    btn.className = 'autosig-btn off-start';
+    btn.textContent = '📡 تشغيل التلقائية';
+  }
+}
+
+async function toggleAutoSignals(){
+  const r = await api('/api/user/auto-signals', {method:'POST', body:'{}'});
+  if(r && r.ok){
+    renderAutoSigToggle(!!r.auto_signals);
+    toast(r.auto_signals ? '🟢 تم تشغيل الإشارات التلقائية' : '🔴 تم إيقاف الإشارات التلقائية');
+  } else {
+    toast((r && r.error) || 'تعذر التحديث', true);
+  }
+}
+
+function renderActiveDemoHud(){
+  const hud = document.getElementById('activeDemoHud');
+  if(!hud) return;
+  if(!activeDemoPos){
+    hud.style.display = 'none';
+    return;
+  }
+  const openList = (demoOverviewData && demoOverviewData.open) || [];
+  const liveMatch = openList.find(p => Number(p.id) === Number(activeDemoPos.id));
+  if(liveMatch) activeDemoPos = Object.assign({}, activeDemoPos, liveMatch);
+  const p = activeDemoPos;
+  const pnl = +(p.floating_pnl || 0);
+  const isBuy = (p.direction||'BUY') === 'BUY';
+  hud.style.display = 'block';
+  document.getElementById('hudTitle').textContent = `${p.symbol} ${isBuy?'▲ شراء':'▼ بيع'} · ${p.lots} لوت @ ${p.entry}`;
+  const pnlEl = document.getElementById('hudPnl');
+  pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+  pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const curPx = p.current_price ? `السعر الحي: ${p.current_price} · ` : '';
+  document.getElementById('hudMeta').textContent = `${curPx}SL ${p.sl||'—'} · TP ${p.tp||'—'}`;
+}
+
+function renderDemoDeck(ov){
+  if(!ov || !ov.ok) return;
+  demoOverviewData = ov;
+  const bal = +(ov.balance || 0), eq = +(ov.equity || bal), fl = +(ov.floating || 0);
+  document.getElementById('demoBalHero').textContent = `$${bal.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+  document.getElementById('demoEqHero').textContent = `$${eq.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+  const flEl = document.getElementById('demoFloatHero');
+  flEl.textContent = `${fl>=0?'+':''}$${fl.toFixed(2)}`;
+  flEl.style.color = fl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('demoWrHero').textContent = ov.win_rate != null ? `${Math.round(ov.win_rate)}%` : '—';
+
+  const openArr = ov.open || [];
+  document.getElementById('demoOpenBadge').textContent = `${openArr.length} مفتوحة`;
+  const dot = document.getElementById('demoTabDot');
+  if(dot){ dot.textContent = openArr.length; dot.style.display = openArr.length ? 'inline-block' : 'none'; }
+
+  const openBox = document.getElementById('demoOpenList');
+  openBox.innerHTML = openArr.length ? openArr.map(p => {
+    const pnl = +(p.floating_pnl || 0);
+    const isBuy = (p.direction||'BUY') === 'BUY';
+    const pxTxt = p.current_price ? ` · الحي: <b>${p.current_price}</b>` : '';
+    return `
+      <div class="demo-pos-card ${pnl>=0?'profit':'loss'}">
+        <div class="sig-top" style="margin-bottom:6px">
+          <div>
+            <div class="sig-sym">${p.symbol} <span class="badge ${isBuy?'b-buy':'b-sell'}">${isBuy?'▲ شراء':'▼ بيع'}</span></div>
+            <div class="sig-meta">📦 ${p.lots} لوت · دخول <b>${p.entry}</b>${pxTxt}</div>
+          </div>
+          <div style="font-family:var(--mono);font-size:15px;font-weight:900;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+        </div>
+        <div class="sig-meta" style="margin-bottom:8px">🛑 SL: ${p.sl||'—'} · 🏁 TP: ${p.tp||'—'}</div>
+        <div class="btn-row">
+          <button class="btn gold" onclick="focusDemoPosOnChart(${p.id})">📈 عرض على الشارت</button>
+          <button class="btn ghost" onclick="breakevenDemoPos(${p.id})">🛡 تأمين BE</button>
+          <button class="btn red" onclick="closeDemoPos(${p.id})">✖ إغلاق</button>
+        </div>
+      </div>`;
+  }).join('') : '<div class="empty">لا توجد صفقات تجريبية مفتوحة — اضغط «🎮 تجريبي الآن» على أي إشارة لتفعيلها ومتابعتها لحظياً!</div>';
+
+  const closedArr = ov.closed || [];
+  const clBox = document.getElementById('demoClosedList');
+  clBox.innerHTML = closedArr.length ? closedArr.map(p => {
+    const pnl = +(p.pnl || 0);
+    return `<div class="news-item">
+      <div><b>${p.symbol}</b> <span style="font-size:11px;color:var(--muted)">${p.direction} · ${p.lots} لوت · ${p.reason||p.status}</span></div>
+      <b style="font-family:var(--mono);color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</b>
+    </div>`;
+  }).join('') : '<div class="empty">لا توجد صفقات مغلقة بعد.</div>';
+
+  renderActiveDemoHud();
+  if(openArr.length && !demoPollTimer){
+    demoPollTimer = setInterval(()=>loadDemoOverview(false), 8000);
+  } else if(!openArr.length && demoPollTimer){
+    clearInterval(demoPollTimer); demoPollTimer = null;
+  }
+}
+
+async function loadDemoOverview(showToast=false){
+  const ov = await api('/api/demo/overview');
+  if(ov && ov.ok){
+    renderDemoDeck(ov);
+    if(showToast) toast('✅ تم تحديث بيانات الحساب التجريبي الحي');
+  }
+}
+
+async function activateDemoSignal(sid){
+  toast('🎮 جارٍ تفعيل الإشارة على حسابك التجريبي...');
+  const r = await api('/api/demo/open-signal', {method:'POST', body:JSON.stringify({signal_id:sid})});
+  if(!r || !r.ok){
+    toast((r && r.error) || 'تعذر تفعيل الصفقة التجريبية', true);
+    return;
+  }
+  activeDemoPos = r.position;
+  if(r.overview) renderDemoDeck(r.overview);
+  const sig = r.signal;
+  if(sig){
+    if(!allSignals.find(x => Number(x.id) === Number(sig.id))) allSignals.unshift(sig);
+    allSignals.forEach(x => { if(Number(x.id) === Number(sig.id)) x.demo_open = true; });
+    renderSignals();
+    openTab('signals', document.getElementById('tab-signals'));
+    curSym = sig.symbol; curTf = sig.timeframe || 'H1';
+    loadCandles(sig.symbol, curTf, sig);
+    window.scrollTo({top:0, behavior:'smooth'});
+  }
+  renderActiveDemoHud();
+  toast(r.already_open ? '🟢 الصفقة نشطة مسبقاً — تُتابع الآن حياً على الشارت!' : '🎮 تم تفعيل الإشارة بالتجريبي وفتحها حياً على الشارت!');
+}
+
+function focusDemoPosOnChart(pid){
+  const openArr = (demoOverviewData && demoOverviewData.open) || [];
+  const p = openArr.find(x => Number(x.id) === Number(pid));
+  if(!p) return;
+  activeDemoPos = p;
+  const linkedSig = (allSignals || []).find(s => Number(s.id) === Number(p.signal_id));
+  const ovSig = linkedSig || {
+    id: p.signal_id || p.id, symbol: p.symbol, direction: p.direction,
+    timeframe: curTf, entry: p.entry, stop: p.sl || 0, tp1: p.tp || 0, tp2: 0, tp3: p.tp || 0
+  };
+  openTab('signals', document.getElementById('tab-signals'));
+  curSym = p.symbol;
+  loadCandles(p.symbol, ovSig.timeframe || 'H1', ovSig);
+  renderActiveDemoHud();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+async function closeDemoPos(pid){
+  const r = await api('/api/demo/close', {method:'POST', body:JSON.stringify({position_id:pid})});
+  if(r && r.ok){
+    if(activeDemoPos && Number(activeDemoPos.id) === Number(pid)) activeDemoPos = null;
+    if(r.overview) renderDemoDeck(r.overview);
+    toast(`✅ أُغلقت الصفقة — النتيجة: ${(+(r.pnl||0))>=0?'+':''}$${(+(r.pnl||0)).toFixed(2)}`);
+  } else toast((r && r.error) || 'تعذر الإغلاق', true);
+}
+
+async function breakevenDemoPos(pid){
+  const r = await api('/api/demo/breakeven', {method:'POST', body:JSON.stringify({position_id:pid})});
+  if(r && r.ok){
+    if(r.overview) renderDemoDeck(r.overview);
+    toast('🛡 تم نقل وقف الخسارة إلى نقطة الدخول (تأمين الصفقة)');
+  } else toast((r && r.error) || 'تعذر التأمين', true);
+}
+
+function closeActiveDemo(){ if(activeDemoPos) closeDemoPos(activeDemoPos.id); }
+function breakevenActiveDemo(){ if(activeDemoPos) breakevenDemoPos(activeDemoPos.id); }
 
 async function logJournal(sid, action){
   const r = await api('/api/journal', {method:'POST', body:JSON.stringify({signal_id:sid, action})});
@@ -790,6 +1053,7 @@ async function boot(){
     document.getElementById('kQuota').textContent = lim > 0 ? `${used} / ${lim}` : `${used} / ∞`;
     const pctQ = lim > 0 ? Math.min(100, Math.max(8, Math.round(used/lim*100))) : 100;
     document.getElementById('qBarFill').style.width = pctQ + '%';
+    renderAutoSigToggle(me.auto_signals !== false);
     renderMarketChips(me.markets);
     if(me.risk){
       document.getElementById('rBal').value = me.risk.balance;
@@ -865,9 +1129,19 @@ async function boot(){
   const sigs = await api('/api/signals');
   allSignals = (sigs && sigs.signals) ? sigs.signals : [];
   renderSignals();
+  loadDemoOverview(false);
 
-  // Deep-link tab support (e.g. /?tab=partner from /partner command)
-  const reqTab = new URLSearchParams(window.location.search).get('tab');
+  // v7.5.0 Deep-link auto-activation: /?demo_sig=<sid> opens & activates signal on live chart immediately!
+  const qs = new URLSearchParams(window.location.search);
+  const demoSigId = Number(qs.get('demo_sig') || 0);
+  if(demoSigId > 0 && !window._demoSigApplied){
+    window._demoSigApplied = true;
+    activateDemoSignal(demoSigId);
+    return;
+  }
+
+  // Deep-link tab support (e.g. /?tab=partner or /?tab=demo)
+  const reqTab = qs.get('tab');
   if(reqTab && document.getElementById('pane-' + reqTab) && !window._tabApplied){
     window._tabApplied = true;
     openTab(reqTab, document.getElementById('tab-' + reqTab));

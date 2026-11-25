@@ -118,6 +118,8 @@ def dispatch_request(
                 return _json_resp(403, {"ok": False, "error": "Forbidden: ADMIN_ID required"})
 
             if m == "GET" and path == "/api/admin/overview":
+                from fysb.engines.tracker import seq_of
+                from fysb.ui.cards import signal_creator_label
                 with db.conn() as c:
                     users_n = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
                     paid_subs = c.execute(
@@ -126,6 +128,30 @@ def dispatch_request(
                     open_sigs = c.execute(
                         "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
                     ).fetchone()["n"]
+                    raw_sigs = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 20").fetchall()]
+                    cids = sorted({int(r.get("created_by") or 0) for r in raw_sigs if int(r.get("created_by") or 0) > 0})
+                    sids = [int(r["id"]) for r in raw_sigs]
+                    umap: dict[int, dict] = {}
+                    dcnt: dict[int, int] = {}
+                    deliv_cnt: dict[int, int] = {}
+                    if cids:
+                        ph = ",".join("?" * len(cids))
+                        for u in c.execute(f"SELECT user_id, username, full_name FROM users WHERE user_id IN ({ph})", tuple(cids)).fetchall():
+                            umap[int(u["user_id"])] = dict(u)
+                    if sids:
+                        ph = ",".join("?" * len(sids))
+                        for d in c.execute(f"SELECT signal_id, COUNT(*) n FROM demo_positions WHERE signal_id IN ({ph}) GROUP BY signal_id", tuple(sids)).fetchall():
+                            dcnt[int(d["signal_id"])] = int(d["n"])
+                        for dl in c.execute(f"SELECT signal_id, COUNT(*) n FROM signal_deliveries WHERE signal_id IN ({ph}) GROUP BY signal_id", tuple(sids)).fetchall():
+                            deliv_cnt[int(dl["signal_id"])] = int(dl["n"])
+                recent_signals = []
+                for r in raw_sigs:
+                    sid_i = int(r["id"])
+                    r["seq"] = seq_of(sid_i)
+                    r["creator"] = signal_creator_label(r, umap)
+                    r["demo_count"] = dcnt.get(sid_i, 0)
+                    r["deliveries"] = deliv_cnt.get(sid_i, 0)
+                    recent_signals.append(r)
                 toggles = {k: (db.get_setting(k, "0") == "1") for k in ALLOWED_ADMIN_TOGGLES}
                 return _json_resp(200, {
                     "ok": True,
@@ -136,6 +162,7 @@ def dispatch_request(
                         "open_signals": open_sigs,
                     },
                     "toggles": toggles,
+                    "recent_signals": recent_signals,
                     "pending_payments": payments.list_requests("PENDING", 15),
                     "pending_payouts": affiliates.list_payouts("PENDING", 15),
                     "chart_channels": chart_channels.list_channels(False),
@@ -146,6 +173,16 @@ def dispatch_request(
                     "news_feed_error": news_guard.last_feed_error(),
                     "partners_count": len(partners.list_partners()),
                 })
+
+            if m == "POST" and path == "/api/admin/signal":
+                sid = int(payload.get("signal_id") or 0)
+                op = str(payload.get("op") or "").lower()
+                if op == "cancel" and sid > 0:
+                    with db.tx() as c:
+                        c.execute("UPDATE signals SET status='CANCELLED', closed_at=? WHERE id=?", (config.now(), sid))
+                    audit_log.log(uid, f"webapp_signal_cancel:{sid}")
+                    return _json_resp(200, {"ok": True, "signal_id": sid, "status": "CANCELLED"})
+                return _json_resp(400, {"ok": False, "error": "Unsupported signal op"})
 
             if m == "POST" and path == "/api/admin/chart-channel":
                 op = str(payload.get("op") or "").lower()
@@ -240,6 +277,7 @@ def dispatch_request(
 
         # --- USER APIs ---
         if m == "GET" and path == "/api/me":
+            from fysb.engines import demo as demo_engine
             plan = dict(subscriptions.plan_for(uid))
             day_start = db.day_start_utc()
             with db.conn() as c:
@@ -247,6 +285,22 @@ def dispatch_request(
                     "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
                     (uid, day_start),
                 ).fetchone()["n"]
+                urow = c.execute("SELECT notifications, full_name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+            auto_sig_on = bool(urow["notifications"]) if urow else True
+            try:
+                demo_ov = demo_engine.account_overview(uid, config.market_api_key())
+            except Exception:
+                acc = demo_engine.get_or_create_account(uid)
+                demo_ov = {
+                    "balance": float(acc.get("balance") or 10000.0),
+                    "equity": float(acc.get("balance") or 10000.0),
+                    "floating": 0.0,
+                    "drawdown_pct": 0.0,
+                    "open": [],
+                    "closed": [],
+                    "win_rate": None,
+                    "settings": demo_engine.demo_settings(uid),
+                }
             lim = int(plan.get("max_signals_per_day") or 0)
             aff_data = affiliates.affiliate_stats(uid)
             try:
@@ -295,8 +349,18 @@ def dispatch_request(
                 "ok": True,
                 "user_id": uid,
                 "is_admin": principal["is_admin"],
+                "auto_signals": auto_sig_on,
                 "plan": {"code": plan.get("code", "FREE"), "title": plan.get("title", "FREE")},
                 "quota": {"used": used, "limit": lim},
+                "demo": {
+                    "balance": demo_ov["balance"],
+                    "equity": demo_ov["equity"],
+                    "floating": demo_ov["floating"],
+                    "drawdown_pct": demo_ov["drawdown_pct"],
+                    "open_count": len(demo_ov.get("open") or []),
+                    "win_rate": demo_ov.get("win_rate"),
+                    "auto_trade": bool((demo_ov.get("settings") or {}).get("auto_trade")),
+                },
                 "risk": risk_journal.get_risk_profile(uid),
                 "drawdown": risk_journal.daily_drawdown_status(uid),
                 "journal": risk_journal.journal_summary(uid, 30),
@@ -307,6 +371,70 @@ def dispatch_request(
                 "partner": partner_payload,
                 "markets": chart_channels.available_markets(),
             })
+
+        if m == "POST" and path == "/api/user/auto-signals":
+            from fysb.services import users as users_svc
+            with db.conn() as c:
+                r = c.execute("SELECT notifications FROM users WHERE user_id=?", (uid,)).fetchone()
+            cur = bool(r["notifications"]) if r else True
+            nxt = (not cur) if payload.get("enabled") is None else bool(payload.get("enabled"))
+            users_svc.set_notifications(uid, nxt)
+            return _json_resp(200, {"ok": True, "auto_signals": nxt})
+
+        if m == "GET" and path == "/api/demo/overview":
+            from fysb.engines import demo as demo_engine
+            ov = demo_engine.account_overview(uid, config.market_api_key())
+            return _json_resp(200, {"ok": True, **ov})
+
+        if m == "POST" and path == "/api/demo/open-signal":
+            from fysb.engines import demo as demo_engine
+            from fysb.engines.tracker import seq_of
+            sid = int(payload.get("signal_id") or 0)
+            lots_raw = payload.get("lots")
+            lots_ov = float(lots_raw) if lots_raw not in (None, "") else None
+            res = demo_engine.open_signal_interactive(uid, sid, config.market_api_key(), lots_override=lots_ov)
+            if not res.get("ok"):
+                return _json_resp(400, res)
+            sig = dict(res["signal"])
+            sig["seq"] = seq_of(int(sig["id"]))
+            ov = demo_engine.account_overview(uid, config.market_api_key())
+            return _json_resp(200, {
+                "ok": True,
+                "already_open": bool(res.get("already_open")),
+                "position_id": int(res["position_id"]),
+                "position": res["position"],
+                "signal": sig,
+                "overview": ov,
+            })
+
+        if m == "POST" and path == "/api/demo/close":
+            from fysb.engines import demo as demo_engine
+            pid = int(payload.get("position_id") or 0)
+            with db.conn() as c:
+                pos = c.execute("SELECT * FROM demo_positions WHERE id=? AND user_id=? AND status='OPEN'", (pid, uid)).fetchone()
+            if not pos:
+                return _json_resp(404, {"ok": False, "error": "الصفقة المفتوحة غير موجودة"})
+            px = float(pos["entry"])
+            try:
+                q_px = market_data.fetch_price(pos["symbol"], config.market_api_key())
+                if q_px and float(q_px.get("price") or 0) > 0:
+                    px = float(q_px["price"])
+            except Exception:
+                pass
+            res = demo_engine.close_at_price(uid, pid, px, "إغلاق يدوي من التطبيق")
+            ov = demo_engine.account_overview(uid, config.market_api_key())
+            return _json_resp(200 if res.get("ok") else 400, {**res, "overview": ov})
+
+        if m == "POST" and path == "/api/demo/breakeven":
+            from fysb.engines import demo as demo_engine
+            pid = int(payload.get("position_id") or 0)
+            with db.tx() as c:
+                pos = c.execute("SELECT * FROM demo_positions WHERE id=? AND user_id=? AND status='OPEN'", (pid, uid)).fetchone()
+                if not pos:
+                    return _json_resp(404, {"ok": False, "error": "الصفقة المفتوحة غير موجودة"})
+                c.execute("UPDATE demo_positions SET sl=? WHERE id=?", (float(pos["entry"]), pid))
+            ov = demo_engine.account_overview(uid, config.market_api_key())
+            return _json_resp(200, {"ok": True, "position_id": pid, "sl": float(pos["entry"]), "overview": ov})
 
         if m == "POST" and path == "/api/partner/payout":
             wallet = str(payload.get("wallet_address") or "").strip()
@@ -338,19 +466,35 @@ def dispatch_request(
             return _json_resp(200, {"ok": True, "channel_id": ch_id, "enabled": nxt == 1})
 
         if m == "GET" and path == "/api/signals":
+            from fysb.engines.tracker import seq_of
+            from fysb.ui.cards import signal_creator_label
+            p_row = partners.get_partner_by_user(uid)
+            is_partner = bool(p_row and int(p_row.get("enabled") or 0) == 1)
             with db.conn() as c:
-                if principal["is_admin"]:
-                    rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 20").fetchall()]
+                if principal["is_admin"] or is_partner:
+                    rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 25").fetchall()]
                 else:
                     rows = [
                         dict(r)
                         for r in c.execute(
-                            """SELECT s.* FROM signals s
-                               JOIN signal_deliveries d ON d.signal_id = s.id
-                               WHERE d.user_id=? ORDER BY s.id DESC LIMIT 20""",
-                            (uid,),
+                            """SELECT DISTINCT s.* FROM signals s
+                               LEFT JOIN signal_deliveries d ON d.signal_id = s.id AND d.user_id=?
+                               WHERE d.user_id IS NOT NULL OR s.created_by=?
+                               ORDER BY s.id DESC LIMIT 25""",
+                            (uid, uid),
                         ).fetchall()
                     ]
+                open_demo_sids = {
+                    int(r["signal_id"])
+                    for r in c.execute(
+                        "SELECT signal_id FROM demo_positions WHERE user_id=? AND status='OPEN' AND signal_id>0",
+                        (uid,),
+                    ).fetchall()
+                }
+            for r in rows:
+                r["seq"] = seq_of(int(r["id"]))
+                r["creator"] = signal_creator_label(r)
+                r["demo_open"] = int(r["id"]) in open_demo_sids
             return _json_resp(200, {"ok": True, "signals": rows})
 
         if m == "GET" and path == "/api/candles":

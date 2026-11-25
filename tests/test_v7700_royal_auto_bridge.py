@@ -298,3 +298,35 @@ def test_v772_native_bot_buttons_and_admin_home_panel_button(env, monkeypatch):
     assert "adminJumpBar" in u_html and "openAdminPanelNow" in u_html
 
 
+def test_v773_admin_clicking_u_home_opens_admin_panel_never_user_home(env):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fysb.handlers import user_pages
+
+    sent = []
+    q = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_UID, username="boss", full_name="Royal Boss"),
+        message=SimpleNamespace(
+            chat_id=ADMIN_UID,
+            message_id=1,
+            edit_text=AsyncMock(),
+            reply_text=AsyncMock(side_effect=lambda *a, **kw: sent.append((a, kw))),
+        ),
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+    ctx = SimpleNamespace(bot=bot, user_data={})
+
+    asyncio.run(user_pages.user_page(q, "home", ADMIN_UID, ctx))
+    assert len(sent) == 1
+    args, kw = sent[0]
+    rendered_text = args[0] if args else kw.get("text", "")
+    rm = kw.get("reply_markup")
+    assert "SUPER ADMIN" in rendered_text
+    assert rm is not None
+    rendered_cbs = [b.callback_data for r in rm.inline_keyboard for b in r if b.callback_data]
+    assert "a:stats" in rendered_cbs and "a:hub:execution" in rendered_cbs
+    assert "u:signow" not in rendered_cbs
+
+
+

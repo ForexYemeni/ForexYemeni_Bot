@@ -53,7 +53,16 @@ def render_ctrader_luxury_guide_html() -> str:
     )
 
 
-def _user_bridge_home_kb(conns: list[dict]) -> InlineKeyboardMarkup:
+def _nav_for(uid: int, extra_rows: list | None = None) -> InlineKeyboardMarkup:
+    """Route Admin back to Admin Command Center and regular users to User Home."""
+    if uid == config.ADMIN_ID:
+        rows = list(extra_rows or [])
+        rows.append([kb.btn("⚡ لوحة إدارة جسر النسخ", "a:bridge", style="primary")])
+        return kb.admin_nav(rows)
+    return kb.user_nav(extra_rows)
+
+
+def _user_bridge_home_kb(uid: int, conns: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list] = [
         [kb.btn("👑 ربط cTrader (Demo/Live)", "u:br_new:ctrader", style="success")],
         [kb.btn("⚡ ربط TradeLocker", "u:br_new:tradelocker", style="primary"),
@@ -72,8 +81,9 @@ def _user_bridge_home_kb(conns: list[dict]) -> InlineKeyboardMarkup:
         kb.btn("📖 دليل تفعيل cTrader", "u:br_guide", style="success"),
         kb.btn("📜 سجل أوامر النسخ", "u:br_orders", style="primary"),
     ])
-    rows.append([kb.btn("🧪 التداول التجريبي", "u:demo")])
-    return kb.user_nav(rows)
+    if uid != config.ADMIN_ID:
+        rows.append([kb.btn("🧪 التداول التجريبي", "u:demo")])
+    return _nav_for(uid, rows)
 
 
 async def render_user_bridge_home(q, uid: int, bot) -> None:
@@ -92,7 +102,7 @@ async def render_user_bridge_home(q, uid: int, bot) -> None:
         "</blockquote>",
         "<i>اختر المنصة للربط الفوري من هنا، أو اضغط على أي حساب مربوط لفحصه وإرسال صفقة اختبار 0.01 لوت.</i>",
     ]
-    await render(q, "\n".join(lines), _user_bridge_home_kb(conns), bot)
+    await render(q, "\n".join(lines), _user_bridge_home_kb(uid, conns), bot)
 
 
 async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEFAULT_TYPE, bot) -> bool:
@@ -106,7 +116,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
             [kb.btn("👑 ابدأ ربط cTrader الآن", "u:br_new:ctrader", style="success")],
             [kb.btn("↩️ جسر النسخ الملكي", "u:bridge", style="primary")],
         ]
-        await render(q, render_ctrader_luxury_guide_html(), kb.user_nav(rows), bot)
+        await render(q, render_ctrader_luxury_guide_html(), _nav_for(uid, rows), bot)
         return True
 
     if action == "br_orders":
@@ -124,7 +134,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
                     f"   <i>{esc((o.get('detail') or '')[:90])}</i>"
                 )
             body = "\n".join(lines)
-        await render(q, body, kb.user_nav([[kb.btn("↩️ جسر النسخ", "u:bridge")]]), bot)
+        await render(q, body, _nav_for(uid, [[kb.btn("↩️ جسر النسخ", "u:bridge")]]), bot)
         return True
 
     if action.startswith("br_new:"):
@@ -142,7 +152,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
             [kb.btn("💎 حساب حقيقي Live", f"u:br_mode:{plat}:LIVE", style="danger")],
             [kb.btn("↩️ جسر النسخ", "u:bridge")],
         ]
-        await render(q, body, kb.user_nav(rows), bot)
+        await render(q, body, _nav_for(uid, rows), bot)
         return True
 
     if action.startswith("br_mode:"):
@@ -154,7 +164,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
             await render(
                 q,
                 f"⛔ <b>النسخ على حساب {amode} غير متاح حالياً:</b>\n{esc(reason)}",
-                kb.user_nav([[kb.btn("↩️ جسر النسخ", "u:bridge")]]),
+                _nav_for(uid, [[kb.btn("↩️ جسر النسخ", "u:bridge")]]),
                 bot,
             )
             return True
@@ -162,7 +172,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
         if plat == "mt5_bridge":
             res = await afn.run(ab.save_connection, uid, "mt5_bridge", amode, partial_tp_be=True)
             if not res.get("ok"):
-                await render(q, f"❌ {esc(res.get('error') or 'تعذر الحفظ')}", kb.user_nav([[kb.btn("↩️ جسر النسخ", "u:bridge")]]), bot)
+                await render(q, f"❌ {esc(res.get('error') or 'تعذر الحفظ')}", _nav_for(uid, [[kb.btn("↩️ جسر النسخ", "u:bridge")]]), bot)
                 return True
             conn = res["connection"]
             body = (
@@ -172,7 +182,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
                 f"▎اضغط الزر بالأسفل لاستلام ملف <b>ForexYemeni_Bridge.mq5</b> جاهزاً للتثبيت على MT5 فوراً."
                 f"</blockquote>"
             )
-            await render(q, body, kb.user_nav([
+            await render(q, body, _nav_for(uid, [
                 [kb.btn("⬇️ إرسال ملف ForexYemeni_Bridge.mq5 الآن", f"u:br_ea:{conn['id']}", style="success")],
                 [kb.btn("↩️ جسر النسخ", "u:bridge")],
             ]), bot)
@@ -212,7 +222,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
                 f"⚡ <b>ربط TradeLocker ({amode}) — الخطوة 1 من 3</b>\n"
                 "<blockquote>أرسل البريد الإلكتروني لحسابك في TradeLocker:</blockquote>"
             )
-        await render(q, prompt, kb.user_nav([[kb.btn("❌ إلغاء", "u:bridge", style="danger")]]), bot)
+        await render(q, prompt, _nav_for(uid, [[kb.btn("❌ إلغاء", "u:bridge", style="danger")]]), bot)
         return True
 
     if action.startswith("br_view:"):
@@ -246,7 +256,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
             kb.btn("🗑 حذف الربط", f"u:br_del:{cid}", style="danger"),
         ])
         rows.append([kb.btn("↩️ جسر النسخ", "u:bridge")])
-        await render(q, body, kb.user_nav(rows), bot)
+        await render(q, body, _nav_for(uid, rows), bot)
         return True
 
     if action.startswith("br_test:"):
@@ -256,7 +266,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
         await render(
             q,
             f"🔍 <b>نتيجة فحص الاتصال المباشر</b>\n<blockquote>{esc(str(msg))}</blockquote>",
-            kb.user_nav([
+            _nav_for(uid, [
                 [kb.btn("🧪 تجربة صفقة اختبار 0.01 لوت الآن", f"u:br_testtrade:{cid}", style="success")],
                 [kb.btn("↩️ تفاصيل الحساب", f"u:br_view:{cid}"), kb.btn("⚡ جسر النسخ", "u:bridge")],
             ]),
@@ -271,7 +281,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
         await render(
             q,
             f"🧪 <b>نتيجة صفقة الاختبار (EURUSD BUY 0.01)</b>\n<blockquote>{esc(str(msg))}</blockquote>",
-            kb.user_nav([
+            _nav_for(uid, [
                 [kb.btn("📜 سجل أوامر النسخ", "u:br_orders", style="primary"),
                  kb.btn("↩️ تفاصيل الحساب", f"u:br_view:{cid}")],
             ]),
@@ -695,7 +705,7 @@ async def _finish_user_connect(msg, uid: int, plat: str, amode: str, creds: dict
     if not res.get("ok"):
         await msg.reply_text(
             f"❌ <b>تعذر حفظ الربط:</b> {esc(res.get('error') or 'خطأ')}",
-            reply_markup=kb.user_nav([[kb.btn("↩️ جسر النسخ", "u:bridge")]]),
+            reply_markup=_nav_for(uid, [[kb.btn("↩️ جسر النسخ", "u:bridge")]]),
             parse_mode="HTML",
         )
         return True
@@ -707,7 +717,7 @@ async def _finish_user_connect(msg, uid: int, plat: str, amode: str, creds: dict
         f"🔐 <b>تم حفظ وتشفير حساب {esc(ab.PLATFORMS[plat]['name'])} ({amode}) بنجاح!</b>\n"
         f"<blockquote>{esc(str(status_line))}</blockquote>\n"
         "اضغط الزر بالأسفل لتجربة فتح صفقة اختبار حقيقية <b>0.01 لوت</b> الآن:",
-        reply_markup=kb.user_nav([
+        reply_markup=_nav_for(uid, [
             [kb.btn("🧪 إرسال صفقة اختبار 0.01 لوت الآن", f"u:br_testtrade:{cid}", style="success")],
             [kb.btn("🔍 إعادة فحص الاتصال", f"u:br_test:{cid}", style="primary"),
              kb.btn("⚡ جسر النسخ", "u:bridge")],

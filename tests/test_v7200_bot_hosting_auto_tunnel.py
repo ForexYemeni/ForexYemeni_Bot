@@ -90,6 +90,7 @@ def test_tunnel_requires_edge_registration_and_health_check(isolated_env, monkey
     )
     fake_bin.chmod(0o755)
     monkeypatch.setattr(tunnel, "ensure_cloudflared_binary", lambda: fake_bin)
+    monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
 
     async def _fake_verify_ok(url, retries=7, delay=2.0):
         return True, "OK"
@@ -124,11 +125,11 @@ def test_tunnel_rejects_error_1033_unregistered_cf_and_fails_over_to_serveo_443(
     )
     bad_cf.chmod(0o755)
 
-    # Fake ssh binary simulating Serveo port-443 HTTPS tunnel success!
+    # Fake ssh binary simulating Pinggy/Serveo port-443 HTTPS tunnel with ANSI codes!
     good_ssh = tmp_path / "fake_ssh.sh"
     good_ssh.write_text(
         "#!/bin/sh\n"
-        "echo 'Forwarding HTTP traffic from https://royal-fallback.serveo.net'\n"
+        "printf '\\033[32mForwarding HTTP traffic from https://royal-fallback.a.free.pinggy.link\\033[0m\\n'\n"
         "sleep 30\n",
         encoding="utf-8",
     )
@@ -137,15 +138,42 @@ def test_tunnel_rejects_error_1033_unregistered_cf_and_fails_over_to_serveo_443(
     monkeypatch.setattr(tunnel, "ensure_cloudflared_binary", lambda: bad_cf)
     monkeypatch.setattr(tunnel.shutil, "which", lambda name: str(good_ssh) if name == "ssh" else None)
 
-    async def _fake_verify_ok(url, retries=7, delay=2.0):
+    async def _fake_verify_ok(url, retries=6, delay=2.0):
         return True, "OK"
 
     monkeypatch.setattr(tunnel, "verify_https_health", _fake_verify_ok)
 
     async def _run():
         url = await tunnel.start_tunnel(port=18081, timeout=1.5)
-        assert url == "https://royal-fallback.serveo.net"
-        assert tunnel.tunnel_status()["provider"] == "Serveo-443"
+        assert url == "https://royal-fallback.a.free.pinggy.link"
+        assert tunnel.tunnel_status()["provider"] == "Pinggy-443"
+        assert tunnel.is_tunnel_alive() is True
+        await tunnel.stop_tunnel()
+
+    asyncio.run(_run())
+
+
+def test_ngrok_443_takes_priority_when_token_configured(isolated_env, monkeypatch, tmp_path):
+    db.set_setting("ngrok_authtoken", "2aBcDeFgHiJkLmNoPqRsTuVwXyZ_1234567890")
+    fake_ng = tmp_path / "fake_ngrok.sh"
+    fake_ng.write_text(
+        "#!/bin/sh\n"
+        "echo 't=2026-11-25 msg=\"started tunnel\" url=https://forexyemeni-royal.ngrok-free.app'\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    fake_ng.chmod(0o755)
+    monkeypatch.setattr(tunnel, "ensure_ngrok_binary", lambda: fake_ng)
+
+    async def _fake_verify_ok(url, retries=6, delay=2.0):
+        return True, "OK"
+
+    monkeypatch.setattr(tunnel, "verify_https_health", _fake_verify_ok)
+
+    async def _run():
+        url = await tunnel.start_tunnel(port=18082, timeout=5.0)
+        assert url == "https://forexyemeni-royal.ngrok-free.app"
+        assert tunnel.tunnel_status()["provider"] == "Ngrok-443"
         assert tunnel.is_tunnel_alive() is True
         await tunnel.stop_tunnel()
 

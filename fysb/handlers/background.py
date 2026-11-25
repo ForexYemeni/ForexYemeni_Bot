@@ -729,8 +729,18 @@ async def webapp_tunnel_loop(app):
 
     notified_url = ""
     health_ticks = 0
+    fail_backoff = 0
     while True:
         try:
+            custom_db = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip()
+            if custom_db.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:
+                if config.WEBAPP_URL != custom_db:
+                    config.set_runtime_webapp_url(custom_db, source="db_custom")
+                if _tun.is_tunnel_alive():
+                    await _tun.stop_tunnel()
+                await asyncio.sleep(30)
+                continue
+
             auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
             should_run = bool(
                 config.WEBAPP_ENABLED
@@ -745,6 +755,7 @@ async def webapp_tunnel_loop(app):
                 if getattr(post_init, "_webapp_srv", None) is not None:
                     # Periodic live health verification every ~3 min to catch stale 1033 tunnels
                     if _tun.is_tunnel_alive():
+                        fail_backoff = 0
                         health_ticks += 1
                         if health_ticks >= 9:
                             health_ticks = 0
@@ -753,28 +764,36 @@ async def webapp_tunnel_loop(app):
                                 log.warning("WEBAPP TUNNEL: live health probe failed — restarting tunnel")
                                 await _tun.stop_tunnel()
                     if not _tun.is_tunnel_alive():
+                        if fail_backoff > 0:
+                            fail_backoff -= 20
+                            await asyncio.sleep(20)
+                            continue
                         health_ticks = 0
                         url = await _tun.start_tunnel(port=config.WEBAPP_PORT)
-                        if url and url != notified_url and config.ADMIN_ID:
-                            notified_url = url
-                            prov = _tun.tunnel_status().get("provider") or "HTTPS"
-                            try:
-                                await app.bot.send_message(
-                                    config.ADMIN_ID,
-                                    "🌐 <b><u>التطبيق المصغّر الملكي جاهز ومفحوص 100% (HTTP 200)!</u></b>\n"
-                                    "<blockquote>"
-                                    f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
-                                    f"▎🛰 المزوّد النشط: <b>{prov}</b> (تم التحقق الحي قبل الإرسال)\n"
-                                    "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
-                                    "</blockquote>",
-                                    reply_markup=_kb.InlineKeyboardMarkup([
-                                        [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
-                                        [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
-                                    ]),
-                                    parse_mode="HTML",
-                                )
-                            except Exception:
-                                pass
+                        if url:
+                            fail_backoff = 0
+                            if url != notified_url and config.ADMIN_ID:
+                                notified_url = url
+                                prov = _tun.tunnel_status().get("provider") or "HTTPS"
+                                try:
+                                    await app.bot.send_message(
+                                        config.ADMIN_ID,
+                                        "🌐 <b><u>التطبيق المصغّر الملكي جاهز ومفحوص 100% (HTTP 200)!</u></b>\n"
+                                        "<blockquote>"
+                                        f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
+                                        f"▎🛰 المزوّد النشط: <b>{prov}</b> (تم التحقق الحي قبل الإرسال)\n"
+                                        "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
+                                        "</blockquote>",
+                                        reply_markup=_kb.InlineKeyboardMarkup([
+                                            [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
+                                            [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
+                                        ]),
+                                        parse_mode="HTML",
+                                    )
+                                except Exception:
+                                    pass
+                        else:
+                            fail_backoff = 180
             elif _tun.is_tunnel_alive():
                 await _tun.stop_tunnel()
                 notified_url = ""
@@ -810,6 +829,9 @@ async def post_init(app):
     # whenever WEBAPP_ENABLED=1 and either a static WEBAPP_URL or Auto-HTTPS
     # Tunnel (Bot-Hosting) is active.
     post_init._webapp_srv = None
+    custom_db_url = (await afn.run(db.get_setting, "webapp_custom_url", "") or "").strip()
+    if custom_db_url.lower().startswith("https://") and not config.WEBAPP_URL_STATIC:
+        config.set_runtime_webapp_url(custom_db_url, source="db_custom")
     auto_tun_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
     want_webapp = bool(
         config.WEBAPP_ENABLED

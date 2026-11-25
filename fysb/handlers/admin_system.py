@@ -785,10 +785,11 @@ def _plan_code_title_rows():
 
 
 async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
-    """v7.2.0 Telegram Mini App & Admin Web Panel status + Bot-Hosting Zero-Config Auto-HTTPS Tunnel."""
+    """v7.2.2 Telegram Mini App & Admin Web Panel status + Bot-Hosting Verified Auto-HTTPS / Ngrok-443."""
     from fysb.webapp import tunnel as _tun
     ready = config.webapp_ready()
     auto_on = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
+    has_ngrok = bool(await afn.run(_tun.get_ngrok_token))
     st = _tun.tunnel_status()
     rows_kb = []
     if ready:
@@ -798,45 +799,78 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
         src_txt = (
             f"⚡ نفق HTTPS تلقائي مفحوص ({esc(prov)} · HTTP 200 ✅)"
             if config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel"
-            else "🔗 رابط HTTPS مخصص (.env)"
+            else ("🔗 رابط HTTPS محفوظ في قاعدة البيانات" if config.WEBAPP_TUNNEL_SOURCE == "db_custom" else "🔗 رابط HTTPS مخصص (.env)")
         )
         body = (
-            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.2.1)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v7.2.2)</u></b>\n"
             "<blockquote>"
             f"▎🟢 الحالة: <b>مفعّل ومفحوص حياً عبر HTTPS</b>\n"
             f"▎🛰 المصدر: <b>{src_txt}</b>\n"
             f"▎🔗 الرابط: <code>{esc(config.WEBAPP_URL)}</code>\n"
             f"▎🖥 الخادم المدمج: <code>127.0.0.1:{config.WEBAPP_PORT}</code>\n"
+            f"▎🔑 Ngrok-443: <b>{'🟢 مضبوط' if has_ngrok else '⚪ غير مضبوط'}</b>\n"
             "▎🔐 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
             "</blockquote>"
         )
     else:
         err_line = f"\n▎⚠️ التشخيص: <code>{esc(st['last_error'])}</code>" if st.get("last_error") else ""
         tail_logs = st.get("logs") or []
-        log_line = (
-            f"\n▎🧾 آخر سجل: <code>{esc(tail_logs[-1][:140])}</code>"
-            if tail_logs else ""
-        )
+        log_line = f"\n▎🧾 آخر سجل: <code>{esc(tail_logs[-1][:140])}</code>" if tail_logs else ""
         body = (
-            "🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.2.1)</u></b>\n"
+            "🌐 <b><u>التطبيق المصغر ولوحة الإدارة الويب (Mini App v7.2.2)</u></b>\n"
             "<blockquote>"
-            f"▎⏳ الحالة: <b>{'جاري تهيئة وفحص نفق HTTPS التلقائي...' if auto_on else 'متوقف حالياً'}</b>\n"
-            "▎🚀 <b>وضع Bot-Hosting (بدون أي موقع أو دومين):</b>\n"
-            "  يختبر تلقائياً Cloudflare (http2/quic) ثم Serveo (بورت 443) و Localhost.run ويتحقق من HTTP 200 قبل التفعيل!"
+            f"▎⏳ الحالة: <b>{'جاري محاولة الاتصال بنفق HTTPS...' if auto_on else 'متوقف حالياً'}</b>\n"
+            f"▎🔑 Ngrok-443 (مضمون على Bot-Hosting): <b>{'🟢 مضبوط' if has_ngrok else '⚪ غير مضبوط'}</b>\n"
+            "▎🛡 <b>ملاحظة Bot-Hosting:</b> إذا حجب السيرفر بورت 7844 و SSH، اضغط زر <b>«🔑 ربط Ngrok المجاني (بورت 443)»</b> بالأسفل — يعمل على بورت 443 القياسي المضمون 100% بدون أي موقع!"
             f"{err_line}{log_line}"
             "</blockquote>"
         )
     if notice:
         body += f"\n\n<i>{esc(notice)}</i>"
     if not config.WEBAPP_URL_STATIC:
-        rows_kb.append([kb.btn("🔄 تشغيل / تجديد نفق HTTPS الآن", "a:webapptunnel_restart", style="success")])
+        rows_kb.append([kb.btn("🔑 ربط Ngrok المجاني (بورت 443)", "a:webapp_setngrok", style="success")])
+        rows_kb.append([
+            kb.btn("🔄 تشغيل / تجديد النفق", "a:webapptunnel_restart", style="primary"),
+            kb.btn("🔗 لصق رابط HTTPS", "a:webapp_seturl", style="primary"),
+        ])
         rows_kb.append([kb.btn(
-            f"🛰 النفق التلقائي على Bot-Hosting: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
+            f"🛰 النفق التلقائي: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
             "a:webapptunnel_toggle",
             style="primary" if auto_on else "danger",
         )])
     rows_kb.append([kb.btn("↩️ النظام والأمان", "a:hub:system")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_webapp_set_ngrok(q, uid, context, bot):
+    context.user_data["awaiting_ngrok_token"] = True
+    await render(
+        q,
+        "🔑 <b><u>ربط Ngrok المجاني (يعمل عبر بورت 443 المضمون 100% على Bot-Hosting)</u></b>\n"
+        "<blockquote>"
+        "▎1) افتح مجاناً (بدون بطاقة وبدون موقع):\n"
+        "   <code>https://dashboard.ngrok.com/get-started/your-authtoken</code>\n"
+        "▎2) انسخ <b>Your Authtoken</b> وأرسله هنا في رسالة واحدة الآن.\n"
+        "▎3) سيحمّل البوت ngrok تلقائياً ويفتح التطبيق المصغّر ولوحة الإدارة فوراً على بورت 443!\n"
+        "▎<i>(أرسل <code>clear</code> لإزالة التوكن)</i>"
+        "</blockquote>",
+        kb.admin_nav([[kb.btn("❌ إلغاء", "a:webapp", style="danger")]]),
+        bot,
+    )
+
+
+async def admin_webapp_set_url(q, uid, context, bot):
+    context.user_data["awaiting_webapp_url"] = True
+    await render(
+        q,
+        "🔗 <b><u>ضبط رابط HTTPS مخصص للتطبيق المصغّر</u></b>\n"
+        "<blockquote>"
+        "▎أرسل رابط <b>https://...</b> المباشر الآن ليُحفظ تلقائياً بدون تعديل <code>.env</code>.\n"
+        "▎<i>(أرسل <code>clear</code> لإزالته والعودة للنفق التلقائي)</i>"
+        "</blockquote>",
+        kb.admin_nav([[kb.btn("❌ إلغاء", "a:webapp", style="danger")]]),
+        bot,
+    )
 
 
 async def admin_webapp_tunnel_toggle(q, uid, context, bot):

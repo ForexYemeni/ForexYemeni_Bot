@@ -439,6 +439,20 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_scan_tfs(q, uid, context, bot)
     elif act == "togglescantf":
         await admin_trading.admin_scan_tf_toggle(q, uid, context, bot, arg)
+    elif act == "newsguard":
+        await admin_trading.admin_news_guard(q, uid, context, bot)
+    elif act == "newsguardtoggle":
+        await admin_trading.admin_news_guard_toggle(q, uid, context, bot)
+    elif act == "newsguardwin":
+        await admin_trading.admin_news_guard_win(q, uid, context, bot, int(arg or 30))
+    elif act == "leaderboard":
+        await admin_trading.admin_leaderboard(q, uid, context, bot, "30d")
+    elif act == "lb":
+        await admin_trading.admin_leaderboard(q, uid, context, bot, arg or "30d")
+    elif act == "lbpublish":
+        await admin_trading.admin_leaderboard_publish(q, uid, context, bot, arg or "30d")
+    elif act == "strength":
+        await admin_trading.admin_strength(q, uid, context, bot)
     elif act == "backtest":
         await admin_trading.admin_backtest(q, uid, context, bot)
     elif act == "btrun":

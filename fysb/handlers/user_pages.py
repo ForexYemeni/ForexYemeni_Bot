@@ -610,6 +610,11 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                 extra.append("▎لا توجد إشارات مرسلة لحسابك في هذا التاريخ.")
 
         rows_kb.append([kb.btn("🚀 إشارة الآن — توليد بمراحل حقيقية", "u:signow", style="success")])
+        rows_kb.append([
+            kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="success"),
+            kb.btn("🧭 قوة العملات", "u:strength", style="primary"),
+            kb.btn("📰 الأخبار", "u:news", style="primary"),
+        ])
 
         if is_today:
             scope_label = _sa.ar_date_label(_sa.today_iso())
@@ -1439,6 +1444,42 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     elif action.startswith("watchoff:"):
         from fysb.handlers import signal_now as _sn
         await _sn.stop_watch(q, uid, context, bot, _safe_int(action.split(":", 1)[1]) or 0)
+
+    elif action == "leaderboard" or action.startswith("lb:"):
+        period = action.split(":", 1)[1] if action.startswith("lb:") else "30d"
+        if period not in ("7d", "30d", "all"):
+            period = "30d"
+        from fysb.services import leaderboard as _lb
+        body = await afn.run(_lb.render_leaderboard_card, period, False)
+        p_row = [
+            kb.btn("📅 7 أيام" + (" ✓" if period == "7d" else ""), "u:lb:7d", style="success" if period == "7d" else "primary"),
+            kb.btn("📆 30 يوماً" + (" ✓" if period == "30d" else ""), "u:lb:30d", style="success" if period == "30d" else "primary"),
+            kb.btn("📚 الكل" + (" ✓" if period == "all" else ""), "u:lb:all", style="success" if period == "all" else "primary"),
+        ]
+        rows_kb = [
+            p_row,
+            [kb.btn("🧭 قوة العملات", "u:strength", style="primary"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
+            [kb.btn("📡 مركز الإشارات", "u:signals", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "strength":
+        from fysb.engines import intelligence as _intel
+        body = await afn.run(_intel.render_strength_card)
+        rows_kb = [
+            [kb.btn("🔄 تحديث فوري", "u:strength", style="success"), kb.btn("📰 الأخبار الاقتصادية", "u:news", style="primary")],
+            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
+
+    elif action == "news":
+        from fysb.engines import news_guard as _ng
+        body = await afn.run(_ng.render_news_calendar_html)
+        rows_kb = [
+            [kb.btn("🔄 تحديث التقويم", "u:news", style="success"), kb.btn("🧭 قوة العملات", "u:strength", style="primary")],
+            [kb.btn("🏆 ترتيب الاستراتيجيات", "u:leaderboard", style="primary")],
+        ]
+        await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action == "help":
         await render(q,

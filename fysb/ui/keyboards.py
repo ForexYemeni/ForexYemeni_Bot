@@ -225,12 +225,15 @@ def admin_hub_trading() -> InlineKeyboardMarkup:
          btn("🧠 محرك السوق", "a:engine", style="primary")],
         [btn("⚡ إشارة الآن", "a:signow", style="success"),
          btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")],
-        [btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary"),
-         btn("🛡 إدارة المخاطر", "a:risk", style="danger")],
-        [btn("🌐 الأسواق", "a:markets", style="primary"),
-         btn("⏱ الأطر الزمنية", "a:timeframes", style="primary")],
-        [btn("🔬 إدارة التحليلات", "a:analytics", style="primary"),
-         btn("⚙️ أوضاع التشغيل", "a:modes", style="primary")],
+        [btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success"),
+         btn("📰 درع الأخبار", "a:newsguard", style="primary")],
+        [btn("🧭 قوة العملات (8)", "a:strength", style="primary"),
+         btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary")],
+        [btn("🛡 إدارة المخاطر", "a:risk", style="danger"),
+         btn("🌐 الأسواق", "a:markets", style="primary")],
+        [btn("⏱ الأطر الزمنية", "a:timeframes", style="primary"),
+         btn("🔬 إدارة التحليلات", "a:analytics", style="primary")],
+        [btn("⚙️ أوضاع التشغيل", "a:modes", style="primary")],
     ])
 
 

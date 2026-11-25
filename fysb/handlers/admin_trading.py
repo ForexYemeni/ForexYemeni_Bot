@@ -569,6 +569,7 @@ async def admin_engine(q, uid, context, bot):
         [kb.btn("➖ فاصل", f"a:engineadj:interval:-60"), kb.btn(f"⏱ {interval}s", "a:plannoop"), kb.btn("➕ فاصل", f"a:engineadj:interval:60")],
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
+        [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success")],
         [kb.btn("🧪 اختبار تاريخي (Backtest)", "a:backtest")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
@@ -619,6 +620,116 @@ async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
     new_val = await afn.run(_toggle_scan_tf_sync, code)
     await afn.run(audit_log.log, uid, f"engine_scan_timeframes:{new_val}")
     await admin_scan_tfs(q, uid, context, bot)
+
+
+# --- v6.25.0 Live News Guard, Strategy Leaderboard & Currency Strength ---------
+def _news_guard_state_sync() -> tuple[bool, int, str]:
+    from fysb.engines import news_guard as _ng
+    on = _ng.is_enabled()
+    win = _ng.window_minutes()
+    body = _ng.render_news_calendar_html(enabled=on, buf_min=win)
+    return on, win, body
+
+
+def _news_guard_toggle_sync() -> bool:
+    cur = (db.get_setting("news_guard_enabled", "1") or "1") == "1"
+    nxt = "0" if cur else "1"
+    db.set_setting("news_guard_enabled", nxt)
+    return nxt == "1"
+
+
+def _news_guard_set_win_sync(mins: int) -> int:
+    m = max(5, min(120, int(mins)))
+    db.set_setting("news_guard_minutes", str(m))
+    return m
+
+
+async def admin_news_guard(q, uid, context, bot):
+    on, win, body = await afn.run(_news_guard_state_sync)
+    rows_kb = [
+        [kb.btn("⏹ إيقاف درع الأخبار" if on else "▶️ تفعيل درع الأخبار", "a:newsguardtoggle",
+                style="danger" if on else "success")],
+        [
+            kb.btn(f"{'✅ ' if win == 15 else ''}±15د", "a:newsguardwin:15", style="success" if win == 15 else "primary"),
+            kb.btn(f"{'✅ ' if win == 30 else ''}±30د", "a:newsguardwin:30", style="success" if win == 30 else "primary"),
+            kb.btn(f"{'✅ ' if win == 45 else ''}±45د", "a:newsguardwin:45", style="success" if win == 45 else "primary"),
+            kb.btn(f"{'✅ ' if win == 60 else ''}±60د", "a:newsguardwin:60", style="success" if win == 60 else "primary"),
+        ],
+        [kb.btn("🔄 تحديث التقويم", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_news_guard_toggle(q, uid, context, bot):
+    nxt = await afn.run(_news_guard_toggle_sync)
+    await afn.run(audit_log.log, uid, f"news_guard_enabled:{int(nxt)}")
+    await admin_news_guard(q, uid, context, bot)
+
+
+async def admin_news_guard_win(q, uid, context, bot, mins: int):
+    m = await afn.run(_news_guard_set_win_sync, mins)
+    await afn.run(audit_log.log, uid, f"news_guard_minutes:{m}")
+    await admin_news_guard(q, uid, context, bot)
+
+
+def _active_channel_chat_ids() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute("SELECT chat_id FROM broadcast_channels WHERE enabled=1").fetchall()
+    return [str(r["chat_id"]) for r in rows if r["chat_id"]]
+
+
+async def admin_leaderboard(q, uid, context, bot, period: str = "30d", notice: str = ""):
+    if period not in ("7d", "30d", "all"):
+        period = "30d"
+    from fysb.services import leaderboard as _lb
+    body = await afn.run(_lb.render_leaderboard_card, period, False)
+    if notice:
+        body = f"<blockquote>{esc(notice)}</blockquote>\n\n" + body
+    p_row = [
+        kb.btn("📅 7 أيام" + (" ✓" if period == "7d" else ""), "a:lb:7d", style="success" if period == "7d" else "primary"),
+        kb.btn("📆 30 يوماً" + (" ✓" if period == "30d" else ""), "a:lb:30d", style="success" if period == "30d" else "primary"),
+        kb.btn("📚 الكل" + (" ✓" if period == "all" else ""), "a:lb:all", style="success" if period == "all" else "primary"),
+    ]
+    rows_kb = [
+        p_row,
+        [kb.btn("📢 نشر المصفوفة في القنوات الآن", f"a:lbpublish:{period}", style="success")],
+        [kb.btn("🧭 قوة العملات (8)", "a:strength", style="primary"), kb.btn("📰 درع الأخبار", "a:newsguard", style="primary")],
+        [kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_leaderboard_publish(q, uid, context, bot, period: str = "30d"):
+    if period not in ("7d", "30d", "all"):
+        period = "30d"
+    from fysb.services import leaderboard as _lb
+    card_txt = await afn.run(_lb.render_leaderboard_card, period, True)
+    chat_ids = await afn.run(_active_channel_chat_ids)
+    sent = 0
+    failed = 0
+    for cid in chat_ids:
+        try:
+            target = int(cid) if cid.lstrip("-").isdigit() else cid
+            await bot.send_message(target, card_txt, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+    await afn.run(audit_log.log, uid, f"leaderboard_published:{period}:sent={sent}")
+    note = (
+        f"✅ تم نشر مصفوفة الاستراتيجيات ({period}) في {sent} قناة" + (f" · فشل {failed}" if failed else "")
+        if chat_ids else "⚠️ لا توجد قنوات مفعّلة حالياً للنشر."
+    )
+    await admin_leaderboard(q, uid, context, bot, period=period, notice=note)
+
+
+async def admin_strength(q, uid, context, bot):
+    from fysb.engines import intelligence as _intel
+    body = await afn.run(_intel.render_strength_card)
+    rows_kb = [
+        [kb.btn("🔄 تحديث فوري", "a:strength", style="success"), kb.btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="primary")],
+        [kb.btn("📰 درع الأخبار", "a:newsguard", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
 def _enabled_backtest_markets() -> list[str]:

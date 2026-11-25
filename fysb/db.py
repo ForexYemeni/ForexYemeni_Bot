@@ -489,6 +489,9 @@ DEFAULT_SETTINGS = {
     "admin_signal_markets": "",
     # v6.24.0 Multi-timeframe auto scanner (comma-separated enabled TFs, e.g. M15,H1)
     "engine_scan_timeframes": "M15,H1",
+    # v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
+    "news_guard_enabled": "1",
+    "news_guard_minutes": "30",
 }
 
 SEED_MARKETS = [

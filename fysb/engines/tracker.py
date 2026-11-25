@@ -264,6 +264,15 @@ def check_open_signals(api_key: str) -> dict:
                 _log(symbol, sig["timeframe"], "MISSED_ENTRY",
                      f"signal #{sig['id']} reached TP1 without ever touching the entry")
                 continue
+            # v6.25.0 (#8): Smart pending CHoCH auto-invalidation
+            inv_ok, inv_why = detect_pending_choch_invalidation(sig, candles)
+            if inv_ok:
+                stats["updated"] += 1
+                notes, _, new_edits = _apply_transition(sig, "CANCELLED", payload, live_px)
+                notifications.extend(notes)
+                edits.extend(new_edits)
+                _log(symbol, sig["timeframe"], "PENDING_INVALIDATED", f"signal #{sig['id']} {inv_why}")
+                continue
             # Still a live pending plan: keep the card pulsing with the real
             # price, but NEVER bank targets or celebrate halfway for a trade
             # the market has not given us yet.
@@ -297,6 +306,14 @@ def check_open_signals(api_key: str) -> dict:
                     notes, new_edits = _halfway_notes(sig, post, live_px)
                     notifications.extend(notes)
                     edits.extend(new_edits)
+            except Exception:
+                pass
+        # v6.25.0 (#10): Early Invalidation Warning (one-time per RUNNING trade)
+        if sig["status"] == "RUNNING" and int(sig.get("hit_tp") or 0) == 0 and live_px:
+            try:
+                warn_ok, warn_txt = detect_early_invalidation(sig, live_px, candles)
+                if warn_ok and warn_txt:
+                    notifications.extend(_alert_targets(sig, warn_txt))
             except Exception:
                 pass
         # Live-card pulse: re-render the ORIGINAL delivered card while the price
@@ -660,6 +677,107 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     return None
 
 
+_EARLY_WARNED_SIDS: set[int] = set()
+
+
+def detect_pending_choch_invalidation(sig: dict, candles: list[dict]) -> tuple[bool, str]:
+    """v6.25.0 (#8): Smart Pending CHoCH Auto-Invalidation.
+
+    For an unfilled ACTIVE limit/pending signal, if a confirmed candle closes
+    decisively beyond the planned Stop Loss (structure broken before fill),
+    invalidate and cancel cleanly so traders are never pulled into a broken setup.
+    """
+    if not candles or sig.get("status") != "ACTIVE":
+        return False, ""
+    direction = (sig.get("direction") or "").upper()
+    stop = float(sig.get("stop") or 0.0)
+    if stop <= 0:
+        return False, ""
+    for c in candles:
+        close_px = float(c.get("close") or 0.0)
+        if close_px <= 0:
+            continue
+        if direction == "BUY" and close_px <= stop:
+            return True, f"CHoCH هبوطي — إغلاق أسفل وقف الخسارة {stop:g} قبل تفعيل الدخول"
+        if direction == "SELL" and close_px >= stop:
+            return True, f"CHoCH صعودي — إغلاق أعلى وقف الخسارة {stop:g} قبل تفعيل الدخول"
+    return False, ""
+
+
+def dynamic_stop_advisory(sig: dict, hit_tp: int) -> str:
+    """v6.25.0 (#9): Exact dynamic Break-Even (after TP1) & Lock-50% (after TP2) stop levels."""
+    from fysb import instruments
+    sym = sig["symbol"]
+    if hit_tp == 1:
+        be_px = instruments.fmt_price(sym, float(sig["entry"]))
+        return (
+            f"▎🛡 <b>الوقف الديناميكي (Break-Even):</b> انقل وقف الخسارة إلى نقطة الدخول "
+            f"<code>{be_px}</code> (مخاطرة 0$) واترك الجزء المتبقي نحو TP2 وTP3.\n"
+        )
+    if hit_tp == 2:
+        lock_px = instruments.fmt_price(sym, float(sig["tp1"]))
+        return (
+            f"▎🔒 <b>تأمين 50% ربح (Trailing Lock):</b> ارفع وقف الخسارة الآن إلى TP1 "
+            f"<code>{lock_px}</code> لتثبيت ربح مضمون حتى لو انعكس السوق!\n"
+        )
+    return ""
+
+
+def detect_early_invalidation(sig: dict, live_px: float, candles: list[dict]) -> tuple[bool, str]:
+    """v6.25.0 (#10): One-time Early Invalidation Advisory for RUNNING trades.
+
+    Triggers when live price has retraced >= 62% of the distance from entry to SL
+    AND the most recent candle prints a strong adverse conviction body (>= 60% of range).
+    """
+    sid = int(sig.get("id") or 0)
+    if sid <= 0 or sid in _EARLY_WARNED_SIDS:
+        return False, ""
+    if sig.get("status") != "RUNNING" or int(sig.get("hit_tp") or 0) > 0:
+        return False, ""
+    entry = float(sig.get("entry") or 0.0)
+    stop = float(sig.get("stop") or 0.0)
+    direction = (sig.get("direction") or "").upper()
+    risk = abs(entry - stop)
+    if risk <= 0 or live_px <= 0 or not candles:
+        return False, ""
+
+    adverse_move = (entry - live_px) if direction == "BUY" else (live_px - entry)
+    ratio = adverse_move / risk
+    if ratio < 0.62 or ratio >= 0.99:
+        return False, ""
+
+    last = candles[-1]
+    o = float(last.get("open") or 0.0)
+    h = float(last.get("high") or 0.0)
+    l = float(last.get("low") or 0.0)
+    c_px = float(last.get("close") or 0.0)
+    rng = max(h - l, 1e-9)
+    adverse_candle = (
+        (direction == "BUY" and c_px < o and ((o - c_px) / rng) >= 0.60)
+        or (direction == "SELL" and c_px > o and ((c_px - o) / rng) >= 0.60)
+    )
+    if not adverse_candle:
+        return False, ""
+
+    _EARLY_WARNED_SIDS.add(sid)
+    from fysb import instruments
+    from fysb.theme import dir_badge, esc, tf_name
+    seq = seq_of(sid)
+    cur_pips = drift_pips(sig["symbol"], direction, entry, live_px)
+    txt = (
+        f"⚠️ <b><u>تنبيه ضعف مبكر (Early Invalidation) — الإشارة #{seq}</u></b> "
+        f"— {esc(sig['symbol'])} {dir_badge(direction)} ⏱ {tf_name(sig['timeframe'])}\n"
+        f"<blockquote>"
+        f"▎📉 السعر الحالي: <code>{instruments.fmt_price(sig['symbol'], live_px)}</code> "
+        f"(<b>{cur_pips:+.1f} pips</b> · <b>{int(ratio * 100)}%</b> نحو الوقف)\n"
+        f"▎⚡ رُصدت شمعة زخم معاكسة قوية (CHoCH محتمل) قبل ملامسة وقف الخسارة "
+        f"<code>{instruments.fmt_price(sig['symbol'], stop)}</code>.\n"
+        f"▎🛡 <b>تنبيه إداري:</b> يمكنك تقليص المخاطرة أو الخروج المبكر بخسارة أقل — القرار بيدك."
+        f"</blockquote>"
+    )
+    return True, txt
+
+
 def halfway_reached(sig: dict, candles: list[dict]) -> bool:
     """Did price already cover >=50% of the entry->TP1 distance (in trade
     direction) at any point AFTER the signal, without hitting SL?"""
@@ -768,9 +886,9 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         tp_px = float(tp_map[hit_tp])
         detail = (f"▎🏁 الهدف المتحقق: <code>{instruments.fmt_price(sig['symbol'], tp_px)}</code>"
                   f" · 💵 <b>{instruments.usd_move(sig['symbol'], pips_result, 0.01, px=tp_px):+,.2f} $</b> لكل 0.01 لوت\n")
-        if hit_tp == 1:
-            detail += ("▎🛡 <b>إدارة الصفقة:</b> انقل وقف الخسارة إلى نقطة الدخول (حماية كاملة) "
-                       "واُترك الجزء المتبقي يعمل نحو الهدفين التاليين.\n")
+        dyn_adv = dynamic_stop_advisory(sig, hit_tp)
+        if dyn_adv:
+            detail += dyn_adv
         if status == "TP3_HIT":
             detail += "▎👑 <b>صفقة مكتملة بكل الأهداف — أداء ممتاز.</b>\n"
     if status == "SL_HIT":

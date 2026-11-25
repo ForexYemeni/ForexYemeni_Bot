@@ -169,6 +169,23 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         _log_run(symbol, entry_tf, "KILL_SWITCH", "global kill switch is engaged")
         return {"status": "REJECTED", "signal_id": None, "reason": "kill switch engaged", "score": None}
 
+    # 0.5: v6.25.0 Live Economic Calendar & News Guard (free keyless feed)
+    if not force:
+        try:
+            from fysb.engines import news_guard
+            blocked_news, ev = news_guard.check_news_block(symbol)
+            if blocked_news and ev:
+                mins = int(ev.get("minutes_delta") or 0)
+                when_txt = f"بعد {mins}د" if mins >= 0 else f"منذ {abs(mins)}د"
+                n_reason = (
+                    f"درع الأخبار (News Guard): خبر قوي قريب {ev.get('currency')} — "
+                    f"{ev.get('title')} ({when_txt})"
+                )
+                _log_run(symbol, entry_tf, "NEWS_BLOCKED", n_reason)
+                return {"status": "REJECTED", "signal_id": None, "reason": n_reason, "score": None}
+        except Exception as exc:
+            log.debug("news_guard check skipped: %s", exc)
+
     # 1-2: entry data + validation
     try:
         payload = market_data.fetch_candles(provider_symbol, market_data.parse_interval(entry_tf), api_key)
@@ -227,6 +244,52 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         return {"status": "NO_SETUP", "signal_id": None, "reason": conflict_note, "score": None}
     if conflict_note:
         _log_run(symbol, entry_tf, "CONFLICT_RESOLVED", conflict_note)
+
+    # 8.7: v6.25.0 Institutional Intelligence Enrichment
+    # (#3 Adaptive Weighting, #4 Confluence Matrix, #5 DXY Correlation,
+    #  #6 Killzone Session, #7 Liquidity Sweep & Stop-Hunt)
+    try:
+        from fysb.engines import intelligence as _intel
+        bias_struct = structure_labels(bias_candles) if bias_candles else {}
+        bias_trend = str(bias_struct.get("trend") or "")
+        kz = _intel.current_killzone()
+        sweep = _intel.detect_liquidity_sweep(candles)
+        dxy_cache_by_dir: dict[str, dict] = {}
+        for cand in results:
+            bonus = 0.0
+            extra_notes: list[str] = []
+            # Adaptive 30-day closed performance weight
+            aw = _intel.adaptive_strategy_weight(cand.code, symbol)
+            if aw["delta"]:
+                bonus += aw["delta"]
+                extra_notes.append(aw["note"])
+            # Confluence across agreeing strategies + HTF alignment
+            conf = _intel.build_confluence_summary(results, cand.direction, entry_tf, bias_trend)
+            if conf["bonus"]:
+                bonus += conf["bonus"]
+            extra_notes.append(conf["label"])
+            # Killzone liquidity session bonus
+            if kz["bonus"]:
+                bonus += kz["bonus"]
+            extra_notes.append(f"الجلسة: {kz['label']}")
+            # Live DXY correlation check
+            d_key = cand.direction.upper()
+            if d_key not in dxy_cache_by_dir:
+                dxy_cache_by_dir[d_key] = _intel.dxy_bias_check(symbol, d_key)
+            dxy_res = dxy_cache_by_dir[d_key]
+            if dxy_res["delta"]:
+                bonus += dxy_res["delta"]
+                extra_notes.append(dxy_res["note"])
+            # Liquidity sweep alignment
+            if sweep["detected"] and sweep["direction"] == d_key:
+                bonus += sweep["bonus"]
+                extra_notes.append(sweep["note"])
+            if bonus:
+                cand.score = int(max(0, min(95, round(float(cand.score) + bonus))))
+            cand.reasons = list(cand.reasons or []) + extra_notes
+        results.sort(key=lambda r: float(r.score), reverse=True)
+    except Exception as exc:
+        log.debug("intelligence enrichment skipped: %s", exc)
 
     # 9: merge & multi-candidate gate evaluation (v6.19.0)
     # Evaluate ranked candidates in score order so if candidate #1 fails

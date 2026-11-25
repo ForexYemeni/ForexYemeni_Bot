@@ -285,6 +285,20 @@ async def market_engine_loop(app):
 
     while True:
         try:
+            # v6.25.0 (#2): 30-min pre-news warning to Admin for High-Impact events
+            if config.ADMIN_ID:
+                try:
+                    from fysb.engines import news_guard as _ng
+                    for ev in await afn.run(_ng.due_pre_news_alerts, 30):
+                        await _safe_send(
+                            app.bot,
+                            config.ADMIN_ID,
+                            f"📰 <b><u>تنبيه خبر اقتصادي قوي بعد ~{int(ev.get('minutes_delta') or 30)} دقيقة</u></b>\n"
+                            f"<blockquote>▎🔴 العملة: <b>{ev.get('currency')}</b> — <b>{ev.get('title')}</b>\n"
+                            f"▎🛡 درع الأخبار سيحمي الإشارات الجديدة تلقائياً حول وقت الخبر.</blockquote>",
+                        )
+                except Exception:
+                    pass
             if await afn.run(db.get_setting, "engine_enabled", "0") == "1" \
                     and not await afn.run(db.kill_switch_on) \
                     and await afn.run(db.get_setting, "signal_push_enabled", "1") == "1":

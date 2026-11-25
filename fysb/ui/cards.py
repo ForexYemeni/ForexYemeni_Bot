@@ -63,6 +63,19 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
         f"🧠 <b>الاستراتيجية:</b> <b>{esc(strategy_name(sig['strategy']))}</b>",
         f"📌 <b>الحالة:</b> {status_line}",
     ]
+    # v6.25.0 (#4): Institutional Confluence Matrix badge when multi-strategy scores exist
+    try:
+        raw_scores = sig["strategy_scores"]
+    except (KeyError, IndexError, TypeError):
+        raw_scores = ""
+    if raw_scores:
+        try:
+            from fysb.engines.intelligence import format_confluence_from_scores
+            conf_line = format_confluence_from_scores(raw_scores, sig["strategy"])
+            if conf_line:
+                meta.append(conf_line)
+        except Exception:
+            pass
 
     head = (f"{d_emoji} <b><u>{esc(symbol)}</u></b>  ·  <b>{'شراء' if direction == 'BUY' else 'بيع'}</b>  ·  "
             f"<b>{esc(tf_name(sig['timeframe']))}</b>\n{status_line}")

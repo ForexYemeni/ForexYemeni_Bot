@@ -585,6 +585,21 @@ def self_update(dest_root=None, target_tag: str = "", force: bool = False) -> di
             if snap is not None:
                 result["rollback_backup"] = snap.name
             result["files"] = safe_extract(tmp_zip, dest_root)
+            # v7.0.1: ensure newly added requirements (e.g. Pillow) are installed
+            # on existing hosts updating via /update without manual pip commands.
+            try:
+                import importlib.util as _ilu
+                if _ilu.find_spec("PIL") is None:
+                    import subprocess as _sp
+                    _sp.run(
+                        [sys.executable, "-m", "pip", "install", "--quiet", "Pillow>=10.4.0"],
+                        stdout=_sp.DEVNULL,
+                        stderr=_sp.DEVNULL,
+                        timeout=60,
+                        check=False,
+                    )
+            except Exception:
+                pass
         finally:
             try:
                 tmp_zip.unlink()

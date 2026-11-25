@@ -36,7 +36,7 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def test_version_and_webapp_https_gating(isolated_db, monkeypatch):
-    assert config.VERSION == "7.0.0"
+    assert tuple(int(x) for x in config.VERSION.split(".")) >= (7, 0, 0)
     monkeypatch.setattr(config, "WEBAPP_URL", "")
     assert config.webapp_ready() is False
 
@@ -81,7 +81,7 @@ def test_miniapp_and_admin_panel_routes_end_to_end(isolated_db):
 
     # 1) Public routes: health + User Mini App HTML + Admin Web Panel HTML
     st, ct, body = wa_server.dispatch_request("GET", "/health", {})
-    assert st == 200 and json.loads(body)["version"] == "7.0.0"
+    assert st == 200 and json.loads(body)["version"] == config.VERSION
 
     st, ct, html_u = wa_server.dispatch_request("GET", "/", {})
     assert st == 200 and "lightweight-charts" in html_u.decode("utf-8") and 'dir="rtl"' in html_u.decode("utf-8")
@@ -151,7 +151,7 @@ def test_real_asyncio_http_server_loopback(isolated_db):
             writer.close()
             await writer.wait_closed()
             assert b"HTTP/1.1 200 OK" in raw
-            assert b'"version": "7.0.0"' in raw
+            assert f'"version": "{config.VERSION}"'.encode("ascii") in raw
         finally:
             srv.close()
             await srv.wait_closed()

@@ -206,8 +206,15 @@ def dispatch_request(
         if m == "GET" and path == "/api/candles":
             sym = (qs.get("symbol") or "XAUUSD").strip().upper()
             tf = (qs.get("tf") or "H1").strip().upper()
+            with db.conn() as c:
+                mrow = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
+            prov_sym = (mrow["provider_symbol"] if mrow and mrow["provider_symbol"] else sym)
             try:
-                candles, src = market_data.fetch_candles(sym, tf, count=80)
+                payload = market_data.fetch_candles(
+                    prov_sym, market_data.parse_interval(tf), api_key=config.market_api_key(), outputsize=80
+                )
+                candles = list((payload or {}).get("values") or [])
+                src = str((payload or {}).get("source") or "")
             except Exception:
                 candles, src = [], ""
             formatted = []

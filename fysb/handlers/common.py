@@ -135,7 +135,31 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
     return msg
 
 
+def is_private_user_update(update: object) -> bool:
+    """v8.0.1: True ONLY when the update is from a real Telegram user in a private chat.
+
+    Channel posts (`channel_post` / `edited_channel_post`) have `effective_user=None`
+    and `effective_chat.type='channel'`; group/supergroup messages have non-private
+    chat types. Rejecting them guarantees the bot NEVER crashes or replies inside
+    any Telegram channel or group where it was added as admin/member.
+    """
+    if update is None:
+        return False
+    if getattr(update, "channel_post", None) is not None or getattr(update, "edited_channel_post", None) is not None:
+        return False
+    if getattr(update, "effective_user", None) is None:
+        return False
+    chat = getattr(update, "effective_chat", None)
+    if chat is not None:
+        ctype = str(getattr(chat, "type", "") or "").lower()
+        if ctype and ctype != "private":
+            return False
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_user_update(update):
+        return
     tg_user = update.effective_user
     uid = tg_user.id
     try:
@@ -212,6 +236,8 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         restart-looped; a huge uptime => the old process never restarted)
     No secrets: engine type, latency and version only.
     """
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     t0 = time.monotonic()
     ok, _integrity = await afn.run(db.healthy)
@@ -245,6 +271,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
       * /update list         ← عرض أحدث الإصدارات بأزرار تثبيت وتراجع فوري
       * /update rollback     ← تراجع فوري لآخر نسخة محفوظة محلياً (حتى بلا إنترنت)
     """
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
         await afn.run(audit_log.log, uid, "security:update_command_denied")
@@ -389,6 +417,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
         await afn.run(audit_log.log, uid, "security:admin_command_denied")
@@ -404,6 +434,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     if uid != config.ADMIN_ID:
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة فقط.")
@@ -451,7 +483,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         return
     log.error("Unhandled application error", exc_info=err)
     try:
-        if hasattr(update, "effective_message") and update.effective_message:
+        # v8.0.1: NEVER post error replies into Telegram channels or groups!
+        if is_private_user_update(update) and hasattr(update, "effective_message") and update.effective_message:
             await update.effective_message.reply_text("⚠️ حدث خطأ غير متوقع. أعد المحاولة.")
     except Exception:
         pass

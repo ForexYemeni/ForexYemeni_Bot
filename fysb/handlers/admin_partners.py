@@ -468,6 +468,9 @@ async def render_partner_start(update: Update, p: dict) -> None:
 
 async def partner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry command `/partner` — accessible ONLY to active registered partners."""
+    from fysb.handlers.common import is_private_user_update
+    if not is_private_user_update(update):
+        return
     uid = update.effective_user.id
     p = await afn.run(partners_svc.get_partner_by_user, uid)
     if not p or not p.get("enabled"):

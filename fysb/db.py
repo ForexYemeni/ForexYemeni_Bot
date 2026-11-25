@@ -355,6 +355,87 @@ CREATE TABLE IF NOT EXISTS trade_journal(
   closed_at TEXT DEFAULT '',
   UNIQUE(user_id, signal_id)
 );
+CREATE TABLE IF NOT EXISTS academy_lessons(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  title TEXT NOT NULL,
+  track TEXT NOT NULL DEFAULT 'FREE',
+  sort_order INTEGER NOT NULL DEFAULT 1,
+  summary TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  quiz_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS academy_enrollments(
+  user_id INTEGER PRIMARY KEY,
+  plan_type TEXT NOT NULL DEFAULT 'PAID',
+  starts_at TEXT NOT NULL,
+  ends_at TEXT DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'MANUAL',
+  granted_by INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS academy_progress(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  lesson_code TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0,
+  quiz_score INTEGER NOT NULL DEFAULT 0,
+  quiz_total INTEGER NOT NULL DEFAULT 0,
+  completed_at TEXT DEFAULT '',
+  UNIQUE(user_id, lesson_code)
+);
+CREATE TABLE IF NOT EXISTS gift_codes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  target_plan TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  max_uses INTEGER NOT NULL DEFAULT 1,
+  uses_count INTEGER NOT NULL DEFAULT 0,
+  note TEXT DEFAULT '',
+  created_by INTEGER DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  expires_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS gift_redemptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  target_plan TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  redeemed_at TEXT NOT NULL,
+  UNIQUE(code_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS affiliate_links(
+  invitee_id INTEGER PRIMARY KEY,
+  referrer_id INTEGER NOT NULL,
+  converted INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affiliate_commissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  referrer_id INTEGER NOT NULL,
+  referred_user_id INTEGER NOT NULL,
+  payment_id INTEGER DEFAULT 0,
+  amount_usd REAL NOT NULL DEFAULT 0.0,
+  rate_pct REAL NOT NULL DEFAULT 15.0,
+  commission_usd REAL NOT NULL DEFAULT 0.0,
+  tier_name TEXT NOT NULL DEFAULT 'BRONZE',
+  status TEXT NOT NULL DEFAULT 'CREDITED',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affiliate_payouts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  amount_usd REAL NOT NULL DEFAULT 0.0,
+  wallet_address TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  admin_note TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  processed_at TEXT DEFAULT ''
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -460,6 +541,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_ref_invitee ON referrals(invitee_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchers_due ON signal_watchers(status, next_run)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_txid_uniq ON payments(LOWER(txid)) WHERE txid IS NOT NULL AND txid != ''",
+    "CREATE INDEX IF NOT EXISTS idx_acad_prog_user ON academy_progress(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_redemp_user ON gift_redemptions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_comm_ref ON affiliate_commissions(referrer_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_links_ref ON affiliate_links(referrer_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_payout_status ON affiliate_payouts(status, user_id)",
 ]
 
 DEFAULT_SETTINGS = {
@@ -518,6 +604,11 @@ DEFAULT_SETTINGS = {
     "news_guard_minutes": "30",
     # v6.26.0 Local zero-cost institutional charts (Pillow)
     "charts_enabled": "1",
+    # v6.27.0 Independent Trading Academy + Tiered Affiliates
+    "academy_enabled": "1",
+    "academy_price_usd": "49",
+    "academy_duration_days": "365",
+    "affiliate_min_payout_usd": "20",
 }
 
 SEED_MARKETS = [

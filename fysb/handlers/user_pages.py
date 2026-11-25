@@ -276,7 +276,9 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         await render(q, body, kb.user_nav([
             [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
             [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
-            [kb.btn("💎 الباقات", "u:plans"), kb.btn("📈 إحصائياتي", "u:my_stats")],
+            [kb.btn("🎓 الأكاديمية المستقلة", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
+            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans")],
+            [kb.btn("🛡 ملف المخاطرة", "u:risk"), kb.btn("📓 مفكرة التداول", "u:journal")],
         ]), bot)
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
@@ -977,7 +979,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             [kb.copy_btn("📋 نسخ رابط الدعوة بضغطة واحدة", st["link"], style="primary")],
             [kb.url_btn("📤 شارك رابط الدعوة (نص فاخر جاهز)", share_link, style="success")],
             [kb.url_btn("🔗 فتح رابط الدعوة", st["link"])],
-            [kb.btn("💎 الباقات", "u:plans", style="primary")],
+            [kb.btn("💸 لوحة عمولات الشركاء (15%–35%)", "u:affiliate", style="success"),
+             kb.btn("💎 الباقات", "u:plans", style="primary")],
         ]
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 

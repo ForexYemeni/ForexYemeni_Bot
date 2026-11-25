@@ -93,7 +93,7 @@ def _insert_signal(sig: dict) -> int:
 
 
 def test_version_and_phase3_schema(isolated_db):
-    assert config.VERSION == "6.26.0"
+    assert tuple(int(x) for x in config.VERSION.split(".")) >= (6, 26, 0)
     assert charts.charts_enabled() is True
     with db.conn() as c:
         tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

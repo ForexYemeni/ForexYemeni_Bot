@@ -148,7 +148,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Royal referral capture (first link wins, server-side only) ---------
     # /start ref<CODE> — e.g. https://t.me/<bot>?start=refROYAL
     payload = (context.args or [""])[0] if context.args else ""
-    if isinstance(payload, str) and payload.lower().startswith("ref") and len(payload) > 3 \
+    if isinstance(payload, str) and payload.lower().startswith("ref_") and payload[4:].isdigit() \
+            and uid != config.ADMIN_ID:
+        try:
+            from fysb.services import affiliates as _aff
+            if await afn.run(_aff.bind_referral, int(payload[4:]), uid):
+                await afn.run(audit_log.log, uid, f"affiliate_ref_bound:{payload[4:]}")
+        except Exception:
+            log.exception("affiliate referral bind failed")
+    elif isinstance(payload, str) and payload.lower().startswith("ref") and len(payload) > 3 \
             and uid != config.ADMIN_ID:
         try:
             from fysb.services import referrals

@@ -88,7 +88,9 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
                 "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt",
                 "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
-                "awaiting_partner_limit")
+                "awaiting_partner_limit",
+                "awaiting_gift_code", "awaiting_aff_wallet",
+                "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct")
 
 
 def clear_flows(ud: dict) -> None:
@@ -101,6 +103,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.effective_message.text or "").strip()
     ud = context.user_data
+
+    # ---------- Phase 4 (v6.27.0) Academy / Gift Codes / Affiliate Payouts ----------
+    if any(ud.get(k) for k in ("awaiting_gift_code", "awaiting_aff_wallet",
+                               "awaiting_acad_grant", "awaiting_gift_custom", "awaiting_gift_direct")):
+        from fysb.handlers import academy_growth
+        if await academy_growth.handle_growth_text_input(update, context, uid, text):
+            return
 
     # ---------- Admin flows ----------
     if uid == config.ADMIN_ID:

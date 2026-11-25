@@ -148,12 +148,15 @@ def approve_request(pid: int, actor: int) -> dict:
         if not p:
             return {"ok": False, "error": "طلب غير موجود أو تمت مراجعته مسبقاً"}
         c.execute("UPDATE payments SET status='APPROVED', reviewed_at=? WHERE id=?", (config.now(), pid))
+    p_dict = dict(p)
     plan = None
     with db.conn() as c:
-        plan = c.execute("SELECT * FROM plans WHERE code=?", (p["plan_code"],)).fetchone()
+        plan = c.execute("SELECT * FROM plans WHERE code=?", (p_dict["plan_code"],)).fetchone()
     grant_res = {}
-    if plan:
-        p_dict = dict(p)
+    if str(p_dict.get("plan_code") or "").upper() == "ACADEMY":
+        from fysb.services import academy as _acad
+        _acad.grant_paid_access(p_dict["user_id"], source="PAYMENT", granted_by=actor)
+    elif plan:
         pl_dict = dict(plan)
         grant_res = grant_subscription(
             p_dict["user_id"],
@@ -164,9 +167,20 @@ def approve_request(pid: int, actor: int) -> dict:
             amount=float(p_dict.get("amount") or 0),
             currency=p_dict.get("currency") or pl_dict.get("currency") or "USD",
         )
+    # v6.27.0: Tiered Affiliate Commission (15% -> 20% -> 25% -> 35%) on any paid approval
+    aff_comm = None
+    try:
+        from fysb.services import affiliates as _aff
+        aff_comm = _aff.record_commission_on_payment(
+            int(p_dict["user_id"]),
+            float(p_dict.get("amount") or 0),
+            payment_id=pid,
+        )
+    except Exception:
+        pass
     from fysb.services.audit import log as audit_log
     audit_log(actor, f"payment_approved:{pid}")
-    return {"ok": True, "payment": dict(p), "commission": grant_res.get("commission")}
+    return {"ok": True, "payment": p_dict, "commission": grant_res.get("commission"), "affiliate_commission": aff_comm}
 
 
 def reject_request(pid: int, reason: str, actor: int) -> dict:

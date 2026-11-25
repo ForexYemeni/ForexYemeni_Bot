@@ -260,7 +260,10 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
          btn("💠 الباقات", "a:plans", style="primary")],
         [btn("🏦 وسائل الدفع", "a:paymethods", style="primary"),
          btn("🤝 نظام الإحالات", "a:refs", style="success")],
-        [btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
+        [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),
+         btn("🎁 الهدايا والأكواد", "a:gifts", style="success")],
+        [btn("💸 عمولات الشركاء", "a:affiliates", style="success"),
+         btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
         [btn("📈 الإحصائيات", "a:statistics", style="primary"),
          btn("📋 التقارير", "a:reports", style="primary")],
     ])

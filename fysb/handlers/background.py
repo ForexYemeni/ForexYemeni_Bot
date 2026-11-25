@@ -728,6 +728,7 @@ async def webapp_tunnel_loop(app):
     from fysb.ui import keyboards as _kb
 
     notified_url = ""
+    health_ticks = 0
     while True:
         try:
             auto_db = (await afn.run(db.get_setting, "webapp_auto_tunnel", "1") or "1") == "1"
@@ -741,27 +742,39 @@ async def webapp_tunnel_loop(app):
                 # Ensure embedded HTTP server is running before opening tunnel
                 if getattr(post_init, "_webapp_srv", None) is None:
                     post_init._webapp_srv = await _wsrv.start_webapp_server()
-                if getattr(post_init, "_webapp_srv", None) is not None and not _tun.is_tunnel_alive():
-                    url = await _tun.start_tunnel(port=config.WEBAPP_PORT)
-                    if url and url != notified_url and config.ADMIN_ID:
-                        notified_url = url
-                        try:
-                            await app.bot.send_message(
-                                config.ADMIN_ID,
-                                "🌐 <b><u>التطبيق المصغّر الملكي يعمل الآن تلقائياً بدون أي موقع!</u></b>\n"
-                                "<blockquote>"
-                                f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
-                                "▎⚡ تم تشغيل النفق التلقائي المجاني بنجاح على Bot-Hosting.\n"
-                                "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
-                                "</blockquote>",
-                                reply_markup=_kb.InlineKeyboardMarkup([
-                                    [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
-                                    [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
-                                ]),
-                                parse_mode="HTML",
-                            )
-                        except Exception:
-                            pass
+                if getattr(post_init, "_webapp_srv", None) is not None:
+                    # Periodic live health verification every ~3 min to catch stale 1033 tunnels
+                    if _tun.is_tunnel_alive():
+                        health_ticks += 1
+                        if health_ticks >= 9:
+                            health_ticks = 0
+                            ok, _ = await _tun.verify_https_health(_tun.tunnel_status()["url"], retries=2, delay=1.5)
+                            if not ok:
+                                log.warning("WEBAPP TUNNEL: live health probe failed — restarting tunnel")
+                                await _tun.stop_tunnel()
+                    if not _tun.is_tunnel_alive():
+                        health_ticks = 0
+                        url = await _tun.start_tunnel(port=config.WEBAPP_PORT)
+                        if url and url != notified_url and config.ADMIN_ID:
+                            notified_url = url
+                            prov = _tun.tunnel_status().get("provider") or "HTTPS"
+                            try:
+                                await app.bot.send_message(
+                                    config.ADMIN_ID,
+                                    "🌐 <b><u>التطبيق المصغّر الملكي جاهز ومفحوص 100% (HTTP 200)!</u></b>\n"
+                                    "<blockquote>"
+                                    f"▎🟢 الرابط المباشر (HTTPS): <code>{url}</code>\n"
+                                    f"▎🛰 المزوّد النشط: <b>{prov}</b> (تم التحقق الحي قبل الإرسال)\n"
+                                    "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
+                                    "</blockquote>",
+                                    reply_markup=_kb.InlineKeyboardMarkup([
+                                        [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{url}/admin", style="success")],
+                                        [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{url}/", style="primary")],
+                                    ]),
+                                    parse_mode="HTML",
+                                )
+                            except Exception:
+                                pass
             elif _tun.is_tunnel_alive():
                 await _tun.stop_tunnel()
                 notified_url = ""

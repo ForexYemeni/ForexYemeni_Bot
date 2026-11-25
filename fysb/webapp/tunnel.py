@@ -1,37 +1,39 @@
-"""Zero-Config Automatic HTTPS Tunnel for Bot-Hosting / VPS / Local (v7.2.0).
+"""Zero-Config Verified Auto-HTTPS Tunnel for Bot-Hosting / VPS / Local (v7.2.1).
 
-Enables Telegram Mini App & Admin Web Panel WITHOUT owning any domain, website,
-or external hosting — ideal for Bot-Hosting (Pterodactyl) containers!
-
-How it works (100% Free, Zero Account, Zero Root):
-  1. If `WEBAPP_URL` is already configured in `.env` (or cloud host env like
-     RAILWAY_PUBLIC_DOMAIN / RENDER_EXTERNAL_URL), this module does nothing.
-  2. Otherwise, when `WEBAPP_ENABLED=1` and DB setting `webapp_auto_tunnel=1`:
-     - Uses existing `cloudflared` in PATH if installed, OR downloads the
-       official Cloudflare static binary once from GitHub Releases into
-       `BASE_DIR/.bin/cloudflared` (with `/tmp/fysb_cloudflared` fallback).
-     - Spawns `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:<port>`.
-     - Captures the live `https://<random>.trycloudflare.com` URL within ~3s
-       and injects it into `config.set_runtime_webapp_url(url)` immediately
-       (no bot restart required!).
-     - Automatically restarts the tunnel if it ever drops, and terminates
-       cleanly on `post_shutdown()`.
+Guarantees ZERO Error 1033 broken links:
+  1. Never activates or notifies a URL just because a tunnel printed it!
+  2. For Cloudflare (`cloudflared`), waits for BOTH the `trycloudflare.com` URL
+     AND `"Registered tunnel connection"` in stderr, trying IPv4 `http2` first
+     and `quic` second.
+  3. Performs a REAL end-to-end HTTPS self-test (`GET {url}/health` -> HTTP 200
+     JSON `{"ok": true}`) proving traffic actually traverses the internet edge
+     all the way back into our embedded Python HTTP server!
+  4. If Bot-Hosting's firewall blocks Cloudflare's port 7844, automatically fails
+     over to port-443 SSH HTTPS tunnels (`serveo.net` on TCP 443 -> `localhost.run`)
+     when `ssh` is available, verifying each with `GET {url}/health`!
+  5. Records real diagnostic log lines in `tunnel_status()["logs"]` so Admin
+     always sees the exact reason if the host blocks all outbound tunnels.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import platform
 import re
 import shutil
 import stat
+import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 from fysb import config
 from fysb.config import log
 
 _TRYCF_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+_SERVEO_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.(?:serveo\.net|serveousercontent\.com)")
+_LHR_RE = re.compile(r"https://[a-zA-Z0-9-]+\.lhr\.life")
 
 _BIN_URLS = {
     ("linux", "x86_64"): "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
@@ -44,6 +46,8 @@ _BIN_URLS = {
 
 _STATE: dict = {
     "active": False,
+    "verified": False,
+    "provider": "",
     "url": "",
     "port": 0,
     "pid": 0,
@@ -51,6 +55,7 @@ _STATE: dict = {
     "last_error": "",
     "restarts": 0,
 }
+_LOGS: deque[str] = deque(maxlen=15)
 
 _PROC: asyncio.subprocess.Process | None = None
 _READERS: list[asyncio.Task] = []
@@ -65,14 +70,14 @@ def _get_lock() -> asyncio.Lock:
 
 
 def tunnel_status() -> dict:
-    """Return a safe copy of the current auto-tunnel runtime state."""
-    return dict(_STATE)
+    """Return a safe copy of the current auto-tunnel runtime state & recent logs."""
+    out = dict(_STATE)
+    out["logs"] = list(_LOGS)
+    return out
 
 
 def _download_url_for_host() -> str | None:
-    sys_name = platform.system().lower()
-    arch = platform.machine().lower()
-    return _BIN_URLS.get((sys_name, arch))
+    return _BIN_URLS.get((platform.system().lower(), platform.machine().lower()))
 
 
 def _is_executable(path: Path) -> bool:
@@ -125,14 +130,64 @@ def ensure_cloudflared_binary() -> Path | None:
     return None
 
 
+def _probe_health_once(url: str, timeout: float = 8.0) -> tuple[bool, str]:
+    """Perform a single real public HTTPS GET {url}/health and verify JSON `ok: true`."""
+    health_url = url.rstrip("/") + "/health"
+    req = urllib.request.Request(
+        health_url,
+        headers={
+            "User-Agent": f"ForexYemeni-HealthCheck/{config.VERSION}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = int(getattr(resp, "status", 200))
+            raw = resp.read(2048).decode("utf-8", errors="ignore")
+            if code != 200:
+                return False, f"HTTP {code}"
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and data.get("ok") is True:
+                    return True, "OK"
+            except Exception:
+                pass
+            return False, "استجابة غير متوقعة (ليست JSON من الخادم)"
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read(512).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        if "1033" in body:
+            return False, "Cloudflare Error 1033 (النفق لم يسجّل اتصاله)"
+        return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:80]}"
+
+
+async def verify_https_health(url: str, retries: int = 7, delay: float = 2.0) -> tuple[bool, str]:
+    """Verify end-to-end public HTTPS reachability (allows DNS propagation time)."""
+    last_err = ""
+    for attempt in range(max(1, int(retries))):
+        ok, msg = await asyncio.to_thread(_probe_health_once, url, 8.0)
+        if ok:
+            return True, "OK"
+        last_err = msg
+        if attempt + 1 < retries:
+            await asyncio.sleep(delay)
+    return False, last_err or "تعذر التحقق من رابط HTTPS"
+
+
 async def stop_tunnel() -> None:
-    """Cleanly stop any running cloudflared subprocess and reader tasks."""
+    """Cleanly stop any running tunnel subprocess and reader tasks."""
     global _PROC, _READERS
     proc = _PROC
     _PROC = None
     readers = list(_READERS)
     _READERS.clear()
     _STATE["active"] = False
+    _STATE["verified"] = False
     _STATE["pid"] = 0
     if proc is not None and proc.returncode is None:
         try:
@@ -152,10 +207,16 @@ async def stop_tunnel() -> None:
     if config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel":
         config.set_runtime_webapp_url("", source="")
         _STATE["url"] = ""
+        _STATE["provider"] = ""
 
 
-async def _drain_stream(stream: asyncio.StreamReader, url_future: asyncio.Future) -> None:
-    """Read cloudflared stderr/stdout until EOF, resolving `url_future` on first trycloudflare URL."""
+async def _drain_tunnel_stream(
+    stream: asyncio.StreamReader,
+    url_re: re.Pattern,
+    url_future: asyncio.Future,
+    reg_future: asyncio.Future | None = None,
+) -> None:
+    """Stream tunnel stdout/stderr, recording recent logs and resolving URL & registration."""
     try:
         while True:
             raw = await stream.readline()
@@ -164,91 +225,197 @@ async def _drain_stream(stream: asyncio.StreamReader, url_future: asyncio.Future
             line = raw.decode("utf-8", errors="ignore").strip()
             if not line:
                 continue
-            m = _TRYCF_RE.search(line)
+            _LOGS.append(line[:200])
+            m = url_re.search(line)
             if m and not url_future.done():
                 url_future.set_result(m.group(0))
+            if reg_future is not None and not reg_future.done():
+                low = line.lower()
+                if "registered tunnel connection" in low:
+                    reg_future.set_result(True)
     except asyncio.CancelledError:
         raise
     except Exception:
         pass
 
 
-async def start_tunnel(port: int | None = None, timeout: float = 35.0) -> str | None:
-    """Start Cloudflare Quick Tunnel pointing to `http://127.0.0.1:<port>`.
-    Returns the live `https://...trycloudflare.com` URL on success, or None."""
+async def _try_spawn_provider(
+    provider_name: str,
+    cmd: list[str],
+    url_re: re.Pattern,
+    require_cf_register: bool,
+    target_port: int,
+    timeout: float,
+    verify: bool = True,
+) -> tuple[str | None, str]:
+    """Spawn one tunnel provider, wait for URL (+ registration if Cloudflare), and
+    end-to-end verify `GET {url}/health == 200` before accepting."""
     global _PROC
+    await stop_tunnel()
+    _LOGS.clear()
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        return None, f"{provider_name}: تعذر التشغيل ({type(exc).__name__})"
+
+    _PROC = proc
+    _STATE["pid"] = proc.pid or 0
+    _STATE["port"] = target_port
+    _STATE["provider"] = provider_name
+
+    loop = asyncio.get_running_loop()
+    url_future: asyncio.Future = loop.create_future()
+    reg_future: asyncio.Future | None = loop.create_future() if require_cf_register else None
+    readers = []
+    if proc.stderr:
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stderr, url_re, url_future, reg_future)))
+    if proc.stdout:
+        readers.append(asyncio.create_task(_drain_tunnel_stream(proc.stdout, url_re, url_future, reg_future)))
+    _READERS.extend(readers)
+
+    try:
+        url = await asyncio.wait_for(url_future, timeout=min(timeout, 22.0))
+    except asyncio.TimeoutError:
+        await stop_tunnel()
+        return None, f"{provider_name}: انتهت مهلة الحصول على الرابط"
+    except Exception as exc:
+        await stop_tunnel()
+        return None, f"{provider_name}: {type(exc).__name__}"
+
+    # CRITICAL FIX for Cloudflare Error 1033: wait for actual edge registration!
+    if reg_future is not None:
+        try:
+            await asyncio.wait_for(reg_future, timeout=min(timeout, 20.0))
+        except asyncio.TimeoutError:
+            log.warning("WEBAPP TUNNEL (%s): got %s but edge registration timed out (port 7844 likely blocked)", provider_name, url)
+            await stop_tunnel()
+            return None, f"{provider_name}: فشل تسجيل اتصال الحافة (غالبًا بورت 7844 محجوب)"
+
+    # Ensure process is still alive right after registration
+    if proc.returncode is not None:
+        await stop_tunnel()
+        return None, f"{provider_name}: توقفت العملية فجأة (code={proc.returncode})"
+
+    # End-to-End Self-Test: actually fetch GET {url}/health through the public internet!
+    if verify:
+        ok, vmsg = await verify_https_health(url, retries=7, delay=2.0)
+        if not ok:
+            log.warning("WEBAPP TUNNEL (%s): health check failed for %s (%s)", provider_name, url, vmsg)
+            await stop_tunnel()
+            return None, f"{provider_name}: فشل الفحص الحي ({vmsg})"
+
+    _STATE["active"] = True
+    _STATE["verified"] = True
+    _STATE["url"] = url
+    _STATE["provider"] = provider_name
+    _STATE["last_error"] = ""
+    config.set_runtime_webapp_url(url, source="auto_tunnel")
+    log.info("WEBAPP TUNNEL VERIFIED & READY [%s]: %s -> http://127.0.0.1:%s", provider_name, url, target_port)
+    return url, ""
+
+
+async def start_tunnel(port: int | None = None, timeout: float = 35.0, verify: bool = True) -> str | None:
+    """Start a verified free HTTPS tunnel pointing to `http://127.0.0.1:<port>`.
+    Tries Cloudflare (http2 -> quic), then automatically fails over to port-443
+    SSH HTTPS tunnels (`serveo.net` -> `localhost.run`) if Cloudflare's port 7844
+    is blocked on Bot-Hosting."""
     async with _get_lock():
         target_port = int(port if port is not None else config.WEBAPP_PORT)
         if target_port <= 0:
             _STATE["last_error"] = "بورت الخادم المحلي غير متاح"
             return None
 
-        # Reuse already healthy tunnel on same port
-        if _PROC is not None and _PROC.returncode is None and _STATE.get("url") and _STATE.get("port") == target_port:
+        if is_tunnel_alive() and _STATE.get("port") == target_port:
             return _STATE["url"]
 
-        await stop_tunnel()
+        errors: list[str] = []
 
+        # 1) Primary: Cloudflare cloudflared (IPv4 http2, then IPv4 quic)
         bin_path = await asyncio.to_thread(ensure_cloudflared_binary)
-        if not bin_path:
-            return None
+        if bin_path:
+            for proto in ("http2", "quic"):
+                cmd = [
+                    str(bin_path),
+                    "tunnel",
+                    "--no-autoupdate",
+                    "--edge-ip-version",
+                    "4",
+                    "--protocol",
+                    proto,
+                    "--url",
+                    f"http://127.0.0.1:{target_port}",
+                ]
+                url, err = await _try_spawn_provider(
+                    f"Cloudflare-{proto}",
+                    cmd,
+                    _TRYCF_RE,
+                    require_cf_register=True,
+                    target_port=target_port,
+                    timeout=timeout,
+                    verify=verify,
+                )
+                if url:
+                    return url
+                errors.append(err)
+        else:
+            if _STATE.get("last_error"):
+                errors.append(_STATE["last_error"])
 
-        cmd = [
-            str(bin_path),
-            "tunnel",
-            "--no-autoupdate",
-            "--protocol",
-            "http2",
-            "--url",
-            f"http://127.0.0.1:{target_port}",
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        # 2) Fallback for Bot-Hosting containers that block port 7844:
+        #    SSH reverse HTTPS tunnels over standard TCP port 443 / 22!
+        ssh_bin = shutil.which("ssh")
+        if ssh_bin:
+            ssh_base = [
+                ssh_bin,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-o", "ConnectTimeout=12",
+                "-o", "ExitOnForwardFailure=yes",
+            ]
+            # Serveo on TCP port 443 (bypasses port 7844 & port 22 firewalls!)
+            url, err = await _try_spawn_provider(
+                "Serveo-443",
+                [*ssh_base, "-p", "443", "-R", f"80:127.0.0.1:{target_port}", "serveo.net"],
+                _SERVEO_RE,
+                require_cf_register=False,
+                target_port=target_port,
+                timeout=timeout,
+                verify=verify,
             )
-        except Exception as exc:
-            _STATE["last_error"] = f"تعذر تشغيل cloudflared: {type(exc).__name__}"
-            log.warning("WEBAPP TUNNEL: failed to launch %s: %s", bin_path, exc)
-            return None
+            if url:
+                return url
+            errors.append(err)
 
-        _PROC = proc
-        _STATE["pid"] = proc.pid or 0
-        _STATE["port"] = target_port
+            # localhost.run fallback
+            url, err = await _try_spawn_provider(
+                "LocalhostRun",
+                [*ssh_base, "-R", f"80:127.0.0.1:{target_port}", "nokey@localhost.run"],
+                _LHR_RE,
+                require_cf_register=False,
+                target_port=target_port,
+                timeout=timeout,
+                verify=verify,
+            )
+            if url:
+                return url
+            errors.append(err)
 
-        loop = asyncio.get_running_loop()
-        url_future: asyncio.Future = loop.create_future()
-        readers = []
-        if proc.stderr:
-            readers.append(asyncio.create_task(_drain_stream(proc.stderr, url_future)))
-        if proc.stdout:
-            readers.append(asyncio.create_task(_drain_stream(proc.stdout, url_future)))
-        _READERS.extend(readers)
-
-        try:
-            url = await asyncio.wait_for(url_future, timeout=timeout)
-        except asyncio.TimeoutError:
-            _STATE["last_error"] = "انتهت مهلة الحصول على رابط HTTPS من Cloudflare"
-            log.warning("WEBAPP TUNNEL: timed out waiting for trycloudflare URL")
-            for t in readers:
-                t.cancel()
-            await stop_tunnel()
-            return None
-        except Exception as exc:
-            _STATE["last_error"] = f"خطأ أثناء إنشاء النفق: {type(exc).__name__}"
-            for t in readers:
-                t.cancel()
-            await stop_tunnel()
-            return None
-
-        _STATE["active"] = True
-        _STATE["url"] = url
-        _STATE["last_error"] = ""
-        config.set_runtime_webapp_url(url, source="auto_tunnel")
-        log.info("WEBAPP TUNNEL READY: %s -> http://127.0.0.1:%s", url, target_port)
-        return url
+        _STATE["last_error"] = " · ".join(e for e in errors if e)[:280] or "تعذر فتح نفق HTTPS تلقائي"
+        return None
 
 
 def is_tunnel_alive() -> bool:
-    return bool(_PROC is not None and _PROC.returncode is None and _STATE.get("active") and _STATE.get("url"))
+    return bool(
+        _PROC is not None
+        and _PROC.returncode is None
+        and _STATE.get("active")
+        and _STATE.get("verified")
+        and _STATE.get("url")
+    )

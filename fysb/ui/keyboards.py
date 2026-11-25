@@ -196,7 +196,7 @@ def user_menu() -> InlineKeyboardMarkup:
          btn("🎧 الدعم والمساعدة", "u:support", style="primary")],
     ]
     if _cfg.webapp_ready():
-        rows.insert(0, [webapp_btn("📱 فتح التطبيق التفاعلي الملكي (Mini App)", f"{_cfg.WEBAPP_URL}/", style="success")])
+        rows.insert(0, [webapp_btn("📱 فتح التطبيق التفاعلي الملكي (Mini App)", _cfg.webapp_page_url("/"), style="success")])
     return InlineKeyboardMarkup(rows)
 
 

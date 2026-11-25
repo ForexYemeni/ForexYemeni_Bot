@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>FOREXYEMENI — Super Admin Web Panel v7.4.3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet"/>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:#06080f;--glass:rgba(16,22,36,.82);--border:rgba(148,163,184,.16);
+  --gold:#d9b04c;--gold2:#f7de8c;--gold-line:rgba(217,176,76,.35);
+  --green:#16c784;--red:#f04452;--cyan:#38bdf8;--text:#f1f5f9;--muted:#94a3b8;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:'Cairo',-apple-system,BlinkMacSystemFont,'Segoe UI',Tahoma,sans-serif;
+  background:
+    radial-gradient(ellipse 80% 45% at 50% -10%, rgba(217,176,76,.16), transparent 65%),
+    radial-gradient(ellipse 50% 35% at 95% 25%, rgba(22,199,132,.07), transparent 60%),
+    var(--bg);
+  color:var(--text);padding:14px 14px 40px;max-width:900px;margin:0 auto;min-height:100vh;
+}
+.hdr{
+  background:rgba(10,14,24,.86);backdrop-filter:blur(16px);
+  border:1px solid var(--gold-line);border-radius:18px;
+  display:flex;justify-content:space-between;align-items:center;
+  padding:13px 16px;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.4);
+}
+.hdr h1{font-size:16px;font-weight:900;background:linear-gradient(90deg,#f7de8c,#d9b04c);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hdr .sub{font-size:11px;color:var(--muted)}
+.grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+@media(min-width:640px){.grid4{grid-template-columns:repeat(4,1fr)}}
+.kpi{
+  background:var(--glass);border:1px solid var(--border);border-top:2px solid var(--gold);
+  border-radius:16px;padding:13px;box-shadow:0 8px 24px rgba(0,0,0,.32);
+}
+.kpi .lbl{color:var(--muted);font-size:12px;font-weight:700}
+.kpi .val{font-family:var(--mono);font-size:22px;font-weight:900;margin-top:4px;color:var(--gold2)}
+.card{
+  background:var(--glass);backdrop-filter:blur(16px);border:1px solid var(--border);
+  border-radius:18px;padding:15px;margin-bottom:13px;box-shadow:0 10px 28px rgba(0,0,0,.3);
+}
+.card.gold-edge{border-color:var(--gold-line)}
+.card h3{font-size:15px;font-weight:800;color:var(--gold2);margin-bottom:11px;display:flex;justify-content:space-between;align-items:center}
+.toggles{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+@media(min-width:640px){.toggles{grid-template-columns:repeat(3,1fr)}}
+.btn{
+  border:none;border-radius:11px;padding:10px 12px;font-family:'Cairo',sans-serif;
+  font-weight:800;font-size:12px;cursor:pointer;color:#fff;background:#2563eb;transition:.15s;
+}
+.btn:active{transform:scale(.96)}
+.btn.on{background:linear-gradient(135deg,#0f9d66,#16c784);color:#04120c}
+.btn.off{background:rgba(30,41,59,.85);border:1px solid var(--border);color:var(--muted)}
+.btn.danger{background:linear-gradient(135deg,#c92a38,#f04452)}
+.btn.gold{background:linear-gradient(135deg,#c29024,#f7de8c);color:#06080f}
+.item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;flex-wrap:wrap}
+.item:last-child{border-bottom:none}
+.row-form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+input,select{
+  background:rgba(6,8,15,.88);border:1px solid var(--border);color:var(--text);
+  padding:9px 11px;border-radius:11px;font-size:13px;font-family:var(--mono);outline:none;
+}
+input:focus,select:focus{border-color:var(--gold)}
+.pill{background:rgba(217,176,76,.16);border:1px solid var(--gold-line);color:var(--gold2);padding:2px 9px;border-radius:999px;font-size:11px;font-weight:800;font-family:var(--mono)}
+.toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#16c784;color:#04120c;padding:10px 18px;border-radius:12px;font-weight:900;display:none;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+</style>
+</head>
+<body>
+<div class="toast" id="toast"></div>
+<div class="hdr">
+  <div>
+    <h1>👑 لوحة الإدارة الملكية — FOREXYEMENI</h1>
+    <div class="sub">مركز القيادة التنفيذي · v7.4.3</div>
+  </div>
+  <button class="btn gold" onclick="loadAdmin()">🔄 تحديث حي</button>
+</div>
+<div id="authErr" style="display:none;background:rgba(127,29,29,.45);border:1px solid #f04452;padding:15px;border-radius:14px;margin-bottom:12px">
+  ⛔ وصول مرفوض — هذه اللوحة مخصصة لـ <b>ADMIN_ID</b> فقط عبر توقيع Telegram WebApp HMAC.
+</div>
+<div id="adminBody">
+  <div class="grid4">
+    <div class="kpi"><div class="lbl">إجمالي المستخدمين</div><div class="val" id="kUsers">—</div></div>
+    <div class="kpi"><div class="lbl">المشتركون المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
+    <div class="kpi"><div class="lbl">صفقات مفتوحة الآن</div><div class="val" style="color:var(--cyan)" id="kOpen">—</div></div>
+    <div class="kpi"><div class="lbl">طلبات دفع معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
+  </div>
+  <div class="card gold-edge">
+    <h3>⚡ مفاتيح التحكم السريع وبث الأخبار (1-Tap)</h3>
+    <div class="toggles" id="togglesBox"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn gold" style="flex:1" onclick="sendLuxuryNewsNow()">📤 إرسال نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+    </div>
+  </div>
+  <div class="card gold-edge">
+    <h3><span>📰 التقويم الاقتصادي الحقيقي (للإدارة فقط)</span><span class="pill" id="newsCountPill">0 خبر</span></h3>
+    <div id="adminNewsBox"><div style="color:var(--muted)">—</div></div>
+  </div>
+  <div class="card">
+    <h3><span>🏆 مصفوفة أداء الاستراتيجيات — 30 يوماً (للإدارة فقط)</span><span class="pill" id="lbSumPill">—</span></h3>
+    <div id="adminLbBox"><div style="color:var(--muted)">—</div></div>
+  </div>
+  <div class="card gold-edge">
+    <h3><span>📊 قنوات الشارت فقط (حسب السوق)</span><span class="pill" id="schedBadge">⏱ يدوي</span></h3>
+    <div class="row-form">
+      <input id="ccChatId" placeholder="@MyGoldCharts أو -100..." style="flex:1;min-width:150px"/>
+      <input id="ccTitle" placeholder="اسم القناة (اختياري)" style="flex:1;min-width:120px"/>
+      <select id="ccMkt"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+      <button class="btn gold" onclick="addChartCh()">➕ إضافة قناة</button>
+    </div>
+    <div id="chartChBox"><div style="color:var(--muted)">—</div></div>
+  </div>
+  <div class="card">
+    <h3>🎁 إصدار كود هدية فوري (أي باقة · أي مدة)</h3>
+    <div class="row-form">
+      <select id="gPlan"><option value="PRO">PRO</option><option value="VIP" selected>VIP</option><option value="ROYAL">ROYAL</option><option value="ACADEMY">ACADEMY</option></select>
+      <input id="gDays" type="number" value="30" style="width:90px" placeholder="أيام"/>
+      <input id="gUses" type="number" value="1" style="width:80px" placeholder="عدد"/>
+      <button class="btn gold" onclick="genGift()">🎟 إصدار كود</button>
+    </div>
+    <div id="giftOut" style="margin-top:6px;font-weight:800;font-family:var(--mono);color:var(--green)"></div>
+  </div>
+  <div class="card"><h3>💳 طلبات الدفع المعلقة</h3><div id="payBox">—</div></div>
+  <div class="card"><h3>💸 طلبات سحب الشركاء المعلقة</h3><div id="payoutBox">—</div></div>
+</div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); try{ tg.setHeaderColor('#06080f'); tg.setBackgroundColor('#06080f'); }catch(_e){} }
+const INIT_DATA = (tg && tg.initData) || '';
+function toast(m,e=false){const el=document.getElementById('toast');el.textContent=m;el.style.background=e?'#f04452':'#16c784';el.style.color=e?'#fff':'#04120c';el.style.display='block';setTimeout(()=>el.style.display='none',2800);}
+const API_BASE=(()=>{try{const q=new URLSearchParams(window.location.search).get('api')||'';const c=q.trim().replace(/\/+$/,'');if(c&&/^https?:\/\//i.test(c))return c;}catch(_e){}return '';})();
+async function api(p,o={}){const h=Object.assign({'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'},o.headers||{});try{const r=await fetch(API_BASE+p,Object.assign({},o,{headers:h}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {ok:false,error:'HTTP '+r.status};return await r.json();}catch(err){return {ok:false,error:'تعذر الاتصال بالخادم'};}}
+
+async function toggleKey(key){
+  const r = await api('/api/admin/toggle',{method:'POST',body:JSON.stringify({key})});
+  toast(r.ok ? '✅ تم تحديث الإعداد' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+async function sendLuxuryNewsNow(){
+  const r = await api('/api/admin/news-broadcast',{method:'POST',body:'{}'});
+  toast(r.ok ? '📤 تم إرسال نشرة الأخبار الفاخرة للمستلمين المحددين' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+async function addChartCh(){
+  const chat_id = document.getElementById('ccChatId').value.trim();
+  if(!chat_id) return toast('أدخل معرف القناة أولاً', true);
+  const r = await api('/api/admin/chart-channel',{method:'POST',body:JSON.stringify({
+    op:'add', chat_id, title:document.getElementById('ccTitle').value.trim(), markets:document.getElementById('ccMkt').value
+  })});
+  toast(r.ok ? '✅ تمت إضافة قناة الشارت بنجاح' : (r.error||'خطأ'), !r.ok);
+  if(r.ok){ document.getElementById('ccChatId').value=''; document.getElementById('ccTitle').value=''; loadAdmin(); }
+}
+async function chartChOp(op, id){
+  const r = await api('/api/admin/chart-channel',{method:'POST',body:JSON.stringify({op, id})});
+  toast(r.ok ? '✅ تم تحديث قناة الشارت' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+async function actPay(id, decision){
+  const r = await api('/api/admin/payment',{method:'POST',body:JSON.stringify({payment_id:id, decision})});
+  toast(r.ok ? '✅ تم تنفيذ القرار على الدفعة' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+async function actPayout(id, decision){
+  const r = await api('/api/admin/payout',{method:'POST',body:JSON.stringify({payout_id:id, decision})});
+  toast(r.ok ? '✅ تم تحديث طلب السحب' : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+async function genGift(){
+  const r = await api('/api/admin/gift',{method:'POST',body:JSON.stringify({
+    target_plan:document.getElementById('gPlan').value,
+    duration_days:+document.getElementById('gDays').value,
+    max_uses:+document.getElementById('gUses').value
+  })});
+  if(r.ok){ document.getElementById('giftOut').textContent = '🎟 الكود الجديد: ' + r.code; toast('🎁 تم إصدار الكود'); }
+  else toast(r.error||'خطأ', true);
+}
+
+async function loadAdmin(){
+  const d = await api('/api/admin/overview');
+  if(!d || !d.ok){
+    document.getElementById('authErr').style.display='block';
+    document.getElementById('adminBody').style.display='none';
+    return;
+  }
+  document.getElementById('kUsers').textContent = d.kpis.users;
+  document.getElementById('kSubs').textContent = d.kpis.active_paid_subs;
+  document.getElementById('kOpen').textContent = d.kpis.open_signals;
+  document.getElementById('kPay').textContent = d.pending_payments.length;
+
+  const sm = d.chart_schedule_minutes || 0;
+  document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${sm} دقيقة` : '⏹ يدوي';
+
+  const mktSel = document.getElementById('ccMkt');
+  if(d.markets && d.markets.length && mktSel.options.length <= 1){
+    d.markets.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); });
+  }
+
+  const cchs = d.chart_channels || [];
+  document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
+    `<div class="item">
+      <span>${c.enabled?'🟢':'⚪'} <b>${c.title||c.chat_id}</b> <span class="pill">${c.markets||'ALL'}</span> <span style="color:var(--muted);font-family:var(--mono);font-size:11px">${c.chat_id}</span></span>
+      <span style="display:flex;gap:6px">
+        <button class="btn ${c.enabled?'on':'off'}" onclick="chartChOp('toggle',${c.id})">${c.enabled?'مفعّلة':'متوقفة'}</button>
+        <button class="btn danger" onclick="chartChOp('delete',${c.id})">🗑</button>
+      </span>
+    </div>`
+  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد قنوات شارت مخصصة بعد — أضف قناة واختر السوق أعلاه.</div>';
+
+  const labels = {
+    engine_enabled:'🧠 المحرك الآلي', global_kill_switch:'🛑 مفتاح الطوارئ',
+    news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
+    news_broadcast_users:'👥 بث للمستخدمين', news_broadcast_partners:'🤝 بث للشركاء',
+    news_broadcast_channels:'📺 بث للقنوات', charts_enabled:'📊 الشارتات المحلية',
+    academy_enabled:'🎓 الأكاديمية', crypto_api_enabled:'🔗 منصات الكريبتو'
+  };
+  document.getElementById('togglesBox').innerHTML = Object.entries(labels).map(([k,lbl])=>{
+    const on = !!d.toggles[k];
+    const cls = k==='global_kill_switch' ? (on?'danger':'off') : (on?'on':'off');
+    return `<button class="btn ${cls}" onclick="toggleKey('${k}')">${lbl}: ${on?'🟢 مفعّل':'⚪ متوقف'}</button>`;
+  }).join('');
+
+  // Admin-Only News Calendar & Honest Feed Status
+  const nev = d.news_events || [];
+  document.getElementById('newsCountPill').textContent = nev.length + ' خبر قوي';
+  if(nev.length){
+    document.getElementById('adminNewsBox').innerHTML = nev.slice(0,8).map(e=>
+      `<div class="item">
+        <span><span class="pill" style="background:rgba(240,68,82,.18);border-color:rgba(240,68,82,.4);color:#f04452">${e.currency}</span> <b>${e.title}</b></span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${e.time_utc||''}</span>
+      </div>`
+    ).join('');
+  } else if(d.news_feed_error){
+    document.getElementById('adminNewsBox').innerHTML = `<div style="color:#f04452;font-size:13px">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${d.news_feed_error}</div>`;
+  } else {
+    document.getElementById('adminNewsBox').innerHTML = '<div style="color:var(--muted);font-size:13px">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
+  }
+
+  // Admin-Only Strategy Leaderboard (fixed real list)
+  const lb = d.leaderboard || {};
+  const lbRows = lb.strategies || [];
+  document.getElementById('lbSumPill').textContent = `${lb.total_trades||0} صفقة · نجاح ${lb.overall_win_rate||0}%`;
+  const medals = ['🥇','🥈','🥉'];
+  document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,8).map((r,i)=>
+    `<div class="item">
+      <span>${medals[i]||'🔹'} <b>${r.name||r.strategy||r.code}</b> <span class="pill">${r.code}</span></span>
+      <span style="font-family:var(--mono);font-size:12px">${r.win_rate}% · <b style="color:${r.net_pips>=0?'var(--green)':'var(--red)'}">${r.net_pips>0?'+':''}${r.net_pips}p</b> (${r.trades})</span>
+    </div>`
+  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد صفقات مغلقة كافية في الفترة المختارة بعد.</div>';
+
+  document.getElementById('payBox').innerHTML = d.pending_payments.length ? d.pending_payments.map(p=>
+    `<div class="item"><span>#${p.id} · UID ${p.user_id} · <b>${p.plan_code}</b> · ${p.amount}$</span>
+     <span style="display:flex;gap:6px"><button class="btn on" onclick="actPay(${p.id},'approve')">✅</button>
+     <button class="btn danger" onclick="actPay(${p.id},'reject')">❌</button></span></div>`
+  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات دفع معلقة.</div>';
+
+  document.getElementById('payoutBox').innerHTML = d.pending_payouts.length ? d.pending_payouts.map(p=>
+    `<div class="item"><span>#${p.id} · UID ${p.user_id} · <b>${p.amount_usd}$</b> · ${p.wallet_address}</span>
+     <span style="display:flex;gap:6px"><button class="btn on" onclick="actPayout(${p.id},'approve')">✅</button>
+     <button class="btn danger" onclick="actPayout(${p.id},'reject')">❌</button></span></div>`
+  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات سحب معلقة.</div>';
+}
+loadAdmin();
+</script>
+</body>
+</html>

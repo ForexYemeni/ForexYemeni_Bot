@@ -64,7 +64,7 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "7.4.2"
+VERSION = "7.4.3"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 
@@ -107,6 +107,43 @@ except ValueError:
     WEBAPP_PORT = 8080
 WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "1").strip() == "1"
 WEBAPP_AUTO_TUNNEL = os.getenv("WEBAPP_AUTO_TUNNEL", "1").strip() == "1"
+# v7.4.3: Built-in Royal GitHub Pages Front-Door — 100% free forever, zero extra accounts,
+# works in Yemen & all Arab ISPs without VPN/DNS blocks, and bypasses Ngrok/Pinggy warning screens
+# by passing the live HTTPS tunnel backend via ?api=<origin> + ngrok-skip-browser-warning header!
+WEBAPP_GH_PAGES_URL = (
+    os.getenv("WEBAPP_FRONTDOOR_URL", "").strip().rstrip("/")
+    or f"https://{REPO_OWNER.lower()}.github.io/{REPO_NAME}"
+)
+WEBAPP_GH_PAGES_ENABLED = os.getenv("WEBAPP_GH_PAGES", "1").strip() != "0"
+
+_INTERSTITIAL_HOSTS = (
+    ".ngrok-free.dev",
+    ".ngrok-free.app",
+    ".ngrok.app",
+    ".ngrok.io",
+    ".pinggy.link",
+    ".pinggy.online",
+)
+
+
+def needs_frontdoor_host(url: str) -> bool:
+    """True when `url` is a free tunnel host (Ngrok/Pinggy) that shows a browser warning screen."""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse((url or "").strip()).hostname or "").lower()
+    except Exception:
+        return False
+    return bool(host and any(host.endswith(suf) for suf in _INTERSTITIAL_HOSTS))
+
+
+def is_static_pages_url(url: str) -> bool:
+    """True when `url` is a static GitHub/GitLab Pages host needing `?api=<backend>`."""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse((url or "").strip()).hostname or "").lower()
+    except Exception:
+        return False
+    return bool(host and (host.endswith(".github.io") or host.endswith(".gitlab.io")))
 
 
 def set_runtime_webapp_url(url: str, source: str = "auto_tunnel") -> None:
@@ -127,6 +164,57 @@ def set_runtime_webapp_url(url: str, source: str = "auto_tunnel") -> None:
 def webapp_ready() -> bool:
     """True only when a valid HTTPS WEBAPP_URL is configured or auto-tunneled."""
     return bool(WEBAPP_ENABLED and WEBAPP_URL.lower().startswith("https://"))
+
+
+def webapp_page_url(
+    path: str = "/",
+    query: dict[str, str] | None = None,
+    *,
+    base_url: str | None = None,
+    backend_url: str | None = None,
+    use_gh_pages: bool | None = None,
+) -> str:
+    """Build the optimal HTTPS Telegram Mini App URL.
+
+    * When the active backend is an interstitial tunnel (Ngrok / Pinggy) and GitHub Pages
+      Front-Door is enabled, automatically serves the static UI from GitHub Pages
+      (`https://<owner>.github.io/<repo>/...`) with `?api=<backend>` — zero browser warning
+      screen, zero ISP DNS blocks (`workers.dev`), zero extra accounts, free forever.
+    * When a clean custom HTTPS domain (or non-interstitial tunnel) is active, returns it directly.
+    """
+    from urllib.parse import urlencode
+
+    active = (base_url if base_url is not None else WEBAPP_URL).strip().rstrip("/")
+    if not active:
+        return ""
+    p = "/" + (path or "/").lstrip("/")
+    params: dict[str, str] = dict(query or {})
+
+    gh_on = WEBAPP_GH_PAGES_ENABLED if use_gh_pages is None else bool(use_gh_pages)
+    frontdoor = WEBAPP_GH_PAGES_URL.strip().rstrip("/")
+
+    if gh_on and frontdoor.lower().startswith("https://") and needs_frontdoor_host(active):
+        # Serve static UI from GitHub Pages with trailing slash on /admin/ to avoid 301 redirects
+        gh_path = "/admin/" if p.rstrip("/") == "/admin" else "/"
+        params["api"] = active
+        return f"{frontdoor}{gh_path}?{urlencode(params)}"
+
+    if is_static_pages_url(active):
+        api_origin = (backend_url or "").strip().rstrip("/")
+        if not api_origin:
+            try:
+                from fysb.webapp import tunnel as _tun
+                api_origin = str(_tun.tunnel_status().get("url") or "").strip().rstrip("/")
+            except Exception:
+                api_origin = ""
+        gh_path = "/admin/" if p.rstrip("/") == "/admin" else "/"
+        if api_origin.lower().startswith("https://"):
+            params["api"] = api_origin
+        qs = f"?{urlencode(params)}" if params else ""
+        return f"{active}{gh_path}{qs}"
+
+    qs = f"?{urlencode(params)}" if params else ""
+    return f"{active}{p}{qs}"
 
 BACKUP_DIR = BASE_DIR / "backups"
 LOG_DIR = BASE_DIR / "logs"

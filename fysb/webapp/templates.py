@@ -488,14 +488,32 @@ function toast(msg, err=false){{
   window._tt=setTimeout(()=>el.style.display='none', 2800);
 }}
 
+const API_BASE = (()=>{{
+  try{{
+    const q = new URLSearchParams(window.location.search).get('api') || '';
+    const clean = q.trim().replace(/\\/+$/, '');
+    if(clean && /^https?:\\/\\//i.test(clean)) return clean;
+  }}catch(_e){{}}
+  return '';
+}})();
+
 async function api(path, opts={{}}){{
   const headers = Object.assign({{
     'X-Telegram-Init-Data': INIT_DATA,
     'Content-Type':'application/json',
-    'ngrok-skip-browser-warning':'1'
+    'ngrok-skip-browser-warning':'1',
+    'X-Pinggy-No-Screen':'1'
   }}, opts.headers||{{}});
-  const r = await fetch(path, Object.assign({{}}, opts, {{headers}}));
-  return r.json();
+  try{{
+    const r = await fetch(API_BASE + path, Object.assign({{}}, opts, {{headers}}));
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    if(!ct.includes('application/json')){{
+      return {{ok:false, error:'HTTP ' + r.status + ' — تعذر استلام JSON من خادم البوت'}};
+    }}
+    return await r.json();
+  }}catch(err){{
+    return {{ok:false, error:'تعذر الاتصال بخادم البوت: ' + (err && err.message ? err.message : 'Network error')}};
+  }}
 }}
 
 function openTab(name, btn){{
@@ -903,7 +921,8 @@ const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) {{ tg.ready(); tg.expand(); try{{ tg.setHeaderColor('#06080f'); tg.setBackgroundColor('#06080f'); }}catch(_e){{}} }}
 const INIT_DATA = (tg && tg.initData) || '';
 function toast(m,e=false){{const el=document.getElementById('toast');el.textContent=m;el.style.background=e?'#f04452':'#16c784';el.style.color=e?'#fff':'#04120c';el.style.display='block';setTimeout(()=>el.style.display='none',2800);}}
-async function api(p,o={{}}){{const h=Object.assign({{'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1'}},o.headers||{{}});const r=await fetch(p,Object.assign({{}},o,{{headers:h}}));return r.json();}}
+const API_BASE=(()=>{{try{{const q=new URLSearchParams(window.location.search).get('api')||'';const c=q.trim().replace(/\\/+$/,'');if(c&&/^https?:\\/\\//i.test(c))return c;}}catch(_e){{}}return '';}})();
+async function api(p,o={{}}){{const h=Object.assign({{'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'}},o.headers||{{}});try{{const r=await fetch(API_BASE+p,Object.assign({{}},o,{{headers:h}}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {{ok:false,error:'HTTP '+r.status}};return await r.json();}}catch(err){{return {{ok:false,error:'تعذر الاتصال بالخادم'}};}}}}
 
 async function toggleKey(key){{
   const r = await api('/api/admin/toggle',{{method:'POST',body:JSON.stringify({{key}})}});

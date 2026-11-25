@@ -388,9 +388,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
                 f"✅ <b><u>تم حفظ وتفعيل رابط التطبيق المصغّر بنجاح!</u></b>\n"
                 f"<blockquote>▎🔗 <code>{esc(u_txt)}</code>{origin_note}\n{status_line}</blockquote>",
                 reply_markup=kb_ui.admin_nav([
-                    [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{u_txt}/admin", style="success")],
-                    [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{u_txt}/", style="primary")],
-                    [kb_ui.btn("☁️ كود Cloudflare Worker", "a:webapp_worker", style="primary")],
+                    [kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", config.webapp_page_url("/admin", base_url=u_txt), style="success")],
+                    [kb_ui.webapp_btn("📱 فتح التطبيق المصغر", config.webapp_page_url("/", base_url=u_txt), style="primary")],
+                    [kb_ui.btn("🌐 تفعيل واجهة GitHub Pages المجانية", "a:webapp_ghpages", style="success")],
                     [kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")],
                 ]),
                 parse_mode="HTML",
@@ -429,9 +429,9 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             if url:
                 rows_ok = []
                 if show_url:
-                    rows_ok.append([kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{show_url}/admin", style="success")])
-                    rows_ok.append([kb_ui.webapp_btn("📱 فتح التطبيق المصغر", f"{show_url}/", style="primary")])
-                rows_ok.append([kb_ui.btn("☁️ كود Cloudflare Worker (إلغاء التحذير)", "a:webapp_worker", style="success")])
+                    rows_ok.append([kb_ui.webapp_btn("🖥 فتح لوحة الإدارة الويب", config.webapp_page_url("/admin", base_url=show_url), style="success")])
+                    rows_ok.append([kb_ui.webapp_btn("📱 فتح التطبيق المصغر", config.webapp_page_url("/", base_url=show_url), style="primary")])
+                rows_ok.append([kb_ui.btn("🌐 تفعيل واجهة GitHub Pages المجانية", "a:webapp_ghpages", style="success")])
                 rows_ok.append([kb_ui.btn("🌐 إعدادات التطبيق", "a:webapp")])
                 await update.effective_message.reply_text(
                     f"🎉 <b><u>تم تشغيل {esc(lbl)} بنجاح!</u></b>\n"

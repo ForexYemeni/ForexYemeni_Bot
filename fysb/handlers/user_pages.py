@@ -282,7 +282,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             [kb.btn("🔗 ربط منصات الكريبتو (Binance/Bybit/OKX)", "u:exchange", style="primary")],
         ]
         if config.webapp_ready():
-            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", f"{config.WEBAPP_URL}/", style="success")])
+            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", config.webapp_page_url("/"), style="success")])
         await render(q, body, kb.user_nav(dash_rows), bot)
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------

@@ -860,8 +860,8 @@ async def webapp_tunnel_loop(app):
                                         "▎📱 أصبح زر التطبيق ظاهراً الآن في القائمة الرئيسية للمستخدمين ولك!"
                                         "</blockquote>",
                                         reply_markup=_kb.InlineKeyboardMarkup([
-                                            [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{display_url}/admin", style="success")],
-                                            [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", f"{display_url}/", style="primary")],
+                                            [_kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", config.webapp_page_url("/admin", base_url=display_url), style="success")],
+                                            [_kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", config.webapp_page_url("/", base_url=display_url), style="primary")],
                                         ]),
                                         parse_mode="HTML",
                                     )

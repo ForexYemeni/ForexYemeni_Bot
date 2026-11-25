@@ -804,11 +804,16 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
     tok_status = " + ".join(tok_parts) if tok_parts else "⚪ تلقائي بدون توكن"
     rows_kb = []
     if ready:
-        rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", f"{config.WEBAPP_URL}/admin", style="success")])
-        rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", f"{config.WEBAPP_URL}/", style="primary")])
+        admin_link = config.webapp_page_url("/admin")
+        user_link = config.webapp_page_url("/")
+        rows_kb.append([kb.webapp_btn("🖥 فتح لوحة الإدارة الويب", admin_link, style="success")])
+        rows_kb.append([kb.webapp_btn("📱 معاينة التطبيق المصغر للمستخدم", user_link, style="primary")])
         prov = st.get("provider") or "HTTPS"
-        if config.WEBAPP_TUNNEL_SOURCE == "worker_proxy":
-            src_txt = f"☁️ واجهة HTTPS مخصصة / Worker (بلا تحذير ✅ · الخلفية: {esc(prov)})"
+        using_gh = config.WEBAPP_GH_PAGES_ENABLED and config.needs_frontdoor_host(config.WEBAPP_URL)
+        if using_gh:
+            src_txt = f"🌐 واجهة GitHub Pages الملكية (مجاني مدى الحياة · بلا تحذير · الخلفية: {esc(prov)})"
+        elif config.WEBAPP_TUNNEL_SOURCE == "worker_proxy":
+            src_txt = f"☁️ واجهة HTTPS مخصصة / Proxy (بلا تحذير ✅ · الخلفية: {esc(prov)})"
         elif config.WEBAPP_TUNNEL_SOURCE == "auto_tunnel":
             src_txt = f"⚡ نفق HTTPS تلقائي مفحوص ({esc(prov)} · HTTP 200 ✅)"
         elif config.WEBAPP_TUNNEL_SOURCE == "db_custom":
@@ -816,13 +821,19 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
         else:
             src_txt = "🔗 رابط HTTPS مخصص (.env)"
         back_line = f"\n▎🛰 النفق الخلفي: <code>{esc(st['url'])}</code>" if st.get("url") and st.get("url") != config.WEBAPP_URL else ""
+        gh_line = f"\n▎⚡ بوابة GitHub Pages: <code>{esc(config.WEBAPP_GH_PAGES_URL)}</code>" if using_gh else ""
         dom_line = f"\n▎📌 دومين Ngrok الثابت: <code>{esc(ng_dom)}</code>" if ng_dom else ""
+        isp_warn = (
+            "\n▎⚠️ ملاحظة: نطاق <code>*.workers.dev</code> محجوب DNS لدى بعض شبكات اليمن — اضغط زر <b>«🌐 تفعيل واجهة GitHub Pages»</b> بالأسفل للحل الجذري الفوري!"
+            if ".workers.dev" in config.WEBAPP_URL.lower()
+            else ""
+        )
         body = (
             f"🌐 <b><u>التطبيق المصغر الملكي ولوحة الإدارة الويب (v{config.VERSION})</u></b>\n"
             "<blockquote>"
             f"▎🟢 الحالة: <b>مفعّل عبر HTTPS</b>\n"
             f"▎🛰 المصدر: <b>{src_txt}</b>\n"
-            f"▎🔗 الرابط الفعّال: <code>{esc(config.WEBAPP_URL)}</code>{back_line}{dom_line}\n"
+            f"▎🔗 الرابط الفعّال: <code>{esc(config.WEBAPP_URL)}</code>{gh_line}{back_line}{dom_line}{isp_warn}\n"
             f"▎🖥 الخادم المدمج: <code>127.0.0.1:{config.WEBAPP_PORT}</code>\n"
             f"▎🔐 التوكنات المضبوطة: <b>{tok_status}</b>\n"
             "▎🛡 المصادقة: توقيع <b>Telegram WebApp HMAC-SHA256</b> + حارس <b>ADMIN_ID</b>."
@@ -844,19 +855,61 @@ async def admin_webapp_info(q, uid, context, bot, notice: str = ""):
     if notice:
         body += f"\n\n<i>{esc(notice)}</i>"
     if not config.WEBAPP_URL_STATIC:
-        rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="success")])
-        rows_kb.append([kb.btn("☁️ كود Cloudflare Worker (إلغاء التحذير للأبد)", "a:webapp_worker", style="success")])
+        rows_kb.append([kb.btn("🌐 تفعيل واجهة GitHub Pages (مجاني · بلا حجب وبلا تحذير)", "a:webapp_ghpages", style="success")])
+        rows_kb.append([kb.btn("🔑 ربط أي توكن (Cloudflare / Ngrok / Pinggy)", "a:webapp_setngrok", style="primary")])
         rows_kb.append([
             kb.btn("🔄 تشغيل / تجديد النفق", "a:webapptunnel_restart", style="primary"),
             kb.btn("🔗 لصق أي رابط HTTPS", "a:webapp_seturl", style="primary"),
         ])
-        rows_kb.append([kb.btn(
-            f"🛰 النفق التلقائي: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
-            "a:webapptunnel_toggle",
-            style="primary" if auto_on else "danger",
-        )])
+        rows_kb.append([
+            kb.btn("☁️ كود Cloudflare Worker", "a:webapp_worker", style="primary"),
+            kb.btn(
+                f"🛰 النفق التلقائي: {'🟢 مفعّل' if auto_on else '⚪ متوقف'}",
+                "a:webapptunnel_toggle",
+                style="primary" if auto_on else "danger",
+            ),
+        ])
     rows_kb.append([kb.btn("↩️ النظام والأمان", "a:hub:system")])
     await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_webapp_enable_ghpages(q, uid, context, bot):
+    """1-Tap activation of Royal GitHub Pages Front-Door (clears blocked workers.dev custom URL, keeps live tunnel!)."""
+    from fysb.handlers import background as _bg
+    from fysb.webapp import server as _wsrv
+    from fysb.webapp import tunnel as _tun
+
+    await afn.run(db.set_setting, "webapp_custom_url", "")
+    await afn.run(db.set_setting, "webapp_auto_tunnel", "1")
+    config.WEBAPP_GH_PAGES_ENABLED = True
+    st = _tun.tunnel_status()
+    live_back = str(st.get("url") or "").strip().rstrip("/")
+    if live_back.lower().startswith("https://") and _tun.is_tunnel_alive():
+        config.set_runtime_webapp_url(live_back, source="auto_tunnel")
+        await afn.run(audit_log.log, uid, f"webapp_ghpages_enabled:{live_back}")
+        await admin_webapp_info(
+            q, uid, context, bot,
+            notice="✅ تم تفعيل واجهة GitHub Pages الملكية فوراً! افتح لوحة الإدارة أو التطبيق من الأزرار أعلاه — بدون VPN وبلا أي تحذير.",
+        )
+        return
+
+    # Start tunnel immediately if not running yet
+    if getattr(_bg.post_init, "_webapp_srv", None) is None:
+        _bg.post_init._webapp_srv = await _wsrv.start_webapp_server()
+    await _tun.stop_tunnel()
+    url = await _tun.start_tunnel(port=config.WEBAPP_PORT, timeout=35.0)
+    if url:
+        config.set_runtime_webapp_url(url, source="auto_tunnel")
+        await afn.run(audit_log.log, uid, f"webapp_ghpages_enabled:{url}")
+        await admin_webapp_info(
+            q, uid, context, bot,
+            notice="✅ تم تفعيل واجهة GitHub Pages الملكية وتشغيل النفق بنجاح! اضغط «🖥 فتح لوحة الإدارة الويب» الآن.",
+        )
+    else:
+        await admin_webapp_info(
+            q, uid, context, bot,
+            notice="⚠️ تم مسح الرابط القديم وتفعيل وضع GitHub Pages — شغّل النفق أو اربط توكن Ngrok ليعمل فوراً.",
+        )
 
 
 async def admin_webapp_set_ngrok(q, uid, context, bot):

@@ -4,132 +4,340 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Super Admin Web Panel v7.5.0</title>
+<title>FOREXYEMENI — Super Admin Web Panel v7.5.1</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root{
-  --bg:#06080f;--glass:rgba(16,22,36,.82);--border:rgba(148,163,184,.16);
-  --gold:#d9b04c;--gold2:#f7de8c;--gold-line:rgba(217,176,76,.35);
-  --green:#16c784;--red:#f04452;--cyan:#38bdf8;--text:#f1f5f9;--muted:#94a3b8;
+  --bg:#06080f;--bg2:#0c111d;--glass:rgba(15,21,36,.84);
+  --border:rgba(148,163,184,.16);--gold:#d9b04c;--gold2:#f7de8c;
+  --gold-line:rgba(217,176,76,.38);--green:#16c784;--red:#f04452;
+  --cyan:#38bdf8;--violet:#a78bfa;--text:#f1f5f9;--muted:#94a3b8;
   --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
 }
-*{box-sizing:border-box;margin:0;padding:0}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{
   font-family:'Cairo',-apple-system,BlinkMacSystemFont,'Segoe UI',Tahoma,sans-serif;
   background:
-    radial-gradient(ellipse 80% 45% at 50% -10%, rgba(217,176,76,.16), transparent 65%),
-    radial-gradient(ellipse 50% 35% at 95% 25%, rgba(22,199,132,.07), transparent 60%),
+    radial-gradient(ellipse 90% 45% at 50% -12%, rgba(217,176,76,.18), transparent 65%),
+    radial-gradient(ellipse 55% 35% at 95% 20%, rgba(22,199,132,.08), transparent 60%),
+    radial-gradient(ellipse 50% 35% at 5% 85%, rgba(56,189,248,.07), transparent 60%),
     var(--bg);
-  color:var(--text);padding:14px 14px 40px;max-width:900px;margin:0 auto;min-height:100vh;
+  color:var(--text);padding-bottom:96px;min-height:100vh;
 }
-.hdr{
-  background:rgba(10,14,24,.86);backdrop-filter:blur(16px);
-  border:1px solid var(--gold-line);border-radius:18px;
-  display:flex;justify-content:space-between;align-items:center;
-  padding:13px 16px;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.4);
+.topbar{
+  position:sticky;top:0;z-index:45;
+  background:rgba(6,8,15,.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--gold-line);
+  padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:8px;
 }
-.hdr h1{font-size:16px;font-weight:900;background:linear-gradient(90deg,#f7de8c,#d9b04c);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.hdr .sub{font-size:11px;color:var(--muted)}
-.grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
-@media(min-width:640px){.grid4{grid-template-columns:repeat(4,1fr)}}
+.brand-box{display:flex;align-items:center;gap:10px}
+.crown-orb{
+  width:38px;height:38px;border-radius:13px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#f7de8c,#c29024);color:#06080f;font-size:19px;
+  box-shadow:0 4px 18px rgba(217,176,76,.38);flex-shrink:0;
+}
+.brand-name{font-size:15px;font-weight:900;background:linear-gradient(90deg,#f7de8c,#d9b04c);-webkit-background-clip:text;-webkit-text-fill-color:transparent;line-height:1.15}
+.brand-sub{font-size:10.5px;color:var(--muted);display:flex;align-items:center;gap:5px;margin-top:2px}
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.8s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.85)}}
+.top-actions{display:flex;align-items:center;gap:6px}
+.icon-btn{
+  height:34px;padding:0 11px;border-radius:11px;border:1px solid var(--gold-line);
+  background:rgba(217,176,76,.12);color:var(--gold2);font-family:'Cairo',sans-serif;
+  font-size:12px;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:4px;
+}
+.wrap{padding:13px 13px 10px;max-width:780px;margin:0 auto}
+.apane{display:none;animation:fadeUp .22s ease}
+.apane.active{display:block}
+@keyframes fadeUp{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.hero{
+  background:linear-gradient(145deg,rgba(217,176,76,.17),rgba(15,21,36,.92) 55%,rgba(22,199,132,.09));
+  border:1px solid var(--gold-line);border-radius:20px;padding:15px;margin-bottom:13px;
+  box-shadow:0 12px 34px rgba(0,0,0,.42);
+}
+.hero-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px}
+.hero-eyebrow{font-size:11px;color:var(--gold2);font-weight:800;letter-spacing:.3px}
+.hero-title{font-size:19px;font-weight:900;color:#fff;margin-top:2px}
+.grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:13px}
+@media(min-width:600px){.grid4{grid-template-columns:repeat(4,1fr)}}
 .kpi{
-  background:var(--glass);border:1px solid var(--border);border-top:2px solid var(--gold);
-  border-radius:16px;padding:13px;box-shadow:0 8px 24px rgba(0,0,0,.32);
+  background:rgba(6,8,15,.68);border:1px solid var(--border);border-top:2px solid var(--gold);
+  border-radius:15px;padding:12px;cursor:pointer;transition:.16s;
 }
-.kpi .lbl{color:var(--muted);font-size:12px;font-weight:700}
-.kpi .val{font-family:var(--mono);font-size:22px;font-weight:900;margin-top:4px;color:var(--gold2)}
+.kpi:active{transform:scale(.97)}
+.kpi .lbl{color:var(--muted);font-size:11px;font-weight:700}
+.kpi .val{font-family:var(--mono);font-size:21px;font-weight:900;margin-top:4px;color:var(--gold2)}
+.quick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+.qtile{
+  background:rgba(6,8,15,.65);border:1px solid var(--border);border-radius:14px;padding:11px;
+  display:flex;align-items:center;gap:9px;cursor:pointer;text-align:right;color:var(--text);
+  font-family:'Cairo',sans-serif;transition:.15s;
+}
+.qtile:active{transform:scale(.97)}
+.qtile .qic{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(217,176,76,.14);border:1px solid var(--gold-line);font-size:17px;flex-shrink:0}
+.qtile .qt{font-size:12.5px;font-weight:800}
+.qtile .qs{font-size:10.5px;color:var(--muted)}
 .card{
   background:var(--glass);backdrop-filter:blur(16px);border:1px solid var(--border);
-  border-radius:18px;padding:15px;margin-bottom:13px;box-shadow:0 10px 28px rgba(0,0,0,.3);
+  border-radius:18px;padding:14px;margin-bottom:12px;box-shadow:0 10px 28px rgba(0,0,0,.32);
 }
 .card.gold-edge{border-color:var(--gold-line)}
-.card h3{font-size:15px;font-weight:800;color:var(--gold2);margin-bottom:11px;display:flex;justify-content:space-between;align-items:center}
+.card-hdr{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:11px;flex-wrap:wrap}
+.card-hdr h3{font-size:14.5px;font-weight:900;color:var(--gold2)}
 .toggles{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
-@media(min-width:640px){.toggles{grid-template-columns:repeat(3,1fr)}}
+@media(min-width:600px){.toggles{grid-template-columns:repeat(3,1fr)}}
 .btn{
-  border:none;border-radius:11px;padding:10px 12px;font-family:'Cairo',sans-serif;
+  border:none;border-radius:11px;padding:9px 12px;font-family:'Cairo',sans-serif;
   font-weight:800;font-size:12px;cursor:pointer;color:#fff;background:#2563eb;transition:.15s;
 }
 .btn:active{transform:scale(.96)}
 .btn.on{background:linear-gradient(135deg,#0f9d66,#16c784);color:#04120c}
-.btn.off{background:rgba(30,41,59,.85);border:1px solid var(--border);color:var(--muted)}
-.btn.danger{background:linear-gradient(135deg,#c92a38,#f04452)}
+.btn.off{background:rgba(30,41,59,.88);border:1px solid var(--border);color:var(--muted)}
+.btn.danger{background:linear-gradient(135deg,#c92a38,#f04452);color:#fff}
 .btn.gold{background:linear-gradient(135deg,#c29024,#f7de8c);color:#06080f}
-.item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;flex-wrap:wrap}
-.item:last-child{border-bottom:none}
+.btn.ghost{background:rgba(30,41,59,.75);border:1px solid var(--border);color:var(--text)}
+.btn-row{display:flex;gap:7px;flex-wrap:wrap}
+.btn-row .btn{flex:1}
+.filter-bar{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+.fchip{
+  border:1px solid var(--border);background:rgba(6,8,15,.65);color:var(--muted);
+  border-radius:10px;padding:6px 11px;font-family:'Cairo',sans-serif;font-size:11.5px;font-weight:800;cursor:pointer;
+}
+.fchip.active{background:rgba(217,176,76,.18);border-color:var(--gold-line);color:var(--gold2)}
+.sig-card{
+  background:rgba(6,8,15,.72);border:1px solid var(--border);border-radius:16px;
+  padding:12px;margin-bottom:10px;
+}
+.sig-card.win{border-right:3px solid var(--green)}
+.sig-card.live{border-right:3px solid var(--cyan)}
+.sig-card.loss{border-right:3px solid var(--red)}
+.sig-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px}
+.sig-sym{font-size:15px;font-weight:900}
+.sig-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.lvls{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-bottom:9px}
+.lvl{background:rgba(15,21,36,.85);border:1px solid var(--border);border-radius:9px;padding:5px 3px;text-align:center}
+.lvl span{display:block;font-size:9.5px;color:var(--muted)}
+.lvl b{font-family:var(--mono);font-size:11px}
+.stats-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:11px}
+.st-box{background:rgba(6,8,15,.7);border:1px solid var(--border);border-radius:12px;padding:8px 6px;text-align:center}
+.st-box .l{font-size:10px;color:var(--muted)}
+.st-box .v{font-family:var(--mono);font-size:15px;font-weight:900;margin-top:2px}
+.item{
+  display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:11px;margin-bottom:8px;background:rgba(6,8,15,.65);
+  border:1px solid var(--border);border-radius:14px;font-size:12.5px;flex-wrap:wrap;
+}
+.lb-row{padding:10px 0;border-bottom:1px solid var(--border)}
+.lb-row:last-child{border-bottom:none}
+.lb-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;font-size:12.5px}
+.lb-bar{height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden}
+.lb-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#16c784,#f7de8c)}
 .row-form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 input,select{
   background:rgba(6,8,15,.88);border:1px solid var(--border);color:var(--text);
-  padding:9px 11px;border-radius:11px;font-size:13px;font-family:var(--mono);outline:none;
+  padding:9px 11px;border-radius:11px;font-size:12.5px;font-family:var(--mono);outline:none;
 }
 input:focus,select:focus{border-color:var(--gold)}
-.pill{background:rgba(217,176,76,.16);border:1px solid var(--gold-line);color:var(--gold2);padding:2px 9px;border-radius:999px;font-size:11px;font-weight:800;font-family:var(--mono)}
-.toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#16c784;color:#04120c;padding:10px 18px;border-radius:12px;font-weight:900;display:none;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.pill{background:rgba(217,176,76,.16);border:1px solid var(--gold-line);color:var(--gold2);padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800;font-family:var(--mono)}
+.pill.green{background:rgba(22,199,132,.16);border-color:rgba(22,199,132,.4);color:var(--green)}
+.pill.red{background:rgba(240,68,82,.16);border-color:rgba(240,68,82,.4);color:var(--red)}
+.pill.cyan{background:rgba(56,189,248,.16);border-color:rgba(56,189,248,.4);color:var(--cyan)}
+.empty{color:var(--muted);text-align:center;padding:18px 8px;font-size:12.5px}
+.toast{position:fixed;top:64px;left:50%;transform:translateX(-50%);background:#16c784;color:#04120c;padding:10px 18px;border-radius:13px;font-weight:900;font-size:12.5px;display:none;z-index:99;box-shadow:0 10px 28px rgba(0,0,0,.55);white-space:nowrap}
+/* Floating Frosted Bottom Navigation Dock — 5 Executive Pages */
+.dock-wrap{position:fixed;bottom:10px;left:10px;right:10px;z-index:50;display:flex;justify-content:center;pointer-events:none}
+.dock{
+  pointer-events:auto;width:100%;max-width:560px;
+  background:rgba(12,17,29,.93);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+  border:1px solid var(--gold-line);border-radius:20px;
+  display:grid;grid-template-columns:repeat(5,1fr);padding:6px;gap:3px;
+  box-shadow:0 12px 38px rgba(0,0,0,.68);
+}
+.tab{
+  background:none;border:none;color:var(--muted);font-family:'Cairo',sans-serif;
+  font-size:10.5px;font-weight:800;cursor:pointer;padding:7px 2px;border-radius:14px;
+  display:flex;flex-direction:column;align-items:center;gap:2px;transition:.18s;position:relative;
+}
+.tab .ic{font-size:17px;line-height:1}
+.tab .cnt-dot{
+  position:absolute;top:2px;left:6px;background:var(--red);color:#fff;
+  font-size:9px;font-weight:900;padding:1px 5px;border-radius:999px;font-family:var(--mono);display:none;
+}
+.tab.active{
+  color:var(--gold2);
+  background:linear-gradient(135deg,rgba(217,176,76,.24),rgba(217,176,76,.06));
+  box-shadow:inset 0 0 0 1px rgba(217,176,76,.38);
+}
 </style>
 </head>
 <body>
 <div class="toast" id="toast"></div>
-<div class="hdr">
-  <div>
-    <h1>👑 لوحة الإدارة الملكية — FOREXYEMENI</h1>
-    <div class="sub">مركز القيادة التنفيذي · v7.5.0</div>
-  </div>
-  <button class="btn gold" onclick="loadAdmin()">🔄 تحديث حي</button>
-</div>
-<div id="authErr" style="display:none;background:rgba(127,29,29,.45);border:1px solid #f04452;padding:15px;border-radius:14px;margin-bottom:12px">
-  ⛔ وصول مرفوض — هذه اللوحة مخصصة لـ <b>ADMIN_ID</b> فقط عبر توقيع Telegram WebApp HMAC.
-</div>
-<div id="adminBody">
-  <div class="grid4">
-    <div class="kpi"><div class="lbl">إجمالي المستخدمين</div><div class="val" id="kUsers">—</div></div>
-    <div class="kpi"><div class="lbl">المشتركون المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
-    <div class="kpi"><div class="lbl">صفقات مفتوحة الآن</div><div class="val" style="color:var(--cyan)" id="kOpen">—</div></div>
-    <div class="kpi"><div class="lbl">طلبات دفع معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
-  </div>
-  <div class="card gold-edge">
-    <h3><span>📡 مركز إدارة الإشارات الملكي (الأحدث · المنشئ · الأداء)</span><span class="pill" id="sigCountPill">0 إشارة</span></h3>
-    <div id="adminSignalsBox"><div style="color:var(--muted);font-size:13px">⏳ جارٍ تحميل الإشارات...</div></div>
-  </div>
-  <div class="card gold-edge">
-    <h3>⚡ مفاتيح التحكم السريع وبث الأخبار (1-Tap)</h3>
-    <div class="toggles" id="togglesBox"></div>
-    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn gold" style="flex:1" onclick="sendLuxuryNewsNow()">📤 إرسال نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+
+<div class="topbar">
+  <div class="brand-box">
+    <div class="crown-orb">👑</div>
+    <div>
+      <div class="brand-name">FOREXYEMENI ADMIN</div>
+      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v7.5.1</div>
     </div>
   </div>
-  <div class="card gold-edge">
-    <h3><span>📰 التقويم الاقتصادي الحقيقي (للإدارة فقط)</span><span class="pill" id="newsCountPill">0 خبر</span></h3>
-    <div id="adminNewsBox"><div style="color:var(--muted)">—</div></div>
+  <div class="top-actions">
+    <button class="icon-btn" onclick="openUserApp()">📱 المستخدم</button>
+    <button class="icon-btn" onclick="loadAdmin()">🔄</button>
   </div>
-  <div class="card">
-    <h3><span>🏆 مصفوفة أداء الاستراتيجيات — 30 يوماً (للإدارة فقط)</span><span class="pill" id="lbSumPill">—</span></h3>
-    <div id="adminLbBox"><div style="color:var(--muted)">—</div></div>
-  </div>
-  <div class="card gold-edge">
-    <h3><span>📊 قنوات الشارت فقط (حسب السوق)</span><span class="pill" id="schedBadge">⏱ يدوي</span></h3>
-    <div class="row-form">
-      <input id="ccChatId" placeholder="@MyGoldCharts أو -100..." style="flex:1;min-width:150px"/>
-      <input id="ccTitle" placeholder="اسم القناة (اختياري)" style="flex:1;min-width:120px"/>
-      <select id="ccMkt"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
-      <button class="btn gold" onclick="addChartCh()">➕ إضافة قناة</button>
-    </div>
-    <div id="chartChBox"><div style="color:var(--muted)">—</div></div>
-  </div>
-  <div class="card">
-    <h3>🎁 إصدار كود هدية فوري (أي باقة · أي مدة)</h3>
-    <div class="row-form">
-      <select id="gPlan"><option value="PRO">PRO</option><option value="VIP" selected>VIP</option><option value="ROYAL">ROYAL</option><option value="ACADEMY">ACADEMY</option></select>
-      <input id="gDays" type="number" value="30" style="width:90px" placeholder="أيام"/>
-      <input id="gUses" type="number" value="1" style="width:80px" placeholder="عدد"/>
-      <button class="btn gold" onclick="genGift()">🎟 إصدار كود</button>
-    </div>
-    <div id="giftOut" style="margin-top:6px;font-weight:800;font-family:var(--mono);color:var(--green)"></div>
-  </div>
-  <div class="card"><h3>💳 طلبات الدفع المعلقة</h3><div id="payBox">—</div></div>
-  <div class="card"><h3>💸 طلبات سحب الشركاء المعلقة</h3><div id="payoutBox">—</div></div>
 </div>
+
+<div class="wrap">
+  <div id="authErr" style="display:none;background:rgba(127,29,29,.45);border:1px solid #f04452;padding:15px;border-radius:16px;margin-bottom:12px">
+    ⛔ وصول مرفوض — هذه اللوحة مخصصة لـ <b>ADMIN_ID</b> فقط عبر توقيع Telegram WebApp HMAC.
+  </div>
+
+  <div id="adminBody">
+    <!-- PAGE 1: EXECUTIVE DASHBOARD -->
+    <div id="apane-home" class="apane active">
+      <div class="hero">
+        <div class="hero-top">
+          <div>
+            <div class="hero-eyebrow">EXECUTIVE COMMAND CENTER</div>
+            <div class="hero-title">لوحة الإدارة الملكية الشاملة</div>
+          </div>
+          <span class="pill green" id="partnersPill">🤝 0 شريك</span>
+        </div>
+        <div class="grid4" style="margin-bottom:6px">
+          <div class="kpi" onclick="openAdminTab('home')"><div class="lbl">👥 المستخدمون</div><div class="val" id="kUsers">—</div></div>
+          <div class="kpi" onclick="openAdminTab('finance')"><div class="lbl">💎 المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
+          <div class="kpi" onclick="openAdminTab('signals')"><div class="lbl">📡 مفتوحة الآن</div><div class="val" style="color:var(--cyan)" id="kOpen">—</div></div>
+          <div class="kpi" onclick="openAdminTab('finance')"><div class="lbl">⏳ طلبات معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
+        </div>
+        <div class="quick-grid">
+          <button class="qtile" onclick="openAdminTab('signals')">
+            <span class="qic">📡</span>
+            <div><div class="qt">إدارة الإشارات</div><div class="qs" id="qSigSub">الأداء · المنشئ · التجريبي</div></div>
+          </button>
+          <button class="qtile" onclick="openAdminTab('finance')">
+            <span class="qic">💳</span>
+            <div><div class="qt">المالية والهدايا</div><div class="qs" id="qFinSub">الدفعات · السحوبات · الأكواد</div></div>
+          </button>
+          <button class="qtile" onclick="openAdminTab('channels')">
+            <span class="qic">📺</span>
+            <div><div class="qt">القنوات والشارت</div><div class="qs" id="qChSub">قنوات الشارت · الجدولة</div></div>
+          </button>
+          <button class="qtile" onclick="openAdminTab('analytics')">
+            <span class="qic">🏆</span>
+            <div><div class="qt">التحليلات والأخبار</div><div class="qs" id="qAnSub">مصفوفة الاستراتيجيات · التقويم</div></div>
+          </button>
+        </div>
+      </div>
+
+      <div class="card gold-edge">
+        <div class="card-hdr"><h3>⚡ مفاتيح التحكم المركزية (1-Tap)</h3><span class="pill">تحكم فوري</span></div>
+        <div class="toggles" id="togglesBox"></div>
+        <div style="margin-top:11px">
+          <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PAGE 2: ROYAL SIGNALS MANAGEMENT -->
+    <div id="apane-signals" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>📡 مركز إدارة الإشارات الملكي</h3>
+          <span class="pill" id="sigCountPill">0 إشارة</span>
+        </div>
+        <div class="stats-strip">
+          <div class="st-box"><div class="l">الإجمالي</div><div class="v" style="color:var(--gold2)" id="ssTotal">0</div></div>
+          <div class="st-box"><div class="l">مفتوحة</div><div class="v" style="color:var(--cyan)" id="ssOpen">0</div></div>
+          <div class="st-box"><div class="l">رابحة</div><div class="v" style="color:var(--green)" id="ssWin">0</div></div>
+          <div class="st-box"><div class="l">صافي النقاط</div><div class="v" id="ssPips">0p</div></div>
+        </div>
+        <input id="sigSearch" style="width:100%;margin-bottom:9px;font-family:'Cairo',sans-serif" placeholder="🔍 ابحث بالرمز (XAUUSD) أو الاستراتيجية أو اسم المنشئ..." oninput="renderAdminSignals()"/>
+        <div class="filter-bar">
+          <button class="fchip active" onclick="setAdminSigFilter('all',this)">🗂 الكل</button>
+          <button class="fchip" onclick="setAdminSigFilter('open',this)">🚀 مفتوحة</button>
+          <button class="fchip" onclick="setAdminSigFilter('win',this)">🏆 رابحة</button>
+          <button class="fchip" onclick="setAdminSigFilter('loss',this)">🛑 وقف/منتهية</button>
+        </div>
+        <div id="adminSignalsBox"><div class="empty">⏳ جارٍ تحميل الإشارات...</div></div>
+      </div>
+    </div>
+
+    <!-- PAGE 3: FINANCE, PAYOUTS & VIP GIFTS -->
+    <div id="apane-finance" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr"><h3>💳 طلبات الدفع المعلقة</h3><span class="pill red" id="payBadgePill">0</span></div>
+        <div id="payBox"><div class="empty">لا توجد طلبات دفع معلقة.</div></div>
+      </div>
+      <div class="card gold-edge">
+        <div class="card-hdr"><h3>💸 طلبات سحب الشركاء المعلقة</h3><span class="pill" id="payoutBadgePill">0</span></div>
+        <div id="payoutBox"><div class="empty">لا توجد طلبات سحب معلقة.</div></div>
+      </div>
+      <div class="card">
+        <div class="card-hdr"><h3>🎁 استوديو إصدار أكواد الهدايا VIP</h3></div>
+        <div class="row-form">
+          <select id="gPlan" style="flex:1;min-width:110px"><option value="PRO">PRO</option><option value="VIP" selected>VIP</option><option value="ROYAL">ROYAL</option><option value="ACADEMY">ACADEMY</option></select>
+          <input id="gDays" type="number" value="30" style="width:88px" placeholder="أيام"/>
+          <input id="gUses" type="number" value="1" style="width:76px" placeholder="عدد"/>
+        </div>
+        <button class="btn gold" style="width:100%" onclick="genGift()">🎟 إصدار كود هدية ملكي الآن</button>
+        <div id="giftOut" style="margin-top:9px;font-weight:900;font-family:var(--mono);color:var(--green);text-align:center"></div>
+      </div>
+    </div>
+
+    <!-- PAGE 4: CHANNELS & CHART BROADCAST STUDIO -->
+    <div id="apane-channels" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>📊 إضافة قناة شارت مخصصة</h3>
+          <span class="pill" id="schedBadge">⏹ يدوي</span>
+        </div>
+        <div class="row-form">
+          <input id="ccChatId" placeholder="@MyGoldCharts أو -100..." style="flex:1;min-width:160px"/>
+          <input id="ccTitle" placeholder="اسم القناة (اختياري)" style="flex:1;min-width:130px"/>
+          <select id="ccMkt" style="flex:1;min-width:130px"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+        </div>
+        <button class="btn gold" style="width:100%" onclick="addChartCh()">➕ إضافة قناة الشارت الآن</button>
+      </div>
+      <div class="card">
+        <div class="card-hdr"><h3>📺 قنوات الشارت فقط المربوطة</h3><span class="pill cyan" id="chCountPill">0 قناة</span></div>
+        <div id="chartChBox"><div class="empty">لا توجد قنوات شارت مخصصة بعد.</div></div>
+      </div>
+    </div>
+
+    <!-- PAGE 5: ANALYTICS, LEADERBOARD & ECONOMIC CALENDAR -->
+    <div id="apane-analytics" class="apane">
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>🏆 مصفوفة أداء الاستراتيجيات (30 يوماً)</h3>
+          <span class="pill" id="lbSumPill">—</span>
+        </div>
+        <div id="adminLbBox"><div class="empty">—</div></div>
+      </div>
+      <div class="card gold-edge">
+        <div class="card-hdr">
+          <h3>📰 التقويم الاقتصادي الحقيقي (48 ساعة)</h3>
+          <span class="pill red" id="newsCountPill">0 خبر</span>
+        </div>
+        <div id="adminNewsBox"><div class="empty">—</div></div>
+        <button class="btn gold" style="width:100%;margin-top:10px" onclick="sendLuxuryNewsNow()">📤 بث النشرة الاقتصادية الفاخرة الآن</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- FLOATING FROSTED GLASS 5-PAGE DOCK -->
+<div class="dock-wrap">
+  <div class="dock">
+    <button class="tab active" id="atab-home" onclick="openAdminTab('home',this)"><span class="ic">📊</span><span>القيادة</span></button>
+    <button class="tab" id="atab-signals" onclick="openAdminTab('signals',this)"><span class="cnt-dot" id="sigDot" style="background:var(--cyan);color:#04120c">0</span><span class="ic">📡</span><span>الإشارات</span></button>
+    <button class="tab" id="atab-finance" onclick="openAdminTab('finance',this)"><span class="cnt-dot" id="finDot">0</span><span class="ic">💳</span><span>المالية</span></button>
+    <button class="tab" id="atab-channels" onclick="openAdminTab('channels',this)"><span class="ic">📺</span><span>القنوات</span></button>
+    <button class="tab" id="atab-analytics" onclick="openAdminTab('analytics',this)"><span class="ic">🏆</span><span>التحليلات</span></button>
+  </div>
+</div>
+
 <script>
-// v7.4.4: Zero-blocking Telegram Admin bridge — instant paint even when telegram.org is blocked!
+// v7.5.1: Zero-blocking Telegram Admin Multi-Page App — instant paint & smooth 5-page executive UX
 function notifyTgNative(){
   try{
     if(window.Telegram && window.Telegram.WebApp){
@@ -175,14 +383,96 @@ function toast(m,e=false){const el=document.getElementById('toast');el.textConte
 const API_BASE=(()=>{try{const q=new URLSearchParams(window.location.search).get('api')||'';const c=q.trim().replace(/\/+$/,'');if(c&&/^https?:\/\//i.test(c))return c;}catch(_e){}return '';})();
 async function api(p,o={}){const h=Object.assign({'X-Telegram-Init-Data':INIT_DATA,'Content-Type':'application/json','ngrok-skip-browser-warning':'1','X-Pinggy-No-Screen':'1'},o.headers||{});try{const r=await fetch(API_BASE+p,Object.assign({},o,{headers:h}));const ct=(r.headers.get('content-type')||'').toLowerCase();if(!ct.includes('application/json'))return {ok:false,status:r.status,error:'HTTP '+r.status};const j=await r.json();j._status=r.status;return j;}catch(err){return {ok:false,netErr:true,error:'تعذر الاتصال بخادم البوت ('+(API_BASE||'same-origin')+')'};}}
 
+let adminSignalsData = [];
+let adminSigFilter = 'all';
+
+function openAdminTab(name, btnEl){
+  document.querySelectorAll('.apane').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  const pane = document.getElementById('apane-' + name);
+  if(pane) pane.classList.add('active');
+  const tab = btnEl || document.getElementById('atab-' + name);
+  if(tab) tab.classList.add('active');
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function copyVal(txt, msg){
+  if(!txt) return;
+  if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast(msg||'✅ تم النسخ')).catch(()=>toast(msg||'✅ تم النسخ'));
+  else toast(msg||'✅ تم النسخ');
+}
+
+function openUserApp(){
+  window.location.href = API_BASE ? ('../?api=' + encodeURIComponent(API_BASE)) : '/';
+}
+
+function openSigDemoChart(id){
+  window.location.href = API_BASE ? ('../?api=' + encodeURIComponent(API_BASE) + '&demo_sig=' + id) : ('/?demo_sig=' + id);
+}
+
+function setAdminSigFilter(mode, btn){
+  adminSigFilter = mode;
+  btn.parentElement.querySelectorAll('.fchip').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderAdminSignals();
+}
+
+function renderAdminSignals(){
+  const box = document.getElementById('adminSignalsBox');
+  const q = ((document.getElementById('sigSearch')||{}).value || '').trim().toLowerCase();
+  let list = adminSignalsData || [];
+  if(adminSigFilter === 'open') list = list.filter(s => ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes((s.status||'').toUpperCase()) && !s.closed_at);
+  if(adminSigFilter === 'win') list = list.filter(s => ['TP1_HIT','TP2_HIT','TP3_HIT'].includes((s.status||'').toUpperCase()) || (+s.pips_result||0) > 0);
+  if(adminSigFilter === 'loss') list = list.filter(s => ['SL_HIT','CANCELLED','EXPIRED'].includes((s.status||'').toUpperCase()));
+  if(q) list = list.filter(s => `${s.symbol||""} ${s.strategy||""} ${s.creator||""} #${s.seq||s.id}`.toLowerCase().includes(q));
+  if(!list.length){
+    box.innerHTML = '<div class="empty">لا توجد إشارات مطابقة لهذا الفلتر.</div>';
+    return;
+  }
+  box.innerHTML = list.map(s => {
+    const isBuy = (s.direction||'BUY').toUpperCase() === 'BUY';
+    const st = (s.status||'ACTIVE').toUpperCase();
+    const isWin = ['TP1_HIT','TP2_HIT','TP3_HIT'].includes(st);
+    const isOpen = ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes(st) && !s.closed_at;
+    const cls = isWin ? 'win' : (isOpen ? 'live' : 'loss');
+    const pillCls = isWin ? 'green' : (isOpen ? 'cyan' : 'red');
+    const pips = +(s.pips_result || 0);
+    const pTxt = pips ? ` · <b style="color:${pips>0?'var(--green)':'var(--red)'}">${pips>0?'+':''}${pips.toFixed(1)}p</b>` : '';
+    return `
+      <div class="sig-card ${cls}">
+        <div class="sig-top">
+          <div>
+            <div class="sig-sym"><span style="color:var(--gold2)">#${s.seq||s.id}</span> ${s.symbol}
+              <span class="pill ${isBuy?'green':'red'}">${isBuy?'▲ شراء':'▼ بيع'}</span>
+            </div>
+            <div class="sig-meta">⏱ ${s.timeframe} · 🧠 ${s.strategy} · ⭐ ${s.score||0}/100${pTxt}</div>
+            <div class="sig-meta">${s.creator||'🤖 المحرك التلقائي'} · 📬 ${s.deliveries||0} مستلم · 🎮 ${s.demo_count||0} تجريبي</div>
+          </div>
+          <span class="pill ${pillCls}">${st}</span>
+        </div>
+        <div class="lvls">
+          <div class="lvl"><span>دخول</span><b style="color:var(--gold2)">${s.entry}</b></div>
+          <div class="lvl"><span>SL</span><b style="color:var(--red)">${s.stop}</b></div>
+          <div class="lvl"><span>TP1</span><b style="color:var(--green)">${s.tp1}</b></div>
+          <div class="lvl"><span>TP2</span><b style="color:var(--green)">${s.tp2}</b></div>
+          <div class="lvl"><span>TP3</span><b style="color:var(--gold2)">${s.tp3}</b></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn on" onclick="openSigDemoChart(${s.id})">🎮 تجريبي على الشارت</button>
+          ${isOpen ? `<button class="btn danger" style="flex:0;min-width:96px" onclick="cancelAdminSig(${s.id})">🚫 إلغاء</button>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+}
+
 async function toggleKey(key){
   const r = await api('/api/admin/toggle',{method:'POST',body:JSON.stringify({key})});
-  toast(r.ok ? '✅ تم تحديث الإعداد' : (r.error||'خطأ'), !r.ok);
+  toast(r.ok ? '✅ تم تحديث الإعداد بنجاح' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }
 async function sendLuxuryNewsNow(){
   const r = await api('/api/admin/news-broadcast',{method:'POST',body:'{}'});
-  toast(r.ok ? '📤 تم إرسال نشرة الأخبار الفاخرة للمستلمين المحددين' : (r.error||'خطأ'), !r.ok);
+  toast(r.ok ? '📤 تم بث نشرة الأخبار الفاخرة بنجاح' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }
 async function addChartCh(){
@@ -214,18 +504,16 @@ async function cancelAdminSig(id){
   toast(r.ok ? '🚫 تم إلغاء الإشارة #' + id : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }
-function openSigDemoChart(id){
-  const base = API_BASE ? ('../?api=' + encodeURIComponent(API_BASE) + '&demo_sig=' + id) : ('/?demo_sig=' + id);
-  window.location.href = base;
-}
 async function genGift(){
   const r = await api('/api/admin/gift',{method:'POST',body:JSON.stringify({
     target_plan:document.getElementById('gPlan').value,
     duration_days:+document.getElementById('gDays').value,
     max_uses:+document.getElementById('gUses').value
   })});
-  if(r.ok){ document.getElementById('giftOut').textContent = '🎟 الكود الجديد: ' + r.code; toast('🎁 تم إصدار الكود'); }
-  else toast(r.error||'خطأ', true);
+  if(r.ok){
+    document.getElementById('giftOut').innerHTML = `🎟 الكود: <span>${r.code}</span> <button class="btn ghost" style="padding:4px 9px;margin-right:6px" onclick="copyVal('${r.code}','✅ تم نسخ كود الهدية')">📋 نسخ</button>`;
+    toast('🎁 تم إصدار الكود الملكي');
+  } else toast(r.error||'خطأ', true);
 }
 
 async function loadAdmin(){
@@ -243,57 +531,35 @@ async function loadAdmin(){
   }
   document.getElementById('authErr').style.display='none';
   document.getElementById('adminBody').style.display='block';
+  const pendPay = d.pending_payments || [], pendOut = d.pending_payouts || [];
+  const totalPend = pendPay.length + pendOut.length;
+
   document.getElementById('kUsers').textContent = d.kpis.users;
   document.getElementById('kSubs').textContent = d.kpis.active_paid_subs;
   document.getElementById('kOpen').textContent = d.kpis.open_signals;
-  document.getElementById('kPay').textContent = d.pending_payments.length;
+  document.getElementById('kPay').textContent = totalPend;
+  document.getElementById('partnersPill').textContent = `🤝 ${d.partners_count||0} شريك`;
 
-  const rSigs = d.recent_signals || [];
-  document.getElementById('sigCountPill').textContent = rSigs.length + ' إشارة';
-  document.getElementById('adminSignalsBox').innerHTML = rSigs.length ? rSigs.map(s => {
-    const isBuy = (s.direction||'BUY').toUpperCase() === 'BUY';
-    const st = (s.status||'ACTIVE').toUpperCase();
-    const isWin = ['TP1_HIT','TP2_HIT','TP3_HIT'].includes(st);
-    const isOpen = ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes(st) && !s.closed_at;
-    const stCol = isWin ? '#16c784' : (isOpen ? '#38bdf8' : '#f04452');
-    const pips = +(s.pips_result || 0);
-    const pTxt = pips ? ` · <b style="color:${pips>0?'#16c784':'#f04452'}">${pips>0?'+':''}${pips.toFixed(1)}p</b>` : '';
-    return `<div class="item">
-      <div style="flex:1;min-width:190px">
-        <div><b style="color:var(--gold2)">#${s.seq||s.id}</b> <b>${s.symbol}</b>
-          <span class="pill" style="color:${isBuy?'#16c784':'#f04452'}">${isBuy?'▲ شراء':'▼ بيع'}</span>
-          <span class="pill" style="color:${stCol}">${st}</span>${pTxt}
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px">
-          ⏱ ${s.timeframe} · 🧠 ${s.strategy} (${s.score||0}/100) · ${s.creator||'🤖 تلقائي'} · 📬 ${s.deliveries||0} · 🎮 ${s.demo_count||0}
-        </div>
-      </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn on" onclick="openSigDemoChart(${s.id})">🎮 تجريبي</button>
-        ${isOpen ? `<button class="btn danger" onclick="cancelAdminSig(${s.id})">🚫</button>` : ''}
-      </div>
-    </div>`;
-  }).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد إشارات مسجلة بعد.</div>';
+  const finDot = document.getElementById('finDot');
+  if(finDot){ finDot.textContent = totalPend; finDot.style.display = totalPend ? 'inline-block' : 'none'; }
+  const sigDot = document.getElementById('sigDot');
+  if(sigDot){ sigDot.textContent = d.kpis.open_signals || 0; sigDot.style.display = (d.kpis.open_signals||0) ? 'inline-block' : 'none'; }
 
-  const sm = d.chart_schedule_minutes || 0;
-  document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${sm} دقيقة` : '⏹ يدوي';
+  // Page 2: Signals data & stats strip
+  adminSignalsData = d.recent_signals || [];
+  document.getElementById('sigCountPill').textContent = adminSignalsData.length + ' إشارة';
+  const openN = adminSignalsData.filter(s => ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes((s.status||'').toUpperCase()) && !s.closed_at).length;
+  const winN = adminSignalsData.filter(s => ['TP1_HIT','TP2_HIT','TP3_HIT'].includes((s.status||'').toUpperCase()) || (+s.pips_result||0) > 0).length;
+  const netP = adminSignalsData.reduce((a,s) => a + (+s.pips_result||0), 0);
+  document.getElementById('ssTotal').textContent = adminSignalsData.length;
+  document.getElementById('ssOpen').textContent = openN;
+  document.getElementById('ssWin').textContent = winN;
+  const spEl = document.getElementById('ssPips');
+  spEl.textContent = `${netP>=0?'+':''}${netP.toFixed(0)}p`;
+  spEl.style.color = netP >= 0 ? 'var(--green)' : 'var(--red)';
+  renderAdminSignals();
 
-  const mktSel = document.getElementById('ccMkt');
-  if(d.markets && d.markets.length && mktSel.options.length <= 1){
-    d.markets.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); });
-  }
-
-  const cchs = d.chart_channels || [];
-  document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
-    `<div class="item">
-      <span>${c.enabled?'🟢':'⚪'} <b>${c.title||c.chat_id}</b> <span class="pill">${c.markets||'ALL'}</span> <span style="color:var(--muted);font-family:var(--mono);font-size:11px">${c.chat_id}</span></span>
-      <span style="display:flex;gap:6px">
-        <button class="btn ${c.enabled?'on':'off'}" onclick="chartChOp('toggle',${c.id})">${c.enabled?'مفعّلة':'متوقفة'}</button>
-        <button class="btn danger" onclick="chartChOp('delete',${c.id})">🗑</button>
-      </span>
-    </div>`
-  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد قنوات شارت مخصصة بعد — أضف قناة واختر السوق أعلاه.</div>';
-
+  // Page 1: Toggles
   const labels = {
     engine_enabled:'🧠 المحرك الآلي', global_kill_switch:'🛑 مفتاح الطوارئ',
     news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
@@ -304,48 +570,92 @@ async function loadAdmin(){
   document.getElementById('togglesBox').innerHTML = Object.entries(labels).map(([k,lbl])=>{
     const on = !!d.toggles[k];
     const cls = k==='global_kill_switch' ? (on?'danger':'off') : (on?'on':'off');
-    return `<button class="btn ${cls}" onclick="toggleKey('${k}')">${lbl}: ${on?'🟢 مفعّل':'⚪ متوقف'}</button>`;
+    return `<button class="btn ${cls}" onclick="toggleKey('${k}')">${lbl}: ${on?'🟢':'⚪'}</button>`;
   }).join('');
 
-  // Admin-Only News Calendar & Honest Feed Status
+  // Page 4: Chart Channels
+  const sm = d.chart_schedule_minutes || 0;
+  document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${sm} دقيقة` : '⏹ يدوي';
+  const mktSel = document.getElementById('ccMkt');
+  if(d.markets && d.markets.length && mktSel.options.length <= 1){
+    d.markets.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); });
+  }
+  const cchs = d.chart_channels || [];
+  document.getElementById('chCountPill').textContent = cchs.length + ' قناة';
+  document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
+    `<div class="item">
+      <div>${c.enabled?'🟢':'⚪'} <b>${c.title||c.chat_id}</b> <span class="pill">${c.markets||'ALL'}</span>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${c.chat_id}</div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn ${c.enabled?'on':'off'}" onclick="chartChOp('toggle',${c.id})">${c.enabled?'مفعّلة':'متوقفة'}</button>
+        <button class="btn danger" onclick="chartChOp('delete',${c.id})">🗑</button>
+      </div>
+    </div>`
+  ).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه.</div>';
+
+  // Page 5: News & Leaderboard
   const nev = d.news_events || [];
   document.getElementById('newsCountPill').textContent = nev.length + ' خبر قوي';
   if(nev.length){
-    document.getElementById('adminNewsBox').innerHTML = nev.slice(0,8).map(e=>
+    document.getElementById('adminNewsBox').innerHTML = nev.slice(0,10).map(e=>
       `<div class="item">
-        <span><span class="pill" style="background:rgba(240,68,82,.18);border-color:rgba(240,68,82,.4);color:#f04452">${e.currency}</span> <b>${e.title}</b></span>
+        <div><span class="pill red">${e.currency}</span> <b>${e.title}</b></div>
         <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${e.time_utc||''}</span>
       </div>`
     ).join('');
   } else if(d.news_feed_error){
-    document.getElementById('adminNewsBox').innerHTML = `<div style="color:#f04452;font-size:13px">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${d.news_feed_error}</div>`;
+    document.getElementById('adminNewsBox').innerHTML = `<div class="empty" style="color:var(--red)">⚠️ تعذر جلب التقويم الاقتصادي حالياً: ${d.news_feed_error}</div>`;
   } else {
-    document.getElementById('adminNewsBox').innerHTML = '<div style="color:var(--muted);font-size:13px">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
+    document.getElementById('adminNewsBox').innerHTML = '<div class="empty">🟢 لا توجد أخبار عالية التأثير خلال 48 ساعة.</div>';
   }
 
-  // Admin-Only Strategy Leaderboard (fixed real list)
   const lb = d.leaderboard || {};
   const lbRows = lb.strategies || [];
   document.getElementById('lbSumPill').textContent = `${lb.total_trades||0} صفقة · نجاح ${lb.overall_win_rate||0}%`;
   const medals = ['🥇','🥈','🥉'];
-  document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,8).map((r,i)=>
-    `<div class="item">
-      <span>${medals[i]||'🔹'} <b>${r.name||r.strategy||r.code}</b> <span class="pill">${r.code}</span></span>
-      <span style="font-family:var(--mono);font-size:12px">${r.win_rate}% · <b style="color:${r.net_pips>=0?'var(--green)':'var(--red)'}">${r.net_pips>0?'+':''}${r.net_pips}p</b> (${r.trades})</span>
+  document.getElementById('adminLbBox').innerHTML = lbRows.length ? lbRows.slice(0,10).map((r,i)=>
+    `<div class="lb-row">
+      <div class="lb-top">
+        <span>${medals[i]||'🔹'} <b>${r.name||r.strategy||r.code}</b> <span class="pill">${r.code}</span></span>
+        <span style="font-family:var(--mono)">${r.win_rate}% · <b style="color:${r.net_pips>=0?'var(--green)':'var(--red)'}">${r.net_pips>0?'+':''}${r.net_pips}p</b> (${r.trades})</span>
+      </div>
+      <div class="lb-bar"><div class="lb-fill" style="width:${Math.min(100,Math.max(4,Math.round(r.win_rate||0)))}%"></div></div>
     </div>`
-  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد صفقات مغلقة كافية في الفترة المختارة بعد.</div>';
+  ).join('') : '<div class="empty">لا توجد صفقات مغلقة كافية في الفترة المختارة بعد.</div>';
 
-  document.getElementById('payBox').innerHTML = d.pending_payments.length ? d.pending_payments.map(p=>
-    `<div class="item"><span>#${p.id} · UID ${p.user_id} · <b>${p.plan_code}</b> · ${p.amount}$</span>
-     <span style="display:flex;gap:6px"><button class="btn on" onclick="actPay(${p.id},'approve')">✅</button>
-     <button class="btn danger" onclick="actPay(${p.id},'reject')">❌</button></span></div>`
-  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات دفع معلقة.</div>';
+  // Page 3: Finance — Payments & Payouts
+  document.getElementById('payBadgePill').textContent = pendPay.length;
+  document.getElementById('payoutBadgePill').textContent = pendOut.length;
+  document.getElementById('payBox').innerHTML = pendPay.length ? pendPay.map(p=>
+    `<div class="item">
+      <div><b style="color:var(--gold2)">#${p.id}</b> · UID <code>${p.user_id}</code> · <span class="pill green">${p.plan_code}</span> · <b>${p.amount}$</b></div>
+      <div class="btn-row" style="width:100%;margin-top:6px">
+        <button class="btn on" onclick="actPay(${p.id},'approve')">✅ اعتماد وتفعيل الباقة</button>
+        <button class="btn danger" style="flex:0;min-width:84px" onclick="actPay(${p.id},'reject')">❌ رفض</button>
+      </div>
+    </div>`
+  ).join('') : '<div class="empty">✅ لا توجد طلبات دفع معلقة حالياً.</div>';
 
-  document.getElementById('payoutBox').innerHTML = d.pending_payouts.length ? d.pending_payouts.map(p=>
-    `<div class="item"><span>#${p.id} · UID ${p.user_id} · <b>${p.amount_usd}$</b> · ${p.wallet_address}</span>
-     <span style="display:flex;gap:6px"><button class="btn on" onclick="actPayout(${p.id},'approve')">✅</button>
-     <button class="btn danger" onclick="actPayout(${p.id},'reject')">❌</button></span></div>`
-  ).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد طلبات سحب معلقة.</div>';
+  document.getElementById('payoutBox').innerHTML = pendOut.length ? pendOut.map(p=>
+    `<div class="item">
+      <div><b style="color:var(--gold2)">#${p.id}</b> · UID <code>${p.user_id}</code> · <b style="color:var(--green)">${p.amount_usd}$</b>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${p.wallet_address}</div>
+      </div>
+      <div class="btn-row" style="width:100%;margin-top:6px">
+        <button class="btn ghost" style="flex:0;min-width:74px" onclick="copyVal('${p.wallet_address}','✅ تم نسخ عنوان المحفظة')">📋 نسخ</button>
+        <button class="btn on" onclick="actPayout(${p.id},'approve')">✅ اعتماد الصرف</button>
+        <button class="btn danger" style="flex:0;min-width:74px" onclick="actPayout(${p.id},'reject')">❌ رفض</button>
+      </div>
+    </div>`
+  ).join('') : '<div class="empty">✅ لا توجد طلبات سحب معلقة حالياً.</div>';
+
+  // Deep-link page support (e.g. /admin?page=signals)
+  const reqPage = new URLSearchParams(window.location.search).get('page');
+  if(reqPage && document.getElementById('apane-' + reqPage) && !window._apApplied){
+    window._apApplied = true;
+    openAdminTab(reqPage);
+  }
 }
 loadAdmin();
 setTimeout(()=>{

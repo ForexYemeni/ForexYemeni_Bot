@@ -22,8 +22,12 @@ _PERIOD_LABELS = {
 }
 
 
-def compute_leaderboard(period: str = "30d") -> dict:
-    """Compute verified strategy performance rankings from closed signals."""
+def compute_leaderboard(period: str = "30d", *, public_only: bool = False) -> dict:
+    """Compute verified strategy performance rankings from closed signals.
+
+    When `public_only=True` (used for channel publishing), excludes private
+    user `SIGNAL_NOW` queries so only official engine / admin signals count.
+    """
     p = (period or "30d").lower()
     if p not in _PERIOD_LABELS:
         p = "30d"
@@ -33,22 +37,23 @@ def compute_leaderboard(period: str = "30d") -> dict:
     elif p == "30d":
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
+    pub_clause = " AND UPPER(COALESCE(source,'AUTO')) != 'SIGNAL_NOW'" if public_only else ""
     with db.conn() as c:
         if cutoff:
             rows = c.execute(
-                """SELECT strategy, symbol, status, pips_result
-                   FROM signals
-                   WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-                     AND closed_at IS NOT NULL AND closed_at!=''
-                     AND closed_at>=?""",
+                f"""SELECT strategy, symbol, status, pips_result
+                    FROM signals
+                    WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                      AND closed_at IS NOT NULL AND closed_at!=''
+                      AND closed_at>=?{pub_clause}""",
                 (cutoff,),
             ).fetchall()
         else:
             rows = c.execute(
-                """SELECT strategy, symbol, status, pips_result
-                   FROM signals
-                   WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-                     AND closed_at IS NOT NULL AND closed_at!=''""",
+                f"""SELECT strategy, symbol, status, pips_result
+                    FROM signals
+                    WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                      AND closed_at IS NOT NULL AND closed_at!=''{pub_clause}""",
             ).fetchall()
 
     buckets: dict[str, dict] = {}
@@ -101,6 +106,7 @@ def compute_leaderboard(period: str = "30d") -> dict:
             best_sym, best_sym_pips = max(b["sym_pips"].items(), key=lambda kv: kv[1])
         ranked.append({
             "code": b["code"],
+            "strategy": b["code"],
             "name": strategy_name(b["code"]),
             "trades": n,
             "wins": b["wins"],
@@ -127,7 +133,7 @@ def compute_leaderboard(period: str = "30d") -> dict:
 
 def render_leaderboard_card(period: str = "30d", channel_mode: bool = False) -> str:
     """Ultra-luxury Arabic Live Strategy Leaderboard card."""
-    data = compute_leaderboard(period)
+    data = compute_leaderboard(period, public_only=channel_mode)
     medals = ("🥇", "🥈", "🥉")
     lines = [
         f"🏆 <b><u>مصفوفة ترتيب الاستراتيجيات الحية — {esc(data['period_label'])}</u></b>",

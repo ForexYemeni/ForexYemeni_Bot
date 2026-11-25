@@ -170,6 +170,27 @@ def _simulate_trade(symbol: str, cand, future: list[dict], start_idx: int,
     )
 
 
+def _market_catalog_defaults(symbol: str) -> tuple[float, str]:
+    """Resolve real per-market (spread_pips, provider_symbol) from `market_catalog`."""
+    sym = (symbol or "XAUUSD").strip().upper()
+    mkt_spread = 0.5
+    prov_sym = sym
+    try:
+        with db.conn() as c:
+            r = c.execute(
+                "SELECT provider_symbol, spread_pips FROM market_catalog WHERE symbol=?",
+                (sym,),
+            ).fetchone()
+        if r:
+            if r["provider_symbol"]:
+                prov_sym = str(r["provider_symbol"])
+            if r["spread_pips"] is not None and float(r["spread_pips"]) >= 0:
+                mkt_spread = float(r["spread_pips"])
+    except Exception:
+        pass
+    return mkt_spread, prov_sym
+
+
 def run_backtest(
     symbol: str,
     timeframe: str = "M15",
@@ -179,7 +200,7 @@ def run_backtest(
     max_hold_bars: int = 48,
     min_rr: float = 2.0,
     min_score: int = 72,
-    spread_pips: float = 0.5,
+    spread_pips: float | None = None,
     api_key: str = "",
     outputsize: int = 800,
     strict_htf: bool = True,
@@ -190,7 +211,8 @@ def run_backtest(
       * Strictly causal HTF resampling (`resample_htf`) — zero lookahead.
       * Exact same `consensus_filter` + `evaluate_quality_gate` (min_score,
         HTF alignment, Kaufman ER chop filter, thin-session guard) + RR gate.
-      * Conservative SL-first execution with realistic spread & BE trailing.
+      * Conservative SL-first execution with real per-market spread from
+        `market_catalog` & BE trailing.
     """
     from fysb.engines.quality_gate import evaluate_quality_gate, htf_factor_for, resample_htf
 
@@ -200,11 +222,11 @@ def run_backtest(
     if not allowed:
         allowed = list(REGISTRY.keys())
 
+    mkt_spread, prov_sym = _market_catalog_defaults(sym)
+    eff_spread = float(spread_pips) if spread_pips is not None else mkt_spread
+
     if candles is None:
         try:
-            with db.conn() as c:
-                r = c.execute("SELECT provider_symbol FROM market_catalog WHERE symbol=?", (sym,)).fetchone()
-            prov_sym = r["provider_symbol"] if r and r["provider_symbol"] else sym
             payload = market_data.fetch_candles(prov_sym, market_data.parse_interval(tf), api_key, outputsize=outputsize)
             candles = confirmed_candles(payload["values"], tf)
         except Exception as exc:
@@ -251,7 +273,7 @@ def run_backtest(
             continue
 
         future = candles[i + 1:min(n, i + 1 + max_hold_bars)]
-        tr = _simulate_trade(sym, cand, future, i + 1, spread_pips=spread_pips)
+        tr = _simulate_trade(sym, cand, future, i + 1, spread_pips=eff_spread)
         trades.append(tr)
         # Advance past exit (or past entry attempt if unfilled) to avoid overlapping trades
         i = max(i + 2, tr.exit_idx + 1)

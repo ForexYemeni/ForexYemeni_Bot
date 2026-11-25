@@ -455,10 +455,18 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_scan_tf_toggle(q, uid, context, bot, arg)
     elif act == "newsguard":
         await admin_trading.admin_news_guard(q, uid, context, bot)
+    elif act == "newsrefresh":
+        await admin_trading.admin_news_guard(q, uid, context, bot, force_refresh=True, notice="🔄 تم تحديث التقويم الاقتصادي من المصدر الحي.")
     elif act == "newsguardtoggle":
         await admin_trading.admin_news_guard_toggle(q, uid, context, bot)
     elif act == "newsguardwin":
         await admin_trading.admin_news_guard_win(q, uid, context, bot, int(arg or 30))
+    elif act == "newsauto":
+        await admin_trading.admin_news_auto_toggle(q, uid, context, bot)
+    elif act == "newsdest":
+        await admin_trading.admin_news_dest_toggle(q, uid, context, bot, arg)
+    elif act == "newssendnow":
+        await admin_trading.admin_news_send_now(q, uid, context, bot)
     elif act == "leaderboard":
         await admin_trading.admin_leaderboard(q, uid, context, bot, "30d")
     elif act == "lb":
@@ -467,6 +475,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_leaderboard_publish(q, uid, context, bot, arg or "30d")
     elif act == "strength":
         await admin_trading.admin_strength(q, uid, context, bot)
+    elif act == "strengthrefresh":
+        await admin_trading.admin_strength(q, uid, context, bot, force_refresh=True)
     elif act == "chartstoggle":
         await admin_trading.admin_charts_toggle(q, uid, context, bot)
     elif act == "chartsmenu":
@@ -500,9 +510,10 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "sigproof":
         await admin_trading.admin_signal_proof_publish(q, uid, context, bot, int(arg or 0))
     elif act == "backtest":
-        await admin_trading.admin_backtest(q, uid, context, bot)
+        await admin_trading.admin_backtest(q, uid, context, bot, int(arg or 0))
     elif act == "btrun":
-        await admin_trading.admin_backtest_run(q, uid, context, bot, arg, arg2)
+        bt_tf, bt_scope = (arg2.split(":", 1) + ["enabled"])[:2] if arg2 else ("M15", "enabled")
+        await admin_trading.admin_backtest_run(q, uid, context, bot, arg, bt_tf, bt_scope)
     elif act == "strategies":
         await admin_trading.admin_strategies(q, uid, context, bot, int(arg or 0))
     elif act == "strategyinfo":

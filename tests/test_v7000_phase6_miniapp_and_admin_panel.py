@@ -134,8 +134,12 @@ def test_miniapp_and_admin_panel_routes_end_to_end(isolated_db):
     st, _, raw = wa_server.dispatch_request("GET", "/api/me", u_hdr)
     me = json.loads(raw)
     assert st == 200 and me["plan"]["code"] == "ROYAL" and me["risk"]["balance"] == 2500.0
-    assert wa_server.dispatch_request("GET", "/api/leaderboard?period=30d", u_hdr)[0] == 200
-    assert wa_server.dispatch_request("GET", "/api/news", u_hdr)[0] == 200
+    # v7.4.0: /api/leaderboard & /api/news are strictly Admin-only (403 for users, 200 for Admin)
+    assert wa_server.dispatch_request("GET", "/api/leaderboard?period=30d", u_hdr)[0] == 403
+    assert wa_server.dispatch_request("GET", "/api/news", u_hdr)[0] == 403
+    st_lb, _, raw_lb = wa_server.dispatch_request("GET", "/api/leaderboard?period=30d", a_hdr)
+    assert st_lb == 200 and isinstance(json.loads(raw_lb)["rows"], list)
+    assert wa_server.dispatch_request("GET", "/api/news", a_hdr)[0] == 200
 
 
 def test_real_asyncio_http_server_loopback(isolated_db):

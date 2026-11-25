@@ -340,9 +340,11 @@ def detect_liquidity_sweep(candles: list[dict], lookback: int = 20) -> dict:
 # ---------------------------------------------------------------------------
 
 def compute_strength_from_pairs(pairs_pct: dict[str, float]) -> list[dict]:
-    """Pure math: compute normalized 0..100 strength score for all 8 majors.
+    """Pure math: compute normalized 0..100 strength score for currencies backed by REAL data.
 
     `pairs_pct` maps pair key like `"EURUSD"`, `"USDJPY"` -> 24h % change.
+    Currencies with zero fetched pairs are excluded from ranking rather than
+    silently scored as 0.0% (preventing artificial distortion when a pair fails).
     """
     raw: dict[str, list[float]] = {c: [] for c in _MAJORS_8}
     for _tk, base, quote in _STRENGTH_PAIRS:
@@ -353,14 +355,17 @@ def compute_strength_from_pairs(pairs_pct: dict[str, float]) -> list[dict]:
         raw[base].append(pct)
         raw[quote].append(-pct)
 
-    avgs = {c: (sum(v) / len(v) if v else 0.0) for c, v in raw.items()}
+    present = [c for c in _MAJORS_8 if raw[c]]
+    if not present:
+        return []
+    avgs = {c: (sum(raw[c]) / len(raw[c])) for c in present}
     vals = list(avgs.values())
-    lo = min(vals) if vals else -1.0
-    hi = max(vals) if vals else 1.0
+    lo = min(vals)
+    hi = max(vals)
     span = max(hi - lo, 0.20)
 
     ranked: list[dict] = []
-    for c in _MAJORS_8:
+    for c in present:
         avg = avgs[c]
         score = int(round(max(5, min(98, ((avg - lo) / span) * 85.0 + 8.0))))
         flag, name_ar = _CCY_META[c]
@@ -375,54 +380,84 @@ def compute_strength_from_pairs(pairs_pct: dict[str, float]) -> list[dict]:
     return ranked
 
 
+def _fetch_pair_day_pct_resilient(ticker: str, base: str, quote: str) -> tuple[str, float | None]:
+    """Fetch 24h % move via Yahoo Finance with real fallback to `market_data.fetch_candles`."""
+    pair_key = f"{base}{quote}"
+    try:
+        pct = _fetch_yahoo_day_pct(ticker)
+        if pct is not None:
+            return pair_key, pct
+    except Exception:
+        pass
+    # Real fallback: TwelveData / market_data failover chain (24 hourly candles)
+    try:
+        from fysb.engines import market_data as _md
+        payload = _md.fetch_candles(f"{base}/{quote}", "1h", api_key=config.market_api_key(), outputsize=26, use_cache=True)
+        vals = list((payload or {}).get("values") or [])
+        if len(vals) >= 2:
+            c0 = float(vals[0].get("open") or vals[0].get("close") or 0.0)
+            c1 = float(vals[-1].get("close") or 0.0)
+            if c0 > 0 and c1 > 0:
+                return pair_key, ((c1 - c0) / c0) * 100.0
+    except Exception:
+        pass
+    return pair_key, None
+
+
 def currency_strength_meter(force_refresh: bool = False) -> list[dict]:
-    """Fetch live 24h % moves across the 7 USD majors and rank all 8 currencies."""
+    """Fetch live 24h % moves across the 7 USD majors in parallel and rank currencies."""
+    from concurrent.futures import ThreadPoolExecutor
     now_t = time.time()
     with _LOCK:
         if not force_refresh and _STRENGTH_CACHE["rows"] and (now_t - _STRENGTH_CACHE["ts"]) < _STRENGTH_TTL:
             return list(_STRENGTH_CACHE["rows"])
     pairs_pct: dict[str, float] = {}
-    for ticker, base, quote in _STRENGTH_PAIRS:
-        try:
-            pct = _fetch_yahoo_day_pct(ticker)
-            if pct is not None:
-                pairs_pct[f"{base}{quote}"] = pct
-        except Exception:
-            continue
+    with ThreadPoolExecutor(max_workers=len(_STRENGTH_PAIRS)) as pool:
+        futs = [pool.submit(_fetch_pair_day_pct_resilient, tk, b, q) for tk, b, q in _STRENGTH_PAIRS]
+        for fut in futs:
+            try:
+                k, pct = fut.result(timeout=10)
+                if pct is not None:
+                    pairs_pct[k] = pct
+            except Exception:
+                continue
     if not pairs_pct:
         with _LOCK:
             return list(_STRENGTH_CACHE["rows"])
     ranked = compute_strength_from_pairs(pairs_pct)
     with _LOCK:
-        _STRENGTH_CACHE.update(ts=now_t, rows=ranked)
+        _STRENGTH_CACHE.update(ts=now_t, rows=ranked, pairs_count=len(pairs_pct))
     return list(ranked)
 
 
-def render_strength_card(rows: list[dict] | None = None) -> str:
+def render_strength_card(rows: list[dict] | None = None, *, force_refresh: bool = False) -> str:
     """Render an ultra-luxury Arabic 8-Currency Strength Meter board."""
-    data = currency_strength_meter() if rows is None else rows
+    data = currency_strength_meter(force_refresh=force_refresh) if rows is None else rows
     if not data:
         return (
             "🧭 <b><u>مؤشر قوة العملات اللحظي (Currency Strength)</u></b>\n"
-            "<blockquote>▎تعذر جلب أسعار العملات اللحظية الآن — أعد المحاولة بعد لحظات.</blockquote>"
+            "<blockquote>▎⚠️ تعذر الاتصال بمزود أسعار الفوركس اللحظية الآن (انقطاع مؤقت في المصدر) — اضغط «تحديث فوري» بعد لحظات.</blockquote>"
         )
+    with _LOCK:
+        p_cnt = int(_STRENGTH_CACHE.get("pairs_count") or len(_STRENGTH_PAIRS))
     medals = ("🥇", "🥈", "🥉")
     lines = [
-        "🧭 <b><u>مؤشر قوة العملات اللحظي (8 عملات رئيسية)</u></b>",
+        f"🧭 <b><u>مؤشر قوة العملات اللحظي ({len(data)} عملات رئيسية)</u></b>",
         "<blockquote>",
     ]
     for i, r in enumerate(data):
-        m = medals[i] if i < 3 else (f"🔻" if i >= len(data) - 2 else "•")
+        m = medals[i] if i < 3 else ("🔻" if i >= len(data) - 2 else "•")
         b = bar(r["score"], 100, 8)
         lines.append(
             f"▎{m} {r['flag']} <b>{r['code']}</b>  {b}  <b>{r['score']}/100</b>  <i>({r['delta_pct']:+.2f}%)</i>"
         )
     strongest = data[0]
     weakest = data[-1]
+    now_utc_s = datetime.now(timezone.utc).strftime("%H:%M UTC")
     lines.append("</blockquote>")
     lines.append(
         f"\n🎯 <b>أقوى تقاطع مؤسسي الآن:</b> "
         f"شراء {strongest['flag']} <b>{strongest['code']}</b> مقابل بيع {weakest['flag']} <b>{weakest['code']}</b>\n"
-        "<i>محسوب رياضياً من حركة الأزواج الرئيسية خلال آخر 24 ساعة — تحديث فوري مجاني 100%.</i>"
+        f"<i>📡 محسوب رياضياً من حركة {p_cnt}/7 أزواج رئيسية حقيقية خلال 24 ساعة · آخر تحديث: {now_utc_s}</i>"
     )
     return "\n".join(lines)

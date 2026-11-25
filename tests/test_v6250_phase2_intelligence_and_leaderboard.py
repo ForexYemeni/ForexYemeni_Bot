@@ -138,9 +138,11 @@ class TestV6250Phase2IntelligenceAndLeaderboard(unittest.TestCase):
         _fire("a:newsguardtoggle", ADMIN)
         self.assertFalse(news_guard.is_enabled())
 
-        # User calendar view
+        # v7.4.0: Regular users cannot open Admin News Guard directly (Admin-only)
         u_txt, _ = _fire("u:news", USER1)
-        self.assertIn("درع الأخبار الاقتصادية", u_txt)
+        self.assertIn("لإدارة المنصة فقط", u_txt)
+        a_txt, _ = _fire("u:news", ADMIN)
+        self.assertIn("درع الأخبار الاقتصادية", a_txt)
 
     # 2) Institutional Intelligence Layers (#3, #4, #5, #6, #7, #12)
     def test_adaptive_weighting_confluence_dxy_killzone_sweep_and_strength(self):
@@ -284,11 +286,12 @@ class TestV6250Phase2IntelligenceAndLeaderboard(unittest.TestCase):
         self.assertEqual(lb["strategies"][0]["code"], "ICT")
         self.assertEqual(lb["strategies"][0]["best_symbol"], "XAUUSD")
 
-        # User leaderboard screen
+        # v7.4.0: Regular users cannot open Admin Strategy Leaderboard directly
         u_txt, u_datas = _fire("u:leaderboard", USER1)
-        self.assertIn("مصفوفة ترتيب الاستراتيجيات الحية", u_txt)
-        self.assertIn("ICT", u_txt)
-        self.assertIn("u:lb:7d", u_datas)
+        self.assertIn("لإدارة المنصة فقط", u_txt)
+        a_lb_txt, _ = _fire("u:leaderboard", ADMIN)
+        self.assertIn("مصفوفة ترتيب الاستراتيجيات الحية", a_lb_txt)
+        self.assertIn("ICT", a_lb_txt)
 
         # Admin leaderboard + 1-tap publish to channels
         sent = []

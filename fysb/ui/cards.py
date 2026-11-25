@@ -160,21 +160,96 @@ def render_analysis_card(an: dict, market_row=None) -> str:
     return "\n".join(out)
 
 
-def render_signal_compact(sig) -> str:
-    """ONE-LINE PLAIN-TEXT summary — used as TELEGRAM BUTTON text.
-
-    Inline keyboard buttons render PLAIN TEXT ONLY: any <b>/<code> markup
-    shows up as literal «رموز برمجية» on screen. No HTML here, ever.
-    `seq` (when present) is the REAL sequential position in the signals
-    center — after a deletion the following signals take the freed number
-    (v6.8.0 «الترقيم الحقيقي»), while `id` stays the stable internal key.
+def signal_row_style(sig) -> str:
+    """v7.5.0: Semantic Bot API 9.4 button color for signal list rows.
+      * TP1_HIT / TP2_HIT / TP3_HIT -> Royal Emerald Green ('success')
+      * RUNNING / ACTIVE            -> Royal Sapphire Blue ('primary')
+      * SL_HIT / CANCELLED / EXPIRED -> Royal Ruby Red ('danger')
     """
-    d_emoji = DIRECTION_EMOJI.get(sig["direction"], "")
-    status_map = {"ACTIVE": "🟢", "RUNNING": "🟢", "TP1_HIT": "🟢", "TP2_HIT": "🟢", "TP3_HIT": "🟢",
-                  "SL_HIT": "🔴", "CANCELLED": "⚪", "EXPIRED": "⚪"}
-    shown_no = sig.get("seq") or sig["id"]
-    return (f"{status_map.get(sig['status'], '🔵')} #{shown_no} · {sig['symbol']} {d_emoji} "
-            f"{tf_name(sig['timeframe'])} · {strategy_name(sig['strategy'])} · {sig['score']}/100 · {signal_status_ar(sig)}")
+    st = str((sig.get("status") if isinstance(sig, dict) else sig["status"]) or "").upper()
+    if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
+        return "success"
+    if st in ("RUNNING", "ACTIVE"):
+        return "primary"
+    return "danger"
+
+
+def signal_creator_label(sig, users_map: dict | None = None) -> str:
+    """v7.5.0: Human-readable Arabic attribution of who created/generated the signal."""
+    src = str((sig.get("source") if isinstance(sig, dict) else sig["source"]) or "").upper()
+    try:
+        cb = int((sig.get("created_by") if isinstance(sig, dict) else sig["created_by"]) or 0)
+    except Exception:
+        cb = 0
+    u_info = (users_map or {}).get(cb) if cb else None
+    if not u_info and cb > 0:
+        try:
+            from fysb import db as _db
+            with _db.conn() as c:
+                r = c.execute("SELECT user_id, username, full_name FROM users WHERE user_id=?", (cb,)).fetchone()
+                if r:
+                    u_info = dict(r)
+        except Exception:
+            u_info = None
+    who = ""
+    if u_info:
+        nm = (u_info.get("full_name") or "").strip()
+        un = (u_info.get("username") or "").strip().lstrip("@")
+        if nm and un:
+            who = f"{nm} (@{un})"
+        elif un:
+            who = f"@{un}"
+        elif nm:
+            who = nm
+        else:
+            who = f"ID {cb}"
+    elif cb > 0:
+        who = f"ID {cb}"
+
+    if src in ("AUTO", "AUTO_FREE", "ENGINE", "SCANNER"):
+        return "🤖 المحرك التلقائي (مجاني)" if src == "AUTO_FREE" else "🤖 المحرك التلقائي"
+    if src in ("ADMIN_SIGNAL_NOW", "MANUAL", "ADMIN"):
+        return f"👑 الإدارة{(' · ' + who) if who else ''}"
+    if src in ("SIGNAL_NOW", "WATCHER", "USER"):
+        return f"👤 مستخدم: {who or 'طلب مباشر'}"
+    if src.startswith("PARTNER"):
+        return f"🤝 شريك: {who or 'قناة شريكة'}"
+    return f"👤 {who}" if who else "🤖 المحرك التلقائي"
+
+
+def render_signal_compact(sig) -> str:
+    """v7.5.0: Ultra-clean, mobile-safe ONE-LINE PLAIN-TEXT button label.
+
+    Never overflows mobile button width, never injects HTML tags, and uses
+    ▲/▼ arrows instead of 🔴 so Bot API 9.4 semantic colors (`signal_row_style`)
+    paint wins Green, active/running Blue, and SL/closed Red cleanly.
+    """
+    direction = str(sig["direction"] or "BUY").upper()
+    arrow = "▲" if direction == "BUY" else "▼"
+    st = str(sig["status"] or "ACTIVE").upper()
+    closed = is_signal_closed(sig)
+    pips = float(sig.get("pips_result") or 0.0) if isinstance(sig, dict) else 0.0
+    shown_no = (sig.get("seq") if isinstance(sig, dict) else None) or sig["id"]
+    strat = strategy_name(sig["strategy"])
+    if st == "RUNNING":
+        st_short = "قيد التنفيذ"
+    elif st == "ACTIVE":
+        st_short = "بانتظار"
+    elif st == "TP3_HIT":
+        st_short = f"👑 {pips:+.0f}p" if pips else "👑 مكتملة"
+    elif st in ("TP1_HIT", "TP2_HIT"):
+        tp_lbl = "TP1" if st == "TP1_HIT" else "TP2"
+        p_txt = f" {pips:+.0f}p" if pips else ""
+        st_short = f"{tp_lbl}{p_txt}" + (" 🛡" if closed else " 🚀")
+    elif st == "SL_HIT":
+        st_short = f"وقف {pips:+.0f}p" if pips else "وقف"
+    elif st == "CANCELLED":
+        st_short = "ملغاة"
+    elif st == "EXPIRED":
+        st_short = "منتهية"
+    else:
+        st_short = signal_status_ar(sig)
+    return f"#{shown_no} {arrow} {sig['symbol']} · {strat} · {st_short}"
 
 
 def render_payment_card(p, plan_title: str = "") -> str:

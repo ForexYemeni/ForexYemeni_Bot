@@ -186,11 +186,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_partners.render_partner_start(update, active_p)
         return
     from fysb.handlers.user_pages import build_user_home_card
-    home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "")
+    from fysb.services import users as _users_svc
+    u_row = await afn.run(_users_svc.get_user, uid)
+    auto_on = bool(u_row["notifications"]) if u_row else True
+    home_text = await build_user_home_card(uid, tg_user.full_name or tg_user.username or "", preloaded_u=u_row)
     await _send_guarded(
         update.effective_message.reply_text,
         home_text,
-        kb.user_menu(),
+        kb.user_menu(auto_signals_on=auto_on),
     )
 
 

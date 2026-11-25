@@ -222,9 +222,10 @@ def test_auto_trading_journal_and_daily_drawdown_guard(isolated_db):
 
 def test_signal_action_keyboard_and_emit_compatibility(isolated_db):
     markup = kb.signal_action_keyboard(55)
-    assert len(markup.inline_keyboard) == 2
-    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert cbs == ["u:lotcalc:55", "u:sigchart:55", "u:jtake:55", "u:jskip:55"]
+    assert len(markup.inline_keyboard) == 3
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+    assert set(cbs) >= {"u:lotcalc:55", "u:sigchart:55", "u:jtake:55", "u:jskip:55"}
+    assert any("تجريبي الآن" in b.text for row in markup.inline_keyboard for b in row)
 
     # Ensure emit_to_users passes reply_markup when bot_send accepts it
     from fysb.engines import signal_engine
@@ -249,4 +250,5 @@ def test_signal_action_keyboard_and_emit_compatibility(isolated_db):
     assert res["sent"] == 1
     assert len(captured) == 1
     assert captured[0][2] is not None
-    assert captured[0][2].inline_keyboard[0][0].callback_data == f"u:lotcalc:{sid}"
+    assert captured[0][2].inline_keyboard[0][0].callback_data == f"u:demosig:{sid}"
+    assert captured[0][2].inline_keyboard[1][0].callback_data == f"u:lotcalc:{sid}"

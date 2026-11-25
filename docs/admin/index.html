@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Super Admin Web Panel v7.4.6</title>
+<title>FOREXYEMENI — Super Admin Web Panel v7.5.0</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root{
@@ -72,7 +72,7 @@ input:focus,select:focus{border-color:var(--gold)}
 <div class="hdr">
   <div>
     <h1>👑 لوحة الإدارة الملكية — FOREXYEMENI</h1>
-    <div class="sub">مركز القيادة التنفيذي · v7.4.6</div>
+    <div class="sub">مركز القيادة التنفيذي · v7.5.0</div>
   </div>
   <button class="btn gold" onclick="loadAdmin()">🔄 تحديث حي</button>
 </div>
@@ -85,6 +85,10 @@ input:focus,select:focus{border-color:var(--gold)}
     <div class="kpi"><div class="lbl">المشتركون المدفوعون</div><div class="val" style="color:var(--green)" id="kSubs">—</div></div>
     <div class="kpi"><div class="lbl">صفقات مفتوحة الآن</div><div class="val" style="color:var(--cyan)" id="kOpen">—</div></div>
     <div class="kpi"><div class="lbl">طلبات دفع معلقة</div><div class="val" style="color:var(--red)" id="kPay">—</div></div>
+  </div>
+  <div class="card gold-edge">
+    <h3><span>📡 مركز إدارة الإشارات الملكي (الأحدث · المنشئ · الأداء)</span><span class="pill" id="sigCountPill">0 إشارة</span></h3>
+    <div id="adminSignalsBox"><div style="color:var(--muted);font-size:13px">⏳ جارٍ تحميل الإشارات...</div></div>
   </div>
   <div class="card gold-edge">
     <h3>⚡ مفاتيح التحكم السريع وبث الأخبار (1-Tap)</h3>
@@ -205,6 +209,15 @@ async function actPayout(id, decision){
   toast(r.ok ? '✅ تم تحديث طلب السحب' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }
+async function cancelAdminSig(id){
+  const r = await api('/api/admin/signal',{method:'POST',body:JSON.stringify({signal_id:id, op:'cancel'})});
+  toast(r.ok ? '🚫 تم إلغاء الإشارة #' + id : (r.error||'خطأ'), !r.ok);
+  loadAdmin();
+}
+function openSigDemoChart(id){
+  const base = API_BASE ? ('../?api=' + encodeURIComponent(API_BASE) + '&demo_sig=' + id) : ('/?demo_sig=' + id);
+  window.location.href = base;
+}
 async function genGift(){
   const r = await api('/api/admin/gift',{method:'POST',body:JSON.stringify({
     target_plan:document.getElementById('gPlan').value,
@@ -234,6 +247,33 @@ async function loadAdmin(){
   document.getElementById('kSubs').textContent = d.kpis.active_paid_subs;
   document.getElementById('kOpen').textContent = d.kpis.open_signals;
   document.getElementById('kPay').textContent = d.pending_payments.length;
+
+  const rSigs = d.recent_signals || [];
+  document.getElementById('sigCountPill').textContent = rSigs.length + ' إشارة';
+  document.getElementById('adminSignalsBox').innerHTML = rSigs.length ? rSigs.map(s => {
+    const isBuy = (s.direction||'BUY').toUpperCase() === 'BUY';
+    const st = (s.status||'ACTIVE').toUpperCase();
+    const isWin = ['TP1_HIT','TP2_HIT','TP3_HIT'].includes(st);
+    const isOpen = ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes(st) && !s.closed_at;
+    const stCol = isWin ? '#16c784' : (isOpen ? '#38bdf8' : '#f04452');
+    const pips = +(s.pips_result || 0);
+    const pTxt = pips ? ` · <b style="color:${pips>0?'#16c784':'#f04452'}">${pips>0?'+':''}${pips.toFixed(1)}p</b>` : '';
+    return `<div class="item">
+      <div style="flex:1;min-width:190px">
+        <div><b style="color:var(--gold2)">#${s.seq||s.id}</b> <b>${s.symbol}</b>
+          <span class="pill" style="color:${isBuy?'#16c784':'#f04452'}">${isBuy?'▲ شراء':'▼ بيع'}</span>
+          <span class="pill" style="color:${stCol}">${st}</span>${pTxt}
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">
+          ⏱ ${s.timeframe} · 🧠 ${s.strategy} (${s.score||0}/100) · ${s.creator||'🤖 تلقائي'} · 📬 ${s.deliveries||0} · 🎮 ${s.demo_count||0}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn on" onclick="openSigDemoChart(${s.id})">🎮 تجريبي</button>
+        ${isOpen ? `<button class="btn danger" onclick="cancelAdminSig(${s.id})">🚫</button>` : ''}
+      </div>
+    </div>`;
+  }).join('') : '<div style="color:var(--muted);font-size:13px">لا توجد إشارات مسجلة بعد.</div>';
 
   const sm = d.chart_schedule_minutes || 0;
   document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${sm} دقيقة` : '⏹ يدوي';

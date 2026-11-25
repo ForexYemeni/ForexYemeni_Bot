@@ -158,7 +158,8 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
     u, plan, state, trial = await afn.run(_home_snapshot, uid, preloaded_u)
     plan_title = esc(plan["title"] if plan else "Free")
     mkts_txt = esc(_format_user_markets((u["market"] if u else "") or ""))
-    notif_txt = "🟢 مفعّلة" if (u and u["notifications"]) else "🔕 متوقفة"
+    auto_on = bool(u and u["notifications"])
+    notif_txt = "🟢 شغّالة — تصلك الفرص التلقائية فوراً" if auto_on else "🔴 متوقفة — اضغط الزر الأخضر بالأسفل للتشغيل"
     greet = f"أهلاً بك يا <b>{esc(tg_name)}</b>" if tg_name else "مرحباً بك في منصتك المؤسسية"
     trial_line = ""
     if trial.get("is_free") and not trial.get("unlimited"):
@@ -177,10 +178,10 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
         f"{trial_line}"
         f"▎📡 رصيد الإشارات اليومي: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
         f"▎🌐 أسواق إشاراتك: <b>{mkts_txt}</b>\n"
-        f"▎🔔 الإشعارات: <b>{notif_txt}</b>"
+        f"▎⚡ الإشارات التلقائية: <b>{notif_txt}</b>"
         "</blockquote>\n"
-        "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول بالأسفل، "
-        "وخصّص أسواقك المفضلة بحرية من <b>🌐 أسواقي وتخصيصي</b>.</i>"
+        "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول، "
+        "وتحكّم بتشغيل أو إيقاف <b>الإشارات التلقائية</b> بضغطة واحدة من الزر أسفل القائمة.</i>"
     )
 
 
@@ -240,7 +241,24 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     # ---------- Home / profile ----------
     if action == "home":
         home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
-        await render(q, home_text, kb.user_menu(), bot)
+        await render(q, home_text, kb.user_menu(auto_signals_on=bool(u["notifications"])), bot)
+
+    elif action == "autosig_toggle":
+        new_val = 0 if u["notifications"] else 1
+        await afn.run(users_service.set_notifications, uid, bool(new_val))
+        u = dict(u)
+        u["notifications"] = new_val
+        try:
+            await q.answer(
+                "🟢 تم تشغيل الإشارات التلقائية — ستصلك الفرص فوراً"
+                if new_val else
+                "🔴 تم إيقاف الإشارات التلقائية — يمكنك إعادة تشغيلها بأي وقت",
+                show_alert=False,
+            )
+        except Exception:
+            pass
+        home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
+        await render(q, home_text, kb.user_menu(auto_signals_on=bool(new_val)), bot)
 
     elif action == "profile":
         profile = await afn.run(users_service.profile_summary, uid, u)
@@ -580,10 +598,11 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             ],
         ]
 
+        from fysb.ui.cards import signal_row_style
         for r in rows:
             is_deliv = int(r["id"]) in delivered_ids
             prefix = "" if (is_deliv or state["remaining"] > 0) else "🔒 "
-            rows_kb.append([kb.btn(prefix + render_signal_compact(r), f"u:signalview:{r['id']}")])
+            rows_kb.append([kb.btn(prefix + render_signal_compact(r), f"u:signalview:{r['id']}", style=signal_row_style(r))])
 
         nav_row = []
         if page > 0:
@@ -757,6 +776,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         # chat_id/message_id in signal_deliveries so the tracker updates this
         # card live on TP1/TP2/TP3/SL/price moves!
         action_rows = [
+            [kb.signal_demo_launch_btn(sid)],
             [kb.btn("🧮 احسب اللوت", f"u:lotcalc:{sid}", style="primary"),
              kb.btn("📊 شارت الإشارة", f"u:sigchart:{sid}", style="primary")],
             [kb.btn("✅ دخلت الصفقة", f"u:jtake:{sid}", style="success"),
@@ -1208,11 +1228,56 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         body.append(f"\n⚙️ <b>إعداداتك:</b> مخاطرة <b>{s['risk_pct']:g}%</b> · اللوت: "
                     f"<b>{lot_word}</b> · "
                     f"التنفيذ التلقائي: <b>{'مفعل 🤖' if s['auto_trade'] else 'متوقف'}</b>")
-        await render(q, "\n".join(body), kb.user_nav([
+        demo_rows = [
             [kb.btn("🚀 فتح صفقة تجريبية", "u:demopick"), kb.btn("📂 الصفقات المفتوحة", "u:demoopen_list")],
             [kb.btn("📜 سجل الصفقات", "u:demohistory"), kb.btn("🔄 تصفير الحساب", "u:demoreset")],
             [kb.btn("⚙️ إعدادات حسابي التجريبي", "u:demoset")],
-        ]), bot)
+        ]
+        if config.webapp_ready():
+            demo_rows.insert(0, [kb.webapp_btn(
+                "🎮 متابعة حسابي التجريبي على الشارت الحي",
+                config.webapp_page_url("/", query={"tab": "demo"}),
+                style="success",
+            )])
+        await render(q, "\n".join(body), kb.user_nav(demo_rows), bot)
+
+    elif action.startswith("demosig:"):
+        sid = _safe_int(action.split(":", 1)[1])
+        from fysb.engines import demo as demo_engine
+        from fysb.engines.tracker import seq_of
+        res = await afn.run(demo_engine.open_signal_interactive, uid, sid, config.market_api_key())
+        if not res.get("ok"):
+            await render(q, f"⚠️ <b>تعذر تفعيل الصفقة التجريبية للإشارة #{sid}:</b>\n{esc(res.get('error') or 'خطأ غير متوقع')}",
+                         kb.user_nav([[kb.btn("🧪 حسابي التجريبي", "u:demo", style="success")]]), bot)
+            return
+        pos = res["position"]
+        sig = res["signal"]
+        seq = await afn.run(seq_of, sid)
+        sym = pos["symbol"]
+        d_ar = "شراء 🟢" if pos["direction"] == "BUY" else "بيع 🔴"
+        status_title = "الصفقة مفعّلة مسبقاً وتُتابع حياً" if res.get("already_open") else "تم تفعيل الإشارة على حسابك التجريبي الآن"
+        card_body = (
+            f"🎮 <b><u>{status_title} — #{seq}</u></b>\n"
+            f"<blockquote>"
+            f"▎🌐 الأداة: <b>{esc(sym)}</b> · {d_ar} · ⏱ {esc(tf_name(sig.get('timeframe') or 'M15'))}\n"
+            f"▎📦 اللوت: <b>{float(pos['lots']):g}</b> · 🎯 الدخول: <code>{instruments.fmt_price(sym, float(pos['entry']))}</code>\n"
+            f"▎🛑 الوقف: <code>{instruments.fmt_price(sym, float(pos.get('sl') or 0))}</code> · "
+            f"🏁 الهدف: <code>{instruments.fmt_price(sym, float(pos.get('tp') or 0))}</code>\n"
+            f"▎📡 الصفقة مرتبطة لحظياً بحسابك التجريبي وبالتطبيق التفاعلي معاً."
+            f"</blockquote>"
+        )
+        kb_rows = []
+        if config.webapp_ready():
+            kb_rows.append([kb.webapp_btn(
+                "📱 فتح ومتابعة الصفقة على الشارت الحي الآن",
+                config.webapp_page_url("/", query={"demo_sig": str(sid)}),
+                style="success",
+            )])
+        kb_rows.append([
+            kb.btn("📂 صفقاتي المفتوحة", "u:demoopen_list", style="primary"),
+            kb.btn("🧪 لوحة التجريبي", "u:demo", style="success"),
+        ])
+        await render(q, card_body, kb.user_nav(kb_rows), bot)
 
     elif action == "demoset":
         from fysb.engines import demo as demo_engine

@@ -405,12 +405,22 @@ async def _safe_send(bot, chat_id, text: str) -> bool:
     return False
 
 
-async def _safe_edit(bot, chat_id, message_id: int, text: str) -> bool:
-    """Edit an HTML Telegram message in place with FloodWait / RetryAfter protection."""
+async def _safe_edit(bot, chat_id, message_id: int, text: str, reply_markup=None) -> bool:
+    """Edit an HTML Telegram message in place with FloodWait / RetryAfter protection,
+    preserving the signal's interactive action keyboard (🎮 تجريبي الآن / 📊 شارت / 🧮 لوت)."""
     from telegram.error import RetryAfter
+    from fysb.engines import tracker as _trk
     cid = _norm_chat_id(chat_id)
+    mk = reply_markup if reply_markup is not None else _trk.markup_for_edit(cid, int(message_id))
     for _ in range(2):
         try:
+            kwargs = {"chat_id": cid, "message_id": int(message_id), "parse_mode": "HTML"}
+            if mk is not None:
+                kwargs["reply_markup"] = mk
+            await bot.edit_message_text(text, **kwargs)
+            await asyncio.sleep(0.05)
+            return True
+        except TypeError:
             await bot.edit_message_text(text, chat_id=cid, message_id=int(message_id), parse_mode="HTML")
             await asyncio.sleep(0.05)
             return True

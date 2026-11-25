@@ -564,12 +564,38 @@ def _load_demo_accounts_map(uids: list[int]) -> dict[int, dict]:
     return out
 
 
+_EDIT_MARKUP: dict[tuple[str, int], object] = {}
+
+
+def markup_for_edit(chat_id, message_id: int):
+    """Return preserved interactive signal keyboard for live in-place card edits."""
+    return _EDIT_MARKUP.pop((str(chat_id), int(message_id)), None)
+
+
+def _live_tp_progress_bar(sig: dict, live_px: float) -> str:
+    """Compact luxury visual progress bar from Entry -> TP3 (or SL) for live RUNNING cards."""
+    entry = float(sig.get("entry") or 0.0)
+    tp3 = float(sig.get("tp3") or sig.get("tp1") or 0.0)
+    direction = str(sig.get("direction") or "BUY").upper()
+    span = abs(tp3 - entry)
+    if span <= 1e-9 or live_px <= 0:
+        return ""
+    move = (live_px - entry) if direction == "BUY" else (entry - live_px)
+    pct = max(0, min(100, int(round((move / span) * 100))))
+    filled = max(0, min(8, int(round(pct / 12.5))))
+    blocks = "🟩" * filled + "⬜" * (8 - filled)
+    hit_tp = int(sig.get("hit_tp") or 0)
+    tp_flags = f"TP1 {'✅' if hit_tp >= 1 else '▫️'} · TP2 {'✅' if hit_tp >= 2 else '▫️'} · TP3 {'✅' if hit_tp >= 3 else '▫️'}"
+    return f"\n▎📊 التقدم نحو الأهداف: {blocks} <b>{pct}%</b>\n▎🏁 {tp_flags}"
+
+
 def _base_live_card_text(sig: dict, px: float, row=None) -> str:
     """Build the invariant portion of the live signal card ONCE per signal.
 
-    v6.20.3 honesty: once a signal is CLOSED (including TP1_HIT / TP2_HIT closed
-    at breakeven with closed_at stamped), NEVER append a live drifting market
-    price below entry — instead display the final secured-profit close summary.
+    v7.5.0 Luxury Live Board:
+      * Clearly distinguishes ACTIVE (بانتظار لمس الدخول), RUNNING (مفعّلة قيد التنفيذ في السوق),
+        TP1/TP2 secured runners (مؤمّنة على الدخول), and CLOSED final stamps ON THE SAME CARD.
+      * Once CLOSED (including TP1/TP2 closed at breakeven), NEVER appends a drifting live price.
     """
     from fysb.theme import is_signal_closed
     from fysb.ui.cards import render_signal_card
@@ -577,8 +603,8 @@ def _base_live_card_text(sig: dict, px: float, row=None) -> str:
         row = _market_row(sig["symbol"])
     text = render_signal_card(sig, user_view=True, row=row)
     closed = is_signal_closed(sig)
+    st = (sig.get("status") or "").upper()
     if closed:
-        st = (sig.get("status") or "").upper()
         if st in ("TP1_HIT", "TP2_HIT"):
             banked = float(sig.get("pips_result") or 0.0)
             text += (
@@ -586,13 +612,46 @@ def _base_live_card_text(sig: dict, px: float, row=None) -> str:
                 f"أُغلق الجزء المتبقي عند نقطة التأمين (الدخول) وانتهت متابعة هذه الإشارة؛ "
                 f"المحرك يبحث الآن عن الفرص الجديدة.</blockquote>"
             )
+        elif st == "TP3_HIT":
+            banked = float(sig.get("pips_result") or 0.0)
+            text += (
+                f"\n\n<blockquote>👑 <b>صفقة ملكية مكتملة بجميع الأهداف ({banked:+.1f} pips)</b> — "
+                f"تم إغلاق المتابعة بنجاح كامل.</blockquote>"
+            )
         return text
     if px:
         entry = float(sig["entry"])
+        drift = drift_pips(sig["symbol"], sig["direction"], entry, px)
+        usd01 = instruments.usd_move(sig["symbol"], drift, 0.01, px=px)
         side = "أعلى الدخول" if px > entry else ("عند الدخول" if px == entry else "أدنى الدخول")
-        text += (f"\n\n<blockquote>💰 <b>سعر السوق الآن:</b> "
-                 f"<code>{instruments.fmt_price(sig['symbol'], px, row)}</code>"
-                 f" · {side} · <b>{drift_pips(sig['symbol'], sig['direction'], entry, px):+.1f} pips</b> من الدخول</blockquote>")
+        px_fmt = instruments.fmt_price(sig["symbol"], px, row)
+        if st == "ACTIVE":
+            ribbon = (
+                f"⏳ <b>الحالة الحية: بانتظار التنفيذ (لم يُلمس الدخول بعد)</b>\n"
+                f"▎💰 <b>سعر السوق الآن:</b> <code>{px_fmt}</code> · {side} · "
+                f"المسافة للدخول: <b>{abs(drift):.1f} pips</b>"
+            )
+        elif st == "RUNNING":
+            mood = "📈 ربح عائم" if drift >= 0 else "📉 تراجع عائم"
+            ribbon = (
+                f"🚀 <b>الحالة الحية: مفعّلة — قيد التنفيذ في السوق الآن</b>\n"
+                f"▎💰 <b>سعر السوق الآن:</b> <code>{px_fmt}</code> · {mood}: "
+                f"<b>{drift:+.1f} pips</b> (<code>{usd01:+,.2f}$</code> / 0.01)"
+                + _live_tp_progress_bar(sig, px)
+            )
+        elif st in ("TP1_HIT", "TP2_HIT"):
+            ribbon = (
+                f"🏁 <b>الحالة الحية: قيد السوق — هدف محقق ومؤمّنة على الدخول 🛡</b>\n"
+                f"▎💰 <b>سعر السوق الآن:</b> <code>{px_fmt}</code> · "
+                f"<b>{drift:+.1f} pips</b> (<code>{usd01:+,.2f}$</code> / 0.01)"
+                + _live_tp_progress_bar(sig, px)
+            )
+        else:
+            ribbon = (
+                f"💰 <b>سعر السوق الآن:</b> <code>{px_fmt}</code>"
+                f" · {side} · <b>{drift:+.1f} pips</b> من الدخول"
+            )
+        text += f"\n\n<blockquote>{ribbon}</blockquote>"
     return text
 
 
@@ -615,16 +674,29 @@ def _live_card_text(sig: dict, uid: int, px: float, row=None, acc=None, base_tex
 
 def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict], market_row=None) -> list:
     """Edits for every delivered card — builds the base card ONCE and
-    batch-loads all recipients' demo accounts in 1 SQL query (O(1) instead of 3N)."""
+    batch-loads all recipients' demo accounts in 1 SQL query (O(1) instead of 3N).
+    Also preserves the interactive luxury action keyboard on every live edited user card."""
     if not refs:
         return []
+    from fysb.ui import keyboards as _kb
     row = market_row if market_row is not None else _market_row(sig["symbol"])
     base_text = _base_live_card_text(sig, live_px, row=row)
     acc_map = _load_demo_accounts_map([r["user_id"] for r in refs])
-    return [(r["user_id"], r["chat_id"], int(r["message_id"]),
-             _live_card_text(sig, r["user_id"], live_px, row=row,
-                             acc=acc_map.get(int(r["user_id"] or 0)), base_text=base_text))
-            for r in refs]
+    user_markup = _kb.signal_action_keyboard(int(sig["id"]))
+    out = []
+    for r in refs:
+        uid = int(r["user_id"] or 0)
+        mid = int(r["message_id"])
+        if uid > 0:
+            if len(_EDIT_MARKUP) > 4000:
+                _EDIT_MARKUP.clear()
+            _EDIT_MARKUP[(str(r["chat_id"]), mid)] = user_markup
+        out.append((
+            r["user_id"], r["chat_id"], mid,
+            _live_card_text(sig, r["user_id"], live_px, row=row,
+                            acc=acc_map.get(uid), base_text=base_text),
+        ))
+    return out
 
 
 def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0) -> str | None:

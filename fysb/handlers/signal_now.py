@@ -317,12 +317,15 @@ async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
     if personal:
         text += "\n\n<blockquote>" + personal + "</blockquote>"
     try:
-        msg = await bot.send_message(uid, text, parse_mode="HTML")
-        await afn.run(record_delivery_refs, uid, sig["id"], msg)
-        # v7.3.0: Automatically deliver the ultra-luxury royal signal chart to the user!
+        action_kb = kb.signal_action_keyboard(sig["id"])
         try:
-            from fysb.ui import charts as _charts
-            if await afn.run(_charts.charts_enabled) and hasattr(bot, "send_photo"):
+            msg = await bot.send_message(uid, text, parse_mode="HTML", reply_markup=action_kb)
+        except TypeError:
+            msg = await bot.send_message(uid, text, parse_mode="HTML")
+        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+        # v7.5.0: ALWAYS share the ultra-luxury royal signal chart with any user who generates a signal!
+        try:
+            if hasattr(bot, "send_photo"):
                 import io as _io
                 from fysb.engines.tracker import seq_of
                 from fysb.handlers.user_pages import build_signal_chart_bundle
@@ -331,12 +334,22 @@ async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
                 if bundle and bundle.get("png"):
                     seq = await afn.run(seq_of, sig["id"])
                     cap = _cch.build_luxury_signal_chart_caption(sig, bundle.get("metrics"), seq=seq)
-                    await bot.send_photo(
-                        chat_id=uid,
-                        photo=_io.BytesIO(bundle["png"]),
-                        caption=cap,
-                        parse_mode="HTML",
-                    )
+                    chart_kb = kb.InlineKeyboardMarkup([[kb.signal_demo_launch_btn(sig["id"])]])
+                    try:
+                        await bot.send_photo(
+                            chat_id=uid,
+                            photo=_io.BytesIO(bundle["png"]),
+                            caption=cap,
+                            parse_mode="HTML",
+                            reply_markup=chart_kb,
+                        )
+                    except TypeError:
+                        await bot.send_photo(
+                            chat_id=uid,
+                            photo=_io.BytesIO(bundle["png"]),
+                            caption=cap,
+                            parse_mode="HTML",
+                        )
         except Exception:
             log.debug("auto signal chart skipped for user=%s sig=%s", uid, sig.get("id"))
         exec_res = await afn.run(user_trade.auto_execute, sig, uid)
@@ -404,24 +417,37 @@ async def pick_strategy(q, uid: int, context, bot, strategy: str) -> None:
                         pulse = birth_pulse_line(sig, row)
                         if pulse:
                             card += "\n\n<blockquote>" + pulse + "</blockquote>"
-                        msg = await bot.send_message(uid, card, parse_mode="HTML")
-                        await afn.run(record_delivery_refs, uid, sig["id"], msg)
-                        # v7.3.0: Also send the luxury signal chart to Admin on Admin Signal-Now
+                        action_kb = kb.signal_action_keyboard(sig["id"])
                         try:
-                            from fysb.ui import charts as _charts
-                            if await afn.run(_charts.charts_enabled) and hasattr(bot, "send_photo"):
+                            msg = await bot.send_message(uid, card, parse_mode="HTML", reply_markup=action_kb)
+                        except TypeError:
+                            msg = await bot.send_message(uid, card, parse_mode="HTML")
+                        await afn.run(record_delivery_refs, uid, sig["id"], msg)
+                        # v7.5.0: Always send the luxury signal chart to Admin on Admin Signal-Now
+                        try:
+                            if hasattr(bot, "send_photo"):
                                 import io as _io
                                 from fysb.handlers.user_pages import build_signal_chart_bundle
                                 from fysb.services import chart_channels as _cch
                                 bundle = await asyncio.to_thread(build_signal_chart_bundle, dict(sig), False)
                                 if bundle and bundle.get("png"):
                                     cap = _cch.build_luxury_signal_chart_caption(sig, bundle.get("metrics"), seq=seq_of(sig["id"]))
-                                    await bot.send_photo(
-                                        chat_id=uid,
-                                        photo=_io.BytesIO(bundle["png"]),
-                                        caption=cap,
-                                        parse_mode="HTML",
-                                    )
+                                    chart_kb = kb.InlineKeyboardMarkup([[kb.signal_demo_launch_btn(sig["id"])]])
+                                    try:
+                                        await bot.send_photo(
+                                            chat_id=uid,
+                                            photo=_io.BytesIO(bundle["png"]),
+                                            caption=cap,
+                                            parse_mode="HTML",
+                                            reply_markup=chart_kb,
+                                        )
+                                    except TypeError:
+                                        await bot.send_photo(
+                                            chat_id=uid,
+                                            photo=_io.BytesIO(bundle["png"]),
+                                            caption=cap,
+                                            parse_mode="HTML",
+                                        )
                         except Exception:
                             pass
                     except Exception:

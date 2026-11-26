@@ -141,6 +141,104 @@ _CONFIRM_TF_SPEC: dict[str, tuple[str, str, str]] = {
     "D1": ("D1", "إغلاق شمعة D1 (يومي) أو H4 كاملة بجسم حقيقي", "H1 (الساعة)"),
 }
 
+_TF_SECONDS_MAP: dict[str, int] = {
+    "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+    "H1": 3600, "H4": 14400, "D1": 86400, "W1": 604800,
+}
+
+
+def _parse_candle_open_utc(ts_raw: str):
+    from datetime import datetime, timezone
+    s = str(ts_raw or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    for fmt_s in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt_s).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _latest_closed_candle_for_tf(candles: list[dict], tf: str) -> tuple[dict, bool]:
+    """Return `(closed_candle, last_is_forming)` aligned 100% with True Analysis radar.
+
+    Provider timestamps mark candle OPEN time in UTC. If the newest candle's
+    `open_dt + tf_sec > now_utc`, it is still forming and we evaluate the
+    preceding truly closed candle instead so the Analysis Card and Live Radar
+    NEVER contradict each other!
+    """
+    from datetime import datetime, timedelta, timezone
+    if not candles:
+        return {}, False
+    tf_sec = _TF_SECONDS_MAP.get(str(tf or "M15").upper(), 900)
+    now_dt = datetime.now(timezone.utc)
+    last_c = candles[-1]
+    last_open = _parse_candle_open_utc(last_c.get("datetime") or "")
+    if last_open is not None and (last_open + timedelta(seconds=tf_sec)) > now_dt:
+        if len(candles) >= 2:
+            return candles[-2], True
+        return {}, True
+    return last_c, False
+
+
+def _detect_pullback_zone(
+    *,
+    direction: str,
+    cur_close: float,
+    activation_px: float,
+    invalidation_px: float,
+    atr: float,
+    obs: list[dict],
+    fvgs: list[dict],
+) -> dict:
+    """Detect an actionable Institutional OB / FVG retracement zone (v8.5.0).
+
+    Returns `{entry_mode, zone_lo, zone_hi, zone_kind}`:
+      - `PULLBACK_ZONE`: clean bullish OB/FVG below/at price (BUY) or bearish OB/FVG
+        above/at price (SELL) strictly inside safe structure and within 2.4x ATR.
+      - `BREAKOUT`: default structural breakout mode.
+    """
+    is_buy = str(direction).upper() == "BUY"
+    want_kind = "bullish" if is_buy else "bearish"
+    max_dist = max(atr * 2.4, abs(activation_px - cur_close) * 1.5, 1e-6)
+    candidates: list[tuple[float, str, float, float]] = []
+
+    for src_kind, items in (("OB", obs or []), ("FVG", fvgs or [])):
+        for z in items:
+            if str(z.get("kind") or "").lower() != want_kind:
+                continue
+            lo = float(z.get("lo") or 0.0)
+            hi = float(z.get("hi") or 0.0)
+            if lo <= 0 or hi <= 0 or hi <= lo:
+                continue
+            if is_buy:
+                # Demand zone must sit at/below current price & activation, and above invalidation
+                if hi <= cur_close * 1.0015 and lo > invalidation_px and hi < activation_px:
+                    dist = max(0.0, cur_close - hi)
+                    if dist <= max_dist:
+                        candidates.append((dist, src_kind, lo, hi))
+            else:
+                # Supply zone must sit at/above current price & activation, and below invalidation
+                if lo >= cur_close * 0.9985 and hi < invalidation_px and lo > activation_px:
+                    dist = max(0.0, lo - cur_close)
+                    if dist <= max_dist:
+                        candidates.append((dist, src_kind, lo, hi))
+
+    if not candidates:
+        return {"entry_mode": "BREAKOUT", "zone_lo": 0.0, "zone_hi": 0.0, "zone_kind": ""}
+
+    # Pick closest valid institutional zone (prefer OB on near-ties)
+    candidates.sort(key=lambda t: (round(t[0], 6), 0 if t[1] == "OB" else 1))
+    _, z_kind, z_lo, z_hi = candidates[0]
+    return {"entry_mode": "PULLBACK_ZONE", "zone_lo": z_lo, "zone_hi": z_hi, "zone_kind": z_kind}
+
 
 def _build_real_confirmation_spec(
     *,
@@ -154,24 +252,28 @@ def _build_real_confirmation_spec(
     invalidation_px: float,
     fmt,
 ) -> dict:
-    """Derive 100% real, candle-grounded confirmation type, stability TF,
-    ATR anti-fakeout filter, and live activation verification state.
-    Zero placeholder or synthetic claims — every figure comes from real OHLC data.
+    """Derive 100% real, closed-candle-grounded confirmation type, stability TF,
+    ATR anti-fakeout filter, institutional pullback zone, and live activation state.
+    Zero placeholder or synthetic claims — every figure comes from real OHLC data
+    and matches True Analysis live radar 100%.
     """
     tf_u = str(tf or "M15").upper()
     stab_tf, stab_ar, conf_tf_ar = _CONFIRM_TF_SPEC.get(
         tf_u,
         (tf_u, f"إغلاق شمعة {tf_u} كاملة بجسم حقيقي", tf_u),
     )
-    last = candles[-1] if candles else {}
-    cur_close = float(last.get("close") or main.get("close") or 0.0)
-    cur_open = float(last.get("open") or cur_close)
-    cur_hi = float(last.get("high") or cur_close)
-    cur_lo = float(last.get("low") or cur_close)
-    c_rng = max(cur_hi - cur_lo, 1e-9)
-    body_pct = int(round(100.0 * abs(cur_close - cur_open) / c_rng))
-    is_bull_candle = cur_close > cur_open
-    is_bear_candle = cur_close < cur_open
+    live_bar = candles[-1] if candles else {}
+    cur_close = float(live_bar.get("close") or main.get("close") or 0.0)
+    closed_bar, last_is_forming = _latest_closed_candle_for_tf(candles, stab_tf)
+    eval_bar = closed_bar or live_bar
+    ev_close = float(eval_bar.get("close") or cur_close)
+    ev_open = float(eval_bar.get("open") or ev_close)
+    ev_hi = float(eval_bar.get("high") or ev_close)
+    ev_lo = float(eval_bar.get("low") or ev_close)
+    c_rng = max(ev_hi - ev_lo, 1e-9)
+    body_pct = int(round(100.0 * abs(ev_close - ev_open) / c_rng)) if closed_bar else 0
+    is_bull_candle = ev_close > ev_open
+    is_bear_candle = ev_close < ev_open
 
     atr = float(main.get("atr") or 0.0)
     buffer_px = max(atr * 0.15, 0.0)
@@ -186,9 +288,9 @@ def _build_real_confirmation_spec(
 
     anti_fakeout = (
         f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55% من مدى الشمعة) بفارق حقيقي ≥ <code>{buffer_pips:.1f}</code> نقطة "
-        f"(0.15×ATR) — لا يُعتد بالذيل وحده لمنع الكسر الكاذب"
+        f"(0.15×ATR) — لا يُعتد بالذيل ولا بالشمعة قبل إغلاقها لمنع الكسر الكاذب"
         if buffer_pips > 0 else
-        f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55% من مدى الشمعة) خارج المستوى — لا يُعتد بالذيل وحده"
+        f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55% من مدى الشمعة) خارج المستوى — لا يُعتد بالذيل ولا بالشمعة قبل إغلاقها"
     )
 
     if direction == "NEUTRAL":
@@ -206,6 +308,10 @@ def _build_real_confirmation_spec(
             "body_pct": body_pct,
             "buffer_pips": buffer_pips,
             "dist_pips": 0.0,
+            "entry_mode": "BREAKOUT",
+            "zone_lo": 0.0,
+            "zone_hi": 0.0,
+            "zone_kind": "",
         }
 
     is_buy = direction == "BUY"
@@ -214,9 +320,10 @@ def _build_real_confirmation_spec(
     rel_word = "فوق" if is_buy else "تحت"
     inv_word = "تحت" if is_buy else "فوق"
     candle_dir_ok = is_bull_candle if is_buy else is_bear_candle
-    already_beyond = (cur_close > activation_px) if is_buy else (cur_close < activation_px)
-    clean_buffer_ok = (
-        (cur_close >= activation_px + buffer_px) if is_buy else (cur_close <= activation_px - buffer_px)
+    closed_beyond = bool(closed_bar) and ((ev_close > activation_px) if is_buy else (ev_close < activation_px))
+    forming_beyond = last_is_forming and ((cur_close > activation_px) if is_buy else (cur_close < activation_px))
+    clean_buffer_ok = bool(closed_bar) and (
+        (ev_close >= activation_px + buffer_px) if is_buy else (ev_close <= activation_px - buffer_px)
     )
     has_retest = bool(brk.get("retest") and ((brk.get("breakout") == "UP") if is_buy else (brk.get("breakout") == "DOWN")))
     has_aligned_sweep = bool(sweep.get("sell_side") if is_buy else sweep.get("buy_side"))
@@ -224,23 +331,51 @@ def _build_real_confirmation_spec(
                        any((f.get("kind") == ("bullish" if is_buy else "bearish")) for f in fvgs)
     has_struct_break = bool(struct.get("bos") or struct.get("choch"))
 
+    # v8.5.0: Detect actionable Institutional OB/FVG Pullback Zone
+    pz = _detect_pullback_zone(
+        direction=direction,
+        cur_close=cur_close,
+        activation_px=activation_px,
+        invalidation_px=invalidation_px,
+        atr=atr,
+        obs=obs,
+        fvgs=fvgs,
+    )
+    entry_mode = pz["entry_mode"]
+    zone_lo = float(pz["zone_lo"] or 0.0)
+    zone_hi = float(pz["zone_hi"] or 0.0)
+    zone_kind = str(pz["zone_kind"] or "")
+
     activated = False
-    if already_beyond and candle_dir_ok and body_pct >= 50:
+    if closed_beyond and candle_dir_ok and body_pct >= 55 and clean_buffer_ok:
         activated = True
         if has_retest:
             conf_type = f"كسر حقيقي مع إعادة اختبار ناجحة (Break & Retest مؤكّد) {rel_word} {lvl_txt}"
-            live_state = f"🟢 مؤكّد ومفعّل فعلياً على إغلاق شمعة {stab_tf} الآن (جسم حقيقي {body_pct}%)"
-        elif clean_buffer_ok:
-            conf_type = f"إغلاق جسم شمعة {'صاعدة' if is_buy else 'هابطة'} حقيقية ({body_pct}%) {rel_word} {lvl_txt} بفارق يتجاوز 0.15×ATR"
-            live_state = f"🟢 الكسر مُغلق وثابت فعلياً على {stab_tf} الآن — يُعزّز الدخول بإعادة اختبار أو تأكيد شمعة {conf_tf_ar}"
+            live_state = f"🟢 مؤكّد ومفعّل فعلياً على إغلاق شمعة {stab_tf} مغلقة الآن (جسم حقيقي {body_pct}%)"
         else:
-            conf_type = f"إغلاق شمعة {stab_tf} {rel_word} {lvl_txt} (جسم {body_pct}%) — قريب من حد المستوى"
-            live_state = f"🟡 مفعّل أولياً على {stab_tf} — يُفضّل انتظار ثبات شمعة {conf_tf_ar} إضافية لتأكيد الزخم"
-    elif already_beyond:
+            conf_type = f"إغلاق جسم شمعة {'صاعدة' if is_buy else 'هابطة'} مغلقة ({body_pct}%) {rel_word} {lvl_txt} بفارق يتجاوز 0.15×ATR"
+            live_state = f"🟢 الكسر مُغلق وثابت فعلياً على شمعة {stab_tf} المغلقة الآن — يُعزّز الدخول بتأكيد {conf_tf_ar}"
+    elif closed_beyond and candle_dir_ok and body_pct >= 50:
+        # Close is beyond level but inside 0.15xATR buffer -> wait for clean confirmation
+        conf_type = f"إغلاق شمعة {stab_tf} {rel_word} {lvl_txt} (جسم {body_pct}%) — قريب من حد المستوى"
+        live_state = f"🟡 إغلاق أولي على {stab_tf} قرب المستوى — بانتظار تأكيد شمعة {conf_tf_ar} إضافية لتأكيد الزخم"
+    elif forming_beyond:
+        conf_type = f"الشمعة الجارية ({stab_tf}) تختبر المستوى {rel_word} {lvl_txt} — التفعيل يتطلب إغلاقاً فعلياً كاملاً"
+        live_state = (
+            f"🟡 الشمعة الجارية ({stab_tf}) تتجاوز المستوى مؤقتاً عند <code>{fmt(cur_close)}</code> "
+            f"— بانتظار إغلاقها الفعلي للتأكيد ومنع الكسر الكاذب"
+        )
+    elif closed_beyond:
         conf_type = f"اختراق ضعيف بذيول (جسم {body_pct}% فقط) {rel_word} {lvl_txt} — يتطلب إغلاق جسم حقيقي ≥ 55%"
         live_state = f"🟡 لم يثبت بزخم كافٍ بعد على {stab_tf} — انتظر إغلاق شمعة {stab_tf} بجسم قوي {rel_word} {lvl_txt}"
     else:
-        if has_aligned_sweep:
+        if entry_mode == "PULLBACK_ZONE":
+            z_ar = "منطقة أوامر مؤسسية (OB)" if zone_kind == "OB" else "فجوة قيمة مؤسسية (FVG)"
+            conf_type = (
+                f"دخول مؤسسي مزدوج: ارتداد ورفض صريح من {z_ar} "
+                f"<code>{fmt(zone_lo)} — {fmt(zone_hi)}</code> أو كسر وإغلاق جسم {stab_tf} (≥ 55%) {rel_word} {lvl_txt}"
+            )
+        elif has_aligned_sweep:
             sw_tag = "سيولة البيع SSL" if is_buy else "سيولة الشراء BSL"
             conf_type = f"تأكيد بعد سحب {sw_tag} + كسر هيكلي وإغلاق جسم شمعة {stab_tf} كاملة (≥ 55%) {rel_word} {lvl_txt}"
         elif has_aligned_zone:
@@ -263,6 +398,10 @@ def _build_real_confirmation_spec(
         "body_pct": body_pct,
         "buffer_pips": buffer_pips,
         "dist_pips": dist_pips,
+        "entry_mode": entry_mode,
+        "zone_lo": zone_lo,
+        "zone_hi": zone_hi,
+        "zone_kind": zone_kind,
     }
 
 
@@ -531,6 +670,10 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         "kz": str(main.get("kz") or ""),
         "activation_px": activation_px,
         "invalidation_px": invalidation_px,
+        "entry_mode": str(confirmation.get("entry_mode") or "BREAKOUT"),
+        "zone_lo": float(confirmation.get("zone_lo") or 0.0),
+        "zone_hi": float(confirmation.get("zone_hi") or 0.0),
+        "zone_kind": str(confirmation.get("zone_kind") or ""),
         "setup": setup_overlay,
     }
 

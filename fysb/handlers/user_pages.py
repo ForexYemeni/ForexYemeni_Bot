@@ -835,6 +835,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     conf_tf=ta_res["confirm_tf"],
                     body_pct=float(ta_res.get("body_pct") or 65.0),
                     candles=ta_res.get("candles") or [],
+                    trigger_kind=str(ta_res.get("trigger_kind") or "BREAKOUT"),
+                    tp_grounded=bool(ta_res.get("tp_grounded")),
                 )
             except Exception as _tae:
                 log.debug("instant true_analysis signal delivery failed: %s", _tae)

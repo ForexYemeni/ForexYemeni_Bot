@@ -35,9 +35,12 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent
 
 # --- ما لا تلمسه عملية التحديث أبداً (بيئة التشغيل المحلية) ------------------
-PRESERVE_EXACT = {".env", "fysb.lock", ".DS_Store", "spot_calibration.json", ".last_boot_update.json"}
+PRESERVE_EXACT = {
+    ".env", "fysb.lock", ".DS_Store", "spot_calibration.json",
+    ".last_boot_update.json", "tunnel_tokens.json", ".tunnel.pid",
+}
 PRESERVE_SUFFIXES = (".db", ".db-journal", ".db-wal", ".db-shm", ".log", ".pyc")
-PRESERVE_DIRS = {"logs", "backups", "__pycache__", ".git", ".pytest_cache", "node_modules", ".bin", ".local", ".cache"}
+PRESERVE_DIRS = {"database", "logs", "backups", "__pycache__", ".git", ".pytest_cache", "node_modules", ".bin", ".local", ".cache"}
 
 TIMEOUT_JSON = 25      # ثوانٍ — فحص الإصدار
 TIMEOUT_ZIP = 180      # ثوانٍ — تنزيل الحزمة
@@ -631,15 +634,11 @@ def _prepare_for_restart() -> None:
     orphan tunnel processes holding Ngrok static domains.
     """
     # 0. Terminate active HTTPS tunnel child process cleanly (ngrok / cloudflared / ssh)
+    #    v8.0.2: uses terminate_tunnel_sync() so ngrok releases its 1-session slot BEFORE os.execve()!
     try:
         if "fysb.webapp.tunnel" in sys.modules:
             from fysb.webapp import tunnel as _tun
-            proc = _tun._STATE.get("proc")
-            if proc is not None and getattr(proc, "returncode", None) is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            _tun.terminate_tunnel_sync(wait_sec=2.5)
     except Exception:
         pass
     # 1. Flush SQLite WAL or close PostgreSQL connection pool (best-effort)

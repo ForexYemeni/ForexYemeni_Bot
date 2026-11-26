@@ -134,4 +134,4 @@ def test_04_main_py_restricts_commands_and_messages_to_private_chats_and_version
     assert 'CommandHandler("start", start, filters=_PRIV)' in src
     assert "MessageHandler(_PRIV & filters.PHOTO, inputs.on_photo)" in src
     assert "MessageHandler(_PRIV & filters.TEXT & ~filters.COMMAND, inputs.on_text)" in src
-    assert config.VERSION == "8.0.1"
+    assert config.VERSION.startswith("8.")

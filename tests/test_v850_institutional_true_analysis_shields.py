@@ -506,4 +506,115 @@ def test_v853_mecca_12h_clock_and_day_boundaries(tmp_path):
     assert days[0]["day"] == "2026-11-24"
 
 
+def test_v860_partner_true_analysis_all_markets_and_luxury_dashboards(tmp_path):
+    """v8.6.0:
+    1) Partner sees «👑 تحليل ForexYemeni الحقيقي» when granted by Admin & can open u:true_analysis / u:ta_anl
+       with partner-scoped nav (p:home, never u:home), while regular u:plans still redirects to Partner Home.
+    2) Partner instant analysis (`p:anl` + `p:anlcat:metal:1`) exposes ALL enabled markets including Gold XAUUSD
+       (no more LIMIT 12 truncation).
+    3) All three luxury dashboards (Partner, User, Admin) render cleanly with 12h Mecca time.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from fysb import config, db
+    from fysb.handlers import admin_partners, common, dispatcher, user_pages
+    from fysb.services import partners as partners_svc, reports, true_analysis as ta, users as users_svc
+
+    config.DB_FILE = tmp_path / "v860_luxury.db"
+    config.ADMIN_ID = 9990001
+    db.init_db()
+
+    partner_uid = 8880042
+    regular_uid = 8880099
+    users_svc.ensure_user(SimpleNamespace(id=partner_uid, username="royal_partner", first_name="Partner", full_name="Royal Partner"))
+    users_svc.ensure_user(SimpleNamespace(id=regular_uid, username="royal_user", first_name="Trader", full_name="Royal Trader"))
+    p_res = partners_svc.create_partner(partner_uid, "قناة الذهب الملكية", 25.0)
+    assert p_res and p_res.get("id")
+    p = partners_svc.get_partner_by_user(partner_uid)
+
+    # Enable >= 15 markets across crypto + forex + metal (including XAUUSD & XAGUSD!)
+    with db.conn() as c:
+        c.execute("UPDATE market_catalog SET enabled=1, verified=1")
+
+    class _CapBot:
+        def __init__(self):
+            self.sent = []
+        async def send_message(self, chat_id, text, **kw):
+            self.sent.append({"chat_id": chat_id, "text": text, "kb": kw.get("reply_markup")})
+            return SimpleNamespace(chat_id=chat_id, message_id=len(self.sent))
+
+    def _mk_q(bot, uid):
+        async def _reply_text(text, **kw):
+            return await bot.send_message(uid, text, **kw)
+        msg = SimpleNamespace(chat_id=uid, message_id=1, reply_text=_reply_text)
+        q = SimpleNamespace(from_user=SimpleNamespace(id=uid), message=msg, data="")
+        ctx = SimpleNamespace(bot=bot, user_data={})
+        return q, ctx
+
+    def _flat_cbs(markup):
+        if not markup:
+            return []
+        return [b.callback_data for row in markup.inline_keyboard for b in row if getattr(b, "callback_data", None)]
+
+    # 1. Partner BEFORE True Analysis grant: button not shown yet, Partner Home renders luxury card + Mecca clock
+    txt_before, kb_before = asyncio.run(admin_partners._build_partner_home(p))
+    assert "لوحة الشريك الملكي" in txt_before and "بتوقيت مكة" in txt_before
+    assert "u:true_analysis" not in _flat_cbs(kb_before)
+
+    # 2. Admin grants «👑 تحليل ForexYemeni الحقيقي» to the Partner!
+    ta.grant_access(partner_uid, days=30)
+    txt_after, kb_after = asyncio.run(admin_partners._build_partner_home(p))
+    assert "تحليل ForexYemeni الحقيقي" in txt_after
+    assert "u:true_analysis" in _flat_cbs(kb_after)
+
+    # Partner taps u:true_analysis via dispatcher._route_user -> opens True Analysis with p:home nav (NEVER u:home!)
+    bot1 = _CapBot()
+    q1, ctx1 = _mk_q(bot1, partner_uid)
+    asyncio.run(dispatcher._route_user(q1, ctx1, partner_uid, "true_analysis"))
+    assert bot1.sent and "رادار تحليل ForexYemeni الحقيقي" in bot1.sent[-1]["text"]
+    cbs_ta = _flat_cbs(bot1.sent[-1]["kb"])
+    assert "u:ta_anl" in cbs_ta
+    assert "p:home" in cbs_ta and "u:home" not in cbs_ta
+
+    # Partner taps u:ta_anl -> opens categorized True Analysis market hub with p:home nav!
+    bot2 = _CapBot()
+    q2, ctx2 = _mk_q(bot2, partner_uid)
+    asyncio.run(dispatcher._route_user(q2, ctx2, partner_uid, "ta_anl"))
+    assert bot2.sent and "تحليل ForexYemeni الحقيقي" in bot2.sent[-1]["text"]
+    assert "p:home" in _flat_cbs(bot2.sent[-1]["kb"])
+
+    # Partner tapping regular user u:plans STILL strictly redirects back to Partner Home!
+    bot3 = _CapBot()
+    q3, ctx3 = _mk_q(bot3, partner_uid)
+    asyncio.run(dispatcher._route_user(q3, ctx3, partner_uid, "plans"))
+    assert bot3.sent and "لوحة الشريك الملكي" in bot3.sent[-1]["text"]
+
+    # 3. Partner «🔬 تحليل الآن» (`p:anl` + `p:anlcat:metal:1`) shows Gold XAUUSD + ALL categories!
+    bot4 = _CapBot()
+    q4, ctx4 = _mk_q(bot4, partner_uid)
+    asyncio.run(admin_partners.handle_partner_callback(q4, partner_uid, ctx4, bot4, "anl"))
+    cbs_anl = _flat_cbs(bot4.sent[-1]["kb"])
+    assert "p:anl:XAUUSD" in cbs_anl, "Gold XAUUSD MUST appear in Partner instant analysis!"
+    assert any(cb.startswith("p:anlcat:") for cb in cbs_anl), "Categorized market sections MUST appear for Partner!"
+
+    bot5 = _CapBot()
+    q5, ctx5 = _mk_q(bot5, partner_uid)
+    asyncio.run(admin_partners.handle_partner_callback(q5, partner_uid, ctx5, bot5, "anlcat:metal:1"))
+    assert "p:anl:XAUUSD" in _flat_cbs(bot5.sent[-1]["kb"])
+
+    # 4. Luxury User Home + User Dashboard + Luxury Admin Home + Admin Stats Dashboard
+    u_home = asyncio.run(user_pages.build_user_home_card(regular_uid, "Trader"))
+    assert "القمرة الملكية للتداول" in u_home and "بتوقيت مكة" in u_home
+    bot6 = _CapBot()
+    q6, ctx6 = _mk_q(bot6, regular_uid)
+    asyncio.run(user_pages.user_page(q6, "dashboard", regular_uid, ctx6))
+    assert "لوحة التحكم الملكية" in bot6.sent[-1]["text"] and "بتوقيت مكة" in bot6.sent[-1]["text"]
+
+    a_home = asyncio.run(common.build_admin_home_card())
+    assert "SUPER ADMIN" in a_home and "بتوقيت مكة" in a_home
+    a_dash = reports.dashboard_view()
+    assert "لوحة المعلومات الملكية المباشرة" in a_dash and "بتوقيت مكة" in a_dash
+
+
+
 

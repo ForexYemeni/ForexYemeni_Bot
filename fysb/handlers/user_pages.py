@@ -132,8 +132,8 @@ def _format_user_markets(raw: str) -> str:
     return "الكل (حسب باقتك)" if not syms else " · ".join(syms)
 
 
-def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None, dict]:
-    """Single-connection snapshot for /start & u:home (v6.20.1 — 1 checkout instead of 9)."""
+def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None, dict, dict, dict]:
+    """Single-connection snapshot for /start & u:home (v8.6.0 — 1 checkout total!)."""
     day = db.day_start_utc()
     with db.conn() as c:
         u = dict(preloaded_u) if preloaded_u is not None else None
@@ -145,23 +145,64 @@ def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None
             "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
             (uid, day),
         ).fetchone()["n"]
+        ta_radars = int(c.execute(
+            "SELECT COUNT(*) n FROM analysis_monitors WHERE user_id=? AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')",
+            (uid,),
+        ).fetchone()["n"] or 0)
+        ta_cfg = {
+            r["key"]: r["value"]
+            for r in c.execute(
+                "SELECT key, value FROM settings WHERE key IN ('true_analysis_enabled','true_analysis_trial_days')"
+            ).fetchall()
+        }
     quota = (max(1, int(plan["max_signals_per_day"] or 1))
              if (plan and plan["code"] != "FREE")
              else max(1, db.get_setting_int("free_daily_signals", int((plan or {}).get("max_signals_per_day") or 1))))
     state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
              "used": used, "remaining": max(0, quota - used), "day": day}
     trial = subs.free_trial_status(uid, user_row=u, plan_row=plan)
-    return u, plan, state, trial
+    # Derive True Analysis status directly from the already-loaded user row + same conn (0 extra DB conns!)
+    try:
+        ta_tdays = max(0, int(ta_cfg.get("true_analysis_trial_days", "3") or 3))
+    except Exception:
+        ta_tdays = 3
+    ta_info = {"active": False, "mode": "NONE", "days_left": 0, "radars": ta_radars,
+               "enabled_global": str(ta_cfg.get("true_analysis_enabled", "1")) == "1",
+               "trial_days": ta_tdays,
+               "trial_available": False}
+    if uid == config.ADMIN_ID:
+        ta_info.update({"active": True, "mode": "ADMIN"})
+    elif u and int(u.get("true_analysis_enabled") or 0) == 1:
+        exp = str(u.get("true_analysis_expires_at") or "").strip()
+        if not exp:
+            ta_info.update({"active": True, "mode": "LIFETIME"})
+        else:
+            from datetime import datetime, timezone
+            try:
+                dt_e = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                if dt_e.tzinfo is None:
+                    dt_e = dt_e.replace(tzinfo=timezone.utc)
+                rem_s = (dt_e - datetime.now(timezone.utc)).total_seconds()
+                if rem_s > 0:
+                    ta_info.update({"active": True, "mode": "PAID", "days_left": max(1, int(rem_s // 86400) + 1)})
+            except Exception:
+                pass
+    if not ta_info["active"] and u and int(u.get("true_analysis_trial_used") or 0) == 0 and ta_info["trial_days"] > 0:
+        ta_info["trial_available"] = True
+    return u, plan, state, trial, ta_info
 
 
 async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) -> str:
-    """v6.20.1: Luxury executive user home banner shared by /start and u:home (single DB checkout)."""
-    u, plan, state, trial = await afn.run(_home_snapshot, uid, preloaded_u)
+    """v8.6.0: Ultra-Luxury Executive VIP Trading Cockpit banner shared by /start and u:home."""
+    u, plan, state, trial, ta_st = await afn.run(_home_snapshot, uid, preloaded_u)
     plan_title = esc(plan["title"] if plan else "Free")
+    anl_quota = int(plan["max_analyses_per_day"] or 0) if plan else 0
     mkts_txt = esc(_format_user_markets((u["market"] if u else "") or ""))
     auto_on = bool(u and u["notifications"])
-    notif_txt = "🟢 شغّالة — تصلك الفرص التلقائية فوراً" if auto_on else "🔴 متوقفة — اضغط الزر الأخضر بالأسفل للتشغيل"
+    notif_txt = "🟢 نشطة — تصلك الفرص فوراً" if auto_on else "🔴 متوقفة — شغّلها من الزر أسفل القائمة"
+    now_ksa = config.mecca_time_12h()
     greet = f"أهلاً بك يا <b>{esc(tg_name)}</b>" if tg_name else "مرحباً بك في منصتك المؤسسية"
+
     trial_line = ""
     if trial.get("is_free") and not trial.get("unlimited"):
         if trial.get("expired"):
@@ -171,18 +212,34 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
             hl = trial.get("hours_left") or 0
             rem = f"{dl} يوم" if dl >= 1 else f"{hl} ساعة"
             trial_line = f"▎⏳ <b>الفترة المجانية التجريبية:</b> متبقي <b>{rem}</b> (من أصل {trial.get('trial_days', 7)} يوم)\n"
+
+    ta_line = ""
+    if ta_st["active"]:
+        ta_badge = (
+            "مفتوح دائماً 👑" if ta_st["mode"] in ("ADMIN", "LIFETIME")
+            else f"متبقي {ta_st['days_left']} يوم"
+        )
+        ta_line = f"▎👑 <b>تحليل ForexYemeni الحقيقي:</b> 🟢 مفعّل ({ta_badge}) · رادارات: <b>{ta_st['radars']}</b>\n"
+    elif ta_st["enabled_global"] and ta_st["trial_available"]:
+        ta_line = f"▎👑 <b>تحليل ForexYemeni الحقيقي:</b> 🎁 تجربة مجانية <b>{ta_st['trial_days']} أيام</b> متاحة لك\n"
+
     return (
-        f"👑 <b><u>{esc(config.BRAND)}</u></b>\n"
-        f"{greet}\n\n"
+        f"👑 <b><u>{esc(config.BRAND)} — القمرة الملكية للتداول</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"✨ {greet}  ·  🕒 <code>{esc(now_ksa)}</code>\n\n"
         "<blockquote>"
-        f"▎💎 باقتك الحالية: <b>{plan_title}</b>\n"
+        f"▎💎 <b>باقتك الحالية:</b> <b>{plan_title}</b>\n"
         f"{trial_line}"
-        f"▎📡 رصيد الإشارات اليومي: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
-        f"▎🌐 أسواق إشاراتك: <b>{mkts_txt}</b>\n"
-        f"▎⚡ الإشارات التلقائية: <b>{notif_txt}</b>"
+        f"{ta_line}"
+        f"▎⚡ <b>الإشارات التلقائية:</b> <b>{notif_txt}</b>"
+        "</blockquote>\n"
+        "<blockquote>"
+        f"▎📡 <b>رصيد الإشارات اليومي:</b> <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+        f"▎🔬 <b>حصة «تحليل الآن» اليومية:</b> <b>{anl_quota}/يوم</b>\n"
+        f"▎🌐 <b>أسواق إشاراتك:</b> <b>{mkts_txt}</b>"
         "</blockquote>\n"
         "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول، "
-        "وتحكّم بتشغيل أو إيقاف <b>الإشارات التلقائية</b> بضغطة واحدة من الزر أسفل القائمة.</i>"
+        "أو افتح <b>🧭 لوحة التحكم</b> لإدارة رادار ForexYemeni الحقيقي وأدواتك الملكية.</i>"
     )
 
 
@@ -531,12 +588,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     # ---------- Home / profile ----------
     if action == "home":
         if uid == config.ADMIN_ID:
-            await render(
-                q,
-                f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
-                kb.admin_menu(),
-                bot,
-            )
+            from fysb.handlers.common import build_admin_home_card
+            await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
             return
         home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
         await render(q, home_text, kb.user_menu(auto_signals_on=bool(u["notifications"])), bot)
@@ -556,12 +609,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         except Exception:
             pass
         if uid == config.ADMIN_ID:
-            await render(
-                q,
-                f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
-                kb.admin_menu(),
-                bot,
-            )
+            from fysb.handlers.common import build_admin_home_card
+            await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
             return
         home_text = await build_user_home_card(uid, (u["full_name"] or u["username"] or "").strip(), preloaded_u=u)
         await render(q, home_text, kb.user_menu(auto_signals_on=bool(new_val)), bot)
@@ -577,7 +626,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
 
     elif action == "dashboard":
         first_mkt = (_parse_user_markets(u["market"] or "") or ["XAUUSD"])[0]
-        snap = await afn.run(_dashboard_snapshot, uid, first_mkt)
+        snap = await afn.run(_dashboard_snapshot, uid, first_mkt, u)
+        ta_st = snap["ta"]
         p = snap["plan"]
         state = snap["state"]
         total, active, wins, delivered, anl_used = snap["counts"]
@@ -587,23 +637,41 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         mcat = (mrow or {}).get("category") if mrow else instruments.spec(first_mkt).category
         from fysb.engines.market_data import market_state
         mstate = market_state(mcat)
-        mstate_txt = "🟢 مفتوح" if mstate else ("🔴 مغلق" if mstate is False else "🟡 غير محدد")
-        body = (f"💎 <b>الباقة:</b> {plan_title}\n\n"
-                f"📡 <b>الإشارات:</b>\n"
-                f"▎استهلاك اليوم: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
-                f"▎🧾 إجمالي ما وصلتك: <b>{delivered}</b>\n\n"
-                f"🔬 <b>التحليلات:</b>\n"
-                f"▎استهلاك اليوم: <b>{anl_used}/{anl_quota}</b>\n\n"
-                f"🛡 وضع المنصة: <b>{esc(snap['trading_mode'])}</b>\n"
-                f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
-                f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
+        mstate_txt = "🟢 السوق مفتوح الآن" if mstate else ("🔴 السوق مغلق حالياً" if mstate is False else "🟡 غير محدد")
+        now_ksa = config.mecca_time_12h()
+        ta_status_txt = (
+            f"🟢 مفعّل · رادارات نشطة: <b>{ta_st['radars']}</b>"
+            if ta_st["active"] else
+            (f"🎁 تجربة مجانية ({ta_st['trial_days']} أيام)" if ta_st["trial_available"] else "⚪ غير مفعّل")
+        )
+        body = (
+            f"👑 <b><u>لوحة التحكم الملكية — {esc(config.BRAND)}</u></b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <code>{esc(now_ksa)}</code>  ·  💎 <b>الباقة:</b> <b>{plan_title}</b>\n\n"
+            "<blockquote>"
+            f"▎📡 <b>الإشارات اليومية:</b> <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+            f"▎🔬 <b>التحليلات اليومية:</b> <b>{anl_used}/{anl_quota}</b> {bar(anl_used, max(1, anl_quota))}\n"
+            f"▎👑 <b>رادار ForexYemeni الحقيقي:</b> {ta_status_txt}\n"
+            f"▎🧾 <b>إجمالي الإشارات التي وصلتك:</b> <b>{delivered}</b>"
+            "</blockquote>\n"
+            "<blockquote>"
+            f"▎🌍 <b>أسواقك ({esc(_format_user_markets(u['market'] or ''))}):</b> <b>{mstate_txt}</b>\n"
+            f"▎🛡 <b>وضع المنصة:</b> <b>{esc(snap['trading_mode'])}</b>\n"
+            f"▎📈 <b>سجل المنصة:</b> إجمالي <b>{total}</b> · نشطة <b>{active}</b> · رابحة <b>{wins}</b>"
+            "</blockquote>\n"
+            "✨ <i>كل أدواتك المؤسسية بضغطة واحدة من لوحة التحكم بالأسفل:</i>"
+        )
         dash_rows = [
-            [kb.btn("👑 تحليل ForexYemeni الحقيقي", "u:true_analysis", style="success")],
-            [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل الآن", "u:analytics")],
-            [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
-            [kb.btn("🎓 الأكاديمية المستقلة", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
-            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans")],
-            [kb.btn("🛡 ملف المخاطرة", "u:risk"), kb.btn("📓 مفكرة التداول", "u:journal")],
+            [kb.btn(
+                "👑 تحليل ForexYemeni الحقيقي (🟢 مفعّل)" if ta_st["active"] else "👑 تحليل ForexYemeni الحقيقي",
+                "u:true_analysis",
+                style="success",
+            )],
+            [kb.btn("📡 فتح الإشارات", "u:signals", style="primary"), kb.btn("🔬 تحليل الآن", "u:analytics", style="primary")],
+            [kb.btn("⚡ إشارة الآن", "u:signow", style="success"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences", style="primary")],
+            [kb.btn("🎓 الأكاديمية الملكية", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
+            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans", style="primary")],
+            [kb.btn("🛡 ملف المخاطرة", "u:risk", style="primary"), kb.btn("📓 مفكرة التداول", "u:journal", style="primary")],
             [kb.btn("🔗 ربط منصات الكريبتو (Binance/Bybit/OKX)", "u:exchange", style="primary")],
         ]
         if config.webapp_ready():
@@ -2424,8 +2492,8 @@ def _dashboard_counts(uid: int):
     return int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used
 
 
-def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
-    """(v6.20.1) Full user dashboard data on ONE single DB connection (replaces 14 sequential RTs!)."""
+def _dashboard_snapshot(uid: int, first_mkt: str, user_row=None) -> dict:
+    """(v8.6.0) Full user dashboard data + True Analysis radar status on ONE single DB connection."""
     day = db.day_start_utc()
     with db.conn() as c:
         plan = subs.plan_for(uid, conn_obj=c)
@@ -2442,6 +2510,16 @@ def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
         anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
                              (uid, day)).fetchone()["n"]
         mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (first_mkt,)).fetchone()
+        ta_radars = int(c.execute(
+            "SELECT COUNT(*) n FROM analysis_monitors WHERE user_id=? AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')",
+            (uid,),
+        ).fetchone()["n"] or 0)
+        ta_cfg = {
+            r["key"]: r["value"]
+            for r in c.execute(
+                "SELECT key, value FROM settings WHERE key IN ('true_analysis_enabled','true_analysis_trial_days')"
+            ).fetchall()
+        }
     used_today = int(drow["today"] or 0) if drow else 0
     delivered = int(drow["total"] or 0) if drow else 0
     quota = (max(int(plan["max_signals_per_day"] or 5), 5)
@@ -2449,12 +2527,37 @@ def _dashboard_snapshot(uid: int, first_mkt: str) -> dict:
              else max(1, db.get_setting_int("free_daily_signals", 2)))
     state = {"plan": plan["code"] if plan else "FREE", "quota": quota,
              "used": used_today, "remaining": max(0, quota - used_today), "day": day}
+    try:
+        ta_tdays = max(0, int(ta_cfg.get("true_analysis_trial_days", "3") or 3))
+    except Exception:
+        ta_tdays = 3
+    ta_info = {"active": False, "radars": ta_radars, "trial_days": ta_tdays, "trial_available": False}
+    u = dict(user_row) if user_row is not None else None
+    if uid == config.ADMIN_ID:
+        ta_info["active"] = True
+    elif u and int(u.get("true_analysis_enabled") or 0) == 1:
+        exp = str(u.get("true_analysis_expires_at") or "").strip()
+        if not exp:
+            ta_info["active"] = True
+        else:
+            from datetime import datetime, timezone
+            try:
+                dt_e = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                if dt_e.tzinfo is None:
+                    dt_e = dt_e.replace(tzinfo=timezone.utc)
+                if (dt_e - datetime.now(timezone.utc)).total_seconds() > 0:
+                    ta_info["active"] = True
+            except Exception:
+                pass
+    if not ta_info["active"] and u and int(u.get("true_analysis_trial_used") or 0) == 0 and ta_tdays > 0:
+        ta_info["trial_available"] = True
     return {
         "plan": plan,
         "state": state,
         "counts": (int(srow["total"] or 0), int(srow["active"] or 0), int(srow["wins"] or 0), delivered, anl_used),
         "market_row": dict(mrow) if mrow else None,
         "trading_mode": db.get_setting("trading_mode", "SIGNALS_ONLY"),
+        "ta": ta_info,
     }
 
 

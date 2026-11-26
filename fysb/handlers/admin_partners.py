@@ -125,6 +125,16 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         else ["▎<i>لم يربط الشريك قناته بعد — يدخل /partner ← ربط قناتي.</i>"]
     )
 
+    from fysb.services import true_analysis as _ta
+    ta_st = await afn.run(_ta.has_access, int(p["user_id"]))
+    if ta_st["active"]:
+        ta_badge = (
+            "🟢 مفعّل (دائم 👑)" if ta_st["mode"] == "LIFETIME"
+            else f"🟢 مفعّل (متبقي {ta_st['days_left']} يوم)"
+        )
+    else:
+        ta_badge = "⚪ غير مفعّل"
+
     body = [
         f"🤝 <b><u>ملف الشريك #{p['id']} — {esc(p['title'])}</u></b>",
         "━━━━━━━━━━━━━━━━━━",
@@ -133,6 +143,7 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         f"▎🔗 كود الإحالة: <code>{esc(p['campaign_code'])}</code>",
         f"▎💰 نسبة العمولة: <b>{p['commission_pct']:.0f}%</b>",
         f"▎📣 وضع النشر: <b>{mode_ar}</b>",
+        f"▎👑 تحليل ForexYemeni الحقيقي: <b>{ta_badge}</b>",
         f"▎🔬 حد «تحليل الآن» اليومي: <b>{_fmt_quota(mq['analysis_used'], mq['analysis_limit'])}</b>",
         f"▎📡 حد «إشارة الآن» اليومي: <b>{_fmt_quota(mq['signal_used'], mq['signal_limit'])}</b>",
         f"▎🏷 التوقيع المخصص: <b>{esc(p.get('brand_label') or 'افتراضي البوت')}</b>",
@@ -181,6 +192,11 @@ async def admin_partner_view(q, uid, context, bot, pid: int):
         perm_rows.append(row)
 
     rows_kb = [
+        [kb.btn(
+            f"👑 تحليل ForexYemeni الحقيقي للشريك ({'🟢 مفعّل' if ta_st['active'] else '⚪ فتح'})",
+            f"a:utamenu:{p['user_id']}",
+            style="success" if ta_st["active"] else "primary",
+        )],
         [kb.copy_btn("📋 نسخ رابط الشريك", link, style="primary")],
         pct_row,
         mode_row,
@@ -486,37 +502,71 @@ async def partner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
+    from fysb.services import true_analysis as _ta
+    from fysb.theme import bar as _bar
+
     st = await afn.run(partners_svc.partner_stats, p["id"])
     chans = await afn.run(partners_svc.partner_channels, p["id"])
+    ta_st = await afn.run(_ta.has_access, int(p["user_id"]))
+    ta_mons = await afn.run(_ta.user_monitors, int(p["user_id"])) if ta_st["active"] else []
     link = partners_svc.partner_link(p["campaign_code"])
     mode_ar = partners_svc.POST_MODE_AR.get(p["post_mode"], p["post_mode"])
+    now_ksa = config.mecca_time_12h()
+    active_ch = sum(1 for c in chans if c.get("enabled"))
+    invited = int(st.get("invited", 0) or 0)
+    converted = int(st.get("converted", 0) or 0)
+    conv_pct = float(st.get("conv_rate_pct", 0.0) or 0.0)
+    pending_usd = float(st.get("earned_pending", 0.0) or 0.0)
+    paid_usd = float(st.get("paid_out", 0.0) or 0.0)
+
+    ta_line = ""
+    if ta_st["active"]:
+        if ta_st["mode"] == "LIFETIME":
+            ta_d = "مفتوح دائماً 👑"
+        elif ta_st["mode"] == "TRIAL":
+            ta_d = f"تجربة · متبقي {ta_st['days_left']} يوم"
+        else:
+            ta_d = f"متبقي {ta_st['days_left']} يوم"
+        ta_line = f"▎👑 <b>تحليل ForexYemeni الحقيقي:</b> 🟢 مفعّل ({ta_d}) · رادارات نشطة: <b>{len(ta_mons)}</b>\n"
 
     body = [
         f"👑 <b><u>لوحة الشريك الملكي — {esc(p['title'])}</u></b>",
         "━━━━━━━━━━━━━━━━━━",
+        f"🕒 <code>{esc(now_ksa)}</code>  ·  🛡 <b>حساب شريك قناة حصري</b>",
+        "",
         "<blockquote>",
-        f"▎🛡 وضع الحساب: <b>حساب شريك قناة حصري</b>",
-        f"▎💰 نسبة عمولتك: <b>{p['commission_pct']:.0f}%</b> من كل اشتراك مدفوع",
-        f"▎📣 وضع النشر المعتمد: <b>{mode_ar}</b>",
-        f"▎🔗 رابط قناتك الحصري:\n<code>{esc(link)}</code>",
+        f"▎💎 <b>نسبة عمولتك الملكية:</b> <b>{p['commission_pct']:.0f}%</b> من كل اشتراك مدفوع",
+        f"▎📣 <b>وضع النشر المعتمد:</b> <b>{mode_ar}</b>",
+        f"▎📺 <b>قنواتك المربوطة:</b> <b>{active_ch}</b> نشطة من أصل <b>{len(chans)}</b>",
+        f"{ta_line}"
+        f"▎🔗 <b>رابط قناتك الحصري:</b>\n<code>{esc(link)}</code>",
         "</blockquote>",
         "<blockquote>",
-        f"▎👥 دخلوا البوت عبر قناتك: <b>{st.get('invited', 0)}</b>",
-        f"▎💎 اشتركوا فعلياً: <b>{st.get('converted', 0)}</b> (نسبة التحويل: <b>{st.get('conv_rate_pct', 0):.1f}%</b>)",
-        f"▎💵 رصيدك المستحق الآن: <b>{st.get('earned_pending', 0):,.2f} $</b>",
-        f"▎✅ إجمالي المصروف سابقاً: <b>{st.get('paid_out', 0):,.2f} $</b>",
-        f"▎🔐 أعضاء قنوات VIP النشطون: <b>{st.get('vip_active_members', 0)}</b>",
+        f"▎👥 <b>المدعوون عبر قناتك:</b> <b>{invited}</b>  ·  💎 <b>المشتركون:</b> <b>{converted}</b>",
+        f"▎📈 <b>معدل التحويل:</b> {_bar(converted, max(1, invited))} <b>{conv_pct:.1f}%</b>",
+        f"▎💵 <b>رصيدك المستحق الآن:</b> <b>{pending_usd:,.2f} $</b>",
+        f"▎✅ <b>إجمالي المصروف سابقاً:</b> <b>{paid_usd:,.2f} $</b>  ·  🔐 <b>أعضاء VIP:</b> <b>{st.get('vip_active_members', 0)}</b>",
         "</blockquote>",
+        "✨ <i>غرفة قيادة الشريك جاهزة — حلّل جميع الأسواق العالمية أو أدر قنواتك بضغطة واحدة:</i>",
     ]
-    rows_kb = [
-        [kb.btn("🔬 تحليل فوري بالشارت", "p:anl", style="success")],
-        [kb.copy_btn("📋 نسخ رابط الإحالة", link, style="success"),
-         kb.url_btn("📤 مشاركة الرابط", f"https://t.me/share/url?url={link}", style="primary")],
-        [kb.btn("➕ ربط قناتي بالبوت", "p:addch", style="success"),
-         kb.btn(f"💸 طلب سحب ({st.get('earned_pending', 0):.2f}$)", "p:payout", style="success")],
-    ]
+    rows_kb = []
     if config.webapp_ready():
-        rows_kb.insert(0, [kb.webapp_btn("📱 فتح بوابة الشريك الملكي (Mini App)", config.webapp_page_url("/", {"tab": "partner"}), style="success")])
+        rows_kb.append([kb.webapp_btn("📱 فتح بوابة الشريك الملكي (Mini App)", config.webapp_page_url("/", {"tab": "partner"}), style="success")])
+    if ta_st["active"]:
+        rows_kb.append([
+            kb.btn("👑 تحليل ForexYemeni الحقيقي", "u:true_analysis", style="success"),
+            kb.btn("🔬 تحليل الآن بالشارت", "p:anl", style="primary"),
+        ])
+    else:
+        rows_kb.append([kb.btn("🔬 تحليل الآن بالشارت (جميع الأسواق العالمية)", "p:anl", style="success")])
+    rows_kb.append([
+        kb.copy_btn("📋 نسخ رابط الإحالة", link, style="success"),
+        kb.url_btn("📤 مشاركة الرابط", f"https://t.me/share/url?url={link}", style="primary"),
+    ])
+    rows_kb.append([
+        kb.btn("➕ ربط قناتي بالبوت", "p:addch", style="success"),
+        kb.btn(f"💸 طلب سحب ({pending_usd:.2f}$)", "p:payout", style="success"),
+    ])
     for c in chans:
         dot = "🟢" if c["enabled"] else "⚪"
         vip = " 🔐VIP" if c.get("is_vip_gate") else ""
@@ -525,9 +575,96 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         rows_kb.append([kb.btn("🏷 تعديل توقيع قناتي", "p:brand", style="primary")])
     rows_kb.append([
         kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary"),
-        kb.btn("🔄 تحديث الإحصائيات", "p:home", style="primary"),
+        kb.btn("🔄 تحديث اللوحة", "p:home", style="primary"),
     ])
     return "\n".join(body), _partner_nav(rows_kb, include_home=False)
+
+
+async def _render_partner_anl_markets(q, bot, *, category: str = "", page: int = 1) -> None:
+    """v8.6.0: Full categorized Global Markets Hub for Partner instant analysis
+    (Gold, Silver, Forex, Crypto, Indices, Energy, Stocks — ZERO 12-row truncation!)."""
+    from fysb import instruments
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON, CATEGORY_ORDER
+
+    def _fetch_all_enabled():
+        with db.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT symbol, title, category FROM market_catalog WHERE enabled=1 ORDER BY symbol"
+            ).fetchall()]
+
+    rows_db = await afn.run(_fetch_all_enabled)
+    by_cat: dict[str, list[dict]] = {}
+    for r in rows_db:
+        c_key = str(r.get("category") or instruments.spec(r["symbol"]).category or "forex").lower()
+        by_cat.setdefault(c_key, []).append(r)
+
+    ordered_cats = [c for c in CATEGORY_ORDER if by_cat.get(c)] + [c for c in by_cat if c not in CATEGORY_ORDER]
+    cat = (category or "").strip().lower()
+
+    if cat and by_cat.get(cat):
+        items = sorted(by_cat[cat], key=lambda r: (0 if r["symbol"] == "XAUUSD" else (1 if r["symbol"] == "XAGUSD" else 2), r["symbol"]))
+        per_page = 12
+        total_pages = max(1, (len(items) + per_page - 1) // per_page)
+        pg = max(1, min(page, total_pages))
+        chunk = items[(pg - 1) * per_page: pg * per_page]
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        rows_m = [
+            [kb.btn(f"📊 {r['symbol']}", f"p:anl:{r['symbol']}", style="primary") for r in chunk[i:i + 3]]
+            for i in range(0, len(chunk), 3)
+        ]
+        if total_pages > 1:
+            nav = []
+            if pg > 1:
+                nav.append(kb.btn("◀️ السابق", f"p:anlcat:{cat}:{pg - 1}"))
+            nav.append(kb.btn(f"📄 {pg}/{total_pages}", f"p:anlcat:{cat}:{pg}"))
+            if pg < total_pages:
+                nav.append(kb.btn("التالي ▶️", f"p:anlcat:{cat}:{pg + 1}"))
+            rows_m.append(nav)
+        rows_m.append([kb.btn("↩️ كل أقسام الأسواق", "p:anl", style="primary")])
+        await render(
+            q,
+            f"🔬 <b><u>التحليل المؤسسي الفوري — {icon} {title}</u></b>\n"
+            f"<blockquote>▎إجمالي أدوات القسم المفعّلة: <b>{len(items)}</b> (صفحة <b>{pg}/{total_pages}</b>)\n"
+            f"▎اختر السوق لتوليد شارت <b>FOREXYEMENI</b> المؤسسي الفاخر + التحليل الكامل فوراً:</blockquote>",
+            _partner_nav(rows_m, include_home=True),
+            bot,
+        )
+        return
+
+    live_syms = {r["symbol"].upper() for r in rows_db}
+    rows_m = []
+    # VIP quick-pick strip (Gold, Silver, EURUSD, BTCUSD)
+    quick = [
+        ("🥇 XAUUSD", "XAUUSD"),
+        ("🥈 XAGUSD", "XAGUSD"),
+        ("💱 EURUSD", "EURUSD"),
+        ("₿ BTCUSD", "BTCUSD"),
+    ]
+    q_btns = [kb.btn(lbl, f"p:anl:{sym}", style="success") for lbl, sym in quick if sym in live_syms]
+    if q_btns:
+        rows_m.append(q_btns[:2])
+        if len(q_btns) > 2:
+            rows_m.append(q_btns[2:4])
+
+    cat_btns = [
+        kb.btn(f"{CATEGORY_ICON.get(c, '🌐')} {CATEGORY_AR.get(c, c)} ({len(by_cat[c])})", f"p:anlcat:{c}:1", style="primary")
+        for c in ordered_cats
+    ]
+    for i in range(0, len(cat_btns), 2):
+        rows_m.append(cat_btns[i:i + 2])
+
+    await render(
+        q,
+        "🔬 <b><u>التحليل المؤسسي الفوري بالشارت — جميع الأسواق العالمية</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        f"▎🌐 <b>الأسواق المفعّلة المتاحة لك الآن:</b> <b>{len(rows_db)}</b> أداة عالمية (الذهب، الفضة، الفوركس، الكريبتو، المؤشرات، الطاقة والأسهم).\n"
+        "▎⚡ اختر من الاختصارات السريعة أو تصفّح أي قسم بالأسفل لتوليد التحليل + الشارت الفاخر فوراً:"
+        "</blockquote>",
+        _partner_nav(rows_m, include_home=True),
+        bot,
+    )
 
 
 async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
@@ -545,28 +682,18 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
         await render(q, text, markup, bot)
         return
 
+    if act == "anlcat":
+        cat = parts[1].lower() if len(parts) > 1 else ""
+        pg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+        await _render_partner_anl_markets(q, bot, category=cat, page=pg)
+        return
+
     if act == "anl":
-        # v8.1.0: Partner Instant Institutional Analysis + Ultra-Luxury ForexYemeni Chart
+        # v8.6.0: Partner Instant Institutional Analysis + Ultra-Luxury ForexYemeni Chart (ALL global markets!)
         sym_arg = parts[1].upper() if len(parts) > 1 else ""
         tf_arg = parts[2].upper() if len(parts) > 2 else ""
         if not sym_arg:
-            def _load_mkts():
-                with db.conn() as c:
-                    return [r["symbol"] for r in c.execute(
-                        "SELECT symbol FROM market_catalog WHERE enabled=1 ORDER BY category, symbol LIMIT 12"
-                    ).fetchall()]
-            mkts = await afn.run(_load_mkts) or ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
-            rows_m = [
-                [kb.btn(f"📊 {m}", f"p:anl:{m}", style="primary") for m in mkts[i:i + 3]]
-                for i in range(0, len(mkts), 3)
-            ]
-            await render(
-                q,
-                "🔬 <b><u>التحليل المؤسسي الفوري بالشارت — لوحة الشريك</u></b>\n"
-                "<blockquote>اختر السوق لتوليد شارت <b>FOREXYEMENI</b> المؤسسي الفاخر + التحليل الكامل فوراً:</blockquote>",
-                _partner_nav(rows_m, include_home=True),
-                bot,
-            )
+            await _render_partner_anl_markets(q, bot)
             return
         if not tf_arg:
             rows_tf = [
@@ -924,7 +1051,7 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
         else "🔒 مقفل من الإدارة"
     )
     iv = int(ch.get("interval_minutes") or 60)
-    last_sent = (ch.get("last_sent") or "")[:19].replace("T", " ") or "—"
+    last_sent = config.mecca_dt_12h(ch.get("last_sent")) if ch.get("last_sent") else "—"
     mq = await afn.run(partners_svc.manual_quota_status, p["id"], p)
     an_q_txt = "♾️ مفتوح" if mq["analysis_limit"] <= 0 else f"{mq['analysis_used']}/{mq['analysis_limit']}"
     sig_q_txt = "♾️ مفتوح" if mq["signal_limit"] <= 0 else f"{mq['signal_used']}/{mq['signal_limit']}"
@@ -942,7 +1069,7 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
         f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"
         f"▎⏱ الأطر الزمنية: <b>{esc(tf_label)}</b>\n"
         f"▎🧠 الاستراتيجيات: <b>{esc(strat_label)}</b>\n"
-        f"▎⏰ الجدولة: كل <b>{iv} دقيقة</b> (توقيت مكة · سكون ليلي 01–07)\n"
+        f"▎⏰ الجدولة: كل <b>{iv} دقيقة</b> (سكون ليلي 01:00am → 08:00am بتوقيت مكة)\n"
         f"▎🕐 آخر نشر: <code>{esc(last_sent)}</code>"
         "</blockquote>"
     )

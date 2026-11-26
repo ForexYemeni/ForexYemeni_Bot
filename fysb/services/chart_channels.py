@@ -182,6 +182,35 @@ def set_markets(cid: int, markets_csv: str) -> str:
     return mkts
 
 
+def update_channel(
+    cid: int,
+    *,
+    title: str | None = None,
+    markets: str | None = None,
+    send_on_signal: bool | None = None,
+    send_on_tracking: bool | None = None,
+    send_on_schedule: bool | None = None,
+) -> dict | None:
+    """Update an existing chart channel's title, instruments/markets, and delivery modes (v8.5.1)."""
+    row = get_channel(cid)
+    if not row:
+        return None
+    new_title = (str(title).strip()[:80] if title is not None and str(title).strip() else row.get("title") or row.get("chat_id") or "")
+    new_mkts = ",".join(parse_markets_csv(markets)) if markets is not None else (row.get("markets") or "ALL")
+    sig_f = int(bool(send_on_signal)) if send_on_signal is not None else int(row.get("send_on_signal") or 0)
+    trk_f = int(bool(send_on_tracking)) if send_on_tracking is not None else int(row.get("send_on_tracking") or 0)
+    sch_f = int(bool(send_on_schedule)) if send_on_schedule is not None else int(row.get("send_on_schedule") or 0)
+    with db.tx() as c:
+        c.execute(
+            """UPDATE chart_channels
+               SET title=?, markets=?, send_on_signal=?, send_on_tracking=?,
+                   send_on_schedule=?, updated_at=?
+               WHERE id=?""",
+            (new_title, new_mkts, sig_f, trk_f, sch_f, config.now(), int(cid)),
+        )
+    return get_channel(cid)
+
+
 def toggle_market(cid: int, symbol: str) -> str:
     row = get_channel(cid)
     if not row:

@@ -308,3 +308,64 @@ def test_v850_anti_chase_filter_and_high_impact_news_guard(tmp_path, monkeypatch
     r_fire = asyncio.run(ta.poll_active_monitors(bot, now_dt=datetime(2026, 4, 21, 12, 16, 0, tzinfo=timezone.utc)))
     assert r_fire["signals_fired"] == 1
     assert r_fire["paused_news"] == 0
+
+
+def test_v851_admin_webapp_channel_edit_instruments_and_stop_periodic_charts(tmp_path, monkeypatch):
+    import json
+    from fysb.services import chart_channels
+    from fysb.webapp import auth, server, templates
+
+    _init_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "BOT_TOKEN", "851000:TESTTOKEN_V851")
+    monkeypatch.setattr(config, "ADMIN_ID", 999851)
+    init_hdr = auth.build_init_data({"id": 999851, "username": "boss", "first_name": "Boss"}, config.BOT_TOKEN)
+    hdrs = {"x-telegram-init-data": init_hdr}
+
+    # 1. Add channel with single instrument XAUUSD
+    cid = chart_channels.add_channel("@GoldCharts851", "Gold Only", "XAUUSD")
+    assert chart_channels.get_channel(cid)["markets"] == "XAUUSD"
+
+    # 2. Edit channel via Admin WebApp API (`op="update"`): multi-instruments + new title + disable periodic schedule
+    body = json.dumps({
+        "op": "update",
+        "id": cid,
+        "title": "VIP Gold & Crypto Charts",
+        "markets": "XAUUSD,BTCUSD,EURUSD",
+        "send_on_signal": True,
+        "send_on_tracking": True,
+        "send_on_schedule": False,
+    }).encode("utf-8")
+    code, _, raw = server.dispatch_request("POST", "/api/admin/chart-channel", hdrs, body)
+    assert code == 200
+    resp = json.loads(raw.decode("utf-8"))
+    assert resp["ok"] is True
+    ch = resp["channel"]
+    assert ch["title"] == "VIP Gold & Crypto Charts"
+    assert ch["markets"] == "XAUUSD,BTCUSD,EURUSD"
+    assert int(ch["send_on_schedule"]) == 0
+    assert int(ch["send_on_signal"]) == 1
+
+    # 3. Stop periodic royal chart updates (15m -> 0m) & toggle chart_schedule_channels
+    code_s, _, raw_s = server.dispatch_request(
+        "POST", "/api/admin/chart-channel", hdrs,
+        json.dumps({"op": "schedule", "minutes": 0}).encode("utf-8"),
+    )
+    assert code_s == 200
+    assert db.get_setting_int("chart_schedule_minutes", 15) == 0
+
+    code_t, _, raw_t = server.dispatch_request(
+        "POST", "/api/admin/toggle", hdrs,
+        json.dumps({"key": "chart_schedule_channels"}).encode("utf-8"),
+    )
+    assert code_t == 200
+    assert json.loads(raw_t.decode("utf-8"))["enabled"] is True
+
+    # 4. Verify Admin HTML contains channel editor + 1-tap stop periodic charts button + required strings
+    html = templates.render_admin_panel_html()
+    assert "openEditChartCh" in html
+    assert "saveEditChartCh" in html
+    assert "schedStopBtn" in html
+    assert "إيقاف التحديث الدوري للشارتات الآن" in html
+    assert "تعديل الأدوات" in html
+    assert "قنوات الشارت فقط" in html
+

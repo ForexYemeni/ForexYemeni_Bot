@@ -386,6 +386,7 @@ ALLOWED_ADMIN_TOGGLES = (
     "news_broadcast_partners",
     "news_broadcast_channels",
     "charts_enabled",
+    "chart_schedule_channels",
     "academy_enabled",
     "crypto_api_enabled",
     "auto_digest_enabled",
@@ -529,6 +530,7 @@ def dispatch_request(
                     "pending_payouts": affiliates.list_payouts("PENDING", 15),
                     "chart_channels": chart_channels.list_channels(False),
                     "chart_schedule_minutes": db.get_setting_int("chart_schedule_minutes", 0),
+                    "chart_schedule_channels": (db.get_setting("chart_schedule_channels", "0") == "1"),
                     "markets": chart_channels.available_markets(),
                     "leaderboard": leaderboard.compute_leaderboard("30d"),
                     "news_events": news_guard.upcoming_high_impact(48),
@@ -1031,7 +1033,46 @@ def dispatch_request(
                 if op == "markets":
                     cid = int(payload.get("id") or 0)
                     mkts = chart_channels.set_markets(cid, str(payload.get("markets") or "ALL"))
-                    return _json_resp(200, {"ok": True, "id": cid, "markets": mkts})
+                    audit_log.log(uid, f"webapp_chart_channel_markets:{cid}:{mkts}")
+                    return _json_resp(200, {
+                        "ok": True,
+                        "id": cid,
+                        "markets": mkts,
+                        "channels": chart_channels.list_channels(False),
+                    })
+                if op == "update":
+                    cid = _safe_int(payload.get("id"), 0)
+                    if not chart_channels.get_channel(cid):
+                        return _json_resp(404, {"ok": False, "error": "القناة غير موجودة"})
+                    updated = chart_channels.update_channel(
+                        cid,
+                        title=payload.get("title") if "title" in payload else None,
+                        markets=str(payload.get("markets") or "ALL") if "markets" in payload else None,
+                        send_on_signal=bool(payload["send_on_signal"]) if "send_on_signal" in payload else None,
+                        send_on_tracking=bool(payload["send_on_tracking"]) if "send_on_tracking" in payload else None,
+                        send_on_schedule=bool(payload["send_on_schedule"]) if "send_on_schedule" in payload else None,
+                    )
+                    audit_log.log(uid, f"webapp_chart_channel_update:{cid}:{(updated or {}).get('markets')}")
+                    return _json_resp(200, {
+                        "ok": True,
+                        "id": cid,
+                        "channel": updated,
+                        "channels": chart_channels.list_channels(False),
+                    })
+                if op == "toggle_flag":
+                    cid = _safe_int(payload.get("id"), 0)
+                    fld = str(payload.get("field") or "").strip()
+                    if fld not in ("send_on_signal", "send_on_tracking", "send_on_schedule"):
+                        return _json_resp(400, {"ok": False, "error": "Invalid channel flag"})
+                    en = chart_channels.toggle_flag(cid, fld)
+                    audit_log.log(uid, f"webapp_chart_channel_flag:{cid}:{fld}={int(en)}")
+                    return _json_resp(200, {
+                        "ok": True,
+                        "id": cid,
+                        "field": fld,
+                        "enabled": en,
+                        "channels": chart_channels.list_channels(False),
+                    })
                 if op == "delete":
                     cid = int(payload.get("id") or 0)
                     ok_del = chart_channels.delete_channel(cid)

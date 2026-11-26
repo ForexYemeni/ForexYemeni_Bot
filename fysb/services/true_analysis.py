@@ -40,8 +40,36 @@ from datetime import datetime, timedelta, timezone
 
 from fysb import config, db, instruments
 from fysb.config import log
-from fysb.engines import market_data
+from fysb.engines import market_data, news_guard
 from fysb.theme import esc, tf_name
+
+
+def is_market_open_at(category: str, now_dt: datetime | None = None) -> bool:
+    """UTC session-calendar gate (v8.5.0 Market-Hours & Weekend Shield).
+
+    Crypto trades 24/7 (always True). Forex / Metals / Indices / Commodities
+    close on Friday 22:00 UTC through Sunday 22:00 UTC and during the daily
+    22:00-23:00 UTC settlement rollover. Prevents PAXG weekend drift from ever
+    firing false signals or falsely invalidating XAUUSD / FX monitors!
+    """
+    cat = str(category or "").lower()
+    if cat == "crypto":
+        return True
+    if cat in ("forex", "metal", "index", "commodity"):
+        now = now_dt or _now_utc()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        wd, h = now.weekday(), now.hour
+        if wd == 5:                    # Saturday (all day closed)
+            return False
+        if wd == 6 and h < 22:         # Sunday before 22:00 UTC open
+            return False
+        if wd == 4 and h >= 22:        # Friday after 22:00 UTC close
+            return False
+        if h == 22 and wd != 6:        # Daily 22:00 UTC rollover pause
+            return False
+        return True
+    return True
 
 # Exact stability -> confirmation timeframe pairing + honest expiry window (hours)
 _TF_SPEC = {
@@ -402,17 +430,27 @@ def evaluate_closed_candle(
     min_close_dt: datetime | None = None,
     min_open_dt: datetime | None = None,
     now_dt: datetime | None = None,
+    entry_mode: str = "BREAKOUT",
+    zone_lo: float = 0.0,
+    zone_hi: float = 0.0,
+    atr: float = 0.0,
+    max_chase_atr: float = 1.8,
 ) -> dict:
-    """Evaluate a REAL closed candle for Confirmation, Invalidation, or Still Waiting.
+    """Evaluate ONLY the latest genuinely CLOSED candle against real levels (v8.5.0).
 
-    Hard guarantees (v8.4.2):
-      - NEVER evaluates an unclosed/forming candle (`close_dt > now_dt`).
+    Strict institutional guarantees:
+      - NEVER evaluates an unclosed forming candle (`dt_close <= now_dt`).
       - NEVER evaluates a historical candle that closed BEFORE the monitor was
         created (`min_close_dt` gate in WATCHING_STABILITY).
       - NEVER evaluates a confirmation candle opened BEFORE the stability bar
         actually closed (`min_open_dt` gate in WATCHING_CONFIRM).
-      - Checks invalidation FIRST on the freshly closed bar, then enforces
-        real direction + body ratio >= `min_body_pct` + ATR buffer.
+      - Checks invalidation FIRST on the freshly closed bar.
+      - Supports DUAL institutional entry triggers:
+          1) `PULLBACK_ZONE`: real OB/FVG retracement touch + bullish/bearish
+             engulfing/rejection close out of the zone (better R:R entry!).
+          2) `BREAKOUT`: real closed body >= `min_body_pct` beyond `level_px + buf`.
+      - Enforces Anti-Chase Spike Filter (`OVEREXTENDED`) when a blow-off candle
+        closes more than `max_chase_atr * atr` beyond the trigger level.
     """
     c, dt_open, dt_close = _select_latest_closed_candle(candles, tf, now_dt=now_dt)
     if not c or dt_open is None or dt_close is None:
@@ -456,6 +494,8 @@ def evaluate_closed_candle(
     rng = max(hi - lo, 1e-9)
     body_pct = round(100.0 * abs(cl - op) / rng, 1)
     is_buy = str(direction).upper() == "BUY"
+    buf = max(0.0, float(buffer_px or 0.0))
+    atr_v = max(0.0, float(atr or 0.0))
 
     # 1. Hard invalidation check on the freshly closed candle
     if invalidation_px > 0:
@@ -471,11 +511,68 @@ def evaluate_closed_candle(
                 "reason": "closed_beyond_invalidation",
             }
 
-    # 2. Direction + real body + ATR buffer confirmation check
     dir_ok = (cl > op) if is_buy else (cl < op)
-    buf = max(0.0, float(buffer_px or 0.0))
+
+    # 2A. Institutional OB / FVG Pullback Rejection Trigger (v8.5.0)
+    if str(entry_mode or "").upper() == "PULLBACK_ZONE" and zone_hi > zone_lo > 0:
+        zone_mid = (zone_lo + zone_hi) / 2.0
+        lower_wick_pct = round(100.0 * max(0.0, min(op, cl) - lo) / rng, 1)
+        upper_wick_pct = round(100.0 * max(0.0, hi - max(op, cl)) / rng, 1)
+        if is_buy:
+            touched_zone = lo <= (zone_hi + buf) and (invalidation_px <= 0 or lo > invalidation_px)
+            strong_body_out = dir_ok and cl >= zone_hi and body_pct >= max(45.0, min_body_pct - 5.0)
+            strong_pin_reject = dir_ok and cl >= zone_mid and lower_wick_pct >= 42.0
+            pb_hit = touched_zone and (strong_body_out or strong_pin_reject)
+            chase_dist = max(0.0, cl - zone_hi)
+        else:
+            touched_zone = hi >= (zone_lo - buf) and (invalidation_px <= 0 or hi < invalidation_px)
+            strong_body_out = dir_ok and cl <= zone_lo and body_pct >= max(45.0, min_body_pct - 5.0)
+            strong_pin_reject = dir_ok and cl <= zone_mid and upper_wick_pct >= 42.0
+            pb_hit = touched_zone and (strong_body_out or strong_pin_reject)
+            chase_dist = max(0.0, zone_lo - cl)
+        if pb_hit:
+            if atr_v > 0 and max_chase_atr > 0 and chase_dist > (atr_v * max_chase_atr):
+                return {
+                    "state": "OVEREXTENDED",
+                    "candle": c,
+                    "candle_ts": c_ts,
+                    "close_iso": close_iso,
+                    "window_lbl": window_lbl,
+                    "close": cl,
+                    "body_pct": body_pct,
+                    "chase_ratio": round(chase_dist / atr_v, 2),
+                    "trigger_kind": "PULLBACK_ZONE",
+                    "reason": "anti_chase_spike_rejected",
+                }
+            return {
+                "state": "CONFIRMED",
+                "candle": c,
+                "candle_ts": c_ts,
+                "close_iso": close_iso,
+                "window_lbl": window_lbl,
+                "close": cl,
+                "body_pct": body_pct,
+                "trigger_kind": "PULLBACK_ZONE",
+                "reason": "pullback_zone_rejection_confirmed",
+            }
+
+    # 2B. Structural Breakout Confirmation + Anti-Chase Spike Filter
     lvl_ok = (cl >= level_px + buf) if is_buy else (cl <= level_px - buf)
     if dir_ok and lvl_ok and body_pct >= min_body_pct:
+        chase_dist = ((cl - level_px) if is_buy else (level_px - cl)) if level_px > 0 else 0.0
+        if atr_v > 0 and max_chase_atr > 0 and chase_dist > (atr_v * max_chase_atr):
+            return {
+                "state": "OVEREXTENDED",
+                "candle": c,
+                "candle_ts": c_ts,
+                "close_iso": close_iso,
+                "window_lbl": window_lbl,
+                "close": cl,
+                "body_pct": body_pct,
+                "chase_ratio": round(chase_dist / atr_v, 2),
+                "trigger_kind": "BREAKOUT",
+                "reason": "anti_chase_spike_rejected",
+            }
         return {
             "state": "CONFIRMED",
             "candle": c,
@@ -484,6 +581,7 @@ def evaluate_closed_candle(
             "window_lbl": window_lbl,
             "close": cl,
             "body_pct": body_pct,
+            "trigger_kind": "BREAKOUT",
             "reason": "closed_body_confirmed",
         }
     return {
@@ -494,13 +592,62 @@ def evaluate_closed_candle(
         "window_lbl": window_lbl,
         "close": cl,
         "body_pct": body_pct,
+        "trigger_kind": str(entry_mode or "BREAKOUT").upper(),
         "reason": "wick_or_below_level",
     }
 
 
 # ---------------------------------------------------------------------------
-# Trade-Level Derivation & Strictly Private Signal Creation
+# Trade-Level Derivation (Liquidity & Structural S/R-Aware TPs) & Private Signal
 # ---------------------------------------------------------------------------
+def _extract_opposing_liquidity_levels(
+    *,
+    direction: str,
+    entry_px: float,
+    candles: list[dict] | None = None,
+    sr: dict | None = None,
+    obs: list[dict] | None = None,
+    fvgs: list[dict] | None = None,
+) -> list[float]:
+    """Extract sorted real opposing liquidity walls ahead of `entry_px` (v8.5.0).
+
+    For BUY: returns sorted ascending structural swing highs, resistance, and
+    bearish OB/FVG lower edges strictly above `entry_px`.
+    For SELL: returns sorted descending structural swing lows, support, and
+    bullish OB/FVG upper edges strictly below `entry_px`.
+    """
+    is_buy = str(direction).upper() == "BUY"
+    levels: list[float] = []
+
+    if sr:
+        lvl = float((sr.get("resistance") if is_buy else sr.get("support")) or 0.0)
+        if lvl > 0:
+            levels.append(lvl)
+
+    opp_kind = "bearish" if is_buy else "bullish"
+    for z in (obs or []) + (fvgs or []):
+        if str(z.get("kind") or "").lower() == opp_kind:
+            edge = float((z.get("lo") if is_buy else z.get("hi")) or 0.0)
+            if edge > 0:
+                levels.append(edge)
+
+    bars = list(candles or [])
+    if len(bars) >= 5:
+        for i in range(1, len(bars) - 1):
+            if is_buy:
+                h_mid = float(bars[i].get("high") or 0.0)
+                if h_mid > float(bars[i - 1].get("high") or 0.0) and h_mid >= float(bars[i + 1].get("high") or 0.0):
+                    levels.append(h_mid)
+            else:
+                l_mid = float(bars[i].get("low") or 0.0)
+                if l_mid > 0 and l_mid < float(bars[i - 1].get("low") or 1e18) and l_mid <= float(bars[i + 1].get("low") or 1e18):
+                    levels.append(l_mid)
+
+    if is_buy:
+        return sorted({round(x, 6) for x in levels if x > entry_px})
+    return sorted({round(x, 6) for x in levels if 0 < x < entry_px}, reverse=True)
+
+
 def _derive_real_trade_plan(
     *,
     symbol: str,
@@ -510,8 +657,17 @@ def _derive_real_trade_plan(
     invalidation_px: float,
     atr: float,
     setup: dict | None = None,
+    candles: list[dict] | None = None,
+    sr: dict | None = None,
+    obs: list[dict] | None = None,
+    fvgs: list[dict] | None = None,
 ) -> dict | None:
-    """Compute valid, strictly ordered real Entry / SL / TP1 / TP2 / TP3 / RR."""
+    """Compute valid, strictly ordered real Entry / SL / TP1 / TP2 / TP3 / RR.
+
+    v8.5.0: Snaps Take Profits cleanly ahead of real opposing structural
+    liquidity pools / swing highs-lows / opposing OBs when present so traders
+    bank profit BEFORE hitting an institutional wall (always keeping R:R valid).
+    """
     sp = instruments.spec(symbol, row)
     digits = sp.digits
     is_buy = str(direction).upper() == "BUY"
@@ -539,9 +695,10 @@ def _derive_real_trade_plan(
                     "tp2": round(s_tp2, digits),
                     "tp3": round(s_tp3, digits),
                     "rr": rr,
+                    "tp_grounded": True,
                 }
 
-    # Structure + ATR grounded risk & targets (1.5R / 2.6R / 4.0R)
+    # Structure + ATR grounded risk
     min_risk = max(atr * 1.1, sp.pip_size * 8.0)
     if invalidation_px > 0 and ((is_buy and invalidation_px < entry_px) or ((not is_buy) and invalidation_px > entry_px)):
         sl_pad = max(atr * 0.25, sp.pip_size * 2.0)
@@ -558,13 +715,52 @@ def _derive_real_trade_plan(
     tp1 = entry_px + sign * risk * 1.5
     tp2 = entry_px + sign * risk * 2.6
     tp3 = entry_px + sign * risk * 4.0
+
+    # v8.5.0: Liquidity & Structural S/R-Aware TP Snapping
+    walls = _extract_opposing_liquidity_levels(
+        direction=direction, entry_px=entry_px, candles=candles, sr=sr, obs=obs, fvgs=fvgs,
+    )
+    tp_pad = max(atr * 0.12, sp.pip_size * 2.0)
+    snapped = False
+    if walls:
+        def _pick_wall(min_r: float, max_r: float, min_after: float) -> float | None:
+            for w in walls:
+                dist = (w - entry_px) * sign
+                r_mult = dist / max(risk, 1e-9)
+                if min_r <= r_mult <= max_r:
+                    cand = w - sign * tp_pad
+                    if ((cand - min_after) * sign) > (risk * 0.35):
+                        return cand
+            return None
+
+        w1 = _pick_wall(1.15, 1.90, entry_px + sign * risk * 0.65)
+        if w1 is not None:
+            tp1 = w1
+            snapped = True
+        w2 = _pick_wall(2.15, 3.15, tp1)
+        if w2 is not None:
+            tp2 = w2
+            snapped = True
+        w3 = _pick_wall(3.35, 5.20, tp2)
+        if w3 is not None:
+            tp3 = w3
+            snapped = True
+
+    # Guarantee strict ordering even after structural snapping
+    if (tp2 - tp1) * sign < risk * 0.6:
+        tp2 = tp1 + sign * risk * 1.0
+    if (tp3 - tp2) * sign < risk * 0.8:
+        tp3 = tp2 + sign * risk * 1.3
+
+    rr_final = round(abs(tp2 - entry_px) / max(risk, 1e-9), 2)
     return {
         "entry": round(entry_px, digits),
         "sl": round(sl, digits),
         "tp1": round(tp1, digits),
         "tp2": round(tp2, digits),
         "tp3": round(tp3, digits),
-        "rr": 2.6,
+        "rr": rr_final,
+        "tp_grounded": snapped,
     }
 
 
@@ -623,8 +819,15 @@ def _create_private_signal(
 # ---------------------------------------------------------------------------
 # Entry Point Called Right After an Analysis Completes
 # ---------------------------------------------------------------------------
-def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
-    """Decide honestly: Instant Real Signal OR 2-Stage Live Chart Radar.
+def evaluate_on_analysis_created(uid: int, analysis: dict, *, now_dt: datetime | None = None) -> dict:
+    """Decide honestly: Instant Real Signal OR 2-Stage Live Chart Radar (v8.5.0).
+
+    Institutional Shields enforced automatically:
+      1. Market-Hours & Weekend Shield (never fires weekend PAXG drift signals).
+      2. High-Impact News Guard (holds instant execution during NFP/CPI/FOMC window).
+      3. Dual Entry Mode (`PULLBACK_ZONE` OB/FVG retracement + `BREAKOUT`).
+      4. Liquidity & Structural S/R-Aware Take Profits.
+      5. Anti-Chase Spike Filter (rejects overextended blow-off candles > 1.8x ATR).
 
     Returns:
       - {"mode": "NO_ACCESS"} when user does not have True Analysis access
@@ -656,21 +859,36 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
     atr = float(chart_data.get("atr") or 0.0)
     activation_px = float(chart_data.get("activation_px") or cur_px)
     invalidation_px = float(chart_data.get("invalidation_px") or 0.0)
+    entry_mode = str(chart_data.get("entry_mode") or conf.get("entry_mode") or "BREAKOUT").upper()
+    if entry_mode not in ("BREAKOUT", "PULLBACK_ZONE"):
+        entry_mode = "BREAKOUT"
+    zone_lo = float(chart_data.get("zone_lo") or conf.get("zone_lo") or 0.0)
+    zone_hi = float(chart_data.get("zone_hi") or conf.get("zone_hi") or 0.0)
+    if not (zone_hi > zone_lo > 0):
+        entry_mode = "BREAKOUT"
+        zone_lo = 0.0
+        zone_hi = 0.0
+
     sp = instruments.spec(symbol, mrow_d)
     safe_pad = max(atr * 0.8, sp.pip_size * 10.0)
     # Invalidation sanity guard: a new monitor must NEVER start with invalidation on the wrong side of price!
     if direction == "BUY":
         ref_lo = min(cur_px, activation_px) if (cur_px > 0 and activation_px > 0) else cur_px
+        if zone_lo > 0:
+            ref_lo = min(ref_lo, zone_lo)
         if invalidation_px <= 0 or invalidation_px >= ref_lo:
             invalidation_px = round(ref_lo - safe_pad, sp.digits)
     else:
         ref_hi = max(cur_px, activation_px) if (cur_px > 0 and activation_px > 0) else cur_px
+        if zone_hi > 0:
+            ref_hi = max(ref_hi, zone_hi)
         if invalidation_px <= 0 or invalidation_px <= ref_hi:
             invalidation_px = round(ref_hi + safe_pad, sp.digits)
     buffer_px = max(atr * 0.15, 0.0)
     setup = chart_data.get("setup") or None
     strategy = str((setup or {}).get("code") or analysis.get("strategy") or "ALL").upper()
     quality = int(analysis.get("quality") or 75)
+    candles = chart_data.get("candles") or []
 
     plan_levels = _derive_real_trade_plan(
         symbol=symbol,
@@ -680,17 +898,25 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
         invalidation_px=invalidation_px,
         atr=atr,
         setup=setup,
+        candles=candles,
+        sr=chart_data.get("sr") or None,
+        obs=chart_data.get("obs") or None,
+        fvgs=chart_data.get("fvgs") or None,
     )
     if not plan_levels:
         return {"mode": "NEUTRAL"}
 
-    now_s = config.now()
-    exp_s = (_now_utc() + timedelta(hours=exp_hours)).isoformat()
+    now = now_dt or _now_utc()
+    now_s = now.isoformat() if now_dt is not None else config.now()
+    exp_s = (now + timedelta(hours=exp_hours)).isoformat()
+
+    # v8.5.0 Institutional Safety Shields before considering Instant Execution
+    market_open = is_market_open_at(sp.category, now)
+    news_blocked, news_ev = news_guard.check_news_block(symbol, now_utc=now)
 
     # Check if the real chart ALREADY has a confirmed closed-candle trigger RIGHT NOW!
     body_pct = float(conf.get("body_pct") or 0.0)
     already_activated = bool(conf.get("activated")) and body_pct >= 55.0
-    candles = chart_data.get("candles") or []
     closed_check = evaluate_closed_candle(
         candles,
         tf=stab_tf,
@@ -699,9 +925,19 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
         buffer_px=buffer_px,
         invalidation_px=invalidation_px,
         min_body_pct=55.0,
+        now_dt=now,
+        entry_mode=entry_mode,
+        zone_lo=zone_lo,
+        zone_hi=zone_hi,
+        atr=atr,
     ) if candles else {"state": "WAITING"}
 
-    instant_ready = already_activated and closed_check.get("state") == "CONFIRMED"
+    instant_ready = (
+        market_open
+        and (not news_blocked)
+        and already_activated
+        and closed_check.get("state") == "CONFIRMED"
+    )
 
     # Supersede any old WATCHING monitor for same (uid, symbol)
     with db.tx() as c:
@@ -712,10 +948,11 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
         )
 
     if instant_ready:
+        trig_kind = str(closed_check.get("trigger_kind") or entry_mode or "BREAKOUT").upper()
+        trig_ar = "ارتداد منطقة الطلب/الأوامر (OB/FVG)" if trig_kind == "PULLBACK_ZONE" else "اختراق هيكلي وإغلاق جسم شمعة حقيقي"
         reason = (
-            f"تنفيذ فوري حقيقي ومؤكّد على الشارت ({stab_tf}) — "
-            f"إغلاق جسم شمعة حقيقي ({int(closed_check.get('body_pct') or body_pct)}%) "
-            f"بفارق يتجاوز 0.15×ATR دون حاجة لانتظار إضافي."
+            f"تنفيذ فوري حقيقي ومؤكّد على الشارت ({stab_tf}) — {trig_ar} "
+            f"({int(closed_check.get('body_pct') or body_pct)}%) بفارق يتجاوز 0.15×ATR دون مطاردة سعرية."
         )
         sig = _create_private_signal(
             uid=uid,
@@ -734,13 +971,15 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
                 """INSERT INTO analysis_monitors(
                     user_id, symbol, timeframe, strategy, direction,
                     stability_tf, confirm_tf, activation_px, invalidation_px, buffer_px,
+                    entry_mode, zone_lo, zone_hi, atr_ref,
                     entry_ref, sl, tp1, tp2, tp3, score, confidence,
                     status, stability_candle_ts, stability_confirmed_at, signal_id,
                     last_checked_at, last_price, note, created_at, expires_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SIGNAL_ACTIVE',?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SIGNAL_ACTIVE',?,?,?,?,?,?,?,?,?)""",
                 (
                     uid, symbol, stab_tf, strategy, direction,
                     stab_tf, conf_tf, activation_px, invalidation_px, buffer_px,
+                    entry_mode, zone_lo, zone_hi, atr,
                     plan_levels["entry"], plan_levels["sl"], plan_levels["tp1"],
                     plan_levels["tp2"], plan_levels["tp3"], quality, quality,
                     str(closed_check.get("candle_ts") or ""), now_s, int(sig["id"]),
@@ -755,24 +994,36 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
             "stability_tf": stab_tf,
             "confirm_tf": conf_tf,
             "body_pct": int(closed_check.get("body_pct") or body_pct),
+            "trigger_kind": trig_kind,
+            "tp_grounded": bool(plan_levels.get("tp_grounded")),
             "candles": candles,
         }
 
-    # Path B: Register live 2-stage radar monitoring
+    # Path B: Register live 2-stage institutional radar monitoring
+    init_note = f"بانتظار إغلاق {stab_tf} + تأكيد {conf_tf}"
+    if not market_open:
+        init_note = "⏸ السوق العالمي مغلق حالياً — تستأنف المراقبة تلقائياً فور الافتتاح"
+    elif news_blocked and news_ev:
+        init_note = f"🛡 درع الأخبار القوية مفعّل ({news_ev.get('title') or 'خبر عالي التأثير'}) — بانتظار هدوء السوق"
+    elif closed_check.get("state") == "OVEREXTENDED":
+        init_note = "🛡 فلتر منع المطاردة — شمعة ممتدة حالياً، بانتظار إعادة اختبار نظيفة"
+
     with db.tx() as c:
         cur = c.execute(
             """INSERT INTO analysis_monitors(
                 user_id, symbol, timeframe, strategy, direction,
                 stability_tf, confirm_tf, activation_px, invalidation_px, buffer_px,
+                entry_mode, zone_lo, zone_hi, atr_ref,
                 entry_ref, sl, tp1, tp2, tp3, score, confidence,
                 status, last_checked_at, last_price, note, created_at, expires_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'WATCHING_STABILITY',?,?,?,?,?,?)""",
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'WATCHING_STABILITY',?,?,?,?,?,?)""",
             (
                 uid, symbol, stab_tf, strategy, direction,
                 stab_tf, conf_tf, activation_px, invalidation_px, buffer_px,
+                entry_mode, zone_lo, zone_hi, atr,
                 plan_levels["entry"], plan_levels["sl"], plan_levels["tp1"],
                 plan_levels["tp2"], plan_levels["tp3"], quality, quality,
-                now_s, cur_px, f"بانتظار إغلاق {stab_tf} + تأكيد {conf_tf}",
+                now_s, cur_px, init_note,
                 now_s, exp_s, now_s,
             ),
         )
@@ -784,6 +1035,10 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
         "stability_tf": stab_tf,
         "confirm_tf": conf_tf,
         "expires_hours": exp_hours,
+        "market_closed": (not market_open),
+        "news_blocked": news_ev if news_blocked else None,
+        "anti_chase": (closed_check.get("state") == "OVEREXTENDED"),
+        "tp_grounded": bool(plan_levels.get("tp_grounded")),
     }
 
 
@@ -861,8 +1116,17 @@ def render_continuity_card(cont: dict, live_px: float = 0.0) -> tuple[str, list[
     return body, rows
 
 
-def render_private_signal_card(sig: dict, *, instant: bool, stab_tf: str, conf_tf: str, body_pct: float = 0.0) -> str:
-    """Ultra-luxury card for a REAL private signal triggered by True Analysis."""
+def render_private_signal_card(
+    sig: dict,
+    *,
+    instant: bool,
+    stab_tf: str,
+    conf_tf: str,
+    body_pct: float = 0.0,
+    trigger_kind: str = "BREAKOUT",
+    tp_grounded: bool = False,
+) -> str:
+    """Ultra-luxury institutional card for a REAL private signal triggered by True Analysis."""
     sym = sig["symbol"]
     with db.conn() as c:
         mrow = c.execute("SELECT * FROM market_catalog WHERE UPPER(symbol)=?", (sym.upper(),)).fetchone()
@@ -874,24 +1138,31 @@ def render_private_signal_card(sig: dict, *, instant: bool, stab_tf: str, conf_t
         if instant else
         "👑 <b><u>إشارة حقيقية مؤكّدة — رادار تحليل ForexYemeni</u></b>"
     )
+    trig_badge = (
+        "🏦 <b>نوع الدخول:</b> ارتداد مؤسسي صريح من منطقة الأوامر/الفجوة (OB/FVG) 💎"
+        if str(trigger_kind or "").upper() == "PULLBACK_ZONE" else
+        "🚀 <b>نوع الدخول:</b> اختراق هيكلي مؤكّد وإغلاق جسم حقيقي"
+    )
     proof_line = (
         f"⚡ <b>التحقق الفوري:</b> إغلاق جسم شمعة <b>{esc(stab_tf)}</b> حقيقي الآن ({int(round(body_pct))}%) — التنفيذ مباشر دون انتظار!"
         if instant else
         f"🔐 <b>التحقق المزدوج الحقيقي:</b> تأكّد إغلاق <b>{esc(stab_tf)}</b> بجسم حقيقي + تأكيد <b>{esc(conf_tf)}</b> ({int(round(body_pct))}%) ✅"
     )
+    tp_tag = " · <i>أهداف مرتبطة بالسيولة الهيكلية</i>" if tp_grounded else ""
     return (
         f"{mode_header}\n"
         f"<blockquote>"
         f"▎💎 <b>الأصل:</b> <b>{esc(sym)}</b> · <b>{dir_badge}</b>\n"
+        f"▎{trig_badge}\n"
         f"▎{proof_line}\n"
         f"▎💰 <b>سعر الدخول الحقيقي:</b> <code>{fmt(sig['entry'])}</code>\n"
         f"▎🛡 <b>وقف الخسارة (SL):</b> <code>{fmt(sig.get('stop', sig.get('sl', 0)))}</code>\n"
-        f"▎🎯 <b>الهدف الأول (TP1):</b> <code>{fmt(sig['tp1'])}</code>\n"
+        f"▎🎯 <b>الهدف الأول (TP1):</b> <code>{fmt(sig['tp1'])}</code>{tp_tag}\n"
         f"▎🎯 <b>الهدف الثاني (TP2):</b> <code>{fmt(sig['tp2'])}</code>\n"
         f"▎🏆 <b>الهدف الثالث (TP3):</b> <code>{fmt(sig['tp3'])}</code>\n"
         f"▎⚖️ <b>نسبة العائد للمخاطرة:</b> <b>1 : {float(sig.get('rr') or 0):.2f}</b> · جودة: <b>{int(sig.get('score') or 80)}/100</b>"
         f"</blockquote>\n"
-        f"<i>🔒 إشارة خاصة بحسابك فقط (غير منشورة في القنوات) · التتبع الحي مفعل تلقائياً حتى الأهداف.</i>"
+        f"<i>🔒 إشارة خاصة بحسابك فقط (غير منشورة في القنوات) · محمية بدرع الأخبار ومنع المطاردة · التتبع الحي مفعل تلقائياً حتى الأهداف.</i>"
     )
 
 
@@ -901,14 +1172,36 @@ def render_monitoring_started_banner(res: dict) -> str:
     with db.conn() as c:
         mrow = c.execute("SELECT * FROM market_catalog WHERE UPPER(symbol)=?", (sym.upper(),)).fetchone()
     fmt = lambda v: instruments.fmt_price(sym, float(v or 0.0), mrow)
+    e_mode = str(mon.get("entry_mode") or "BREAKOUT").upper()
+    z_lo = float(mon.get("zone_lo") or 0.0)
+    z_hi = float(mon.get("zone_hi") or 0.0)
+    if e_mode == "PULLBACK_ZONE" and z_hi > z_lo > 0:
+        entry_line = (
+            f"▎🏦 <b>وضع الدخول المزدوج:</b> ارتداد منطقة الأوامر/الفجوة "
+            f"<code>{fmt(z_lo)} — {fmt(z_hi)}</code> <b>أو</b> اختراق <code>{fmt(mon['activation_px'])}</code>\n"
+        )
+    else:
+        entry_line = (
+            f"▎1️⃣ انتظار إغلاق شمعة <b>{esc(mon['stability_tf'])}</b> بجسم حقيقي (≥ 55%) عند <code>{fmt(mon['activation_px'])}</code>\n"
+        )
+    extra_shield = ""
+    if res.get("market_closed"):
+        extra_shield = "▎⏸ <b>درع عطلة السوق:</b> السوق العالمي مغلق حالياً — تستأنف المراقبة تلقائياً عند الافتتاح دون أي إشارات وهمية.\n"
+    elif res.get("news_blocked"):
+        ev_t = esc(str((res["news_blocked"] or {}).get("title") or "خبر اقتصادي عالي التأثير"))
+        extra_shield = f"▎🛡 <b>درع الأخبار القوية مفعّل:</b> تم تأجيل التنفيذ الفوري مؤقتاً لحمايتك من تقلب خبر <b>{ev_t}</b>.\n"
+    elif res.get("anti_chase"):
+        extra_shield = "▎🛡 <b>فلتر منع المطاردة:</b> الشمعة الأخيرة ممتدة حالياً — بانتظار إعادة اختبار نظيفة لدخول احترافي.\n"
+
     return (
-        f"\n\n👁‍🗨 <b><u>رادار تحليل ForexYemeni الحقيقي — مفعّل الآن</u></b>\n"
+        f"\n\n👁‍🗨 <b><u>رادار تحليل ForexYemeni المؤسسي v8.5 — مفعّل الآن</u></b>\n"
         f"<blockquote>"
-        f"▎🛡 <b>أراقب الشارت عنك لحظة بلحظة!</b>\n"
-        f"▎1️⃣ انتظار إغلاق شمعة <b>{esc(mon['stability_tf'])}</b> بجسم حقيقي (≥ 55%) عند <code>{fmt(mon['activation_px'])}</code>\n"
-        f"▎2️⃣ تأكيد الإغلاق على إطار <b>{esc(mon['confirm_tf'])}</b> دون كسر الإبطال <code>{fmt(mon['invalidation_px'])}</code>\n"
+        f"▎🛡 <b>أراقب الشارت عنك لحظة بلحظة بأعلى دقة مؤسسية!</b>\n"
+        f"{entry_line}"
+        f"▎2️⃣ تأكيد الإغلاق الفعلي على <b>{esc(mon['confirm_tf'])}</b> دون كسر الإبطال <code>{fmt(mon['invalidation_px'])}</code>\n"
         f"▎3️⃣ إرسال <b>إشارتك الحقيقية الخاصة + الشارت المحدّث</b> فور اكتمال الشرطين تلقائياً.\n"
-        f"▎⛔ إن كسر السعر مستوى الإبطال قبل التأكيد، سأُلغي التحليل وأُبلغك فوراً لحماية رأس مالك."
+        f"{extra_shield}"
+        f"▎🔐 <b>الدروع النشطة:</b> إيقاف تلقائي بعطلة السوق · درع الأخبار القوية · منع مطاردة الشموع · أهداف مرتبطة بالسيولة."
         f"</blockquote>"
     )
 
@@ -916,11 +1209,31 @@ def render_monitoring_started_banner(res: dict) -> str:
 # ---------------------------------------------------------------------------
 # Background Live Radar Poll Loop (Runs every 60s in background.py)
 # ---------------------------------------------------------------------------
-async def _deliver_private_signal_with_chart(bot, uid: int, sig: dict, *, instant: bool, stab_tf: str, conf_tf: str, body_pct: float, candles: list[dict] | None = None) -> None:
+async def _deliver_private_signal_with_chart(
+    bot,
+    uid: int,
+    sig: dict,
+    *,
+    instant: bool,
+    stab_tf: str,
+    conf_tf: str,
+    body_pct: float,
+    candles: list[dict] | None = None,
+    trigger_kind: str = "BREAKOUT",
+    tp_grounded: bool = False,
+) -> None:
     from fysb.ui import charts as _charts
     from fysb.ui import keyboards as _kb
 
-    cap = render_private_signal_card(sig, instant=instant, stab_tf=stab_tf, conf_tf=conf_tf, body_pct=body_pct)
+    cap = render_private_signal_card(
+        sig,
+        instant=instant,
+        stab_tf=stab_tf,
+        conf_tf=conf_tf,
+        body_pct=body_pct,
+        trigger_kind=trigger_kind,
+        tp_grounded=tp_grounded,
+    )
     markup = _kb.InlineKeyboardMarkup([
         [_kb.btn("🧮 حاسبة اللوت", f"u:lotcalc:{sig['id']}", style="primary"),
          _kb.btn("👑 رادار تحليلاتي", "u:true_analysis", style="success")],
@@ -965,15 +1278,29 @@ async def _deliver_private_signal_with_chart(bot, uid: int, sig: dict, *, instan
 
 
 async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
-    """Inspect every active True Analysis monitor against REAL closed candles.
+    """Inspect every active True Analysis monitor against REAL closed candles (v8.5.0).
 
-    100% honest & deterministic:
-      - Stage 1 (WATCHING_STABILITY): confirms real closed stability candle.
+    100% honest, institutional & deterministic:
+      - Market-Hours & Weekend Shield: pauses non-crypto monitors while global
+        markets are closed (zero PAXG weekend false signals or invalidations!).
+      - Stage 1 (WATCHING_STABILITY): confirms real closed stability candle
+        (supports BOTH `PULLBACK_ZONE` OB/FVG rejection AND `BREAKOUT`).
       - Stage 2 (WATCHING_CONFIRM): confirms subsequent real closed confirm candle
         and fires PRIVATE signal + ForexYemeni chart exclusively to owner.
-      - Cancels immediately on real invalidation or expiry.
+      - Anti-Chase Filter: rejects overextended spike candles (> 1.8x ATR).
+      - High-Impact News Guard: holds final signal trigger during NFP/CPI/FOMC window.
+      - Cancels immediately on real closed-candle invalidation or expiry.
     """
-    summary = {"checked": 0, "stage1_confirmed": 0, "signals_fired": 0, "invalidated": 0, "expired": 0}
+    summary = {
+        "checked": 0,
+        "stage1_confirmed": 0,
+        "signals_fired": 0,
+        "invalidated": 0,
+        "expired": 0,
+        "paused_market_closed": 0,
+        "paused_news": 0,
+        "anti_chase_blocked": 0,
+    }
     _sync_completed_signal_monitors()
     with db.conn() as c:
         mons = [dict(r) for r in c.execute(
@@ -998,7 +1325,24 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                 c.execute("UPDATE analysis_monitors SET status='CANCELLED', updated_at=? WHERE id=?", (now_iso, mid))
             continue
 
-        # 1. Expiry guard
+        # Lookup catalog & instrument spec FIRST for Market-Hours Shield
+        with db.conn() as c:
+            mrow = c.execute("SELECT * FROM market_catalog WHERE UPPER(symbol)=?", (sym,)).fetchone()
+        mrow_d = dict(mrow) if mrow else None
+        sp = instruments.spec(sym, mrow_d)
+
+        # 0. Market-Hours & Weekend Shield (v8.5.0)
+        # Never invalidate, expire, or fire weekend PAXG drift signals on closed global markets!
+        if not is_market_open_at(sp.category, now):
+            summary["paused_market_closed"] += 1
+            with db.tx() as c:
+                c.execute(
+                    "UPDATE analysis_monitors SET last_checked_at=?, note=?, updated_at=? WHERE id=?",
+                    (now_iso, "⏸ السوق العالمي مغلق حالياً (عطلة نهاية الأسبوع) — تستأنف المراقبة عند الافتتاح", now_iso, mid),
+                )
+            continue
+
+        # 1. Expiry guard (checked only while market is open)
         exp_dt = _parse_utc(m.get("expires_at") or "")
         if exp_dt is not None and now >= exp_dt:
             with db.tx() as c:
@@ -1016,10 +1360,6 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                     pass
             continue
 
-        # Lookup provider symbol
-        with db.conn() as c:
-            mrow = c.execute("SELECT * FROM market_catalog WHERE UPPER(symbol)=?", (sym,)).fetchone()
-        mrow_d = dict(mrow) if mrow else None
         psym = (mrow_d["provider_symbol"] if mrow_d else sym)
         fmt = lambda v: instruments.fmt_price(sym, float(v or 0.0), mrow_d)
 
@@ -1049,6 +1389,13 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                 stab_sec = _TF_SECONDS.get(str(m.get("stability_tf") or "H1").upper(), 3600)
                 min_open_dt = stab_open + timedelta(seconds=stab_sec)
 
+        atr_ref = float(m.get("atr_ref") or 0.0)
+        if atr_ref <= 0 and float(m.get("buffer_px") or 0.0) > 0:
+            atr_ref = float(m["buffer_px"]) / 0.15
+        entry_mode = str(m.get("entry_mode") or "BREAKOUT").upper()
+        zone_lo = float(m.get("zone_lo") or 0.0)
+        zone_hi = float(m.get("zone_hi") or 0.0)
+
         res = evaluate_closed_candle(
             candles,
             tf=check_tf,
@@ -1061,6 +1408,10 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
             min_close_dt=min_close_dt,
             min_open_dt=min_open_dt,
             now_dt=now,
+            entry_mode=entry_mode,
+            zone_lo=zone_lo,
+            zone_hi=zone_hi,
+            atr=atr_ref,
         )
 
         # Invalidation -> cancel immediately and alert user!
@@ -1089,10 +1440,47 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                     pass
             continue
 
+        # Anti-Chase Spike Filter (v8.5.0) -> DO NOT chase blow-off candle!
+        if res["state"] == "OVEREXTENDED":
+            summary["anti_chase_blocked"] += 1
+            alert_key = f"CHASE:{res.get('candle_ts') or ''}"
+            win_txt = f" ({res.get('window_lbl')})" if res.get("window_lbl") else ""
+            ratio = float(res.get("chase_ratio") or 1.8)
+            should_notify = (str(m.get("pause_alert_key") or "") != alert_key)
+            with db.tx() as c:
+                c.execute(
+                    "UPDATE analysis_monitors SET last_checked_at=?, last_price=?, pause_alert_key=?, "
+                    "note=?, updated_at=? WHERE id=?",
+                    (
+                        now_iso, last_px, alert_key,
+                        f"🛡 منع المطاردة: شمعة انفجارية ممتدة ({ratio:.1f}×ATR){win_txt} — بانتظار إعادة اختبار",
+                        now_iso, mid,
+                    ),
+                )
+            if bot and should_notify:
+                try:
+                    await bot.send_message(
+                        uid,
+                        f"🛡 <b><u>فلتر منع مطاردة السعر — {esc(sym)}</u></b>\n"
+                        f"<blockquote>"
+                        f"▎أغلقت شمعة <b>{esc(check_tf)}</b>{esc(win_txt)} بانفجار سعري ممتد "
+                        f"(<b>{ratio:.1f}×ATR</b>) عند <code>{fmt(res['close'])}</code>.\n"
+                        f"▎💎 تم <b>حجب الدخول العشوائي عند القمة/القاع</b> لحماية نسبة العائد للمخاطرة — "
+                        f"ويستمر الرادار بانتظار إعادة اختبار نظيفة."
+                        f"</blockquote>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            continue
+
         # Confirmed!
         if res["state"] == "CONFIRMED":
             same_tf = (str(m["stability_tf"]).upper() == str(m["confirm_tf"]).upper())
             win_txt = f" ({res.get('window_lbl')})" if res.get("window_lbl") else ""
+            trig_kind = str(res.get("trigger_kind") or entry_mode or "BREAKOUT").upper()
+            trig_ar = "ارتداد منطقة الطلب/الأوامر (OB/FVG)" if trig_kind == "PULLBACK_ZONE" else "اختراق وإغلاق جسم حقيقي"
+
             if st == "WATCHING_STABILITY" and not same_tf:
                 # Advance to Stage 2 (WATCHING_CONFIRM) and send real milestone update!
                 with db.tx() as c:
@@ -1102,7 +1490,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                         "last_price=?, note=?, updated_at=? WHERE id=?",
                         (
                             res["candle_ts"], now_iso, now_iso, last_px,
-                            f"تأكد إغلاق {m['stability_tf']}{win_txt} ({res['body_pct']}%) — بانتظار {m['confirm_tf']}",
+                            f"تأكد {trig_ar} على {m['stability_tf']}{win_txt} ({res['body_pct']}%) — بانتظار {m['confirm_tf']}",
                             now_iso, mid,
                         ),
                     )
@@ -1113,7 +1501,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                             uid,
                             f"✅ <b><u>تحديث رادار ForexYemeni — {esc(sym)}</u></b>\n"
                             f"<blockquote>"
-                            f"▎1️⃣ <b>تم تأكيد إغلاق شمعة {esc(m['stability_tf'])}{esc(win_txt)} بنجاح!</b>\n"
+                            f"▎1️⃣ <b>تم تأكيد إغلاق شمعة {esc(m['stability_tf'])}{esc(win_txt)} بنجاح!</b> ({trig_ar})\n"
                             f"▎📊 إغلاق جسم حقيقي: <b>{res['body_pct']:.0f}%</b> عند <code>{fmt(res['close'])}</code>\n"
                             f"▎2️⃣ ⏳ <b>أراقب الآن إغلاق شمعة {esc(m['confirm_tf'])} التالية</b> لإصدار إشارتك الحقيقية مع الشارت..."
                             f"</blockquote>",
@@ -1123,9 +1511,50 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                         pass
                 continue
 
-            # Final Confirmation -> Compute live levels from confirmed close & FIRE PRIVATE REAL SIGNAL!
+            # High-Impact News Guard (v8.5.0) before firing final live signal!
+            news_blocked, news_ev = news_guard.check_news_block(sym, now_utc=now)
+            if news_blocked and news_ev:
+                summary["paused_news"] += 1
+                ev_title = str(news_ev.get("title") or "خبر عالي التأثير")
+                ev_dt = str(news_ev.get("dt_utc") or "")
+                ev_mins = int(news_ev.get("minutes_delta") or 0)
+                alert_key = f"NEWS:{ev_title}:{ev_dt}"
+                should_notify = (str(m.get("pause_alert_key") or "") != alert_key)
+                with db.tx() as c:
+                    c.execute(
+                        "UPDATE analysis_monitors SET last_checked_at=?, last_price=?, pause_alert_key=?, "
+                        "note=?, updated_at=? WHERE id=?",
+                        (
+                            now_iso, last_px, alert_key,
+                            f"🛡 درع الأخبار القوية مفعّل ({ev_title}) — تأجيل الإطلاق مؤقتاً",
+                            now_iso, mid,
+                        ),
+                    )
+                if bot and should_notify:
+                    when_txt = (
+                        f"بعد <b>{ev_mins}</b> دقيقة" if ev_mins > 0
+                        else (f"قبل <b>{abs(ev_mins)}</b> دقيقة" if ev_mins < 0 else "<b>الآن</b>")
+                    )
+                    try:
+                        await bot.send_message(
+                            uid,
+                            f"🛡 <b><u>درع الأخبار القوية مفعّل — {esc(sym)}</u></b>\n"
+                            f"<blockquote>"
+                            f"▎تم <b>تأجيل إطلاق إشارة {esc(sym)} مؤقتاً</b> لحمايتك من التقلبات العنيفة والانزلاق السعري!\n"
+                            f"▎📰 <b>الخبر المؤثر:</b> 🔴 {esc(ev_title)} ({when_txt})\n"
+                            f"▎⏳ سيستأنف الرادار التقييم تلقائياً فور انتهاء نافذة الخبر."
+                            f"</blockquote>",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            # Final Confirmation -> Compute live liquidity-aware levels & FIRE PRIVATE REAL SIGNAL!
             confirmed_entry = float(res["close"])
-            atr_est = abs(float(m["entry_ref"]) - float(m["sl"])) / 1.5 if float(m["sl"]) > 0 else 0.0
+            atr_est = atr_ref if atr_ref > 0 else (
+                abs(float(m["entry_ref"]) - float(m["sl"])) / 1.5 if float(m["sl"]) > 0 else 0.0
+            )
             live_plan = _derive_real_trade_plan(
                 symbol=sym,
                 row=mrow_d,
@@ -1140,6 +1569,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                     "tp2": float(m["tp2"]),
                     "tp3": float(m["tp3"]),
                 },
+                candles=candles,
             )
             if not live_plan:
                 with db.tx() as c:
@@ -1151,8 +1581,8 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                 continue
 
             reason = (
-                f"إشارة حقيقية مؤكّدة من رادار ForexYemeni — "
-                f"تم إغلاق {m['stability_tf']} + تأكيد {m['confirm_tf']} بجسم حقيقي ({res['body_pct']:.0f}%)."
+                f"إشارة حقيقية مؤكّدة من رادار ForexYemeni — {trig_ar} "
+                f"({m['stability_tf']} + {m['confirm_tf']} بجسم {res['body_pct']:.0f}%)."
             )
             sig = _create_private_signal(
                 uid=uid,
@@ -1181,6 +1611,8 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                     conf_tf=str(m["confirm_tf"]),
                     body_pct=float(res["body_pct"]),
                     candles=candles,
+                    trigger_kind=trig_kind,
+                    tp_grounded=bool(live_plan.get("tp_grounded")),
                 )
             continue
 

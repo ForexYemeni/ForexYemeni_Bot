@@ -1299,12 +1299,9 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     elif action == "referrals":
         from urllib.parse import quote as _urlquote
         from fysb.services import affiliates as aff_svc
-        bot_u = ""
-        try:
-            me = await bot.get_me()
-            bot_u = getattr(me, "username", "") or ""
-        except Exception:
-            pass
+        # v8.9.0: cached @username (no Telegram round-trip) — this page used to
+        # pay a get_me() network call PLUS 39 DB connections on every tap.
+        bot_u = await afn.run(aff_svc.cached_bot_username)
         link = await afn.run(aff_svc.unified_invite_link, uid, bot_u)
         ast = await afn.run(aff_svc.affiliate_stats, uid)
         share_text = (

@@ -299,34 +299,28 @@ _BAR_SECONDS = {
 
 
 def confirmed_candles(candles: list[dict], timeframe: str, now_utc: Optional[datetime] = None) -> list[dict]:
-    """v6.20.0 Non-Repainting Guard: strip the trailing candle ONLY when it is
-    genuinely still open/forming (open_time <= now < open_time + bar_duration).
-    Already-closed candles and historical/backtest series are preserved intact."""
-    if not candles or len(candles) < 2:
-        return candles
+    """Return only a closed prefix, never a future/forming trailing bar.
+
+    Provider timestamps denote bar opens. Invalid timestamps/unknown TF cannot
+    prove closure and fail closed; no 2-second early-close grace is fabricated.
+    """
+    from datetime import timezone
     bar_sec = _BAR_SECONDS.get((timeframe or "").strip().upper(), 0)
-    if bar_sec <= 0:
-        return candles
-    raw_dt = str(candles[-1].get("datetime") or "").strip()
-    if not raw_dt:
-        return candles
-    try:
-        from datetime import timezone
-        bar_open = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
-        if bar_open.tzinfo is None:
-            bar_open = bar_open.replace(tzinfo=timezone.utc)
-        else:
-            bar_open = bar_open.astimezone(timezone.utc)
-        now = now_utc or datetime.now(timezone.utc)
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-        elapsed = (now - bar_open).total_seconds()
-        # Strictly forming bar: opened in the past, not yet closed (with 2s clock skew grace)
-        if 0.0 <= elapsed < (bar_sec - 2.0):
-            return candles[:-1]
-    except Exception:
-        pass
-    return candles
+    if not candles or bar_sec <= 0:
+        return []
+    now = now_utc or datetime.now(timezone.utc)
+    now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    out = []
+    for c in candles:
+        try:
+            opened = datetime.fromisoformat(str(c.get("datetime") or "").replace("Z", "+00:00"))
+            opened = opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None else opened.astimezone(timezone.utc)
+            if (now-opened).total_seconds() < bar_sec:
+                break
+            out.append(c)
+        except (TypeError, ValueError, OverflowError):
+            return []
+    return out
 
 
 def _parse_utc_dt(dt_iso: str) -> Optional[datetime]:

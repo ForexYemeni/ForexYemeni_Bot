@@ -1,25 +1,23 @@
-"""Price Action strategy — classic patterns, breakout/retest, S/R confluence.
+"""PRICE_ACTION — recent candle-pattern OR breakout continuation with EMA trend.
 
-Entry thesis: a confirmed candlestick pattern or breakout-retest event aligned
-with EMA trend and support/resistance location.
+A recent (up to three bars) engulfing/pin pattern with EMA9/21 alignment OR a
+breakout with EMA alignment determines direction. Retest is a BONUS, not always
+required. Latest body >=0.25 ATR. Counter-HTF setups need S/R or breakout-retest.
+Entry: close. Stop: last-six-bar extreme +/-0.85 ATR, minimum1.2 ATR.
+Targets 2R/3R/4.5R. RSI bonus: BUY52..75 / SELL25..48.
+Weights: pattern16, breakout-retest16, EMA10, HTF10, S/R8, RSI6,
+volatility4, RR6 (total76). Minimum score64; minimum40 bars.
 
-Score weights (documented, deterministic):
-  Pattern confirmation .................. +16 (engulfing/pin bar in direction)
-  Breakout + retest ..................... +16
-  EMA9/EMA21 trend alignment ............ +10
-  HTF bias alignment .................... +10
-  S/R confluence (entry near level) ..... +8
-  RSI in trend regime ................... +6
-  ATR regime normal ..................... +4
-  RR >= 2.0 ............................. +6
-Base 50. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, breakout_retest, candle_patterns, ema, rsi, support_resistance
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:

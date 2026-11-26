@@ -38,9 +38,12 @@ def leaderboard() -> list[dict]:
             return [dict(d) for d in _lb_cache[0]]
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
-            """SELECT strategy, symbol, entry, stop, hit_tp, pips_result
-               FROM signals
-               WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')""").fetchall()]
+            """SELECT * FROM signals
+               WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                 AND (status IN ('TP3_HIT','SL_HIT') OR COALESCE(closed_at,'')!='')
+                 AND COALESCE(private_user_id,0)=0
+                 AND COALESCE(UPPER(source),'') NOT IN
+                     ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED')""").fetchall()]
     agg: dict[str, dict] = {}
     for r in rows:
         code = (r["strategy"] or "?").upper()
@@ -55,15 +58,11 @@ def leaderboard() -> list[dict]:
             d["tp3"] += 1
         if hit == 0:
             d["sl"] += 1          # SL_HIT rows carry hit_tp = 0 by definition
-        # realized R = banked pips / planned risk pips (risk > 0 only)
-        try:
-            from fysb import instruments
-            risk_pips = instruments.pips(r["symbol"], float(r["entry"]), float(r["stop"] or 0))
-            if risk_pips > 0:
-                d["r_sum"] += (float(r["pips_result"] or 0) / risk_pips)
-                d["r_n"] += 1
-        except Exception:
-            pass
+        from fysb.engines.accounting import modeled_r
+        value = modeled_r(r)
+        if value is not None:
+            d["r_sum"] += value
+            d["r_n"] += 1
     out = []
     for code, d in agg.items():
         n = d["n"]
@@ -102,10 +101,10 @@ def leaderboard_text(limit: int = 8) -> str:
             f" · إشارات مغلقة: <b>{d['n']}</b>"
             f" · رابحة: <b>{d['win_rate']:.0f}%</b>"
             f" · TP3: <b>{d['tp3_share']:.0f}%</b>"
-            f" · متوسط R: <b>{d['avg_r']:+.2f}</b>")
+            f" · متوسط R نموذجي: <b>{d['avg_r']:+.2f}</b>")
     lines.append("</blockquote>")
     lines.append("<i>الترتيب آلي 100% من النتائج المسجلة (TP1/TP2/TP3/SL) — يتحدث تلقائياً مع كل إشارة مغلقة، "
-                 "وبلا أي وعود تسويقية.</i>")
+                 "سجلات قديمة بقياس المسافة وأخرى بنموذج جزئي؛ ليست كشف حساب وسيط ولا تشمل كل التكاليف.</i>")
     return "\n".join(lines)
 
 

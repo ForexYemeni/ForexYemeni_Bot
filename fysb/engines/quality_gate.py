@@ -37,32 +37,47 @@ def htf_factor_for(timeframe: str) -> int:
 
 
 def resample_htf(candles: list[dict], factor: int = 4) -> list[dict]:
-    """Strictly causal walk-forward HTF bar aggregation from completed LTF bars.
+    """UTC epoch-aligned COMPLETE buckets; no tail drift or LTF masquerade.
 
-    Only uses bars already in `candles` (never peeks ahead). If too few
-    resampled bars exist (< 25), falls back cleanly to `candles`.
+    Input timestamps are opening times of completed, regularly spaced bars.
+    Missing constituents and partial edge buckets are omitted. A short series
+    returns fewer HTF bars, NEVER the original lower-timeframe history.
     """
+    from datetime import datetime, timezone
+    from collections import Counter
     if not candles or factor <= 1:
         return list(candles or [])
-    n = len(candles)
-    full_groups = n // factor
-    if full_groups < 25:
-        return list(candles)
-    # Align chunks from the tail so the latest completed bar always ends the
-    # latest HTF bar (no stale lag at the right edge).
-    start = n - full_groups * factor
-    out: list[dict] = []
-    for k in range(start, n, factor):
-        grp = candles[k:k + factor]
-        out.append({
-            "datetime": grp[-1].get("datetime", ""),
-            "open": float(grp[0]["open"]),
-            "high": max(float(c["high"]) for c in grp),
-            "low": min(float(c["low"]) for c in grp),
-            "close": float(grp[-1]["close"]),
-            "volume": sum(float(c.get("volume") or 0.0) for c in grp),
-        })
-    return out
+    if len(candles) < 2:
+        return []
+    def stamp(c):
+        dt = datetime.fromisoformat(c["datetime"].replace("Z", "+00:00"))
+        return int((dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt).timestamp())
+    try:
+        stamps = [stamp(c) for c in candles]
+        diffs = [b-a for a, b in zip(stamps, stamps[1:])]
+        if not diffs or min(diffs) <= 0:
+            return []
+        step = Counter(diffs).most_common(1)[0][0]
+        width = step * factor
+        groups = {}
+        for t, c in zip(stamps, candles):
+            groups.setdefault(t // width * width, []).append((t, c))
+        out = []
+        for start, members in groups.items():
+            if [t for t, _ in members] != [start + i*step for i in range(factor)]:
+                continue
+            grp = [c for _, c in members]
+            out.append({
+                "datetime": datetime.fromtimestamp(start, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": float(grp[0]["open"]),
+                "high": max(float(c["high"]) for c in grp),
+                "low": min(float(c["low"]) for c in grp),
+                "close": float(grp[-1]["close"]),
+                "volume": sum(float(c.get("volume") or 0.0) for c in grp),
+            })
+        return out
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return []
 
 
 def efficiency_ratio(candles: list[dict], period: int = 20) -> float:

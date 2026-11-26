@@ -689,7 +689,7 @@ def _derive_real_trade_plan(
         )
         if sl_ok and tp_ok:
             risk = abs(entry_px - s_sl)
-            rr = round(abs(s_tp2 - entry_px) / max(risk, 1e-9), 2)
+            rr = round(abs(s_tp1 - entry_px) / max(risk, 1e-9), 2)
             if rr >= 1.2:
                 return {
                     "entry": round(entry_px, digits),
@@ -698,6 +698,7 @@ def _derive_real_trade_plan(
                     "tp2": round(s_tp2, digits),
                     "tp3": round(s_tp3, digits),
                     "rr": rr,
+                    "atr_pct": atr / max(entry_px, 1e-9) * 100,
                     "tp_grounded": True,
                 }
 
@@ -755,7 +756,7 @@ def _derive_real_trade_plan(
     if (tp3 - tp2) * sign < risk * 0.8:
         tp3 = tp2 + sign * risk * 1.3
 
-    rr_final = round(abs(tp2 - entry_px) / max(risk, 1e-9), 2)
+    rr_final = round(abs(tp1 - entry_px) / max(risk, 1e-9), 2)
     return {
         "entry": round(entry_px, digits),
         "sl": round(sl, digits),
@@ -763,6 +764,7 @@ def _derive_real_trade_plan(
         "tp2": round(tp2, digits),
         "tp3": round(tp3, digits),
         "rr": rr_final,
+        "atr_pct": atr / max(entry_px, 1e-9) * 100,
         "tp_grounded": snapped,
     }
 
@@ -781,6 +783,7 @@ def _create_private_signal(
     data_time: str = "",
 ) -> dict:
     """Insert a STRICTLY PRIVATE real signal owned solely by `uid` (NEVER channels/others)."""
+    strategy = "TRUE_ANALYSIS" if strategy in ("ALL", "") else strategy
     now_s = config.now()
     exp_h = max(6, db.get_setting_int("signal_expiry_hours", 72))
     exp_s = (_now_utc() + timedelta(hours=exp_h)).isoformat()
@@ -792,7 +795,37 @@ def _create_private_signal(
     rr = float(plan_levels["rr"])
     targets_s = f"{tp1},{tp2},{tp3}"
 
-    with db.tx() as c:
+    from fysb.engines import issuance, news_guard, market_data
+    # Historical confirmation is NOT a current execution witness. Require a
+    # fresh quote to publish, and keep the idea pending until post-birth touch.
+    try:
+        blocked, _ = news_guard.check_news_block(symbol)
+        if blocked:
+            return None
+        from fysb.engines.signal_engine import _provider_symbol
+        quote = market_data.execution_quote(_provider_symbol(symbol), config.market_api_key())
+        live_px = float(quote.get("price") or 0)
+        if live_px <= 0 or not quote.get("ok"):
+            return None
+        from fysb.engines.signal_engine import validate_signal_geometry
+        ok_geometry, _ = validate_signal_geometry(symbol, tf, direction, entry, sl, tp1, tp2, tp3)
+        from fysb.engines.entry_state import is_stale_entry
+        stale_entry, _ = is_stale_entry(symbol, direction, entry, sl, tp1, live_px)
+        if not ok_geometry or stale_entry:
+            return None
+    except Exception:
+        return None
+    with issuance.serialized() as c:
+        ok, _why = issuance.policy(symbol, strategy, direction, rr, float(plan_levels.get("atr_pct") or 0.0),
+                                  source=source, user_id=uid)
+        if not ok:
+            return None
+        existing = c.execute(
+            "SELECT id FROM signals WHERE private_user_id=? AND symbol=? "
+            "AND COALESCE(closed_at,'')='' AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
+            (uid, symbol)).fetchone()
+        if existing:
+            return None
         cur = c.execute(
             """INSERT INTO signals(
                 symbol, direction, entry, stop, tp1, tp2, tp3, targets, rr,
@@ -802,12 +835,13 @@ def _create_private_signal(
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 symbol, direction, entry, sl, tp1, tp2, tp3, targets_s, rr,
-                tf, strategy or "TRUE_ANALYSIS", int(score or 80), "RUNNING",
+                tf, strategy or "TRUE_ANALYSIS", int(score or 80), "ACTIVE",
                 reason[:500], source, "LIVE_TRUE_ANALYSIS", data_time or now_s,
-                now_s, exp_s, now_s, entry, int(uid),
+                now_s, exp_s, "", live_px, int(uid),
             ),
         )
         sid = int(cur.lastrowid)
+        c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25', created_by=? WHERE id=?", (uid, sid))
         # Register ONLY `uid` in signal_deliveries so tracker.py sends TP1/TP2/TP3/SL
         # alerts EXCLUSIVELY to `uid` — NEVER to channels or any other user!
         c.execute(
@@ -889,7 +923,9 @@ def evaluate_on_analysis_created(uid: int, analysis: dict, *, now_dt: datetime |
             invalidation_px = round(ref_hi + safe_pad, sp.digits)
     buffer_px = max(atr * 0.15, 0.0)
     setup = chart_data.get("setup") or None
-    strategy = str((setup or {}).get("code") or analysis.get("strategy") or "ALL").upper()
+    if analysis.get("is_proxy"):
+        return {"ok": False, "error": "بيانات مشتقة/بديلة للعرض فقط؛ لا يصدر منها الرادار إشارة تنفيذ"}
+    strategy = str((setup or {}).get("code") or analysis.get("strategy") or "TRUE_ANALYSIS").upper()
     quality = int(analysis.get("quality") or 75)
     candles = chart_data.get("candles") or []
 
@@ -954,7 +990,7 @@ def evaluate_on_analysis_created(uid: int, analysis: dict, *, now_dt: datetime |
         trig_kind = str(closed_check.get("trigger_kind") or entry_mode or "BREAKOUT").upper()
         trig_ar = "ارتداد منطقة الطلب/الأوامر (OB/FVG)" if trig_kind == "PULLBACK_ZONE" else "اختراق هيكلي وإغلاق جسم شمعة حقيقي"
         reason = (
-            f"تنفيذ فوري حقيقي ومؤكّد على الشارت ({stab_tf}) — {trig_ar} "
+            f"تأكيد نموذج على الشارت — بانتظار لمس الدخول بعد الإصدار ({stab_tf}) — {trig_ar} "
             f"({int(closed_check.get('body_pct') or body_pct)}%) بفارق يتجاوز 0.15×ATR دون مطاردة سعرية."
         )
         sig = _create_private_signal(
@@ -969,6 +1005,8 @@ def evaluate_on_analysis_created(uid: int, analysis: dict, *, now_dt: datetime |
             source="TRUE_ANALYSIS_INSTANT",
             data_time=str(analysis.get("price_time") or now_s),
         )
+        if not sig:
+            return {"ok": False, "error": "تعذر الإصدار: بوابة الحماية أو السعر الحي لم تؤكد صلاحية الخطة"}
         with db.tx() as c:
             cur = c.execute(
                 """INSERT INTO analysis_monitors(
@@ -1599,6 +1637,11 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                 source="TRUE_ANALYSIS_CONFIRMED",
                 data_time=res["candle_ts"] or now_iso,
             )
+            if not sig:
+                with db.tx() as c:
+                    c.execute("UPDATE analysis_monitors SET last_checked_at=?, note=?, updated_at=? WHERE id=?",
+                              (now_iso, "issuance safety gate rejected", now_iso, mid))
+                continue
             with db.tx() as c:
                 c.execute(
                     "UPDATE analysis_monitors SET status='SIGNAL_ACTIVE', confirm_candle_ts=?, "

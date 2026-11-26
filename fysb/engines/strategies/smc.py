@@ -1,24 +1,22 @@
-"""Smart Money Concepts strategy — BOS/CHOCH, HH/HL/LH/LL, supply & demand.
+"""SMC — project-specific BOS/CHOCH and swing-derived supply/demand model.
 
-Entry thesis: a market-structure shift confirms the smart-money direction; price
-then returns to a freshly-formed supply (bearish) or demand (bullish) zone.
+A BOS/CHOCH determines direction. Demand/supply uses an intact-side swing and
+an ATR-width zone, not measured resting orders. HTF alignment is a score bonus,
+not a mandatory rule inside this module. Entry uses zone edge clipped to close.
+Stop: protective swing +/- 0.85 ATR, widened if tight; targets 2R/3R/4.5R.
+Weights: labels14, BOS12, CHOCH10, zone14, HTF12, volatility4, RR6
+(total72). Minimum score58; minimum40 bars.
 
-Score weights (documented, deterministic):
-  Structure labels HH/HL (up) or LH/LL (down) ... +14
-  BOS in trade direction ........................ +12
-  CHOCH confirming reversal ..................... +10
-  Supply/Demand zone retrace entry .............. +14
-  HTF bias alignment ............................ +12
-  ATR regime normal ............................. +4
-  RR >= 2.0 ..................................... +6
-Base 50. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, structure_labels, swings, support_resistance
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:

@@ -1,38 +1,24 @@
-"""CRT — Candle Range Theory (real, rule-based, 100% mechanical).
+"""CRT — latest bar sweeps one of the four preceding reference candle ranges.
 
-Documented rules (no indicators, pure range logic):
-  1. RANGE     : the reference candle (previous completed candle) defines the
-                 CRT range: high = sweep liquidity above, low = liquidity below.
-  2. SWEEP     : a later candle TAKES one side of the range (wick beyond it) —
-                 that is the liquidity grab (BSL/SSL).
-  3. CONFIRM   : the sweeping move CLOSES back inside the range — the failed
-                 break is the CRT trigger.
-  4. ENTRY     : retrace toward the range midpoint (CRT 50%) or the FVG left by
-                 the confirming displacement, in the direction opposite the
-                 swept side, aligned with the higher-timeframe bias.
-  5. INVALIDATION: beyond the swept extreme (plus ATR buffer) — that is where
-                 the CRT narrative is objectively wrong.
-  6. TARGETS   : opposite side of the range first, then measured extensions.
+Reference width >=0.55 ATR; reject two-sided sweeps; close must be strictly
+inside its range and candle body must point opposite the swept side. Require
+HTF structure agreement OR local directional CHOCH. Entry: reachable midpoint,
+otherwise close. Stop: swept extreme +/-0.85 ATR; targets range-derived with
+2R/3R/4.5R floors (not necessarily the opposite boundary after adjustment).
+Weights: range4, sweep12, reclaim10, bias12, displacement10, FVG10,
+midpoint6, kill-zone6, volatility4, RR6 (total80).
+Minimum score64; minimum45 bars.
 
-Score weights (deterministic, auditable):
-  range defined ............ +6
-  sweep beyond range ....... +16
-  close back inside ........ +16
-  HTF bias alignment ....... +12
-  displacement out of range  +10
-  FVG inside range ......... +10
-  entry at CRT mid zone .... +8
-  kill zone ................ +6
-  volatility regime ok ..... +4
-  RR(TP1) >= 2 ............. +8
-Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
@@ -52,6 +38,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     sweep_side, sweep_level = "", 0.0
     for cand_ref in reversed(candles[-5:-1]):
         rh, rl = float(cand_ref["high"]), float(cand_ref["low"])
+        if float(last["high"]) > rh and float(last["low"]) < rl:
+            continue  # ambiguous two-sided sweep is not a directional trigger
         if (rh - rl) < 0.55 * a:
             continue  # ignore tiny doji micro-ranges
         if float(last["high"]) > rh and close < rh and close > rl:

@@ -1,22 +1,36 @@
-"""Silver Bullet (ICT) — DST-aware time-window FVG continuation, 100% mechanical.
+"""SILVER_BULLET — New York date/window-bound FVG continuation.
 
-Documented rules (v8.0.0 DST-accurate America/New_York clock):
-  1. TIME WINDOW — Exact ICT Silver Bullet windows in New York time:
-       LONDON_SB    03:00–04:00 NY
-       NY_AM_SB     10:00–11:00 NY
-       NY_PM_SB     14:00–15:00 NY
-  2. DAY BIAS — Prior-session opening-range direction (bars from the 1–2h
-     preceding the Silver Bullet window) must agree with trade direction.
-  3. SETUP — An intact Fair Value Gap forms inside the window in bias direction.
-  4. ENTRY — Midpoint of the newest intact FVG (never worse than market close).
-  5. TARGETS — Strictly >= 2.0R / 3.0R / 5.0R.
+Windows (America/New_York, DST-aware): 03..04, 10..11, 14..15.
+Require >=3 supplied prior bars in the two hours BEFORE this date's window start.
+Bias: last close relative to that opening range midpoint. Require a matching FVG
+among the latest ten bars whose THIRD candle formed in the SAME window/date.
+Reject gaps with later closes through their invalidation edge; this is not an
+untouched-zone/first-mitigation model. Entry: midpoint clipped to current close.
+Stop beyond recent eight-bar extreme/FVG plus0.2 opening-range width;
+never tighten a valid structural stop. Targets2R/3R/5R.
+Weights: window16, opening-range10, in-window-gap16, direction14,
+HTF10, volatility6, RR8 (total80). Minimum score58; minimum45 bars.
+
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
 from fysb.engines.analysis import atr_pct, fair_value_gaps, ny_hour, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
+_NY = ZoneInfo("America/New_York")
 SB_WINDOWS = [("LONDON_SB", 3, 4), ("NY_AM_SB", 10, 11), ("NY_PM_SB", 14, 15)]
+
+
+def _ny_datetime(iso: str) -> datetime:
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_NY)
 
 
 def _window_of(dt_iso: str):
@@ -29,6 +43,7 @@ def _window_of(dt_iso: str):
     return None
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
@@ -38,28 +53,42 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if not wname:
         return None
 
-    # Prior-session opening-range bias (1–2h prior to the Silver Bullet window)
-    cur_h = ny_hour(last["datetime"])
-    prior_bars = [
-        c for c in candles[-30:-2]
-        if (bh := ny_hour(c.get("datetime", ""))) is not None and ((cur_h - bh) % 24) in (1, 2)
-    ]
-    acc = prior_bars if len(prior_bars) >= 3 else candles[-30:][:8]
+    # Anchor to this DATE's window start, not the current clock hour or an
+    # arbitrary eight-bar fallback. Missing prior-session history means no setup.
+    last_ny = _ny_datetime(last["datetime"])
+    start_hour = next(start for name, start, _ in SB_WINDOWS if name == wname)
+    window_start = last_ny.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    prior_start = window_start - timedelta(hours=2)
+    acc = [c for c in candles[:-1]
+           if prior_start <= _ny_datetime(c["datetime"]) < window_start]
+    if len(acc) < 3:
+        return None
     or_hi = max(c["high"] for c in acc)
     or_lo = min(c["low"] for c in acc)
+    if or_hi <= or_lo:
+        return None
     close = last["close"]
     bias_dir = "BUY" if close > (or_hi + or_lo) / 2 else "SELL"
 
     # Intact FVGs formed inside this window (recent 10 candles)
-    fvgs = fair_value_gaps(candles[-10:], 4)
+    recent = candles[-10:]
+    fvgs = fair_value_gaps(recent, 4)
     fvg = None
     for f in fvgs:
+        idx = f.get("index")  # helper indexes the THIRD candle completing a gap
+        if not isinstance(idx, int) or not 2 <= idx < len(recent):
+            continue
+        formed_ny = _ny_datetime(recent[idx]["datetime"])
+        if not window_start <= formed_ny <= last_ny:
+            continue
         kind_dir = "BUY" if f["kind"] == "bullish" else "SELL"
         if kind_dir != bias_dir:
             continue
-        if bias_dir == "BUY" and close < f["lo"]:
+        # A previously broken gap is not made intact by a later price recovery.
+        after = recent[idx + 1:]
+        if bias_dir == "BUY" and (close < f["lo"] or any(c["close"] < f["lo"] for c in after)):
             continue
-        if bias_dir == "SELL" and close > f["hi"]:
+        if bias_dir == "SELL" and (close > f["hi"] or any(c["close"] > f["hi"] for c in after)):
             continue
         fvg = f
         break

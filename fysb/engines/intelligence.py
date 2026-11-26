@@ -70,27 +70,8 @@ def reset_caches() -> None:
 
 def _signal_r_multiple(row) -> float:
     """Compute real R-Multiple for a closed signal row (immune to cross-asset pip scale!)."""
-    from fysb import instruments
-    pips = float(row["pips_result"] or 0.0)
-    st = str(row["status"] or "").upper()
-    try:
-        entry = float(row["entry"] or 0.0)
-        stop = float(row["stop"] or 0.0)
-        sym = str(row["symbol"] or "XAUUSD")
-        sl_pips = abs(instruments.pips(sym, entry, stop)) if (entry > 0 and stop > 0 and entry != stop) else 0.0
-    except Exception:
-        sl_pips = 0.0
-    if sl_pips > 1e-6 and pips != 0.0:
-        return max(-2.0, min(10.0, pips / sl_pips))
-    if st == "TP3_HIT":
-        return 4.5
-    if st in ("TP2_HIT", "TP2_BE"):
-        return 3.0
-    if st in ("TP1_HIT", "TP1_BE"):
-        return 2.0
-    if st in ("SL_HIT", "LOSS"):
-        return -1.0
-    return 0.0
+    from fysb.engines.accounting import modeled_r
+    return modeled_r(dict(row)) or 0.0
 
 
 def strategy_quarantine_status(
@@ -114,9 +95,10 @@ def strategy_quarantine_status(
     try:
         with db.conn() as c:
             rows = c.execute(
-                """SELECT symbol, entry, stop, status, pips_result FROM signals
+                """SELECT * FROM signals
                    WHERE UPPER(strategy)=?
-                     AND (source IS NULL OR UPPER(source) != 'SIGNAL_NOW')
+                     AND COALESCE(private_user_id,0)=0
+                     AND COALESCE(UPPER(source),'') NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED')
                      AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE','SL_HIT')
                      AND closed_at!='' AND closed_at>=?""",
                 (code, cutoff),

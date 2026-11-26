@@ -85,6 +85,8 @@ def test_03_auto_weekly_monthly_performance_digest(env):
     _seed_signal("EURUSD", "SELL", status="TP1_HIT", pips_result=32.0)
     _seed_signal("GBPUSD", "BUY", status="SL_HIT", pips_result=-18.0)
 
+    with db.tx() as c:
+        c.execute("UPDATE signals SET closed_at=? WHERE status='TP1_HIT'", (config.now(),))
     d, cap, png = digest_svc.build_digest_bundle(days=7)
     assert d["total"] == 3 and d["wins"] == 2 and d["losses"] == 1
     assert d["net_pips"] == 99.0 and d["best_strategy"] == "SMC"
@@ -185,7 +187,16 @@ def test_10_and_11_manual_signal_studio_signal_now_and_smart_demo_auto_copy(env)
         )
     j2 = json.loads(body2)
     assert st2 == 200 and j2["ok"] is True
-    assert j2["signal"]["symbol"] == "XAUUSD" and j2["auto_copied_count"] == 1
+    assert j2["signal"]["symbol"] == "XAUUSD" and j2["auto_copied_count"] == 0
+    # A manual pending plan not delivered to the user must NOT auto-copy.
+    # Activate + deliver explicitly before testing the paper-copy adapter.
+    db.set_setting("global_kill_switch", "0")
+    sig = dict(j2["signal"], status="RUNNING", filled_at=config.now())
+    with db.tx() as c:
+        c.execute("UPDATE signals SET status='RUNNING', filled_at=? WHERE id=?", (config.now(), sig["id"]))
+        c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)", (sig["id"], USER_UID, config.now()))
+    with patch.object(_md, "fetch_price", return_value={"price": 2652., "fetched_at": config.now()}):
+        assert len(demo_engine.auto_copy_signal_for_subscribers(sig)) == 1
 
     # Verify USER_UID now has an OPEN demo position for that exact signal
     with db.conn() as c:
@@ -198,13 +209,17 @@ def test_10_and_11_manual_signal_studio_signal_now_and_smart_demo_auto_copy(env)
         dup_res = demo_engine.auto_copy_signal_for_subscribers(j2["signal"])
     assert dup_res == []
 
+    # The explicit delivery consumed FREE daily quota; upgrade this endpoint
+    # fixture rather than expecting a second free delivery.
+    from fysb.services import subscriptions
+    subscriptions.grant_subscription(USER_UID, "VIP", source="ADMIN", actor=ADMIN_UID)
     # User Mini App: /api/signal-now returns active signal cleanly
     st3, _, body3 = wa_server.dispatch_request(
         "POST", "/api/signal-now", _hdr(USER_UID),
         json.dumps({"symbol": "XAUUSD", "timeframe": "M15"}).encode(),
     )
     j3 = json.loads(body3)
-    assert st3 == 200 and j3["ok"] is True and j3["signal"]["symbol"] == "XAUUSD"
+    assert st3 == 200 and j3["ok"] is True and j3["signal"]["symbol"] == "XAUUSD", j3
 
 
 def test_14_admin_users_page_management_and_6page_template_integrity(env):

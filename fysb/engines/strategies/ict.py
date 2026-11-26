@@ -1,31 +1,27 @@
-"""ICT strategy — Inner Circle Trader concepts, each mapped to a measurable check.
+"""ICT — project-specific price-pattern model, not institutional order-flow data.
 
-Entry thesis: liquidity is swept on the bias side, displacement leaves an FVG or
-order block, price trades back into that imbalance in the direction of the
-higher-timeframe bias during (optionally) a kill zone.
+Direction uses HTF structure with sweep/structure context. A trigger needs a
+matching sweep OR a directional zone + gap-width displacement + local structure.
+FVG/OB selection checks the latest close against the zone, not a complete zone
+mitigation ledger. Entry is zone midpoint clipped to close, or close without zone.
+Stop: recent eight-bar extreme/zone edge +/- 0.85 ATR, widened if too tight.
+Targets: planned 2R/3R/4.5R, not proof of reachable liquidity.
+Weights: HTF12, sweep14, displacement10, zone12, OB8, PD10, MSS8,
+kill-zone6, volatility4, RR6 (total90). Minimum score58; minimum40 bars.
 
-Score weights (documented, deterministic):
-  HTF bias alignment ............ +12
-  Liquidity sweep present ....... +14  (matching direction)
-  Displacement leg .............. +10
-  FVG present & retraced zone ... +12
-  Order block confluence ........ +8
-  Premium/Discount alignment .... +10
-  Structure shift (MSS/CHOCH) ... +8
-  Kill zone active .............. +6
-  ATR regime normal ............. +4
-  RR >= 2.0 ..................... +6
-Base 50. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
     premium_discount, structure_labels,
 )
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:

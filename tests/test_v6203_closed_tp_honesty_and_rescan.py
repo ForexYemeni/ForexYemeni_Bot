@@ -22,6 +22,7 @@ class TestV6203ClosedTpHonestyAndRescan(unittest.TestCase):
         config.DB_FILE = os.path.join(self._tmp.name, "v6203.db")
         config.ADMIN_ID = 999001
         db.init_db()
+        db.set_setting("news_guard_enabled", "0")
 
     def tearDown(self):
         config.DB_FILE = self._old_db

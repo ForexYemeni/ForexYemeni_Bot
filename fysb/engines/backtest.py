@@ -79,11 +79,11 @@ def _simulate_trade(symbol: str, cand, future: list[dict], start_idx: int,
     for k, bar in enumerate(future[:12]):
         hi, lo, op = float(bar["high"]), float(bar["low"]), float(bar["open"])
         if cand.direction == "BUY":
-            if lo <= entry or op <= entry + 0.15 * risk:
+            if lo <= entry <= hi:
                 fill_offset = k
                 break
         else:
-            if hi >= entry or op >= entry - 0.15 * risk:
+            if lo <= entry <= hi:
                 fill_offset = k
                 break
     if fill_offset < 0:

@@ -72,7 +72,13 @@ def _fetch(symbol: str, tf_code: str, size: int = 150):
 def _one_frame_reading(symbol: str, tf: str, row) -> dict:
     """All measurable primitives for ONE timeframe (pure computation)."""
     payload, row = _fetch(symbol, tf)
-    candles = payload["values"]
+    from fysb.engines.analysis import confirmed_candles
+    candles = confirmed_candles(payload["values"], tf)
+    if len(candles) < 40:
+        raise RuntimeError(f"insufficient completed {tf} candles ({len(candles)})")
+    from fysb.engines.strategies.base import candle_input_error
+    if candle_input_error(candles):
+        raise RuntimeError("invalid candle history")
     closes = [c["close"] for c in candles]
     struct = structure_labels(candles)
     bias_struct = struct
@@ -419,6 +425,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         return {"ok": False, "error": "قسم التحليلات معطل حالياً من الإدارة"}
     symbol = instruments.normalize(symbol)
     p_tfs: list[str] = []
+    p_strats: list[str] = []
     if enforce_plan:
         # Real-user path: server-side package gate + atomic daily quota.
         state = quota_state(user_id)
@@ -448,8 +455,9 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         # v8.0.0 (SIG-2): Respect user's plan timeframes when timeframe == "ALL"
         plan_tf_set = {t.upper() for t in p_tfs}
         filtered_tfs = [t for t in ALL_TF_ORDER if t in plan_tf_set]
-        if filtered_tfs:
-            allowed_tfs = filtered_tfs[:4]
+        if not filtered_tfs:
+            return {"ok": False, "error": "لا توجد أطر زمنية مسموحة ومدعومة في الباقة"}
+        allowed_tfs = filtered_tfs[:4]
     try:
         if multi_tf:
             frames = [_one_frame_reading(symbol, tf, row) for tf in allowed_tfs]
@@ -458,26 +466,16 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
     except RuntimeError as e:
         return {"ok": False, "error": f"تعذر جلب بيانات السوق: {e}"}
 
-    from fysb.engines.analysis import confirmed_candles as _confirmed_candles
-    main = frames[-1]          # the highest requested TF drives the card levels
-    # v8.0.0 (SIG-2): Strip forming unclosed candle AND resolve real HTF bias_candles!
-    candles = _confirmed_candles(main["candles"], main["tf"]) or main["candles"]
-    if len(candles) < 40:
-        return {"ok": False, "error": f"بيانات غير كافية ({len(candles)} شمعة)"}
-
+    main = frames[-1]  # highest requested TF drives BOTH card and strategy
+    candles = main["candles"]  # _one_frame_reading already strips forming bars
     bias_tf_map = {"M5": "H1", "M15": "H1", "M30": "H4", "H1": "H4", "H4": "D1", "D1": "D1"}
     bias_tf = bias_tf_map.get(main["tf"].upper(), "H4")
     bias_candles = candles
-    if len(frames) > 1 and frames[-1]["tf"] != frames[0]["tf"]:
-        bias_candles = _confirmed_candles(frames[-1]["candles"], frames[-1]["tf"]) or frames[-1]["candles"]
-        candles = _confirmed_candles(frames[0]["candles"], frames[0]["tf"]) or frames[0]["candles"]
-    elif bias_tf != main["tf"].upper():
+    if bias_tf != main["tf"].upper():
         try:
-            htf_fr = _one_frame_reading(symbol, bias_tf, row)
-            if len(htf_fr["candles"]) >= 30:
-                bias_candles = _confirmed_candles(htf_fr["candles"], bias_tf) or htf_fr["candles"]
-        except Exception:
-            bias_candles = candles
+            bias_candles = _one_frame_reading(symbol, bias_tf, row)["candles"]
+        except RuntimeError:
+            bias_candles = candles  # explicit entry-TF fallback, never relabelled
 
     payload = main["payload"]
     market_open = market_data.market_state((row or {}).get("category") if row else instruments.spec(symbol).category)
@@ -495,20 +493,19 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         direction = "SELL"
     else:
         direction = "NEUTRAL"
-    quality = int(min(95, 45 + max(bull, bear) * 6))
+    quality = int(min(95, 45 + 50 * abs(bull-bear) / max(bull+bear, 1)))
 
     # --- strategy lens (plan-gated; ALL = evaluate every allowed methodology + consensus_filter) ---
     lens_result = None
     lens_name = strategy_name(strategy) if strategy else ""
+    from fysb.engines.signal_engine import _allowed_strategies
+    catalog_allowed = _allowed_strategies(symbol, main["tf"])
+    allowed = [code for code in catalog_allowed
+               if not enforce_plan or "ALL" in p_strats or code in p_strats]
+    if strategy and strategy.upper() != "ALL" and strategy.upper() not in allowed:
+        return {"ok": False, "error": "⛔ المنهجية معطلة أو غير مشمولة في الباقة"}
     if (strategy or "").upper() == "ALL":
-        from fysb.engines.strategies import VERIFIABLE, consensus_filter
-        from fysb.db import IMPLEMENTED_STRATEGIES
-        with db.conn() as c:
-            ok_strats = [r["code"] for r in c.execute(
-                "SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchall()]
-        if not ok_strats:
-            ok_strats = list(IMPLEMENTED_STRATEGIES)
-        allowed = [s for s in ok_strats if s in VERIFIABLE]
+        from fysb.engines.strategies import consensus_filter
         ctx = Ctx(symbol=symbol, timeframe=main["tf"], candles=candles,
                   bias_candles=bias_candles, market_row=row, kill_zone=main["kz"])
         try:
@@ -577,7 +574,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
     # --- recommendation ---
     if lens_result is not None:
         direction = lens_result.direction
-        quality = max(quality, lens_result.score)
+        quality = lens_result.score
         lens_dir = "شراء" if lens_result.direction == "BUY" else "بيع"
         recommendation = (f"{lens_name} تمنح توصية <b>{lens_dir}</b> على إطار {main['tf']} "
                           f"بجودة سياق {lens_result.score}/100 — "
@@ -628,7 +625,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         fmt=fmt,
     )
 
-    risk_note = "التزم بحجم مخاطرة 1-2% من رأس المال لكل فكرة، وطبّق وقف الخسارة المخطط بلا مساومة — الانضباط التنفيذي هو ما يحول التحليل إلى نتائج."
+    risk_note = ("⚠️ شموع مشتقة/بديلة وليست XAU spot مباشرًا؛ لا تعتمد كدليل تنفيذ. " if payload.get("is_proxy") else "") + "التزم بحجم مخاطرة 1-2% من رأس المال لكل فكرة، وطبّق وقف الخسارة المخطط بلا مساومة — الانضباط التنفيذي هو ما يحول التحليل إلى نتائج."
 
     # v8.1.0: Rich real-data payload for Ultra-Luxury Institutional Analysis Charts
     chart_bars = list(main.get("candles") or candles or [])[-95:]
@@ -682,7 +679,9 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         "symbol": symbol, "timeframe": tf_label, "tool": "", "tool_name": "منظومة مؤسسية مركبة",
         "analysis_type": analysis_type, "strategy": strategy,
         "strategy_name": lens_name or "قراءة مؤسسية شاملة",
-        "price": main["close"], "price_time": payload["last_candle_iso"],
+        "price": main["close"], "price_time": candles[-1]["datetime"],
+        "data_provider": payload.get("provider") or payload.get("source") or "UNKNOWN",
+        "is_proxy": bool(payload.get("is_proxy")),
         "direction": direction, "quality": quality,
         "summary": summary, "zones": zones,
         "recommendation": recommendation, "activation": activation,

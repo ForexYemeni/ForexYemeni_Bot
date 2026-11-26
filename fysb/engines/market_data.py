@@ -583,6 +583,9 @@ def _assemble(internal: str, interval: str, values: list[dict], source: str, use
         "symbol": raw_symbol, "interval": interval, "values": values,
         "fetched_at": config.now(), "fetched_epoch": time.time(),
         "last_candle_iso": last_iso, "age_seconds": age, "source": source,
+        "provider": provider_name or source,
+        "instrument_kind": "PROXY" if provider_name == "venue-gold" else "PROVIDER_MARKET",
+        "is_proxy": provider_name == "venue-gold",
     }
     _mark_success(provider_name or source, internal, interval)
     _last_provider[internal] = provider_name or source
@@ -688,6 +691,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
 
 
 def _store_quote(internal: str, provider: str, payload: dict, use_cache: bool) -> dict:
+    payload = {**payload, "provider": provider, "instrument_kind": "PROXY" if provider == "venue-gold" else "PROVIDER_MARKET", "is_proxy": provider == "venue-gold"}
     _mark_success(provider, internal, "quote")
     _last_provider[internal] = provider
     if use_cache:
@@ -749,7 +753,7 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                 provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": ref["price"],
-                                     "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
+                                     "fetched_at": config.now(), "observed_at": ref.get("updated", ""), "source": "LIVE", "spot_ref": True},
                                     use_cache)
             if provider == "fx-ref":
                 ysym = _yahoo_symbol_for(internal)
@@ -759,7 +763,7 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                 provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": ref["price"],
-                                     "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
+                                     "fetched_at": config.now(), "observed_at": ref.get("updated", ""), "source": "LIVE", "spot_ref": True},
                                     use_cache)
             if provider == "venue-gold":
                 v = BINANCE_MAP[internal]
@@ -885,3 +889,24 @@ def provider_status() -> dict:
     state = "OK" if time.time() - newest < 3600 else "NO_RECENT_DATA"
     status.update({"state": state, "cached": len(_cache), "last_fetch_epoch": newest})
     return status
+
+
+def execution_quote(symbol: str, api_key: str = "", max_age: float = 120.0) -> dict:
+    """Freshness from PROVIDER observation time, never HTTP fetch time.
+
+    Adapters without an observation timestamp remain usable for indicative
+    display, NOT proof for a broker dispatch. Proxy quotes are never eligible.
+    """
+    quote = dict(fetch_price(symbol, api_key))
+    quote["ok"] = False
+    try:
+        observed = datetime.fromisoformat(str(quote.get("observed_at") or "").replace("Z", "+00:00"))
+        observed = observed.replace(tzinfo=timezone.utc) if observed.tzinfo is None else observed.astimezone(timezone.utc)
+        age = (datetime.now(timezone.utc)-observed).total_seconds()
+        quote["observation_age_seconds"] = age
+        price = float(quote.get("price") or 0)
+        quote["ok"] = (not quote.get("is_proxy") and bool(quote.get("provider"))
+                       and math.isfinite(price) and price > 0 and -5 <= age <= max_age)
+    except (TypeError, ValueError, OverflowError):
+        quote["reason"] = "provider observation timestamp missing/invalid"
+    return quote

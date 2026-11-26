@@ -856,7 +856,7 @@ def dispatch_request(
                 reason = str(payload.get("reason") or "إشارة احترافية من استوديو الإدارة").strip()[:300]
                 score = max(50, min(100, int(payload.get("score") or 90)))
                 risk_dist = abs(entry - sl)
-                reward_dist = abs((tp3 or tp2 or tp1) - entry)
+                reward_dist = abs(tp1 - entry)
                 rr = round(reward_dist / max(1e-9, risk_dist), 2)
                 targets_str = ",".join(f"{x:g}" for x in (tp1, tp2, tp3) if x > 0)
                 now_iso = config.now()

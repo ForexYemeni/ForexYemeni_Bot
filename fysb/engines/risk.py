@@ -58,8 +58,8 @@ def daily_signal_pnl_pct(conn_obj=None) -> tuple[float, int]:
     day_start = db.day_start_utc()
     def _query(c):
         return c.execute(
-            """SELECT status, hit_tp, rr FROM signals
-               WHERE (source IS NULL OR source NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW'))
+            """SELECT * FROM signals
+               WHERE COALESCE(private_user_id,0)=0 AND (source IS NULL OR UPPER(source) NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED'))
                  AND closed_at>=? AND status IN ('SL_HIT','TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE')""",
             (day_start,),
         ).fetchall()
@@ -71,18 +71,12 @@ def daily_signal_pnl_pct(conn_obj=None) -> tuple[float, int]:
     net_r = 0.0
     sl_hits = 0
     for r in rows:
-        st = (r["status"] or "").upper()
-        hit = int(r["hit_tp"] or 0)
-        base_rr = max(1.0, float(r["rr"] or 2.0))
-        if st == "SL_HIT" and hit == 0:
-            net_r -= 1.0
+        from fysb.engines.accounting import modeled_r
+        value = modeled_r(dict(r))
+        if value is not None:
+            net_r += value
+        if str(r["status"]).upper() == "SL_HIT" and int(r["hit_tp"] or 0) == 0:
             sl_hits += 1
-        elif st in ("TP1_HIT", "TP1_BE") or (st == "SL_HIT" and hit == 1):
-            net_r += base_rr * 0.5
-        elif st in ("TP2_HIT", "TP2_BE") or (st == "SL_HIT" and hit == 2):
-            net_r += base_rr * 1.0
-        elif st == "TP3_HIT":
-            net_r += base_rr * 1.5
     return round(net_r * risk_per, 2), sl_hits
 
 
@@ -122,26 +116,26 @@ def check_signal(symbol: str, rr: float, atr_pct_value: float,
         metrics["cap_exempt"] = True
     else:
         with db.conn() as c:
-            if src == "SIGNAL_NOW" and int(created_by or 0) > 0:
+            if src in ("SIGNAL_NOW", "TRUE_ANALYSIS_INSTANT", "TRUE_ANALYSIS_CONFIRMED") and int(created_by or 0) > 0:
                 open_sym = c.execute(
-                    "SELECT COUNT(*) n FROM signals WHERE source='SIGNAL_NOW' AND created_by=? "
+                    "SELECT COUNT(*) n FROM signals WHERE (created_by=? OR private_user_id=?) "
                     "AND REPLACE(UPPER(symbol),'/','')=? "
                     "AND (closed_at IS NULL OR closed_at='') "
                     "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
-                    (int(created_by), sym_norm),
+                    (int(created_by), int(created_by), sym_norm),
                 ).fetchone()["n"]
                 open_count = c.execute(
-                    "SELECT COUNT(*) n FROM signals WHERE source='SIGNAL_NOW' AND created_by=? "
+                    "SELECT COUNT(*) n FROM signals WHERE (created_by=? OR private_user_id=?) "
                     "AND (closed_at IS NULL OR closed_at='') "
                     "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')",
-                    (int(created_by),),
+                    (int(created_by), int(created_by)),
                 ).fetchone()["n"]
                 corr_open = 0
                 daily_pct = 0.0
             else:
                 open_rows = c.execute(
                     "SELECT symbol, direction FROM signals "
-                    "WHERE (source IS NULL OR source NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW')) "
+                    "WHERE COALESCE(private_user_id,0)=0 AND (source IS NULL OR UPPER(source) NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED')) "
                     "AND (closed_at IS NULL OR closed_at='') "
                     "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')"
                 ).fetchall()

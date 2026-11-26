@@ -1,27 +1,18 @@
-"""SK — Scalper Key (fast momentum at a fresh key level).
+"""SK — this project's Scalper Key model (not an external certification).
 
-Honest, fully mechanical scalping engine (the owner asked for the SK engine
-to exist as a REAL, tested module — this is its documented definition):
-  1. MICRO-TREND : EMA9/EMA21 aligned with real separation (>= 0.15 ATR) in
-                   the trade direction — no counter-scalping ever.
-  2. KEY LEVEL   : the highest high / lowest low of the last 12 candles is the
-                   scalp key; the LAST candle must CLOSE beyond it (break with
-                   close confirmation — a wick-only poke is rejected).
-  3. MOMENTUM    : RSI(14) on the entry TF confirms the push (>= 53 BUY /
-                   <= 47 SELL) — a break without fuel is noise.
-  4. ENTRY       : last close.
-  5. STOP        : the opposite side of the breakout candle ± 0.3 ATR (tight —
-                   a scalp that needs a wide stop is not a scalp).
-  6. TARGETS     : TP1 = 2R (platform floor) · TP2 = 3R · TP3 = 4R — the
-                   quick-capture ladder with a runner.
+Require EMA9/21 separation0.15 ATR; last close beyond prior12-bar key by
+0.10 ATR; RSI>=53 BUY or<=47 SELL. Break distance>=0.25 ATR and HTF are
+bonuses. Entry: close. Stop beyond breakout candle/key +/-0.3 ATR,
+widened if tight; targets2R/3R/4.5R (not4R).
+Weights: trend14, key16, RSI10, decisive8, HTF12, kill-zone6,
+volatility4, RR5 (total75). Minimum score58; minimum40 bars.
 
-Score weights: micro-trend +20 · close-confirmed key break +22 · RSI
-momentum +14 · break distance (>= 0.1 ATR beyond the key) +10 · kill zone +6 ·
-volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone, rsi, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 KEY_LOOKBACK = 12
@@ -29,6 +20,7 @@ STACK_ATR = 0.15
 MIN_BREAK_ATR = 0.10
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:

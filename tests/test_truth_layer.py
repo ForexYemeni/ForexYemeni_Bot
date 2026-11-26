@@ -43,6 +43,10 @@ class TestRichSanitizer(unittest.TestCase):
 
 
 class TestGoldCalibration(unittest.TestCase):
+    def setUp(self):
+        from fysb.engines import provider_health
+        provider_health.reset()
+
     def test_learn_offset_reasonable(self):
         off = md._learn_gold_offset("XAUUSD", 3539.0, 3552.49)
         self.assertIsNotNone(off)

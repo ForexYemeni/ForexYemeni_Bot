@@ -1,5 +1,6 @@
 """v8.2.0 Regression Suite — Active Subscribed Plan Highlight/Card & Real Analysis Confirmation."""
 from __future__ import annotations
+from datetime import datetime, timedelta
 
 import asyncio
 import math
@@ -100,7 +101,7 @@ def _bearish_h1_candles(break_now: bool = False) -> list[dict]:
         c = o + drift
         h = max(o, c) + 2.5
         lo = min(o, c) - 2.5
-        bars.append({"datetime": f"2026-11-20 {i % 24:02d}:00:00", "open": o, "high": h, "low": lo, "close": c})
+        bars.append({"datetime": (datetime(2026, 11, 20) + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S"), "open": o, "high": h, "low": lo, "close": c})
         px = c
     if break_now:
         # Force a decisive full-body bearish breakout candle well below recent support

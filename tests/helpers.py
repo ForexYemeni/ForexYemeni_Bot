@@ -76,7 +76,7 @@ def trend_pullback_setup(base: float = 2500.0, step: float = 2.0) -> list[dict]:
     for i in range(5):
         o = px
         c = px - step * 1.1
-        vals.append((o, o + step * 0.2, c - step * 0.3, c))
+        vals.append((o, o + step * 0.2, c - step * 0.5, c))
         px = c
     # resumption: a strong bullish candle reclaiming the trend
     vals.append((px, px + step * 2.4, px - step * 0.2, px + step * 2.2))
@@ -98,7 +98,7 @@ def ict_bullish_sweep_setup(base: float = 3500.0) -> list[dict]:
     vals.append((px, px + 0.5, low_level + 1.0, low_level + 1.5))
     px = low_level + 1.5
     # sweep: pierce below the low, close back above (sell-side liquidity taken)
-    vals.append((px, px + 0.5, low_level - 1.2, low_level + 2.5))
+    vals.append((px, px + 1.2, low_level - 1.2, low_level + 2.5))
     px = low_level + 2.5
     # displacement: strong bullish candle creating an FVG
     vals.append((px, px + 8.0, px - 0.3, px + 7.5))

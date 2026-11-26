@@ -3,12 +3,19 @@
 Contract:
   evaluate(ctx) -> StrategyResult | None
   * ctx carries entry-TF candles, bias-TF candles, instrument spec, market row.
-  * score = 50 base + weighted bonuses from PASSED, MEASURABLE checks, capped 95.
+  * score = normalized checklist merit (42..95), NOT a win probability.
   * reasons list every contributing rule (documented in docs/STRATEGIES.md).
   * A result is None when the strategy's entry conditions are simply not met —
     that is not an error, the pipeline records it as NO_SETUP.
 """
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from functools import wraps
+import logging
+import math
+from numbers import Real
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,7 +38,7 @@ class StrategyResult:
     tp2: float
     tp3: float
     rr: float
-    score: int                # 0..100 measurable confidence
+    score: int                # checklist merit, never a calibrated probability
     reasons: list[str] = field(default_factory=list)
     checks: dict = field(default_factory=dict)
 
@@ -118,30 +125,113 @@ def cap_stop(
     max_atr: float = 2.6,
     cap_atr: float = 2.4,
 ) -> float:
-    """v6.24.0 Universal stop sanitizer shared across all 13 strategies.
+    """Widen tight/invalid stops, NEVER move a valid structural stop inward.
 
-    * Guarantees strict directional side (BUY: stop < entry; SELL: stop > entry).
-    * Prevents ultra-tight stops (< min_atr * ATR) from noise stop-outs.
-    * Caps abnormal news-spike wick stops (> max_atr * ATR) to cap_atr * ATR
-      so high-quality setups are preserved with institutional risk sizing instead
-      of blowing out to 888-pip stops or getting rejected unnecessarily.
+    ``max_atr``/``cap_atr`` remain accepted for call-site compatibility only.
+    Oversized stops must be rejected by issuance geometry/risk policy, or sized
+    down by execution policy, not cosmetically pulled inside invalidation.
     """
-    a = float(atr_val or 0.0)
-    if a <= 0:
-        return float(stop)
+    e, s, a = float(entry), float(stop), float(atr_val or 0.0)
     d = (direction or "").upper()
-    e = float(entry)
-    s = float(stop)
+    if d not in ("BUY", "SELL") or not all(math.isfinite(x) for x in (e, s, a)):
+        raise ValueError("invalid stop inputs")
+    if a <= 0:
+        return s
+    distance = max(float(min_atr), float(fallback_atr)) * a
     if d == "BUY":
-        if s >= e or (e - s) < min_atr * a:
-            return e - fallback_atr * a
-        if (e - s) > max_atr * a:
-            return e - cap_atr * a
-        return s
-    if d == "SELL":
-        if s <= e or (s - e) < min_atr * a:
-            return e + fallback_atr * a
-        if (s - e) > max_atr * a:
-            return e + cap_atr * a
-        return s
-    return s
+        return e - distance if s >= e or (e - s) < min_atr * a else s
+    return e + distance if s <= e or (s - e) < min_atr * a else s
+
+
+def _finite_number(value) -> bool:
+    try:
+        return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def candle_input_error(candles: list[dict]) -> str:
+    """Validate rather than sort, coerce, repair or silently drop provider bars.
+
+    UTC-naive timestamps follow the provider contract. This checks chronology,
+    NOT whether bars have closed or whether the labelled timeframe is correct;
+    those are responsibilities of the data/issuance pipeline.
+    """
+    if not isinstance(candles, (list, tuple)):
+        return "candle series must be a list or tuple"
+    previous = None
+    for bar in candles:
+        try:
+            o, h, l, c = (bar[k] for k in ("open", "high", "low", "close"))
+            if not all(_finite_number(v) and v > 0 for v in (o, h, l, c)):
+                return "non-finite/non-positive OHLC"
+            if not l <= min(o, c) <= max(o, c) <= h:
+                return "inconsistent OHLC bounds"
+            v = bar.get("volume")
+            if v is not None and (not _finite_number(v) or v < 0):
+                return "invalid volume"
+            dt = datetime.fromisoformat(bar["datetime"].replace("Z", "+00:00"))
+            dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+            if previous is not None and dt <= previous:
+                return "duplicate/out-of-order timestamps"
+            previous = dt
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            return "malformed candle"
+    return ""
+
+
+def result_error(result: StrategyResult, code: str) -> str:
+    """Shared mathematical contract, independent of strategy profitability."""
+    if not isinstance(result, StrategyResult) or result.code != code:
+        return "invalid strategy identity"
+    prices = (result.entry, result.stop, result.tp1, result.tp2, result.tp3)
+    if not all(_finite_number(v) and v > 0 for v in prices):
+        return "invalid/non-positive result prices"
+    e, s, t1, t2, t3 = prices
+    if result.direction == "BUY":
+        ordered = s < e < t1 < t2 < t3
+    elif result.direction == "SELL":
+        ordered = s > e > t1 > t2 > t3
+    else:
+        ordered = False
+    if not ordered:
+        return "invalid directional geometry"
+    rr = abs(t1 - e) / abs(e - s)
+    if not _finite_number(result.rr) or abs(result.rr - round(rr, 2)) > 0.011:
+        return "RR does not describe TP1"
+    if rr < 2.0 - 1e-7 or abs(t2-e)/abs(e-s) < 3.0 - 1e-7 or abs(t3-e)/abs(e-s) < 4.5 - 1e-7:
+        return "target floors violated"
+    if not _finite_number(result.score) or not 0 <= result.score <= 95:
+        return "invalid merit score"
+    if not result.reasons or not all(isinstance(r, str) and r.strip() for r in result.reasons):
+        return "missing decision reasons"
+    if not isinstance(result.checks, dict):
+        return "missing decision checks"
+    return ""
+
+
+def checked_strategy(evaluate):
+    """Apply the same contract to registry AND direct module callers.
+
+    Invalid inputs/results are rejected with diagnostics. Programming failures
+    inside a rule are not swallowed here: evaluate_all logs their traceback.
+    No cache is used: callers can mutate/reuse their candle lists.
+    """
+    code = evaluate.__module__.rsplit(".", 1)[-1].upper()
+
+    @wraps(evaluate)
+    def checked(ctx: Ctx) -> StrategyResult | None:
+        for label, bars in (("entry", ctx.candles), ("bias", ctx.bias_candles)):
+            error = candle_input_error(bars)
+            if error:
+                log.warning("strategy input rejected code=%s series=%s reason=%s", code, label, error)
+                return None
+        result = evaluate(ctx)
+        if result is not None:
+            error = result_error(result, code)
+            if error:
+                log.error("strategy result rejected code=%s reason=%s", code, error)
+                return None
+        return result
+
+    return checked

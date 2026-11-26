@@ -1,32 +1,25 @@
-"""CLASSIC — Classic Technical Analysis (trend + S/R + candle confirmation).
+"""CLASSIC — EMA50 trend + nearby horizontal level + recent candle pattern.
 
-The oldest school in the book, implemented 100% mechanically (no marketing):
-  1. TREND     : price on the correct side of EMA50 AND EMA50 sloping with the
-                 trade direction (rising for BUY, falling for SELL) — a market
-                 hugging its mean is not a classic trend.
-  2. LEVEL     : a REAL horizontal level from support_resistance() — price is
-                 within 1.2 ATR of it, retesting from the correct side
-                 (resistance-turned-support for BUY, support-turned-ceiling
-                 for SELL).
-  3. CONFIRM   : the last candle is a confirmation pattern from
-                 candle_patterns() (engulfing / pin bar) IN the trade direction.
-  4. ENTRY     : last close.
-  5. STOP      : beyond the level (and the last-6-candle extreme) - 0.5 ATR.
-  6. TARGETS   : TP1 = 2R (platform floor) · TP2 = 3R · TP3 = 4.5R — the
-                 classic measured-move ladder.
+Require price beyond EMA50 by0.1 ATR, agreeing EMA50 slope over six bars,
+S/R level within2 ATR and the correct side tolerance0.2 ATR, plus an engulfing/
+pin pattern in the latest THREE bars. This does not prove a historical
+resistance-to-support flip. HTF is a bonus. Entry: close.
+Stop: level/local-six-bar extreme +/-0.5 ATR; targets2R/3R/4.5R.
+Weights: trend14, slope8, level12, side8, pattern12, HTF12,
+kill-zone6, volatility4, RR5 (total81). Minimum score58; minimum55 bars.
 
-Score weights (deterministic): trend +20 · level proximity +18 ·
-direction-correct side +14 · confirmation pattern +16 · EMA50 slope +10 ·
-kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, structure_labels, support_resistance
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 PROXIMITY_ATR = 2.0
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 55:

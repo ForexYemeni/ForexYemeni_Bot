@@ -1,6 +1,6 @@
 """Auto Weekly & Monthly Institutional Performance Digest Service (v8.8.0).
 
-100% honest, database-verified financial audit over the trailing 7 or 30 days:
+Recorded signal-model summary (not broker-account financial audit) over the trailing 7 or 30 days:
   * Audits OFFICIAL published signals only (excludes private on-demand user
     `SIGNAL_NOW` requests so the official track record is never polluted).
   * Separates Decided (closed TP1/TP2/TP3/TP1_BE/TP2_BE/SL), Open (ACTIVE/
@@ -15,7 +15,7 @@
       - Transparent Auto-Quarantine status (`quarantined_strategies`)
   * Broadcast Quality Guard: on scheduled auto-digests (`auto_scheduled=True`),
     Admin ALWAYS receives the full unfiltered audit, while public channels only
-    receive auto-broadcasts when `decided >= 3`, `net_r > 0`, and `profit_factor >= 1.15`.
+    receive both profitable and losing periods when `decided >= 3`.
 """
 from __future__ import annotations
 
@@ -39,28 +39,8 @@ def _cutoff_iso(days: int) -> str:
 
 def _calc_r_multiple(r: dict) -> float:
     """Real R-Multiple of a closed signal (pips_result / stop_pips)."""
-    pips = float(r.get("pips_result") or 0.0)
-    st = str(r.get("status") or "").upper()
-    sym = str(r.get("symbol") or "XAUUSD").upper()
-    entry = float(r.get("entry") or 0.0)
-    stop = float(r.get("stop") or 0.0)
-    sl_pips = 0.0
-    if entry > 0 and stop > 0 and entry != stop:
-        try:
-            sl_pips = abs(instruments.pips(sym, entry, stop))
-        except Exception:
-            sl_pips = 0.0
-    if sl_pips > 1e-6 and pips != 0.0:
-        return max(-2.0, min(10.0, pips / sl_pips))
-    if st == "TP3_HIT":
-        return 4.5
-    if st in ("TP2_HIT", "TP2_BE"):
-        return 3.0
-    if st in ("TP1_HIT", "TP1_BE"):
-        return 2.0
-    if st in LOSS_STATUSES:
-        return -1.0
-    return 0.0
+    from fysb.engines.accounting import modeled_r
+    return modeled_r(r) or 0.0
 
 
 def _exec_verdict(decided: int, net_r: float, pf: float, net_pips: float) -> str:
@@ -72,7 +52,7 @@ def _exec_verdict(decided: int, net_r: float, pf: float, net_pips: float) -> str
         return "💎 أداء مؤسسي رابح ومستقر"
     if net_r > 0 or net_pips > 0:
         return "✅ أداء إيجابي متوازن"
-    return "🛡 فترة متذبذبة — الحجر الذكي للاستراتيجيات مفعّل"
+    return "🛡 فترة سلبية/متذبذبة — دون إخفاء الخسائر"
 
 
 def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
@@ -83,7 +63,7 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         if include_private:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
-                "pips_result, score, source, created_at "
+                "pips_result, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
                 "FROM signals WHERE created_at>=? ORDER BY id DESC",
                 (since,),
             ).fetchall()]
@@ -91,14 +71,16 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         else:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
-                "pips_result, score, source, created_at "
+                "pips_result, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
                 "FROM signals WHERE created_at>=? "
-                "AND (source IS NULL OR UPPER(source) != 'SIGNAL_NOW') "
+                "AND COALESCE(private_user_id,0)=0 "
+                "AND COALESCE(UPPER(source),'') NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED') "
                 "ORDER BY id DESC",
                 (since,),
             ).fetchall()]
             private_excluded = int((c.execute(
-                "SELECT COUNT(*) AS n FROM signals WHERE created_at>=? AND UPPER(source)='SIGNAL_NOW'",
+                "SELECT COUNT(*) AS n FROM signals WHERE created_at>=? AND (COALESCE(private_user_id,0)>0 "
+                "OR UPPER(source) IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED'))",
                 (since,),
             ).fetchone() or {"n": 0})["n"] or 0)
 
@@ -126,9 +108,11 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         sym = str(r.get("symbol") or "XAUUSD").upper()
         entry = float(r.get("entry") or 0.0)
 
-        is_win = st in WIN_STATUSES or (pips > 0 and st not in LOSS_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES)
-        is_loss = st in LOSS_STATUSES or (pips < 0 and st not in WIN_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES)
-        is_open = (not is_win and not is_loss and st in OPEN_STATUSES)
+        from fysb.engines.accounting import is_closed
+        closed = is_closed(r)
+        is_win = closed and (st in WIN_STATUSES or (pips > 0 and st not in LOSS_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES))
+        is_loss = closed and (st in LOSS_STATUSES or (pips < 0 and st not in WIN_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES))
+        is_open = (not is_win and not is_loss and st in OPEN_STATUSES + ("TP1_HIT", "TP2_HIT"))
         is_cancel = (not is_win and not is_loss and st in CANCELLED_STATUSES)
 
         if is_win:
@@ -151,10 +135,6 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
             continue
 
         r_val = _calc_r_multiple(r)
-        if is_win and r_val < 0:
-            r_val = abs(r_val)
-        elif is_loss and r_val > 0:
-            r_val = -abs(r_val)
 
         usd_val = 0.0
         try:
@@ -293,13 +273,13 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
         f"▎📡 إشارات رسمية: <b>{d['total']}</b> (مغلقة: <b>{decided}</b> · جارية: <b>{d['open']}</b>{cancel_bit})",
         f"▎✅ رابحة: <b>{d['wins']}</b> ({tp_strip})  ·  ❌ وقف: <b>{d['losses']}</b>",
         f"▎🎯 نسبة النجاح: <b>{wr:.1f}%</b>  {bar(int(round(wr)), 100)}",
-        f"▎⚖️ العائد الصافي (R): <b>{net_r:+.2f}R</b>  ·  معامل الربح: <b>PF {pf:.2f}</b>",
-        f"▎💎 صافي النقاط: <b>{net_pips:+.1f}p</b>  ·  متوسط العائد/المخاطرة: <b>1:{rr:.1f}</b>",
-        f"▎💵 الأثر المالي (0.01 لوت): <b>{usd001:+,.2f} $</b>  ·  🏆 الأفضل: <b>{esc(d['best_strategy'])}</b>",
+        f"▎⚖️ العائد النموذجي الصافي (R): <b>{net_r:+.2f}R</b>  ·  معامل الربح: <b>PF {pf:.2f}</b>",
+        f"▎💎 صافي النقاط: <b>{net_pips:+.1f}p</b>  ·  متوسط RR المخطط: <b>1:{rr:.1f}</b>",
+        f"▎💵 تقدير نظري (0.01 لوت): <b>{usd001:+,.2f} $</b>  ·  🏆 الأفضل: <b>{esc(d['best_strategy'])}</b>",
     ])
 
     medals = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣")
-    strat_lines = ["🧠 <b>أقوى الاستراتيجيات أداءً (مرتبة بالعائد الحقيقي R)</b>"]
+    strat_lines = ["🧠 <b>أقوى الاستراتيجيات أداءً (مرتبة بالعائد النموذجي R)</b>"]
     if d.get("top_strategies"):
         for i, s in enumerate(d["top_strategies"][:5]):
             sp = float(s.get("pips") or 0.0)
@@ -311,7 +291,7 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
     else:
         strat_lines.append("▎لا توجد صفقات مغلقة خلال هذه الفترة بعد.")
 
-    sym_lines = ["🔥 <b>أقوى الأصول أداءً (مرتبة بالعائد الحقيقي R)</b>"]
+    sym_lines = ["🔥 <b>أقوى الأصول أداءً (مرتبة بالعائد النموذجي R)</b>"]
     if d.get("top_symbols"):
         for s in d["top_symbols"][:4]:
             sp = float(s.get("pips") or 0.0)
@@ -340,23 +320,15 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
             )
         blocks.append(card("\n".join(q_lines)))
 
-    blocks.append("<i>✨ تدقيق مالي آلي موثّق 100% من قاعدة البيانات الحية (يستثني طلبات المستخدمين الخاصة)</i>")
+    blocks.append("<i>✨ ملخص نموذجي من سجلات التتبع المغلقة العامة؛ قد يجمع قياس المسافة القديم والنموذج الجزئي الجديد، دون تكاليف وسيط</i>")
     return "\n".join(blocks)
 
 
 def channel_broadcast_allowed(d: dict) -> tuple[bool, str]:
-    """Quality Guard for automated public/VIP channel broadcasts.
-
-    Never auto-blasts a tiny sample (< 3 decided) or a drawdown period into
-    public channels — Admin always gets the full diagnostic report instead.
-    """
+    """Minimum disclosed sample only; NEVER suppress losing periods."""
     decided = int(d.get("decided") or 0)
-    net_r = float(d.get("net_r") or 0.0)
-    pf = float(d.get("profit_factor") or 0.0)
     if decided < 3:
         return False, f"عدد الصفقات المغلقة غير كافٍ للبث العام ({decided} < 3)"
-    if net_r <= 0 or pf < 1.15:
-        return False, f"حماية سمعة القناة: العائد ({net_r:+.2f}R · PF {pf:.2f}) أقل من حد البث التلقائي العام"
     return True, ""
 
 

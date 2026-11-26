@@ -28,6 +28,11 @@ def _fresh_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_FILE", str(tmp_path / "v840.db"))
     monkeypatch.setattr(config, "ADMIN_ID", 999999)
     db.init_db()
+    db.set_setting("global_kill_switch", "0")
+    db.set_setting("min_rr", "1.0")
+    from fysb.engines import news_guard
+    news_guard.set_cached_events([])
+    monkeypatch.setattr(md, "execution_quote", lambda *a, **kw: {"ok": True, "price": 2660.})
 
 
 def _mk_q(uid: int, data: str = ""):
@@ -200,7 +205,7 @@ def test_true_analysis_two_stage_radar_rejects_wick_then_confirms_h1_and_m15(tmp
         "symbol": "XAUUSD", "timeframe": "H1", "strategy": "SMC", "direction": "BUY",
         "price": 2645.0, "price_time": "2026-11-26 08:00:00", "quality": 85,
         "confirmation": {"stability_tf": "H1", "confirm_tf": "M15", "activated": False, "body_pct": 50},
-        "chart_data": {"tf": "H1", "candles": init_candles, "atr": 10.0, "activation_px": 2650.0, "invalidation_px": 2630.0},
+        "chart_data": {"tf": "H1", "candles": init_candles, "atr": 10.0, "activation_px": 2650.0, "invalidation_px": 2642.0},
     }
     res = ta_svc.evaluate_on_analysis_created(uid, fake_analysis)
     assert res["mode"] == "MONITORING"

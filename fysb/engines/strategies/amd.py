@@ -1,35 +1,29 @@
-"""AMD — Power of Three (Accumulation · Manipulation · Distribution).
+"""AMD — Asian-range preference with an explicit local-range fallback.
 
-Documented ICT/forex-session logic, fully mechanical:
-  1. ACCUMULATION: the opening window (first N candles of the covered session)
-     defines a dealing range.
-  2. MANIPULATION: price breaks ONE side of the opening range (judaas swing /
-     fake move) and then closes back inside the range.
-  3. DISTRIBUTION: expansion toward the OPPOSITE side — the trade direction is
-     opposite to the manipulated side.
+Prefer current-day Asian 00..06 UTC range; otherwise use eight local bars
+followed by six event candidates. First single-sided sweep closing strictly
+inside the reference range defines the trade in the opposite direction.
+The last close must not be back beyond the swept level. HTF/expansion/FVG
+are bonuses. Entry is close or a clipped retracement. Stop stays beyond the
+ACTUAL manipulation wick +/-0.5 ATR. Range targets have 2R/3R/4.5R floors.
+Weights: range8, manipulation16, reclaim14, HTF12, expansion8,
+kill-zone6, volatility4, RR8, FVG8 (total84).
+Minimum score58; minimum40 bars. Fallback is NOT a full daily AMD cycle.
 
-Score weights (deterministic):
-  opening range defined ......... +8
-  manipulation sweep ............ +16
-  close back inside range ....... +14
-  HTF bias alignment ............ +12
-  expansion already started ..... +8
-  kill zone / session timing .... +6
-  volatility regime ok .......... +4
-  RR(TP1) >= 2 .................. +8
-  CRT/FVG confluence ............ +8
-Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, session_levels, structure_labels,
 )
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 OPEN_WINDOW = 8          # fallback candles forming the accumulation range
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
@@ -52,12 +46,17 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         return None
 
     manip_side, manip_level = "", 0.0
+    manip_candle = None
     for c in scan_bars:
+        if not lo < c["close"] < hi or (c["high"] > hi and c["low"] < lo):
+            continue
         if c["high"] > hi and c["close"] < hi:
             manip_side, manip_level = "high", hi
+            manip_candle = c
             break
         if c["low"] < lo and c["close"] > lo:
             manip_side, manip_level = "low", lo
+            manip_candle = c
             break
     if not manip_side and asian_used:
         acc = window[:OPEN_WINDOW]
@@ -66,11 +65,15 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         asian_used = False
         if hi > lo:
             for c in window[OPEN_WINDOW:]:
+                if not lo < c["close"] < hi or (c["high"] > hi and c["low"] < lo):
+                    continue
                 if c["high"] > hi and c["close"] < hi:
                     manip_side, manip_level = "high", hi
+                    manip_candle = c
                     break
                 if c["low"] < lo and c["close"] > lo:
                     manip_side, manip_level = "low", lo
+                    manip_candle = c
                     break
     if not manip_side:
         return None
@@ -90,14 +93,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             return None
         raw_entry = close if close < hi else (hi - 0.25 * a)
         entry = min(raw_entry, close)
-        stop = cap_stop(entry, min(manip_level, lo) - 0.5 * a, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
+        stop = cap_stop(entry, min(float(manip_candle["low"]), lo) - 0.5 * a, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         raw_tp1, raw_tp2, raw_tp3 = hi + (hi - lo) * 0.5, hi + (hi - lo), hi + (hi - lo) * 1.5
     else:
         if close > manip_level:
             return None
         raw_entry = close if close > lo else (lo + 0.25 * a)
         entry = max(raw_entry, close)
-        stop = cap_stop(entry, max(manip_level, hi) + 0.5 * a, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
+        stop = cap_stop(entry, max(float(manip_candle["high"]), hi) + 0.5 * a, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
         raw_tp1, raw_tp2, raw_tp3 = lo - (hi - lo) * 0.5, lo - (hi - lo), lo - (hi - lo) * 1.5
     risk = abs(entry - stop)
     if risk <= 0:

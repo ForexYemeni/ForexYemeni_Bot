@@ -1229,6 +1229,29 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
     if not sig or not sig.get("id"):
         return {"ok": True, "queued": 0, "blocked": 0}
     sid = int(sig["id"])
+    # Trust persisted lifecycle/ownership, never an old publication payload.
+    with db.conn() as c:
+        stored = c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone()
+    if not stored:
+        return {"ok": True, "queued": 0, "blocked": 1, "reason": "signal missing"}
+    sig = dict(stored)
+    from fysb.engines.accounting import is_private, is_closed
+    if (is_private(sig) or is_closed(sig) or sig.get("status") != "RUNNING"
+            or not sig.get("filled_at") or sig.get("source") == "AUTO_FREE" or db.kill_switch_on()):
+        return {"ok": True, "queued": 0, "blocked": 1, "reason": "not an eligible filled public signal"}
+    # Never market-copy a historical fill far from the plan. Feed identity is
+    # checked by execution_quote; unknown/stale/proxy evidence is fail-closed.
+    from fysb.engines import market_data
+    from fysb.engines.signal_engine import _provider_symbol
+    try:
+        quote = market_data.execution_quote(_provider_symbol(sig["symbol"]), config.market_api_key())
+        if not quote.get("ok"):
+            return {"ok": True, "queued": 0, "blocked": 1, "reason": "unverified execution quote"}
+        drift = abs(float(quote["price"])-float(sig["entry"]))
+        if drift > .15 * abs(float(sig["entry"])-float(sig["stop"])):
+            return {"ok": True, "queued": 0, "blocked": 1, "reason": "entry drift exceeds 0.15R"}
+    except Exception:
+        return {"ok": True, "queued": 0, "blocked": 1, "reason": "execution quote unavailable"}
     sym = str(sig.get("symbol") or "").strip().upper()
     direction = str(sig.get("direction") or "BUY").strip().upper()
     entry = float(sig.get("entry") or 0.0)
@@ -1250,6 +1273,11 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
         uid = int(conn["user_id"])
         plat = conn["platform"]
         amode = conn["account_mode"]
+        with db.conn() as c:
+            delivered = c.execute("SELECT 1 FROM signal_deliveries WHERE signal_id=? AND user_id=?", (sid, uid)).fetchone()
+        if not delivered:
+            blocked += 1
+            continue
 
         if int(conn.get("admin_frozen") or 0) == 1:
             blocked += 1
@@ -1267,7 +1295,7 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
                 """SELECT COUNT(*) n FROM bridge_orders bo
                    LEFT JOIN signals s ON s.id = bo.signal_id
                    WHERE bo.connection_id=? AND bo.action_type='OPEN'
-                     AND bo.status IN ('QUEUED','DISPATCHED','EXECUTED')
+                     AND bo.status IN ('RESERVING','UNKNOWN','QUEUED','DISPATCHED','EXECUTED')
                      AND (
                          bo.signal_id = 0
                          OR (
@@ -1312,8 +1340,25 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
             blocked += 1
             continue
 
-        # Execute directly on cTrader / TradeLocker / Deriv or queue for MT5 EA
-        init_status = "QUEUED"
+        # Durable at-most-one reservation BEFORE any broker request. An
+        # ambiguous timeout/crash remains reserved, requiring reconciliation;
+        # never automatically retry an order that might already exist.
+        from fysb.engines.issuance import serialized
+        with serialized() as c:
+            if c.execute("SELECT id FROM bridge_orders WHERE connection_id=? AND signal_id=? AND action_type='OPEN'", (cid, sid)).fetchone():
+                continue
+            count = c.execute("SELECT COUNT(*) n FROM bridge_orders WHERE connection_id=? AND action_type='OPEN' AND status IN ('RESERVING','UNKNOWN','QUEUED','DISPATCHED','EXECUTED')", (cid,)).fetchone()["n"]
+            if count >= int(conn.get("max_open_trades") or 3):
+                blocked += 1
+                continue
+            reservation = c.execute(
+                """INSERT INTO bridge_orders(connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
+                   lots,entry_price,stop_price,tp1_price,tp2_price,tp3_price,status,detail,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?,'RESERVING',?,?,?)""",
+                (cid,uid,plat,amode,sid,sym,direction,lots,entry,stop,tp1,tp2,tp3,"reserved before broker call",now,now)).lastrowid
+        # Only MT5 can queue; missing credentials for a direct adapter must not
+        # silently become an unserviceable QUEUED row.
+        init_status = "QUEUED" if plat == "mt5_bridge" else "BLOCKED_CONFIG"
         ext_id = ""
         detail = f"جاهز للتنفيذ على {PLATFORMS[plat]['name']} ({amode})"
         if plat == "ctrader":
@@ -1338,8 +1383,8 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
                         ext_id = str(ex.get("position_id") or "")
                         detail = f"🟢 نُفذ فعلياً على cTrader ({ex.get('symbol_name', sym)} · #{ext_id})"
             except Exception as exc:
-                init_status = "FAILED"
-                detail = f"❌ فشل تنفيذ cTrader: {str(exc)[:160]}"
+                init_status = "UNKNOWN"
+                detail = f"⚠️ يلزم تحقق مستقل من تنفيذ cTrader: {str(exc)[:160]}"
         elif plat == "tradelocker":
             try:
                 creds = vault.decrypt_json(conn.get("creds_enc") or "") if conn.get("creds_enc") else {}
@@ -1353,8 +1398,8 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
                     ext_id = str(ex.get("order_id") or "")
                     detail = f"🟢 نُفذ فعلياً على TradeLocker ({ex.get('symbol_name', sym)} · #{ext_id})"
             except Exception as exc:
-                init_status = "FAILED"
-                detail = f"❌ فشل تنفيذ TradeLocker: {str(exc)[:160]}"
+                init_status = "UNKNOWN"
+                detail = f"⚠️ يلزم تحقق مستقل من تنفيذ TradeLocker: {str(exc)[:160]}"
         elif plat == "deriv":
             try:
                 creds = vault.decrypt_json(conn.get("creds_enc") or "") if conn.get("creds_enc") else {}
@@ -1366,17 +1411,11 @@ def dispatch_signal_to_bridges(sig: dict) -> dict:
                     ext_id = str(ex.get("contract_id") or "")
                     detail = f"🟢 نُفذ فعلياً على Deriv ({ex.get('symbol_name', sym)} · #{ext_id})"
             except Exception as exc:
-                init_status = "FAILED"
-                detail = f"❌ فشل تنفيذ Deriv: {str(exc)[:160]}"
+                init_status = "UNKNOWN"
+                detail = f"⚠️ يلزم تحقق مستقل من تنفيذ Deriv: {str(exc)[:160]}"
         with db.tx() as c:
-            c.execute(
-                """INSERT INTO bridge_orders(
-                     connection_id,user_id,platform,account_mode,signal_id,symbol,direction,action_type,
-                     lots,entry_price,stop_price,tp1_price,tp2_price,tp3_price,status,external_order_id,detail,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?,?)""",
-                (cid, uid, plat, amode, sid, sym, direction, lots, entry, stop, tp1, tp2, tp3,
-                 init_status, ext_id, detail, now, now),
-            )
+            c.execute("UPDATE bridge_orders SET status=?, external_order_id=?, detail=?, updated_at=? WHERE id=?",
+                      (init_status, ext_id, detail, config.now(), reservation))
         queued += 1
     return {"ok": True, "queued": queued, "blocked": blocked}
 
@@ -1609,7 +1648,8 @@ def poll_mt5_orders(bridge_key: str, balance: float = 0.0, equity: float = 0.0) 
     if not bkey:
         return {"ok": False, "error": "Missing bridge key"}
     now = config.now()
-    with db.tx() as c:
+    from fysb.engines.issuance import serialized
+    with serialized() as c:
         conn = c.execute(
             "SELECT * FROM bridge_connections WHERE bridge_key=? AND platform='mt5_bridge'",
             (bkey,),
@@ -1631,8 +1671,16 @@ def poll_mt5_orders(bridge_key: str, balance: float = 0.0, equity: float = 0.0) 
             "SELECT * FROM bridge_orders WHERE connection_id=? AND status='QUEUED' ORDER BY id ASC LIMIT 10",
             (cid,),
         ).fetchall()]
+        eligible = []
         for o in orders:
-            c.execute("UPDATE bridge_orders SET status='DISPATCHED', updated_at=? WHERE id=?", (now, int(o["id"])))
+            if o["action_type"] == "OPEN" and int(o.get("signal_id") or 0) > 0:
+                row = c.execute("SELECT * FROM signals WHERE id=?", (o["signal_id"],)).fetchone()
+                if not row or row["status"] != "RUNNING" or row["closed_at"] or db.kill_switch_on():
+                    c.execute("UPDATE bridge_orders SET status='BLOCKED_POLICY', detail='signal no longer eligible', updated_at=? WHERE id=?", (now, o["id"]))
+                    continue
+            c.execute("UPDATE bridge_orders SET status='DISPATCHED', updated_at=? WHERE id=? AND status='QUEUED'", (now, int(o["id"])))
+            eligible.append(o)
+        orders = eligible
     return {
         "ok": True,
         "paused": False,
@@ -1789,6 +1837,12 @@ void OnTimer()
          HandlePartialBE(sym, entry);
          SendAck(oid, "EXECUTED", "BE", "50% Partial Closed + SL moved to BE");
       }} else {{
+         double quote = SymbolInfoDouble(sym, dir == "BUY" ? SYMBOL_ASK : SYMBOL_BID);
+         double risk = MathAbs(entry - sl);
+         if(quote <= 0 || risk <= 0 || MathAbs(quote-entry) > 0.15*risk) {{
+            SendAck(oid, "FAILED", "", "Entry drift exceeds 0.15R");
+            continue;
+         }}
          bool ok = (dir == "BUY") ? g_trade.Buy(lots, sym, 0.0, sl, tp, "{config.BRAND}")
                                   : g_trade.Sell(lots, sym, 0.0, sl, tp, "{config.BRAND}");
          if(ok) SendAck(oid, "EXECUTED", IntegerToString((long)g_trade.ResultOrder()), "Filled on MT5");

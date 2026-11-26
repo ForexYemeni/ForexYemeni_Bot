@@ -34,6 +34,9 @@ class _DummyBot:
 def _init_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_FILE", str(tmp_path / "v850.db"))
     db.init_db()
+    db.set_setting("global_kill_switch", "0")
+    db.set_setting("min_rr", "1.0")
+    monkeypatch.setattr(market_data, "execution_quote", lambda *a, **kw: {"ok": True, "price": 3621.})
     news_guard.reset_cache()
     news_guard.set_cached_events([], ts=9e12)  # zero network calls in tests
 
@@ -204,7 +207,7 @@ def test_v850_liquidity_and_sr_aware_take_profits(tmp_path, monkeypatch):
     assert plan["tp_grounded"] is True
     assert 3600.0 < plan["tp1"] < 3617.0
     assert plan["tp1"] < plan["tp2"] < plan["tp3"]
-    assert plan["rr"] >= 1.5
+    assert plan["rr"] == round((plan["tp1"]-plan["entry"])/(plan["entry"]-plan["sl"]), 2)
 
 
 def test_v850_anti_chase_filter_and_high_impact_news_guard(tmp_path, monkeypatch):
@@ -399,6 +402,14 @@ def test_v852_guaranteed_analysis_chart_and_clean_separation_from_true_analysis(
         market_data, "fetch_candles",
         lambda *a, **kw: {"values": vals, "last_candle_iso": vals[-1]["datetime"], "provider": "TEST"},
     )
+
+    # Chart/wizard integration is not a promise that every rising series must
+    # trigger a rule engine. Fix the lens decision independently of strategies.
+    from fysb.engines.strategies.base import StrategyResult
+    entry = vals[-1]["close"]
+    monkeypatch.setattr(analytics, "evaluate_all", lambda *a, **kw: [StrategyResult(
+        "ICT", "BUY", entry, entry-4, entry+8, entry+12, entry+18,
+        2.0, 82, ["chart wizard fixture"], {})])
 
     # 1. Admin Channel «🚀 تحليل الآن» (`post_analysis`) MUST send PNG photo + text card!
     ch_id = admin_channels.add_channel("@TestAnlCh852", "VIP Analysis Channel", "public")

@@ -209,6 +209,8 @@ def _parse_release_payload(data: dict, asset_name: str):
         "name": asset_name,
         "title": (data.get("name") or tag).strip(),
         "published_at": (data.get("published_at") or "").strip(),
+        "notes": str(data.get("body") or ""),
+        "html_url": str(data.get("html_url") or ""),
     }
     if sha256_hex:
         out["sha256"] = sha256_hex
@@ -316,7 +318,7 @@ def release_by_tag(tag: str, owner=None, repo=None, asset_name=None):
     return None
 
 
-def list_releases(limit: int = 8, owner=None, repo=None, asset_name=None) -> list[dict]:
+def list_releases(limit: int = 8, owner=None, repo=None, asset_name=None, *, page: int = 1, include_uninstallable: bool = False) -> list[dict]:
     """قائمة بأحدث الإصدارات المتاحة للتثبيت أو التراجع من GitHub Releases."""
     if owner is None or repo is None or asset_name is None:
         c_owner, c_repo, c_asset = _config()
@@ -324,9 +326,10 @@ def list_releases(limit: int = 8, owner=None, repo=None, asset_name=None) -> lis
         repo = repo or c_repo
         asset_name = asset_name or c_asset
     limit = max(1, min(int(limit or 8), 20))
+    page = max(1, int(page))
     out: list[dict] = []
     try:
-        items = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases?per_page={limit}")
+        items = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases?per_page={limit}&page={page}")
         if isinstance(items, list):
             for item in items:
                 if item.get("draft"):
@@ -334,17 +337,40 @@ def list_releases(limit: int = 8, owner=None, repo=None, asset_name=None) -> lis
                 parsed = _parse_release_payload(item, asset_name)
                 if parsed:
                     out.append(parsed)
-            if out:
-                return out
+                elif include_uninstallable and normalize_tag(item.get("tag_name")):
+                    out.append({"tag": item["tag_name"], "title": item.get("name") or item["tag_name"],
+                                "notes": str(item.get("body") or ""), "url": "",
+                                "published_at": item.get("published_at") or ""})
+            return out
     except Exception:
         pass
     try:
+        if page > 1:
+            return []  # Atom has no reliable arbitrary-page history; never repeat page 1.
         for tag in tags_from_feed(owner, repo, limit=limit):
             url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
             out.append({"tag": tag, "url": url, "name": asset_name, "title": tag, "published_at": ""})
     except Exception:
         pass
     return out
+
+
+def release_details(tag: str):
+    """Published release notes, even for historical releases without a ZIP."""
+    norm = normalize_tag(tag)
+    if not norm:
+        return None
+    owner, repo, asset_name = _config()
+    try:
+        data = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{norm}")
+        if data.get("draft") or normalize_tag(data.get("tag_name")) != norm:
+            return None
+        return _parse_release_payload(data, asset_name) or {
+            "tag": norm, "title": data.get("name") or norm, "url": "",
+            "notes": str(data.get("body") or ""), "published_at": data.get("published_at") or "",
+        }
+    except Exception:
+        return None
 
 
 # --- استخراج آمن --------------------------------------------------------------
@@ -519,7 +545,7 @@ def rollback_update(dest_root=None, snapshot_path=None) -> dict:
 
 # --- الدورة الكاملة ----------------------------------------------------------
 
-def self_update(dest_root=None, target_tag: str = "", force: bool = False) -> dict:
+def self_update(dest_root=None, target_tag: str = "", force: bool = False, *, before_install=None) -> dict:
     """فحص ← تنزيل ← نسخة أمان ← تثبيت. يعيد تقريراً بلا أي استثناءات.
 
     * target_tag فارغ: يجلب أحدث إصدار فقط إذا كان أحدث من المحلي (ما لم تكن force=True).
@@ -592,6 +618,10 @@ def self_update(dest_root=None, target_tag: str = "", force: bool = False) -> di
             if not validate_package(tmp_zip):
                 result["detail"] = "الحزمة ناقصة (main.py أو fysb مفقود) — أُلغي التثبيت"
                 return result
+            # Notify only AFTER downloading/validating the package, BEFORE any
+            # live file is replaced. Non-Telegram/boot callers can omit the hook.
+            if before_install is not None:
+                before_install(dict(result))
             # Save automatic pre-update rollback snapshot of current live code
             snap = create_rollback_snapshot(dest_root, result["local"] or "")
             if snap is not None:
@@ -717,7 +747,7 @@ def _record_boot_stamp(remote_tag: str, root=None) -> None:
         pass
 
 
-def boot_check() -> dict:
+def boot_check(*, before_install=None) -> dict:
     """نقطة الإقلاع — تستدعى من main.py قبل تحميل أي كود من fysb.
 
     يوجد تحديث أحدث ⇒ تثبيته ثم إعادة تشغيل فورية (الدالة لا تعود).
@@ -737,7 +767,7 @@ def boot_check() -> dict:
             return {"status": "loop_guarded", "remote": rel_peek.get("tag") or ""}
     except Exception:
         pass
-    res = self_update()
+    res = self_update(before_install=before_install) if before_install is not None else self_update()
     dt = int((time.monotonic() - t0) * 1000)
     if res["status"] == "updated":
         _record_boot_stamp(res.get("remote") or "")

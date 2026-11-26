@@ -733,7 +733,9 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "webapp_seturl":
         await admin_system.admin_webapp_set_url(q, uid, context, bot)
     elif act == "updates":
-        await admin_system.admin_updates(q, uid, context, bot)
+        await admin_system.admin_updates(q, uid, context, bot, max(1, user_pages._safe_int(arg) or 1))
+    elif act == "updnotes":
+        await admin_system.admin_release_notes(q, uid, context, bot, arg, max(1, user_pages._safe_int(arg2) or 1))
     elif act == "updlatest":
         await admin_system.admin_update_latest(q, uid, context, bot)
     elif act == "updver":

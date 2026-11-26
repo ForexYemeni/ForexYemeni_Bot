@@ -12,3 +12,5 @@ database/spot_calibration.json
 .last_boot_update.json
 tunnel_tokens.json
 .tunnel.pid
+
+.cache/

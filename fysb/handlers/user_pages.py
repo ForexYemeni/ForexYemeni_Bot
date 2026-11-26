@@ -14,10 +14,11 @@ from fysb.services import support as support_service
 from fysb.services import users as users_service
 from fysb.theme import ICON, bar, esc, human_dt, strategy_name, tf_name
 from fysb.ui import keyboards as kb
-from fysb.ui.cards import (plan_tier_icon, render_analysis_card,
-                           render_luxury_upgrade_card, render_plan_card,
-                           render_plans_showcase_card, render_signal_card,
-                           render_signal_compact, render_user_card)
+from fysb.ui.cards import (plan_tier_icon, render_active_subscribed_plan_card,
+                           render_analysis_card, render_luxury_upgrade_card,
+                           render_plan_card, render_plans_showcase_card,
+                           render_signal_card, render_signal_compact,
+                           render_user_card)
 
 TICKET_TYPES = [("عام", "general"), ("مشكلة تقنية", "technical"), ("المدفوعات", "billing"), ("اقتراح", "suggestion")]
 
@@ -1041,22 +1042,41 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     elif action == "plans":
         rows = [dict(r) for r in await afn.run(_all_plans)]
         current = dict(await afn.run(subs.plan_for, uid))
+        active_sub = await afn.run(subs.active_plan, uid)
+        active_sub_d = dict(active_sub) if active_sub else None
         trial = await afn.run(subs.free_trial_status, uid, u, current)
+        cur_code = (current.get("code") or "FREE").upper()
+        cur_rank = (float(current.get("price") or 0), int(current.get("max_signals_per_day") or 0))
+        trial_expired = bool(cur_code == "FREE" and trial and trial.get("expired"))
         rows_kb = []
         for r in rows:
             code = (r["code"] or "").upper()
             ic = plan_tier_icon(code)
             price = float(r["price"] or 0)
             dur = int(r["duration_days"] or 0)
+            r_rank = (price, int(r.get("max_signals_per_day") or 0))
             if code == "FREE":
                 p_lbl = f"مجاني · {'مفتوح' if dur == 0 else f'{dur} يوم'}"
             else:
                 p_lbl = f"{price:g} {r['currency']} · {'دائم' if dur == 0 else f'{dur} يوم'}"
-            badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
-            btn_style = "success" if code in ("VIP", "ROYAL") else "primary"
-            rows_kb.append([kb.btn(f"{ic} {esc(r['title'])}{badge} · {p_lbl}", f"u:planview:{r['code']}", style=btn_style)])
+            is_mine = (code == cur_code) and not trial_expired
+            if is_mine:
+                # Distinct Royal Emerald Green button ONLY for the user's currently active subscribed plan
+                rows_kb.append([kb.btn(
+                    f"👑 باقتك المفعّلة الآن · {esc(r['title'])} ✅",
+                    f"u:planview:{r['code']}",
+                    style="success",
+                )])
+            else:
+                badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
+                prefix = "⬆️ ترقية إلى " if r_rank > cur_rank else ""
+                rows_kb.append([kb.btn(
+                    f"{prefix}{ic} {esc(r['title'])}{badge} · {p_lbl}",
+                    f"u:planview:{r['code']}",
+                    style="primary",
+                )])
         rows_kb.append([kb.btn("🧾 مدفوعاتي وطلباتي", "u:payments", style="primary")])
-        body = render_plans_showcase_card(rows, current, trial_info=trial)
+        body = render_plans_showcase_card(rows, current, trial_info=trial, active_sub=active_sub_d)
         await render(q, body, kb.user_nav(rows_kb), bot)
 
     elif action.startswith("planview:"):
@@ -1065,14 +1085,89 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         if not p:
             await render(q, "هذه الباقة غير متاحة حالياً.", kb.user_nav([[kb.btn("↩️ الباقات", "u:plans", style="primary")]]), bot)
             return
+        p_dict = dict(p)
+        code_u = (p_dict["code"] or "").upper()
+        current = dict(await afn.run(subs.plan_for, uid))
+        cur_code = (current.get("code") or "FREE").upper()
+        active_sub = await afn.run(subs.active_plan, uid)
+        active_sub_d = dict(active_sub) if active_sub else None
+        trial = await afn.run(subs.free_trial_status, uid, u, current) if cur_code == "FREE" or code_u == "FREE" else None
+        trial_expired = bool(cur_code == "FREE" and trial and trial.get("expired"))
+        is_current_active = (
+            (code_u == cur_code and not trial_expired)
+            if code_u == "FREE"
+            else (code_u == cur_code and active_sub_d is not None and (active_sub_d.get("plan_code") or "").upper() == code_u)
+        )
+
+        rows_kb = []
+        plan_strats = [x.strip().upper() for x in (p_dict["strategies"] or "").split(",") if x.strip() and x.upper() != "ALL"]
+
+        if is_current_active:
+            # Ultra-luxury Active Subscribed Membership Certificate — ZERO payment methods!
+            def _today_usage(u_id: int) -> tuple[int, int]:
+                day0 = db.day_start_utc()
+                with db.conn() as c:
+                    s_n = c.execute(
+                        "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
+                        (u_id, day0),
+                    ).fetchone()["n"]
+                    a_n = c.execute(
+                        "SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
+                        (u_id, day0),
+                    ).fetchone()["n"]
+                return int(s_n), int(a_n)
+
+            sig_used, anl_used = await afn.run(_today_usage, uid)
+            body = render_active_subscribed_plan_card(
+                p_dict,
+                active_sub=active_sub_d,
+                trial_info=trial,
+                sig_used=sig_used,
+                anl_used=anl_used,
+            )
+            if plan_strats:
+                from fysb.services import strategy_info as _si
+                body += "\n\n🧠 <b><u>الاستراتيجيات المفتوحة في باقتك — اضغط أي واحدة لقراءة عملها الحقيقي:</u></b>"
+                for s in plan_strats:
+                    mark = "🟢" if _si.implemented(s) else "⚪"
+                    body += f"\n▎{mark} <b>{esc(s)}</b> — {esc(_si.SHORT_LABEL.get(s, s))}"
+                for i in range(0, len(plan_strats), 2):
+                    rows_kb.append([kb.btn(f"🧠 {s}", f"u:stratinfo:{s}:{code_u}") for s in plan_strats[i:i + 2]])
+
+            # Suggest next higher tier upgrade button (if one exists) — payments appear ONLY on upgrade!
+            all_rows = [dict(r) for r in await afn.run(_all_plans)]
+            cur_rank = (float(p_dict.get("price") or 0), int(p_dict.get("max_signals_per_day") or 0))
+            higher = [
+                r for r in all_rows
+                if (float(r.get("price") or 0), int(r.get("max_signals_per_day") or 0)) > cur_rank
+            ]
+            higher.sort(key=lambda r: (float(r.get("price") or 0), int(r.get("max_signals_per_day") or 0)))
+            if higher:
+                nxt = higher[0]
+                nxt_ic = plan_tier_icon(nxt["code"])
+                rows_kb.append([kb.btn(
+                    f"⬆️ ترقية إلى {nxt_ic} {esc(nxt['title'])} · {float(nxt['price'] or 0):g} {esc(nxt['currency'])}",
+                    f"u:planview:{nxt['code']}",
+                    style="primary",
+                )])
+            rows_kb.append([
+                kb.btn("⚡ إشارة الآن", "u:signow", style="success"),
+                kb.btn("🔬 التحليلات الذكية", "u:analytics", style="primary"),
+            ])
+            rows_kb.append([kb.btn("↩️ مقارنة جميع الباقات", "u:plans", style="primary")])
+            await render(q, body, kb.user_nav(rows_kb), bot)
+            return
+
+        # Upgrade / New Plan View — shows full plan specs + ALL payment methods
         methods = await afn.run(payments_service.list_methods, enabled_only=True)
         chains = await afn.run(payments_service.configured_chains)
-        trial = await afn.run(subs.free_trial_status, uid, u) if code.upper() == "FREE" else None
-        rows_kb = []
-        body = render_plan_card(dict(p), trial_info=trial)
+        body = render_plan_card(p_dict, trial_info=trial if code_u == "FREE" else None)
+        cur_rank = (float(current.get("price") or 0), int(current.get("max_signals_per_day") or 0))
+        target_rank = (float(p_dict.get("price") or 0), int(p_dict.get("max_signals_per_day") or 0))
+        if target_rank > cur_rank and code_u != "FREE":
+            body = f"⬆️ <b><u>ترقية ملكية من {esc(current['title'])} إلى {esc(p_dict['title'])}</u></b>\n\n" + body
         # v6.10.0 (owner report 8) — the plan's strategies: ONE LINE EACH with
         # a button per methodology opening the REAL identity page in-chat.
-        plan_strats = [x.strip().upper() for x in (p["strategies"] or "").split(",") if x.strip() and x.upper() != "ALL"]
         if plan_strats:
             from fysb.services import strategy_info as _si
             body += "\n\n🧠 <b><u>الاستراتيجيات داخل هذه الباقة — اضغط أي واحدة لقراءة عملها الحقيقي:</u></b>"
@@ -1081,9 +1176,9 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                 body += f"\n▎{mark} <b>{esc(s)}</b> — {esc(_si.SHORT_LABEL.get(s, s))}"
             for i in range(0, len(plan_strats), 2):
                 rows_kb.append([kb.btn(f"🧠 {s}", f"u:stratinfo:{s}:{code}") for s in plan_strats[i:i + 2]])
-        if code != "FREE":
+        if code_u != "FREE":
             from fysb.services import promos as _promos
-            orig_price = float(p["price"] or 0.0)
+            orig_price = float(p_dict["price"] or 0.0)
             active_promo = context.user_data.get("active_promo") or {}
             promo_code = ""
             promo_pct = 0
@@ -1097,7 +1192,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     body += (
                         f"\n\n🎟 <b>كود الخصم مفعّل:</b> <code>{esc(promo_code)}</code> "
                         f"(<b>-{promo_pct}%</b> · وفّرت <b>${saved_usd:.2f}</b>)\n"
-                        f"▎💰 السعر بعد الخصم: <b>${final_price:g} {esc(p['currency'])}</b> "
+                        f"▎💰 السعر بعد الخصم: <b>${final_price:g} {esc(p_dict['currency'])}</b> "
                         f"<s>${orig_price:g}</s>"
                     )
                 else:

@@ -144,6 +144,13 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers import crypto_api
         if await crypto_api.handle_user_crypto_api(q, uid, action, context, context.bot):
             return
+    # v8.4.0: Royal True Analysis Radar Subscription (price / duration / trial)
+    if action in ("true_analysis", "tatrial", "tabuy") or action.startswith(
+        ("tausdt:", "tapay:", "tamoncancel:")
+    ):
+        from fysb.handlers import true_analysis_ui
+        if await true_analysis_ui.handle_user_true_analysis(q, uid, action, context, context.bot):
+            return
     # v7.7.2: Native Telegram Royal Auto-Bridge (cTrader / TradeLocker / Deriv / MT5 EA)
     if action == "bridge" or action.startswith("br_"):
         from fysb.handlers import auto_bridge_bot
@@ -178,6 +185,9 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act in ("bridge", "promos", "promo_new", "digest_now") or act.startswith("br_"):
         from fysb.handlers import auto_bridge_bot
         await auto_bridge_bot.handle_admin_bridge(q, uid, act, arg, arg2, context, bot)
+    elif act in ("true_analysis", "tatoggle_global", "taset", "talist", "utamenu", "utagrant", "utarevoke"):
+        from fysb.handlers import true_analysis_ui
+        await true_analysis_ui.handle_admin_true_analysis(q, uid, act, arg, arg2, context, bot)
     elif act == "hub":
         from fysb.handlers.common import render
         hub = kb.ADMIN_HUBS.get(arg)

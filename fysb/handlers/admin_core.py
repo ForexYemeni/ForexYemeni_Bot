@@ -89,19 +89,25 @@ async def admin_user_detail(q, uid, context, bot, target: int):
         await render(q, "المستخدم غير موجود.", kb.admin_nav(), bot)
         return
     profile = await afn.run(users_service.profile_summary, target)
+    from fysb.services import true_analysis as _ta
+    ta_st = await afn.run(_ta.has_access, target)
+    ta_badge = ("🟢 مفعّل" if ta_st["active"] else "⚪ غير مفعّل")
     rows_kb = [
         [kb.btn("⛔ حظر" if not u["is_blocked"] else "🔓 إلغاء الحظر", f"a:toggleuser:{target}",
                 style="danger" if not u["is_blocked"] else "success"),
          kb.btn("🔔 تبديل الإشعارات", f"a:togglenotify:{target}")],
         [kb.btn("💳 مدفوعاته", f"a:userpayments:{target}"), kb.btn("📡 ما استلمه", f"a:userdeliveries:{target}")],
         [kb.btn("✏️ تعديل الاشتراك", f"a:subedit:{target}", style="primary"), kb.btn("🧪 حسابه التجريبي", f"a:demoacct:{target}")],
+        [kb.btn(f"👑 تحليل ForexYemeni الحقيقي ({ta_badge})", f"a:utamenu:{target}",
+                style="success" if ta_st["active"] else "primary")],
         [kb.btn("⚡ سماح بالنسخ", f"a:br_user_set:{target}:ALLOW", style="success"),
          kb.btn("🚫 منع النسخ", f"a:br_user_set:{target}:DENY", style="danger"),
          kb.btn("⚙️ تلقائي", f"a:br_user_set:{target}:AUTO")],
         [kb.btn("🗑 حذف المستخدم نهائياً", f"a:userdelete:{target}", style="danger")],
         [kb.btn("↩️ دليل المستخدمين", "a:users")],
     ]
-    await render(q, render_user_card(u, profile), kb.admin_nav(rows_kb), bot)
+    card = render_user_card(u, profile) + f"\n👑 <b>تحليل ForexYemeni الحقيقي:</b> <b>{ta_badge}</b>"
+    await render(q, card, kb.admin_nav(rows_kb), bot)
 
 
 async def admin_user_delete_confirm(q, uid, context, bot, target: int):

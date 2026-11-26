@@ -94,7 +94,7 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_acad_media_for", "awaiting_acad_edit_for", "awaiting_acad_quiz_for",
                 "awaiting_gift_custom", "awaiting_gift_direct",
                 "awaiting_exch_creds", "awaiting_ngrok_token", "awaiting_webapp_url",
-                "awaiting_chart_channel_add")
+                "awaiting_chart_channel_add", "awaiting_ta_setting")
 
 
 def clear_flows(ud: dict) -> None:
@@ -620,6 +620,45 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         except Exception as e:
             ud["awaiting_support_config"] = True
             await update.effective_message.reply_text("تعذر الحفظ: " + safe(e))
+        return True
+
+    # ---------- v8.4.0 Royal True Analysis Settings (price / days / trial) ----------
+    ta_field = ud.pop("awaiting_ta_setting", None)
+    if ta_field in ("price", "days", "trial"):
+        from fysb.ui import keyboards as _kb
+        raw_num = text.strip().replace("$", "").replace(",", "")
+        try:
+            val_f = float(raw_num)
+            if ta_field == "price":
+                if val_f < 0 or val_f > 100000:
+                    raise ValueError("out_of_range")
+                saved = f"{val_f:g}"
+                await afn.run(db.set_setting, "true_analysis_price_usd", saved)
+                msg_ok = f"✅ تم تحديث سعر اشتراك تحليل ForexYemeni الحقيقي إلى <b>{saved} USD</b>."
+            elif ta_field == "days":
+                val_i = int(round(val_f))
+                if val_i < 1 or val_i > 3650:
+                    raise ValueError("out_of_range")
+                await afn.run(db.set_setting, "true_analysis_days", str(val_i))
+                msg_ok = f"✅ تم تحديث مدة الاشتراك إلى <b>{val_i} يوماً</b>."
+            else:
+                val_i = int(round(val_f))
+                if val_i < 0 or val_i > 365:
+                    raise ValueError("out_of_range")
+                await afn.run(db.set_setting, "true_analysis_trial_days", str(val_i))
+                msg_ok = (
+                    f"✅ تم ضبط المدة التجريبية المجانية إلى <b>{val_i} أيام</b> 🎁"
+                    if val_i > 0 else "✅ تم إيقاف الفترة التجريبية المجانية (0 أيام) 🔒"
+                )
+            await afn.run(audit_log.log, uid, f"true_analysis_setting:{ta_field}:{raw_num}")
+            await update.effective_message.reply_text(
+                msg_ok,
+                reply_markup=_kb.admin_nav([[_kb.btn("👑 لوحة تحليل ForexYemeni الحقيقي", "a:true_analysis", style="success")]]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            ud["awaiting_ta_setting"] = ta_field
+            await update.effective_message.reply_text("⚠️ أدخل رقماً صحيحاً صالحاً (أو اضغط إلغاء للعودة).")
         return True
 
     # ---------- User search ----------

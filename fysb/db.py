@@ -560,6 +560,38 @@ CREATE TABLE IF NOT EXISTS bridge_orders(
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS analysis_monitors(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  strategy TEXT NOT NULL DEFAULT 'ALL',
+  direction TEXT NOT NULL,
+  stability_tf TEXT NOT NULL,
+  confirm_tf TEXT NOT NULL,
+  activation_px REAL NOT NULL DEFAULT 0.0,
+  invalidation_px REAL NOT NULL DEFAULT 0.0,
+  buffer_px REAL NOT NULL DEFAULT 0.0,
+  entry_ref REAL NOT NULL DEFAULT 0.0,
+  sl REAL NOT NULL DEFAULT 0.0,
+  tp1 REAL NOT NULL DEFAULT 0.0,
+  tp2 REAL NOT NULL DEFAULT 0.0,
+  tp3 REAL NOT NULL DEFAULT 0.0,
+  score INTEGER NOT NULL DEFAULT 0,
+  confidence INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'WATCHING_STABILITY',
+  stability_candle_ts TEXT NOT NULL DEFAULT '',
+  stability_confirmed_at TEXT NOT NULL DEFAULT '',
+  confirm_candle_ts TEXT NOT NULL DEFAULT '',
+  signal_id INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT NOT NULL DEFAULT '',
+  last_price REAL NOT NULL DEFAULT 0.0,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
 
 # ADD-only column migrations: table -> {column: definition}
@@ -567,6 +599,9 @@ ADD_COLUMNS = {
     "users": {
         "last_seen": "TEXT DEFAULT ''",
         "is_admin_granted": "INTEGER DEFAULT 0",
+        "true_analysis_enabled": "INTEGER DEFAULT 0",
+        "true_analysis_until": "TEXT DEFAULT ''",
+        "true_analysis_trial_used": "INTEGER DEFAULT 0",
     },
     "plans": {"max_signals_per_day": "INTEGER DEFAULT 3",
               "max_analyses_per_day": "INTEGER DEFAULT 3"},
@@ -584,6 +619,7 @@ ADD_COLUMNS = {
         "half_notified": "INTEGER DEFAULT 0",
         "live_px": "REAL DEFAULT 0",
         "filled_at": "TEXT DEFAULT ''",
+        "private_user_id": "INTEGER DEFAULT 0",
     },
     "signal_deliveries": {
         "chat_id": "TEXT DEFAULT ''",
@@ -662,6 +698,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_engine_runs_created ON engine_runs(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_engine_runs_symbol ON engine_runs(symbol, timeframe)",
     "CREATE INDEX IF NOT EXISTS idx_ticketmsgs_ticket ON ticket_messages(ticket_id)",
+    "CREATE INDEX IF NOT EXISTS idx_amon_status ON analysis_monitors(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_amon_user_sym ON analysis_monitors(user_id, symbol, status)",
     "CREATE INDEX IF NOT EXISTS idx_demopos_account ON demo_positions(account_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(is_blocked)",
     "CREATE INDEX IF NOT EXISTS idx_broadcast_status ON broadcasts(status)",
@@ -757,6 +795,11 @@ DEFAULT_SETTINGS = {
     "webapp_auto_tunnel": "1",
     "ngrok_authtoken": "",
     "webapp_custom_url": "",
+    # v8.4.0 Royal True Analysis Radar Subscription (Admin-editable price, duration & trial)
+    "true_analysis_enabled_global": "1",
+    "true_analysis_price_usd": "99",
+    "true_analysis_days": "30",
+    "true_analysis_trial_days": "3",
 }
 
 SEED_MARKETS = [

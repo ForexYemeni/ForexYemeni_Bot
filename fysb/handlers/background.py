@@ -505,9 +505,11 @@ async def tracker_loop(app):
                                     except Exception:
                                         pass
                                 # Route ONLY the chart to matching market-filtered Chart-Only Channels
-                                await _cch.deliver_chart_to_matching_channels(
-                                    app.bot, esig, png, cap, mode="tracking", skip_private=True
-                                )
+                                # (STRICT ISOLATION: NEVER broadcast private True Analysis signals!)
+                                if not int(esig.get("private_user_id") or 0):
+                                    await _cch.deliver_chart_to_matching_channels(
+                                        app.bot, esig, png, cap, mode="tracking", skip_private=True
+                                    )
                             except Exception:
                                 log.debug("tracking chart send failed for sig #%s", ev.get("sig", {}).get("id"))
                 except Exception:
@@ -516,6 +518,9 @@ async def tracker_loop(app):
             for ps in result.get("proof_signals", []):
                 try:
                     sid = int(ps["id"])
+                    priv_uid = int(ps.get("private_user_id") or 0)
+                    if priv_uid and priv_uid != int(config.ADMIN_ID or 0):
+                        continue
                     if sid in admin_proof_sent_sids:
                         continue
                     from fysb.ui import charts as _charts
@@ -709,11 +714,10 @@ async def channels_loop(app):
 
 
 async def watchers_loop(app):
-    """v6.10.0 — «إشارة الآن» auto-search (signal_watchers): every minute the
-    DUE watchers re-run the REAL engine for their exact market+strategy. A
-    found setup is emitted like any engine signal and the watcher stops; a
-    quiet market just reschedules. Nothing is ever manufactured."""
+    """v6.10.0 + v8.4.0 — Runs BOTH «إشارة الآن» auto-search watchers AND the
+    Royal «تحليل ForexYemeni الحقيقي» 2-stage closed-candle radar every 60s."""
     from fysb.handlers import signal_now
+    from fysb.services import true_analysis
     while True:
         try:
             await signal_now.run_due_watchers(app)
@@ -721,6 +725,12 @@ async def watchers_loop(app):
             raise
         except Exception:
             log.exception("watchers loop failed")
+        try:
+            await true_analysis.poll_active_monitors(app.bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("true_analysis radar loop failed")
         await asyncio.sleep(60)
 
 

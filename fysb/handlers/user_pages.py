@@ -202,7 +202,7 @@ async def _render_user_markets(q, uid: int, u, bot, notice: str = "", category: 
     plan = await afn.run(subs.plan_for, uid)
     is_admin = (uid == config.ADMIN_ID)
     allowed_raw = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
-    all_plan = is_admin or ("ALL" in allowed_raw)
+    all_plan = is_admin or ("ALL" in allowed_raw) or (str(plan.get("code") or "").upper() == "VIP")
 
     all_cat_rows = await afn.run(_all_catalog_map)
     live_rows = [r for r in all_cat_rows if int(r.get("enabled") or 0) and int(r.get("verified") or 0)]
@@ -239,11 +239,9 @@ async def _render_user_markets(q, uid: int, u, bot, notice: str = "", category: 
         icon = CATEGORY_ICON.get(cat, "🌐")
         title = CATEGORY_AR.get(cat, cat)
         grp_live = list(live_by_cat.get(cat, []))
-        grp_live.sort(key=lambda r: (
-            0 if r["symbol"] == "XAUUSD" else 1,
-            0 if r["symbol"].upper() in active_set else (1 if r["symbol"].upper() in available else 2),
-            r["symbol"],
-        ))
+        # Stable deterministic sort (XAUUSD first, then alphabetical) so toggling
+        # a coin/pair on Page 1/2/3 flips ✅ ↔ ⚪ in place without jumping pages!
+        grp_live.sort(key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, r["symbol"]))
         total_live = len(grp_live)
         total_cat_all = len(all_by_cat.get(cat, []))
         total_pages = max(1, (total_live + _USER_MKT_PAGE_SIZE - 1) // _USER_MKT_PAGE_SIZE)
@@ -506,6 +504,18 @@ async def _render_analytics_markets(q, uid: int, u, bot, category: str = "", pag
             pair = []
     if pair:
         rows_kb.append(pair)
+    # v8.4.0 Royal True Analysis Radar status / upgrade banner button
+    from fysb.services import true_analysis as _ta
+    ta_st = await afn.run(_ta.has_access, uid)
+    if ta_st["active"]:
+        rows_kb.append([kb.btn("👑 رادار تحليل ForexYemeni الحقيقي (🟢 مفعّل)", "u:true_analysis", style="success")])
+    elif ta_st["enabled_global"]:
+        ta_lbl = (
+            f"👑 تحليل ForexYemeni الحقيقي (🎁 تجربة {ta_st['trial_days']} أيام)"
+            if ta_st["trial_available"] else
+            "👑 اشترك في تحليل ForexYemeni الحقيقي ✨"
+        )
+        rows_kb.append([kb.btn(ta_lbl, "u:true_analysis", style="primary")])
     await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
 
 
@@ -638,6 +648,27 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             await _upsell(q, uid, bot, f"السوق {symbol.upper()} غير مشمول في باقتك الحالية",
                           unlock_kind="markets", unlock_item=symbol.upper())
             return
+        # v8.4.0 CONTINUITY GUARD: if subscriber ALREADY has an active True Analysis
+        # signal or live chart radar on this symbol, inform them that their previous
+        # analysis & signal are still active instead of creating conflicting views!
+        from fysb.services import true_analysis as _ta
+        ta_acc = await afn.run(_ta.has_access, uid)
+        if ta_acc["active"]:
+            cont = await afn.run(_ta.check_active_continuity, uid, symbol)
+            if cont:
+                live_px = 0.0
+                if cont["kind"] == "ACTIVE_SIGNAL":
+                    try:
+                        from fysb.engines import market_data as _md
+                        mrow_c = await afn.run(_market_row, symbol)
+                        psym_c = (mrow_c["provider_symbol"] if mrow_c else symbol)
+                        q_px = await asyncio.to_thread(_md.fetch_price, psym_c, config.market_api_key(), True)
+                        live_px = float((q_px or {}).get("price") or 0.0)
+                    except Exception:
+                        live_px = 0.0
+                c_body, c_rows = await afn.run(_ta.render_continuity_card, cont, live_px)
+                await render(q, c_body, kb.user_nav(c_rows), bot)
+                return
         # v6.8.1 NOTE: the picker NEVER dead-ends (regression-pinned live bug) —
         # even a ⚪ closed market keeps flowing; the analysis stage itself is
         # honest when provider data is unavailable.
@@ -772,9 +803,41 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             log.debug("analysis chart photo delivery skipped: %s", _ce)
         card_text = render_analysis_card(an, market_row=row)
         card_text += f"\n\n📊 <b>حصتك الآن:</b> <b>{q_state['used']}/{q_state['quota']}</b> {bar(q_state['used'], q_state['quota'])}"
-        await render(q, card_text,
-                     kb.user_nav([[kb.btn("🔬 تحليل جديد", "u:analytics"),
-                                   kb.btn("📡 الإشارات", "u:signals")]]), bot)
+
+        # v8.4.0 Royal True Analysis Radar Hook (100% Real Instant Execution OR 2-Stage Closed-Candle Monitoring)
+        from fysb.services import true_analysis as _ta
+        ta_res = await afn.run(_ta.evaluate_on_analysis_created, uid, an)
+        ta_mode = ta_res.get("mode")
+        anl_rows = [[kb.btn("🔬 تحليل جديد", "u:analytics"), kb.btn("📡 الإشارات", "u:signals")]]
+        if ta_mode == "MONITORING":
+            card_text += _ta.render_monitoring_started_banner(ta_res)
+            anl_rows.insert(0, [kb.btn("👁‍🗨 لوحة رادار تحليلاتي", "u:true_analysis", style="success")])
+        elif ta_mode == "INSTANT_SIGNAL":
+            card_text += (
+                "\n\n⚡ <b><u>تنفيذ فوري حقيقي — رادار ForexYemeni</u></b>\n"
+                "<blockquote>▎شروط الإغلاق والثبات مكتملة فعلياً على الشارت الآن! "
+                "تم إصدار إشارتك الحقيقية الخاصة مع الشارت في الرسالة التالية فوراً ✅</blockquote>"
+            )
+            anl_rows.insert(0, [kb.btn("👑 رادار تحليلاتي وإشارتي", "u:true_analysis", style="success")])
+        elif ta_mode == "NO_ACCESS" and (ta_res.get("access") or {}).get("enabled_global"):
+            anl_rows.insert(0, [kb.btn("👑 فعّل رادار تحليل ForexYemeni الحقيقي ✨", "u:true_analysis", style="primary")])
+
+        await render(q, card_text, kb.user_nav(anl_rows), bot)
+
+        if ta_mode == "INSTANT_SIGNAL" and bot is not None:
+            try:
+                await _ta._deliver_private_signal_with_chart(
+                    bot,
+                    uid,
+                    ta_res["signal"],
+                    instant=True,
+                    stab_tf=ta_res["stability_tf"],
+                    conf_tf=ta_res["confirm_tf"],
+                    body_pct=float(ta_res.get("body_pct") or 65.0),
+                    candles=ta_res.get("candles") or [],
+                )
+            except Exception as _tae:
+                log.debug("instant true_analysis signal delivery failed: %s", _tae)
 
     # ---------- Signals (v6.20.4 luxury date-grouped archive: Today / Yesterday / By Date) ----------
     elif action == "signals" or action.startswith("sigday:"):
@@ -1066,12 +1129,13 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         plan = await afn.run(subs.plan_for, uid)
         is_admin = (uid == config.ADMIN_ID)
         allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
-        if not is_admin and "ALL" not in allowed and symbol not in allowed:
+        is_vip = (str(plan.get("code") or "").upper() == "VIP")
+        if not is_admin and not is_vip and "ALL" not in allowed and symbol not in allowed:
             await _upsell(q, uid, bot, f"السوق {symbol} غير متاح في باقتك الحالية",
                           unlock_kind="markets", unlock_item=symbol)
             return
         rows = await afn.run(_live_market_rows)
-        if is_admin or "ALL" in allowed:
+        if is_admin or is_vip or "ALL" in allowed:
             available = [r["symbol"].upper().replace("/", "") for r in rows] or [symbol]
         else:
             available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
@@ -1292,6 +1356,19 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     f"u:planview:{r['code']}",
                     style="primary",
                 )])
+        from fysb.services import true_analysis as _ta
+        ta_st = await afn.run(_ta.has_access, uid)
+        if ta_st["enabled_global"] or ta_st["active"]:
+            if ta_st["active"]:
+                ta_plan_lbl = "👑 تحليل ForexYemeni الحقيقي · مفعّل ✅"
+                ta_style = "success"
+            elif ta_st["trial_available"]:
+                ta_plan_lbl = f"👑 اشتراك تحليل ForexYemeni الحقيقي · {ta_st['price_usd']:g}$ (🎁 تجربة {ta_st['trial_days']} أيام)"
+                ta_style = "primary"
+            else:
+                ta_plan_lbl = f"👑 اشتراك تحليل ForexYemeni الحقيقي · {ta_st['price_usd']:g}$ / {ta_st['duration_days']} يوم"
+                ta_style = "primary"
+            rows_kb.append([kb.btn(ta_plan_lbl, "u:true_analysis", style=ta_style)])
         rows_kb.append([kb.btn("🧾 مدفوعاتي وطلباتي", "u:payments", style="primary")])
         body = render_plans_showcase_card(rows, current, trial_info=trial, active_sub=active_sub_d)
         await render(q, body, kb.user_nav(rows_kb), bot)

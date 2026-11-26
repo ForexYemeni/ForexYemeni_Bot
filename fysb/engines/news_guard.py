@@ -25,9 +25,16 @@ FEED_MIRRORS = (
     "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
 )
 CACHE_TTL_SECONDS = 1800  # 30 min
+# v8.11.0 (P3): a weekly calendar's events carry ABSOLUTE future timestamps, so
+# a slightly-old cache is still truthful for "is a High-impact event within
+# ±window?". Refresh failures no longer poison an otherwise usable cache:
+# UNKNOWN (blocks issuance) applies ONLY to a genuine data void — no usable
+# cached events at all — or to a cache older than the admin-configurable max
+# age. Admins may also opt into fail-open for the data-void case.
+CACHE_MAX_AGE_DEFAULT_HOURS = 48
 
 _LOCK = threading.Lock()
-_CACHE: dict = {"ts": 0.0, "events": [], "error": ""}
+_CACHE: dict = {"ts": 0.0, "events": [], "error": "", "attempt_ts": 0.0}
 _ALERTED_KEYS: set[str] = set()
 
 _IMPACT_AR = {
@@ -70,7 +77,7 @@ _CURRENCY_IMPACT_MARKETS = {
 def reset_cache() -> None:
     """Clear calendar cache & alert dedup set (used in unit tests)."""
     with _LOCK:
-        _CACHE.update(ts=0.0, events=[], error="")
+        _CACHE.update(ts=0.0, events=[], error="", attempt_ts=0.0)
         _ALERTED_KEYS.clear()
 
 
@@ -191,13 +198,17 @@ def fetch_events(force_refresh: bool = False) -> list[dict]:
                 raw = json.loads(resp.read().decode("utf-8"))
             events = _parse_raw_feed(raw if isinstance(raw, list) else [])
             with _LOCK:
-                _CACHE.update(ts=now_t, events=events, error="")
+                _CACHE.update(ts=now_t, events=events, error="", attempt_ts=now_t)
             return list(events)
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {str(exc)[:60]}"
             log.debug("news_guard mirror %s unavailable: %s", mirror, exc)
     with _LOCK:
+        # v8.11.0 (P3): a failed REFRESH no longer poisons an otherwise usable
+        # cache — the error is recorded for diagnostics/health only; cached
+        # events keep serving (their timestamps are absolute and truthful).
         _CACHE["error"] = last_err or "FeedUnavailable"
+        _CACHE["attempt_ts"] = now_t
         if _CACHE["ts"] <= 0:
             _CACHE["ts"] = now_t - CACHE_TTL_SECONDS + 300
         return list(_CACHE["events"])
@@ -205,6 +216,51 @@ def fetch_events(force_refresh: bool = False) -> list[dict]:
 
 def is_enabled() -> bool:
     return (db.get_setting("news_guard_enabled", "1") or "1") == "1"
+
+
+def max_cache_age_seconds() -> int:
+    """v8.11.0 (P3): admin-tunable max usable cache age (hours, 6..168)."""
+    return max(6, min(168, db.get_setting_int("news_guard_cache_max_hours", CACHE_MAX_AGE_DEFAULT_HOURS))) * 3600
+
+
+def fail_open() -> bool:
+    """v8.11.0 (P3): admin opt-in — on a genuine data VOID, allow issuance
+    (logged honestly) instead of the default UNKNOWN-blocks rule."""
+    return (db.get_setting("news_guard_fail_open", "0") or "0") == "1"
+
+
+def cache_age_seconds() -> float:
+    with _LOCK:
+        ts = float(_CACHE.get("ts") or 0.0)
+    return (time.time() - ts) if ts > 0 else 1e12
+
+
+def feed_health() -> dict:
+    """v8.11.0 (P3): truthful calendar health for admin diagnostics (no vendor names).
+
+    OK      — last refresh SUCCEEDED within the normal TTL (an empty feed from a
+              successful refresh is truthful quiet-week data, not a fault).
+    CACHED  — refresh failing, but usable cached events within the max age.
+    UNKNOWN — genuine data void: refresh failing with no usable events at all,
+              or a cache older than the configured max age, or never refreshed.
+    """
+    with _LOCK:
+        ts = float(_CACHE.get("ts") or 0.0)
+        err = str(_CACHE.get("error") or "")
+        n = len(_CACHE.get("events") or [])
+    age = (time.time() - ts) if ts > 0 else 1e12
+    if ts > 0 and not err:
+        state = "OK"
+    elif err and n and age <= max_cache_age_seconds():
+        state = "CACHED"
+    else:
+        state = "UNKNOWN"
+    return {
+        "state": state,
+        "cache_age_minutes": int(age // 60) if age < 1e11 else -1,
+        "events": n,
+        "refresh_error": err,
+    }
 
 
 def window_minutes() -> int:
@@ -228,7 +284,15 @@ def broadcast_destinations() -> dict[str, bool]:
 
 
 def check_news_block(symbol: str, now_utc: datetime | None = None) -> tuple[bool, dict | None]:
-    """Return `(True, event)` if `symbol` is inside a High-Impact news buffer."""
+    """Return `(True, event)` if `symbol` is inside a High-Impact news buffer.
+
+    v8.11.0 (P3) — refresh failures no longer act as a global kill switch:
+      * A usable cache (events present, within the admin max age) serves the
+        block decision as before — event timestamps are absolute and truthful.
+      * UNKNOWN (blocks) applies ONLY to a genuine data void: no usable events
+        at all, or a cache older than the configured max age.
+      * On a data void, the admin may opt into fail-open (`news_guard_fail_open`).
+    """
     if not is_enabled():
         return False, None
     ccys = currencies_for_symbol(symbol)
@@ -239,8 +303,27 @@ def check_news_block(symbol: str, now_utc: datetime | None = None) -> tuple[bool
         now = now.replace(tzinfo=timezone.utc)
     buf = timedelta(minutes=window_minutes())
     events = fetch_events()
-    if last_feed_error():
-        return True, {"currency": "/".join(sorted(ccys)), "title": "حالة الأخبار غير معروفة — تعذر تحديث التقويم", "health": "UNKNOWN", "minutes_delta": 0}
+    refresh_err = last_feed_error()
+    if not events:
+        # No usable cached events at all:
+        #   * refresh failing  → genuine DATA VOID (the documented UNKNOWN rule,
+        #     unless the admin opted into fail-open);
+        #   * refresh succeeded with an empty feed → truthful quiet week, NOT a
+        #     fault — issuance proceeds (v8.4.0/v8.10.0 contract preserved).
+        if refresh_err:
+            if fail_open():
+                log.warning("news guard data VOID for %s — fail-open enabled by admin; issuance allowed", symbol)
+                return False, None
+            return True, {"currency": "/".join(sorted(ccys)), "title": "حالة الأخبار غير معروفة — لا توجد بيانات تقويم صالحة", "health": "UNKNOWN", "minutes_delta": 0}
+        return False, None
+    health = feed_health()
+    if health["state"] == "UNKNOWN":
+        # events exist but the cache is beyond the admin max age while refresh
+        # keeps failing — their absolute timestamps are no longer trustworthy.
+        if fail_open():
+            log.warning("news guard cache beyond max age for %s — fail-open enabled by admin", symbol)
+            return False, None
+        return True, {"currency": "/".join(sorted(ccys)), "title": "حالة الأخبار غير معروفة — بيانات التقويم المحفوظة تجاوزت حصر الصلاحية", "health": "UNKNOWN", "minutes_delta": 0}
     for ev in events:
         if ev.get("impact") != "High":
             continue
@@ -405,6 +488,8 @@ def render_news_calendar_html(
     auto_b = auto_broadcast_enabled()
     dests = broadcast_destinations()
     feed_err = last_feed_error() if events is None else ""
+    # v8.11.0 (P3): truthful health line — CACHED is usable, not an outage.
+    _health = feed_health() if events is None else {"state": "OK", "cache_age_minutes": 0}
     dest_parts = []
     if dests["users"]:
         dest_parts.append("👥 المستخدمون")
@@ -420,14 +505,19 @@ def render_news_calendar_html(
         f"▎🛡 درع حماية المحرك: <b>{'🟢 مفعّل — حماية تلقائية نشطة' if on else '⚪ متوقف'}</b>\n"
         f"▎⏱ نافذة الحظر حول الخبر القوي: <b>±{wmin} دقيقة</b>\n"
         f"▎📢 البث التلقائي للأخبار الفاخرة: <b>{'🟢 مفعّل تلقائياً' if auto_b else '⚪ متوقف'}</b>\n"
-        f"▎📤 وجهات البث المفعّلة: <b>{dest_txt}</b>"
+        f"▎📤 وجهات البث المفعّلة: <b>{dest_txt}</b>\n"
+        f"▎🩺 صحة التقويم: <b>{'🟢 حي ومحدّث' if _health['state'] == 'OK' else ('🟡 يعمل ببيانات محفوظة (' + str(_health['cache_age_minutes']) + ' د) — قرار الخبر يبقى صادقاً' if _health['state'] == 'CACHED' else '🔴 لا توجد بيانات تقويم صالحة')}</b>"
         "</blockquote>",
         "",
     ]
     if feed_err and not evs:
         lines.append(
-            f"⚠️ <b>تعذر الاتصال بمزود التقويم الاقتصادي حالياً</b> (<code>{esc(feed_err)}</code>)\n"
-            "<i>اضغط «🔄 تحديث التقويم» لإعادة المحاولة — لن يتوقف المحرك أثناء انقطاع المزود.</i>"
+            f"⚠️ <b>تعذر الاتصال بمصدر التقويم الاقتصادي حالياً</b> (<code>{esc(feed_err)}</code>)\n"
+            "<i>اضغط «🔄 تحديث التقويم» لإعادة المحاولة — لا توجد بيانات صالحة بديلة الآن.</i>"
+        )
+    elif feed_err and evs:
+        lines.append(
+            f"🟡 <b>يُعاد محاولة التحديث الحي — والقرار يعمل ببيانات محفوظة صالحة</b> (<code>{esc(feed_err)}</code>)"
         )
     elif not evs:
         lines.append("<i>✨ لا توجد أخبار اقتصادية عالية التأثير مجدولة خلال الـ 48 ساعة القادمة.</i>")

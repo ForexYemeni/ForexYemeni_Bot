@@ -643,7 +643,7 @@ async def admin_engine(q, uid, context, bot):
         lines.append(f"  {r['created_at'][11:16]} {esc(r['symbol'])} {esc(r['timeframe'])}: {esc(r['result'])}")
     rows_kb = [
         [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle", style="danger" if enabled else "success")],
-        [kb.btn(f"📐 فريمات المسح الآلي ({scan_tfs_raw or 'M15,H1'})", "a:scantfs", style="primary")],
+        [kb.btn("🔍 تشخيص بوابات الإشارات", "a:enginediag", style="success"), kb.btn(f"📐 فريمات المسح الآلي ({scan_tfs_raw or 'M15,H1'})", "a:scantfs", style="primary")],
         [kb.btn("➖ فاصل", f"a:engineadj:interval:-60"), kb.btn(f"⏱ {interval}s", "a:plannoop"), kb.btn("➕ فاصل", f"a:engineadj:interval:60")],
         [kb.btn("➖ جودة", f"a:engineadj:minscore:-5"), kb.btn(f"⭐ {min_score}", "a:plannoop"), kb.btn("➕ جودة", f"a:engineadj:minscore:5")],
         [kb.btn("🚀 دورة فورية الآن", "a:enginenow"), kb.btn("🧹 تنظيف السجل", "a:engineclean")],
@@ -698,6 +698,130 @@ async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
     new_val = await afn.run(_toggle_scan_tf_sync, code)
     await afn.run(audit_log.log, uid, f"engine_scan_timeframes:{new_val}")
     await admin_scan_tfs(q, uid, context, bot)
+
+
+# --- v8.11.0 (P1): Signal-Gate Diagnostics Panel — every gate, live, no guessing ---
+def _engine_diag_sync() -> dict:
+    """One pooled pass over every issuance gate (admin eyes only, no vendor names)."""
+    from fysb.engines import news_guard as _ng, risk as _risk
+    with db.conn() as c:
+        armed = [r["symbol"] for r in c.execute(
+            "SELECT symbol FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol").fetchall()]
+        last_runs = c.execute(
+            "SELECT e.symbol, e.result, e.detail, e.created_at FROM engine_runs e "
+            "JOIN (SELECT symbol, MAX(id) AS mid FROM engine_runs GROUP BY symbol) t ON e.id=t.mid").fetchall()
+        recent = c.execute(
+            "SELECT symbol, timeframe, result, detail, created_at FROM engine_runs "
+            "ORDER BY id DESC LIMIT 20").fetchall()
+        tfs_enabled = [r["code"] for r in c.execute(
+            "SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchall()]
+    gates = {
+        "engine": db.get_setting("engine_enabled", "0") == "1",
+        "kill": db.kill_switch_on(),
+        "push": db.get_setting("signal_push_enabled", "1") == "1",
+        "scan_tfs": (db.get_setting("engine_scan_timeframes", "M15,H1") or "").strip(),
+        "interval": db.get_setting_int("engine_interval_seconds", 300),
+        "min_score": db.get_setting_int("engine_min_score", 80),
+        "td_key_source": config.market_api_key_source(),
+        "news": _ng.is_enabled(),
+        "news_window": _ng.window_minutes(),
+        "news_fail_open": _ng.fail_open(),
+        "news_cache_max_h": max(6, min(168, db.get_setting_int("news_guard_cache_max_hours", 48))),
+        "news_health": _ng.feed_health(),
+        "provider_state": market_data.provider_status().get("state", "?"),
+        "risk": _risk.open_caps_snapshot(),
+        "tfs_enabled": tfs_enabled,
+    }
+    return {
+        "armed": armed,
+        "runs": {r["symbol"]: dict(r) for r in last_runs},
+        "recent": [dict(r) for r in recent],
+        "gates": gates,
+    }
+
+
+def _probe_market_data_sync() -> str:
+    """REAL live-data probe (admin-only): actual fetch, actual ages, sanitized."""
+    out = []
+    try:
+        q = market_data.fetch_price("XAUUSD", use_cache=False)
+        out.append(f"▎🥇 السعر اللحظي للذهب: <b>{float(q['price']):,.2f}</b> ✅")
+    except RuntimeError as e:
+        out.append(f"▎🥇 السعر اللحظي للذهب: ⚠️ تعذر — {esc(str(e))[:90]}")
+    try:
+        p = market_data.fetch_candles("XAUUSD", "1h", use_cache=False)
+        age_min = int(p["age_seconds"]) // 60
+        limit_min = max(0, market_data.staleness_limit("1h") // 60)
+        verdict = "✅ طازجة ومؤهلة للتحقق" if not market_data.is_stale(p) else "⚠️ قديمة — بوابة القدم سترفضها"
+        out.append(f"▎🕯 آخر شمعة ساعة مغلقة: <code>{esc(p['last_candle_iso'])}</code> UTC")
+        out.append(f"▎⏱ عمرها: <b>{age_min} دقيقة</b> · الحد المسموح لهذا الفريم: <b>{limit_min} دقيقة</b>")
+        out.append(f"▎🧪 الحكم: <b>{verdict}</b> · الشموع المتاحة: <b>{len(p['values'])}</b>")
+    except RuntimeError as e:
+        out.append(f"▎🕯 شموع الساعة: ⚠️ تعذر — {esc(str(e))[:90]}")
+    return "\n".join(out)
+
+
+async def admin_engine_diagnostics(q, uid, context, bot, notice: str = ""):
+    d = await afn.run(_engine_diag_sync)
+    g = d["gates"]
+    nh = g["news_health"]
+    rk = g["risk"]
+    nh_txt = {"OK": "🟢 سليم ومحدّث",
+              "CACHED": f"🟡 بيانات محفوظة ({nh['cache_age_minutes']} د) — صالحة للقرار",
+              "UNKNOWN": "🔴 لا توجد بيانات تقويم صالحة"}.get(nh["state"], "؟")
+    td_txt = {"env": "✅ مضبوط من .env", "panel": "✅ مضبوط من اللوحة (مشفّر)",
+              "": "⚪ غير مضبوط — سلسلة البيانات بلا طبقة موسّعة"}.get(g["td_key_source"], "؟")
+    lines = [
+        "🔍 <b><u>تشخيص بوابات الإشارات — الحقيقة لحظة بلحظة</u></b>",
+        "<blockquote>"
+        f"▎🧠 المحرك الآلي: <b>{'🟢 يعمل' if g['engine'] else '⚪ متوقف — لا إشارات تلقائية إطلاقاً'}</b>\n"
+        f"▎🛡 مفتاح القتل: <b>{'⛔ مشغّل!' if g['kill'] else '✅ حر'}</b> · دفع الإشارات: <b>{'✅' if g['push'] else '⛔'}</b>\n"
+        f"▎📐 المسح: <b>{esc(g['scan_tfs'] or 'M15,H1')}</b> كل <b>{g['interval']} ث</b> · الحد الأدنى للجودة: <b>{g['min_score']}/100</b>\n"
+        f"▎🌐 أسواق مسلّحة: <b>{len(d['armed'])}</b> {esc('، '.join(d['armed'][:8]))}"
+        + (f" (+{len(d['armed']) - 8})" if len(d["armed"]) > 8 else "") + "\n"
+        f"▎🔑 البيانات الموسّعة (KEYED): <b>{td_txt}</b>\n"
+        f"▎📡 حالة سلسلة البيانات: <b>{esc(g['provider_state'])}</b>"
+        "</blockquote>",
+        "",
+        "<b>📰 درع الأخبار:</b> "
+        f"<b>{'🟢 مفعّل (±' + str(g['news_window']) + 'د)' if g['news'] else '⚪ متوقف'}</b> · الصحة: <b>{nh_txt}</b>\n"
+        f"<i>حصر البيانات الصالحة: {g['news_cache_max_h']} ساعة · وضع الفتح عند الفراغ: "
+        f"{'🟢 مفعّل (الفراغ لا يمنع الإصدار)' if g['news_fail_open'] else '⚪ متوقف (الفراغ يمنع الإصدار)'}</i>",
+        "",
+        "<b>🛡 السقف الخفي للمخاطر (يحجب بصمت عندما يمتلئ):</b> "
+        f"<b>{rk['open']}/{rk['cap_open']}</b> {'⛔ <b>ممتلئ — يحجب أي إشارة جديدة</b>' if rk['ceiling_full'] else '✅ متاح'}\n"
+        f"▎أعلى سوق: <b>{esc(rk['worst_symbol'] or '—')} {rk['worst_symbol_open']}/{rk['cap_per_symbol']}</b>"
+        f" {'⛔ ممتلئ' if rk['symbol_full'] else ''} · الترابط: <b>{esc(rk['worst_bucket'] or '—')} {rk['worst_bucket_open']}/{rk['cap_correlated']}</b>"
+        f" {'⛔ ممتلئ' if rk['correlated_full'] else ''}\n"
+        f"▎قاطع اليوم: <b>{rk['daily_pnl_pct']:+.1f}%</b> (الحد -{rk['max_daily_loss_pct']:.1f}%) "
+        f"{'⛔ <b>مشغّل</b>' if rk['daily_breached'] else '✅'} · أقدم إشارة مفتوحة: <b>{rk['oldest_open_hours']} س</b>",
+        "",
+        "<b>📜 آخر محاولة لكل سوق مسلّح:</b>",
+    ]
+    if d["runs"]:
+        for sym, r in list(d["runs"].items())[:10]:
+            mark = "✅" if r["result"] == "SIGNAL_CREATED" else ("ℹ️" if r["result"] in ("NO_SETUP", "DUPLICATE") else "⛔")
+            lines.append(f"  {mark} <b>{esc(sym)}</b>: {esc(r['result'])} · {esc((r['detail'] or '')[:70])}")
+    else:
+        lines.append("  <i>لا توجد دورات مسجلة بعد — شغّل «🚀 دورة فورية الآن».</i>")
+    lines += ["", "<b>🧾 آخر 20 قراراً (engine_runs):</b>"]
+    for r in d["recent"][:20]:
+        lines.append(f"  {human_dt(r['created_at'])} · {esc(r['symbol'])} {esc(r['timeframe'])}: "
+                     f"{esc(r['result'])} · {esc((r['detail'] or '')[:60])}")
+    if notice:
+        lines = [f"<blockquote>🧪 <b>نتيجة الفحص الحي الفعلي:</b>\n{notice}</blockquote>", ""] + lines
+    rows_kb = [
+        [kb.btn("🧪 فحص بيانات حي الآن (ذهب/ساعة)", "a:enginediagprobe", style="success"),
+         kb.btn("🔄 تحديث", "a:enginediag", style="primary")],
+        [kb.btn("🧠 المحرك", "a:engine"), kb.btn("📰 درع الأخبار", "a:newsguard")],
+    ]
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_engine_diag_probe(q, uid, context, bot):
+    notice = await afn.run(_probe_market_data_sync)
+    await afn.run(audit_log.log, uid, "enginediag:probe")
+    await admin_engine_diagnostics(q, uid, context, bot, notice=notice)
 
 
 # --- v6.25.0 / v7.4.0 Live News Guard, Auto-Broadcast, Leaderboard & Strength -
@@ -774,6 +898,13 @@ async def admin_news_guard(q, uid, context, bot, *, force_refresh: bool = False,
             kb.btn(f"{'✅ ' if win == 45 else ''}±45د", "a:newsguardwin:45", style="success" if win == 45 else "primary"),
             kb.btn(f"{'✅ ' if win == 60 else ''}±60د", "a:newsguardwin:60", style="success" if win == 60 else "primary"),
         ],
+        [
+            kb.btn("🟢 الفتح عند الفراغ: مفعّل" if db.get_setting("news_guard_fail_open", "0") == "1"
+                   else "⚪ الفتح عند الفراغ: متوقف", "a:newsfailopen",
+                   style="success" if db.get_setting("news_guard_fail_open", "0") == "1" else "primary"),
+            kb.btn(f"🩺 حصر الكاش: {max(6, min(168, db.get_setting_int('news_guard_cache_max_hours', 48)))}س",
+                   "a:newscachehrs", style="primary"),
+        ],
         [kb.btn("📤 إرسال نشرة الأخبار الفاخرة الآن", "a:newssendnow", style="success")],
         [kb.btn("🔄 تحديث التقويم الآن", "a:newsrefresh", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
     ]
@@ -784,6 +915,57 @@ async def admin_news_guard_toggle(q, uid, context, bot):
     nxt = await afn.run(_news_guard_toggle_sync)
     await afn.run(audit_log.log, uid, f"news_guard_enabled:{int(nxt)}")
     await admin_news_guard(q, uid, context, bot)
+
+
+async def admin_news_fail_open(q, uid, context, bot):
+    """v8.11.0 (P3): on a genuine calendar data VOID, allow issuance (logged)
+    instead of the documented UNKNOWN-blocks rule. Admin's explicit choice."""
+    cur = (db.get_setting("news_guard_fail_open", "0") or "0") == "1"
+    nxt = "0" if cur else "1"
+    await afn.run(db.set_setting, "news_guard_fail_open", nxt)
+    await afn.run(audit_log.log, uid, f"news_guard_fail_open:{nxt}")
+    note = ("🟢 وضع الفتح عند الفراغ مفعّل: انعدام بيانات التقويم نهائياً لن يمنع الإصدار "
+            "(الأخبار المعروفة في الكاش تظل تحجب كالمعتاد)."
+            if nxt == "1" else
+            "⚪ الوضع الافتراضي الصارم: انعدام بيانات التقويم يمنع الإصدار (UNKNOWN).")
+    await admin_news_guard(q, uid, context, bot, notice=note)
+
+
+_CACHE_HRS_CHOICES = (6, 12, 24, 48, 72, 168)
+
+
+async def admin_news_cache_hours(q, uid, context, bot):
+    """v8.11.0 (P3): pick how long cached calendar events stay usable for the
+    High-impact block decision when live refresh fails (absolute timestamps
+    stay truthful)."""
+    cur = max(6, min(168, db.get_setting_int("news_guard_cache_max_hours", 48)))
+    row = []
+    rows_kb = []
+    for h in _CACHE_HRS_CHOICES:
+        row.append(kb.btn(f"{'✅ ' if cur == h else ''}{h}س", f"a:newscachehrsset:{h}",
+                          style="success" if cur == h else "primary"))
+        if len(row) == 3:
+            rows_kb.append(row)
+            row = []
+    if row:
+        rows_kb.append(row)
+    rows_kb.append([kb.btn("↩️ درع الأخبار", "a:newsguard")])
+    body = (
+        "🩺 <b><u>حصر صلاحية بيانات التقويم المحفوظة</u></b>\n"
+        "<blockquote>▎عند تعذر التحديث الحي، تعمل قرارات حظر الأخبار ببيانات محفوظة صالحة — "
+        "أزمنة الأحداث مطلقة وصادقة.\n"
+        f"▎الاختيار الحالي: <b>{cur} ساعة</b>\n"
+        "▎تجاوز الحد أو انعدام البيانات نهائياً = حالة «UNKNOWN» (تمنع الإصدار افتراضياً، "
+        "أو تسمح به إن فعّلت «الفتح عند الفراغ»).</blockquote>"
+    )
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_news_cache_hours_set(q, uid, context, bot, hours: int):
+    h = max(6, min(168, int(hours)))
+    await afn.run(db.set_setting, "news_guard_cache_max_hours", h)
+    await afn.run(audit_log.log, uid, f"news_guard_cache_max_hours:{h}")
+    await admin_news_guard(q, uid, context, bot, notice=f"🩺 صارت بيانات التقويم المحفوظة صالحة حتى {h} ساعة عند تعذر التحديث.")
 
 
 async def admin_news_guard_win(q, uid, context, bot, mins: int):

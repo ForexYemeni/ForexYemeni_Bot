@@ -156,7 +156,7 @@ MARKET_SYMBOL_DELAY_SECONDS = float(os.getenv("MARKET_SYMBOL_DELAY_SECONDS", "6"
 BRAND = "FOREXYEMENI"
 BRAND_SHORT = "FYB"
 BUILD_NAME = ""                # optional eyebrow next to the brand — ELITE naming removed
-VERSION = "8.10.1"
+VERSION = "8.11.0"
 BOT_SIGNATURE = "@ForexYemeni1_BOT"   # the bot identity carried on alerts
 PAGE_SIZE = 8
 
@@ -333,11 +333,53 @@ log = logging.getLogger("FOREXYEMENI")
 
 def has_market_api() -> bool:
     """Presence check only — the key itself is never exposed."""
-    return bool(_MARKET_KEY_RAW)
+    return bool(market_api_key())
 
 
 def market_api_key() -> str:
-    return _MARKET_KEY_RAW
+    """v8.11.0: .env key first, else the ENCRYPTED admin-panel key (settings).
+
+    The panel key is stored encrypted-at-rest via the secrets layer and read
+    through a tiny monotonic TTL cache so hot market-data paths stay cheap.
+    """
+    if _MARKET_KEY_RAW:
+        return _MARKET_KEY_RAW
+    return _panel_td_key()
+
+
+def market_api_key_source() -> str:
+    """'env' | 'panel' | '' — for admin diagnostics only (never the value)."""
+    if _MARKET_KEY_RAW:
+        return "env"
+    return "panel" if _panel_td_key() else ""
+
+
+_TD_KEY_CACHE: dict = {"v": "", "t": 0.0}
+_TD_KEY_TTL_SECONDS = 10.0
+
+
+def _panel_td_key() -> str:
+    now = datetime.now(timezone.utc).timestamp()
+    if now - _TD_KEY_CACHE["t"] > _TD_KEY_TTL_SECONDS:
+        val = ""
+        try:
+            from fysb import db as _db
+            blob = _db.get_setting("twelvedata_api_key_enc", "")
+            if blob:
+                from fysb.services import secrets as _sec
+                data = _sec.decrypt_json(blob)
+                val = str((data or {}).get("key") or "").strip()
+        except Exception:
+            val = ""
+        _TD_KEY_CACHE["v"] = val
+        _TD_KEY_CACHE["t"] = now
+    return _TD_KEY_CACHE["v"]
+
+
+def invalidate_market_key_cache() -> None:
+    """Called by the admin panel right after set/clear of the encrypted key."""
+    _TD_KEY_CACHE["v"] = ""
+    _TD_KEY_CACHE["t"] = 0.0
 
 
 def validate_boot() -> list[str]:

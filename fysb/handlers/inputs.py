@@ -94,6 +94,7 @@ CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search"
                 "awaiting_acad_media_for", "awaiting_acad_edit_for", "awaiting_acad_quiz_for",
                 "awaiting_gift_custom", "awaiting_gift_direct",
                 "awaiting_exch_creds", "awaiting_ngrok_token", "awaiting_webapp_url",
+                "awaiting_td_key",
                 "awaiting_chart_channel_add", "awaiting_ta_setting")
 
 
@@ -400,6 +401,38 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             f"<blockquote>▎🆔 المعرّف: <code>{esc(raw_cid)}</code>\n"
             f"▎🌐 اختر الآن <b>السوق (أو الأسواق)</b> التي ستستقبل هذه القناة شارتاتها فقط:</blockquote>",
             reply_markup=kb_ui.admin_nav(rows_kb),
+            parse_mode="HTML",
+        )
+        return True
+
+    # ---------- v8.11.0 Admin: encrypted TwelveData API key (panel-side) ----------
+    if ud.pop("awaiting_td_key", False):
+        import re as _re
+
+        from fysb.handlers import admin_system as _asys
+        from fysb.ui import keyboards as kb_ui
+
+        key = text.strip()
+        if not _re.fullmatch(r"[A-Za-z0-9]{16,64}", key):
+            await update.effective_message.reply_text(
+                "❌ صيغة المفتاح غير صالحة — المفتاح عبارة عن 16 إلى 64 حرفاً إنجليزياً/رقماً "
+                "دون مسافات أو رموز. أعد الإدخال من مركز الأمان.",
+                reply_markup=kb_ui.admin_nav([[kb_ui.btn("🔑 مفتاح البيانات", "a:sys_tdkey")]]),
+                parse_mode="HTML",
+            )
+            return True
+        await afn.run(_asys._td_key_store_sync, key)
+        config.invalidate_market_key_cache()
+        await afn.run(_asys.audit_log.log, uid, f"twelvedata_key:set:len:{len(key)}")
+        await update.effective_message.reply_text(
+            "🔑 <b>تم حفظ المفتاح مشفّراً ودخل السلسلة مباشرة</b>\n"
+            "▎طبقة البيانات الموسّعة (KEYED) صارت جزءاً من سلسلة الشموع والأسعار من الآن "
+            "دون إعادة تشغيل.\n"
+            "▎للتحقق الفعلي: افتح 🧠 المحرك ← 🔍 تشخيص بوابات الإشارات ← «🧪 فحص بيانات حي».",
+            reply_markup=kb_ui.admin_nav([
+                [kb_ui.btn("🧪 فحص بيانات حي الآن", "a:enginediagprobe", style="success")],
+                [kb_ui.btn("🔑 مفتاح البيانات", "a:sys_tdkey")],
+            ]),
             parse_mode="HTML",
         )
         return True

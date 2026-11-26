@@ -212,10 +212,114 @@ def _blocked_results(n=4):
 def test_silence_card_contains_real_reasons_and_gates(isolated):
     from fysb.handlers import background
     card = background._silence_card(_blocked_results())
-    assert "data stale (age 942min)" in card
+    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in card  # Arabic, never raw English
     assert "الماسح الآلي" in card
     assert "KEYED" in card  # codename only — vendor names never in cards
-    assert "942" in card or "stale" in card
+    assert "data stale" not in card and "session calendar" not in card
+
+
+def test_arabic_translation_layer():
+    from fysb.theme import ar_result, ar_reason, ar_run_line
+    assert "السوق مغلق الآن" in ar_result("MARKET_CLOSED")
+    assert "السوق مغلق" in ar_reason("market closed")
+    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in ar_reason("data stale (age 942min)")
+    assert "لا فرصة مؤهلة" in ar_reason("no qualifying setup")
+    # Arabic institutional reasons pass through untouched:
+    assert ar_reason("جودة أقل من الحد المؤسسي (68 < 72)") == "جودة أقل من الحد المؤسسي (68 < 72)"
+    # engine_runs line: Arabic detail shows, raw English leftovers never appear:
+    line = ar_run_line("MARKET_CLOSED", "session calendar says market is closed; no signal manufactured")
+    assert "session calendar" not in line and "السوق مغلق الآن" in line
+    line2 = ar_run_line("STALE_DATA", "last candle 2026-11-27T01:00:00 age=942s")
+    assert "last candle" not in line2 and "بيانات أقدم من الحد" in line2
+
+
+def test_diagnostics_main_card_compact_with_totals(isolated):
+    from fysb.handlers import admin_trading
+    db.set_setting("engine_enabled", "1")
+    _insert_open_signal()
+    news_guard.set_cached_events([_event_in(10)], ts=time.time())
+    q = _FakeQuery()
+    asyncio.run(admin_trading.admin_engine_diagnostics(q, 9001, None, None))
+    assert q.message.sent, "diagnostics page must render"
+    body = q.message.sent[-1]
+    assert "المانع الرئيسي الآن" in body          # first-glance dominant blocker
+    assert "السقف الخفي" in body and "1/12" in body
+    assert "بدون دورة بعد" in body                # armed markets not yet scanned — honest totals
+    assert len(body) < 2400                        # compact — no wall of text
+
+
+def _markup_labels(markup) -> list[str]:
+    if markup is None:
+        return []
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def test_diagnostics_subpages_paged_and_arabic(isolated, monkeypatch):
+    from fysb.handlers import admin_trading
+    # Two markets, one closed, one stale — verdicts must render in Arabic.
+    monkeypatch.setattr(admin_trading, "_engine_diag_sync", lambda: {
+        "armed": ["XAUUSD", "GBPUSD"],
+        "runs": {"XAUUSD": {"symbol": "XAUUSD", "timeframe": "H1", "result": "MARKET_CLOSED",
+                            "detail": "session calendar says market is closed; no signal manufactured",
+                            "created_at": config.now()},
+                 "GBPUSD": {"symbol": "GBPUSD", "timeframe": "H1", "result": "STALE_DATA",
+                            "detail": "last candle X age=942s", "created_at": config.now()}},
+        "totals": [("🌐 السوق مغلق الآن وفق تقويم الجلسات", 1)],
+        "blocked_markets": 2,
+        "gates": {"risk": {"open": 0, "cap_open": 12, "ceiling_full": False}},
+    })
+    q = _FakeQuery()
+    asyncio.run(admin_trading.admin_engine_diag_markets(q, 9001, None, None, 0))
+    body = q.message.sent[-1]
+    assert "XAUUSD" in body and "GBPUSD" in body
+    assert "السوق مغلق الآن" in body and "بيانات أقدم من الحد" in body
+    assert "session calendar" not in body and "last candle" not in body
+    # engine_runs journal page:
+    from fysb.engines.signal_engine import _log_run
+    _log_run("XAUUSD", "H1", "MARKET_CLOSED", "session calendar says market is closed")
+    q2 = _FakeQuery()
+    asyncio.run(admin_trading.admin_engine_diag_runs(q2, 9001, None, None, 0))
+    body2 = q2.message.sent[-1]
+    assert "XAUUSD" in body2 and "السوق مغلق الآن" in body2
+    assert "session calendar" not in body2
+
+
+def test_ceiling_page_lists_open_signals_and_actions(isolated):
+    from fysb.handlers import admin_trading
+    _insert_open_signal()
+    q = _FakeQuery()
+    asyncio.run(admin_trading.admin_engine_diag_ceiling(q, 9001, None, None))
+    body = q.message.sent[-1]
+    assert "العدّادات الحية" in body
+    assert "XAUUSD" in body and "BUY" in body
+    labels = " ".join(_markup_labels(q.message.markups[-1]))
+    assert "إدارة الإشارات المفتوحة" in labels and "إدارة المخاطر" in labels
+
+
+def test_probe_standalone_card(isolated, monkeypatch):
+    from fysb.handlers import admin_trading
+    monkeypatch.setattr(md, "staleness_limit", lambda interval: 10800)
+    monkeypatch.setattr(md, "fetch_price",
+                        lambda sym, api_key="", use_cache=True: {"price": 4213.5})
+    monkeypatch.setattr(md, "fetch_candles",
+                        lambda sym, iv, api_key="", outputsize=120, use_cache=True:
+                        {"values": _hour_candles(40, last_open_minutes_ago=90),
+                         "age_seconds": 30 * 60, "last_candle_iso": "2026-11-26 20:00:00"})
+    q = _FakeQuery()
+    asyncio.run(admin_trading.admin_engine_diag_probe(q, 9001, None, None))
+    body = q.message.sent[-1]
+    assert "فحص بيانات حي" in body
+    assert "4,213.50" in body and "طازجة ومؤهلة" in body
+    assert "المانع الرئيسي" not in body            # standalone — no repeated diagnostics
+
+
+def test_no_signal_card_translates_reason(isolated):
+    from fysb.ui.cards import render_no_signal_card
+    body = render_no_signal_card(
+        symbol="XAUUSD", timeframe="H1", strategy_label="جميع المنهجيات",
+        style_label="يومي", status="REJECTED", reason="data stale (age 942min)")
+    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in body
+    assert "data stale" not in body
 
 
 def test_silence_alert_rate_limited(isolated, monkeypatch):
@@ -296,9 +400,11 @@ def test_env_key_takes_priority_over_panel(isolated):
 class _FakeMsg:
     def __init__(self):
         self.sent = []
+        self.markups = []
 
     async def reply_text(self, text, **kw):
         self.sent.append(text)
+        self.markups.append(kw.get("reply_markup"))
         return SimpleNamespace(message_id=1)
 
 

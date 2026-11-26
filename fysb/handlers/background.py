@@ -412,17 +412,18 @@ async def market_engine_loop(app):
 
 
 def _silence_card(iter_results: list[dict]) -> str:
-    """v8.11.0 (P4) luxury admin card: why every attempt was blocked (no vendor names)."""
-    from fysb.theme import esc
+    """v8.11.0 (P4)+v8.11.1 luxury admin card: why every attempt was blocked —
+    fully Arabic (no vendor names, no raw English codes)."""
+    from fysb.theme import esc as _esc, ar_reason as _ar_reason, ar_result as _ar_result
     from fysb.engines import news_guard as _ng, risk as _risk
     counts: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
     for r in iter_results:
-        key = (r["reason"][:90] or r["status"])
+        key = _ar_reason(r["reason"][:120]).strip() or _ar_result(r["status"])
         counts[key] = counts.get(key, 0) + 1
         lst = samples.setdefault(key, [])
         if len(lst) < 4:
-            lst.append(f"{esc(r['symbol'])} {esc(r['tf'])}")
+            lst.append(f"{_esc(r['symbol'])} {_esc(r['tf'])}")
     lines = [
         "🔇 <b><u>الماسح الآلي يعمل بلا فرص مؤهلة — التشخيص الحقيقي</u></b>",
         f"<blockquote>▎♻️ دورتان متتاليتان بلا نتيجة واحدة · {len(iter_results)} محاولة كلها محجوبة</blockquote>",
@@ -430,7 +431,7 @@ def _silence_card(iter_results: list[dict]) -> str:
         "<b>🚧 أسباب الحجب الفعلية (من سجل المحرك):</b>",
     ]
     for key, n in sorted(counts.items(), key=lambda kv: -kv[1])[:6]:
-        lines.append(f"  • <b>{n}×</b> {esc(key)} <i>({ '، '.join(samples[key]) })</i>")
+        lines.append(f"  • <b>{n}×</b> {_esc(key)} <i>({ '، '.join(samples[key]) })</i>")
     nh = _ng.feed_health()
     nh_txt = {"OK": "🟢 سليم ومحدّث",
               "CACHED": f"🟡 يعمل ببيانات محفوظة ({nh['cache_age_minutes']} د) — القرار يبقى صادقاً",

@@ -12,7 +12,8 @@ from fysb.handlers.common import render, safe
 from fysb.handlers.inputs import BROKER_PRESETS, broker_test_connectivity, clear_flows
 from fysb.handlers.user_pages import _safe_int
 from fysb.services import audit as audit_log
-from fysb.theme import ICON, esc, human_dt
+from fysb.theme import ICON, ar_result, ar_reason, ar_run_line, esc, human_dt
+from fysb import theme
 from fysb.ui.cards import render_signal_card, render_signal_compact, signal_creator_label, signal_row_style
 from fysb.ui import keyboards as kb
 
@@ -640,7 +641,7 @@ async def admin_engine(q, uid, context, bot):
              "",
              "<b>آخر الدورات:</b>"]
     for r in runs:
-        lines.append(f"  {r['created_at'][11:16]} {esc(r['symbol'])} {esc(r['timeframe'])}: {esc(r['result'])}")
+        lines.append(f"  {r['created_at'][11:16]} {esc(r['symbol'])} {esc(r['timeframe'])}: {ar_run_line(r['result'], r['detail'])}")
     rows_kb = [
         [kb.btn(f"{'⏹ إيقاف المحرك' if enabled else '▶️ تشغيل المحرك'}", "a:enginetoggle", style="danger" if enabled else "success")],
         [kb.btn("🔍 تشخيص بوابات الإشارات", "a:enginediag", style="success"), kb.btn(f"📐 فريمات المسح الآلي ({scan_tfs_raw or 'M15,H1'})", "a:scantfs", style="primary")],
@@ -700,7 +701,7 @@ async def admin_scan_tf_toggle(q, uid, context, bot, code: str):
     await admin_scan_tfs(q, uid, context, bot)
 
 
-# --- v8.11.0 (P1): Signal-Gate Diagnostics Panel — every gate, live, no guessing ---
+# --- v8.11.0/8.11.1 (P1): Signal-Gate Diagnostics — royal buttoned center ---
 def _engine_diag_sync() -> dict:
     """One pooled pass over every issuance gate (admin eyes only, no vendor names)."""
     from fysb.engines import news_guard as _ng, risk as _risk
@@ -710,9 +711,6 @@ def _engine_diag_sync() -> dict:
         last_runs = c.execute(
             "SELECT e.symbol, e.result, e.detail, e.created_at FROM engine_runs e "
             "JOIN (SELECT symbol, MAX(id) AS mid FROM engine_runs GROUP BY symbol) t ON e.id=t.mid").fetchall()
-        recent = c.execute(
-            "SELECT symbol, timeframe, result, detail, created_at FROM engine_runs "
-            "ORDER BY id DESC LIMIT 20").fetchall()
         tfs_enabled = [r["code"] for r in c.execute(
             "SELECT code FROM timeframe_catalog WHERE enabled=1 AND verified=1").fetchall()]
     gates = {
@@ -732,10 +730,25 @@ def _engine_diag_sync() -> dict:
         "risk": _risk.open_caps_snapshot(),
         "tfs_enabled": tfs_enabled,
     }
+    per_market = {r["symbol"]: dict(r) for r in last_runs}
+    # Aggregate the last attempt of every armed market into honest totals.
+    totals: dict[str, int] = {}
+    blocked_markets = 0
+    for sym in armed:
+        r = per_market.get(sym)
+        if not r:
+            totals["بدون دورة بعد"] = totals.get("بدون دورة بعد", 0) + 1
+            continue
+        res = (r["result"] or "").upper()
+        label = theme.ar_result(res)
+        totals[label] = totals.get(label, 0) + 1
+        if res not in ("SIGNAL_CREATED", "NO_SETUP", "DUPLICATE"):
+            blocked_markets += 1
     return {
         "armed": armed,
-        "runs": {r["symbol"]: dict(r) for r in last_runs},
-        "recent": [dict(r) for r in recent],
+        "runs": per_market,
+        "totals": sorted(totals.items(), key=lambda kv: -kv[1]),
+        "blocked_markets": blocked_markets,
         "gates": gates,
     }
 
@@ -761,67 +774,186 @@ def _probe_market_data_sync() -> str:
     return "\n".join(out)
 
 
+def _primary_blocker(gates: dict, diag: dict) -> str:
+    """The ONE dominant blocker, honest and first-glance."""
+    rk = gates["risk"]
+    if gates["kill"]:
+        return "🛡 مفتاح القتل مشغّل — لا إصدار إطلاقاً حتى تعطيله من إدارة المخاطر"
+    if not gates["engine"]:
+        return "⚪ المحرك متوقف عمداً — شغّله من صفحة المحرك ليبدأ البحث الآلي"
+    if rk["ceiling_full"]:
+        return (f"🛡 السقف الكلي ممتلئ ({rk['open']}/{rk['cap_open']}) — إشارة مفتوحة منذ "
+                f"{rk['oldest_open_hours']} س تحجب كل الجديد حتى تُغلق أو يُرفع السقف")
+    if rk["daily_breached"]:
+        return f"💥 قاطع الخسارة اليومي مشغّل ({rk['daily_pnl_pct']:+.1f}%) — وقاية اليومية"
+    if gates["news"] and gates["news_health"]["state"] == "UNKNOWN" and not gates["news_fail_open"]:
+        return "📰 درع الأخبار بلا بيانات تقويم صالحة — يمنع الإصدار (راجع درع الأخبار)"
+    if diag["totals"]:
+        top_label, top_n = diag["totals"][0]
+        if diag["blocked_markets"] and top_label not in ("✅ إشارة ولدت وسُلّمت", "🧭 لا فرصة مؤهلة — شروط الاستراتيجيات غير مكتملة فعلاً"):
+            return f"{top_label} — {top_n} من {len(diag['armed'])} سوق في آخر دورة"
+    return "✅ لا مانع بنيوي — الحالة سوقية صادقة (فرص غير مكتملة أو أسواق مغلقة)"
+
+
 async def admin_engine_diagnostics(q, uid, context, bot, notice: str = ""):
     d = await afn.run(_engine_diag_sync)
     g = d["gates"]
     nh = g["news_health"]
     rk = g["risk"]
-    nh_txt = {"OK": "🟢 سليم ومحدّث",
-              "CACHED": f"🟡 بيانات محفوظة ({nh['cache_age_minutes']} د) — صالحة للقرار",
-              "UNKNOWN": "🔴 لا توجد بيانات تقويم صالحة"}.get(nh["state"], "؟")
-    td_txt = {"env": "✅ مضبوط من .env", "panel": "✅ مضبوط من اللوحة (مشفّر)",
-              "": "⚪ غير مضبوط — سلسلة البيانات بلا طبقة موسّعة"}.get(g["td_key_source"], "؟")
+    td_txt = {"env": "✅ من .env", "panel": "✅ من اللوحة (مشفّر)",
+              "": "⚪ غير مضبوط"}.get(g["td_key_source"], "؟")
     lines = [
-        "🔍 <b><u>تشخيص بوابات الإشارات — الحقيقة لحظة بلحظة</u></b>",
-        "<blockquote>"
-        f"▎🧠 المحرك الآلي: <b>{'🟢 يعمل' if g['engine'] else '⚪ متوقف — لا إشارات تلقائية إطلاقاً'}</b>\n"
-        f"▎🛡 مفتاح القتل: <b>{'⛔ مشغّل!' if g['kill'] else '✅ حر'}</b> · دفع الإشارات: <b>{'✅' if g['push'] else '⛔'}</b>\n"
-        f"▎📐 المسح: <b>{esc(g['scan_tfs'] or 'M15,H1')}</b> كل <b>{g['interval']} ث</b> · الحد الأدنى للجودة: <b>{g['min_score']}/100</b>\n"
-        f"▎🌐 أسواق مسلّحة: <b>{len(d['armed'])}</b> {esc('، '.join(d['armed'][:8]))}"
-        + (f" (+{len(d['armed']) - 8})" if len(d["armed"]) > 8 else "") + "\n"
-        f"▎🔑 البيانات الموسّعة (KEYED): <b>{td_txt}</b>\n"
-        f"▎📡 حالة سلسلة البيانات: <b>{esc(g['provider_state'])}</b>"
-        "</blockquote>",
+        "🔍 <b><u>تشخيص بوابات الإشارات — الحكم الفوري</u></b>",
         "",
-        "<b>📰 درع الأخبار:</b> "
-        f"<b>{'🟢 مفعّل (±' + str(g['news_window']) + 'د)' if g['news'] else '⚪ متوقف'}</b> · الصحة: <b>{nh_txt}</b>\n"
-        f"<i>حصر البيانات الصالحة: {g['news_cache_max_h']} ساعة · وضع الفتح عند الفراغ: "
-        f"{'🟢 مفعّل (الفراغ لا يمنع الإصدار)' if g['news_fail_open'] else '⚪ متوقف (الفراغ يمنع الإصدار)'}</i>",
+        f"<blockquote>⛔ <b>المانع الرئيسي الآن:</b> <b>{esc(_primary_blocker(g, d))}</b></blockquote>",
         "",
-        "<b>🛡 السقف الخفي للمخاطر (يحجب بصمت عندما يمتلئ):</b> "
-        f"<b>{rk['open']}/{rk['cap_open']}</b> {'⛔ <b>ممتلئ — يحجب أي إشارة جديدة</b>' if rk['ceiling_full'] else '✅ متاح'}\n"
-        f"▎أعلى سوق: <b>{esc(rk['worst_symbol'] or '—')} {rk['worst_symbol_open']}/{rk['cap_per_symbol']}</b>"
-        f" {'⛔ ممتلئ' if rk['symbol_full'] else ''} · الترابط: <b>{esc(rk['worst_bucket'] or '—')} {rk['worst_bucket_open']}/{rk['cap_correlated']}</b>"
-        f" {'⛔ ممتلئ' if rk['correlated_full'] else ''}\n"
-        f"▎قاطع اليوم: <b>{rk['daily_pnl_pct']:+.1f}%</b> (الحد -{rk['max_daily_loss_pct']:.1f}%) "
-        f"{'⛔ <b>مشغّل</b>' if rk['daily_breached'] else '✅'} · أقدم إشارة مفتوحة: <b>{rk['oldest_open_hours']} س</b>",
+        f"🟢 المحرك: <b>{'يعمل' if g['engine'] else 'متوقف'}</b> · "
+        f"🛡 القتل: <b>{'مشغّل!' if g['kill'] else 'حر'}</b> · "
+        f"الدفع: <b>{'✅' if g['push'] else '⛔'}</b> · "
+        f"📡 البيانات: <b>{esc(g['provider_state'])}</b> · "
+        f"🔑 الموسّع: <b>{td_txt}</b>",
+        f"📰 الأخبار: <b>{'مفعّلة ±' + str(g['news_window']) + 'د' if g['news'] else 'متوقف'}</b> "
+        f"({'🟢 حي' if nh['state'] == 'OK' else ('🟡 محفوظ ' + str(nh['cache_age_minutes']) + 'د' if nh['state'] == 'CACHED' else '🔴 بلا بيانات')}) · "
+        f"⏱ المسح: <b>{esc(g['scan_tfs'] or 'M15,H1')}</b> كل <b>{g['interval']}ث</b> · "
+        f"⭐ الجودة ≥ <b>{g['min_score']}</b> · 🌐 الأسواق المسلّحة: <b>{len(d['armed'])}</b>",
         "",
-        "<b>📜 آخر محاولة لكل سوق مسلّح:</b>",
+        f"🛡 <b>السقف الخفي:</b> <b>{rk['open']}/{rk['cap_open']}</b> "
+        f"{'⛔ ممتلئ — يحجب' if rk['ceiling_full'] else '✅ متاح'} · "
+        f"أعلى سوق: <b>{esc(rk['worst_symbol'] or '—')} {rk['worst_symbol_open']}/{rk['cap_per_symbol']}</b>"
+        f"{' ⛔' if rk['symbol_full'] else ''} · "
+        f"الترابط: <b>{esc(rk['worst_bucket'] or '—')} {rk['worst_bucket_open']}/{rk['cap_correlated']}</b>"
+        f"{' ⛔' if rk['correlated_full'] else ''}",
+        f"💥 قاطع اليوم: <b>{rk['daily_pnl_pct']:+.1f}%</b> (الحد -{rk['max_daily_loss_pct']:.1f}%) "
+        f"{'⛔ مشغّل' if rk['daily_breached'] else '✅'} · أقدم إشارة مفتوحة: <b>{rk['oldest_open_hours']} س</b>",
     ]
-    if d["runs"]:
-        for sym, r in list(d["runs"].items())[:10]:
-            mark = "✅" if r["result"] == "SIGNAL_CREATED" else ("ℹ️" if r["result"] in ("NO_SETUP", "DUPLICATE") else "⛔")
-            lines.append(f"  {mark} <b>{esc(sym)}</b>: {esc(r['result'])} · {esc((r['detail'] or '')[:70])}")
-    else:
-        lines.append("  <i>لا توجد دورات مسجلة بعد — شغّل «🚀 دورة فورية الآن».</i>")
-    lines += ["", "<b>🧾 آخر 20 قراراً (engine_runs):</b>"]
-    for r in d["recent"][:20]:
-        lines.append(f"  {human_dt(r['created_at'])} · {esc(r['symbol'])} {esc(r['timeframe'])}: "
-                     f"{esc(r['result'])} · {esc((r['detail'] or '')[:60])}")
+    if d["totals"]:
+        parts = [f"{lbl} <b>{n}</b>" for lbl, n in d["totals"][:4]]
+        lines.append("")
+        lines.append("📊 <b>إجمالي آخر دورة:</b> " + " · ".join(parts))
     if notice:
         lines = [f"<blockquote>🧪 <b>نتيجة الفحص الحي الفعلي:</b>\n{notice}</blockquote>", ""] + lines
     rows_kb = [
-        [kb.btn("🧪 فحص بيانات حي الآن (ذهب/ساعة)", "a:enginediagprobe", style="success"),
-         kb.btn("🔄 تحديث", "a:enginediag", style="primary")],
+        [kb.btn("🧪 فحص بيانات حي", "a:enginediagprobe", style="success"),
+         kb.btn(f"🌐 قرار كل سوق ({len(d['armed'])})", "a:enginediagmarkets:0", style="primary")],
+        [kb.btn("🧾 سجل المحرك", "a:enginediagruns:0"),
+         kb.btn("🛡 إدارة السقف" + (" ⛔" if rk["ceiling_full"] else ""),
+                "a:enginediagceiling", style="danger" if rk["ceiling_full"] else "primary")],
         [kb.btn("🧠 المحرك", "a:engine"), kb.btn("📰 درع الأخبار", "a:newsguard")],
     ]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
+_DIAG_MARKETS_PER_PAGE = 6
+_DIAG_RUNS_PER_PAGE = 8
+
+
+def _runs_page_sync(per: int, offset: int) -> list[dict]:
+    """(thread-offload helper) one paged slice of the engine_runs journal."""
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT symbol, timeframe, result, detail, created_at FROM engine_runs "
+            "ORDER BY id DESC LIMIT ? OFFSET ?", (per + 1, offset)).fetchall()]
+
+
+async def admin_engine_diag_markets(q, uid, context, bot, page: int = 0):
+    """Paged per-market verdicts — royal Arabic, compact, no wall of text."""
+    d = await afn.run(_engine_diag_sync)
+    items = []
+    for sym in d["armed"]:
+        r = d["runs"].get(sym)
+        if not r:
+            items.append(f"• <b>{esc(sym)}</b> — ⚪ لم تُجرَّب بعد في دورة مسجلة")
+            continue
+        line = f"• <b>{esc(sym)}</b> {esc(r['timeframe'])}: {theme.ar_run_line(r['result'], r['detail'] or '')}"
+        items.append(line)
+    total_pages = max(1, (len(items) + _DIAG_MARKETS_PER_PAGE - 1) // _DIAG_MARKETS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = items[page * _DIAG_MARKETS_PER_PAGE:(page + 1) * _DIAG_MARKETS_PER_PAGE]
+    body = (
+        "🌐 <b><u>قرار كل سوق مسلّح — آخر دورة</u></b>\n"
+        f"<blockquote>▎صفحة {page + 1}/{total_pages} · {len(items)} سوق — كل قرار بسببه العربي الصادق</blockquote>\n\n"
+        + "\n".join(chunk)
+    )
+    rows = []
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(kb.btn("⬅️ السابق", f"a:enginediagmarkets:{page - 1}"))
+        nav.append(kb.btn(f"📄 {page + 1}/{total_pages}", "a:plannoop"))
+        if page < total_pages - 1:
+            nav.append(kb.btn("➡️ التالي", f"a:enginediagmarkets:{page + 1}"))
+        rows.append(nav)
+    rows.append([kb.btn("🔍 التشخيص", "a:enginediag")])
+    await render(q, body, kb.admin_nav(rows), bot)
+
+
+async def admin_engine_diag_runs(q, uid, context, bot, page: int = 0):
+    """Paged engine_runs journal — Arabic verdicts, 8 per page, honest timestamps."""
+    per = _DIAG_RUNS_PER_PAGE
+    rows = await afn.run(_runs_page_sync, per, page * per)
+    has_more = len(rows) > per
+    rows = rows[:per]
+    if not rows:
+        body = "🧾 <b>سجل المحرك فارغ</b>\n<i>شغّل «🚀 دورة فورية الآن» من صفحة المحرك.</i>"
+    else:
+        lines = ["🧾 <b><u>سجل المحرك — آخر القرارات</u></b>",
+                 f"<blockquote>▎صفحة {page + 1} · قرارات موثقة بأسبابها العربية</blockquote>", ""]
+        for r in rows:
+            lines.append(f"• {human_dt(r['created_at'])} · <b>{esc(r['symbol'])}</b> {esc(r['timeframe'])}\n"
+                         f"   {theme.ar_run_line(r['result'], r['detail'] or '')}")
+        body = "\n".join(lines)
+    nav = []
+    if page > 0:
+        nav.append(kb.btn("⬅️ السابق", f"a:enginediagruns:{page - 1}"))
+    if has_more:
+        nav.append(kb.btn("➡️ التالي", f"a:enginediagruns:{page + 1}"))
+    rows_kb = ([nav] if nav else []) + [[kb.btn("🔍 التشخيص", "a:enginediag")]]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_engine_diag_ceiling(q, uid, context, bot):
+    """The hidden ceiling, fully visible, with REAL management buttons."""
+    from fysb.engines import risk as _risk
+    rk = await afn.run(_risk.open_caps_snapshot)
+    lines = [
+        "🛡 <b><u>إدارة السقف الخفي — العدّادات الحية</u></b>",
+        "",
+        f"<blockquote>⛔ <b>{rk['open']}/{rk['cap_open']}</b> "
+        f"{'ممتلئ — كل إشارة جديدة محجوبة حتى تُغلق صفقة أو يُعدّل السقف' if rk['ceiling_full'] else 'متاح — يوجد مجال للإصدار'}</blockquote>",
+        "",
+        f"▎أعلى سوق: <b>{esc(rk['worst_symbol'] or '—')} {rk['worst_symbol_open']}/{rk['cap_per_symbol']}</b>"
+        f"{' ⛔ ممتلئ' if rk['symbol_full'] else ''}",
+        f"▎الترابط الاتجاهي: <b>{esc(rk['worst_bucket'] or '—')} {rk['worst_bucket_open']}/{rk['cap_correlated']}</b>"
+        f"{' ⛔ ممتلئ' if rk['correlated_full'] else ''}",
+        f"▎قاطع اليوم: <b>{rk['daily_pnl_pct']:+.1f}%</b> (الحد -{rk['max_daily_loss_pct']:.1f}%) "
+        f"{'⛔ مشغّل' if rk['daily_breached'] else '✅'}",
+        "",
+        "<b>📜 الإشارات المفتوحة الآن:</b>",
+    ]
+    for r in rk["open_rows"]:
+        lines.append(f"  • <b>{esc(r['symbol'])}</b> {esc(r['direction'])} — منذ <b>{r['hours']} س</b>")
+    if not rk["open_rows"]:
+        lines.append("  <i>لا إشارات مفتوحة — السقف حر تماماً.</i>")
+    rows_kb = [
+        [kb.btn("📡 إدارة الإشارات المفتوحة", "a:signals", style="success")],
+        [kb.btn("🛡 إدارة المخاطر (رفع السقف / القتل)", "a:risk", style="primary")],
+        [kb.btn("🔍 التشخيص", "a:enginediag")],
+    ]
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
 async def admin_engine_diag_probe(q, uid, context, bot):
+    """Standalone probe card — the result ALONE, no repeated wall of diagnostics."""
     notice = await afn.run(_probe_market_data_sync)
     await afn.run(audit_log.log, uid, "enginediag:probe")
-    await admin_engine_diagnostics(q, uid, context, bot, notice=notice)
+    body = ("🧪 <b><u>فحص بيانات حي — النتائج الفعلية الآن</u></b>\n"
+            f"<blockquote>{notice}</blockquote>\n"
+            "<i>الفحص يجلب البيانات من السلسلة الحقيقية لحظة الطلب — لا كاش ولا افتراض.</i>")
+    rows_kb = [
+        [kb.btn("🔄 إعادة الفحص", "a:enginediagprobe", style="success")],
+        [kb.btn("🔍 التشخيص الكامل", "a:enginediag"), kb.btn("🧠 المحرك", "a:engine")],
+    ]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
 # --- v6.25.0 / v7.4.0 Live News Guard, Auto-Broadcast, Leaderboard & Strength -

@@ -532,6 +532,12 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_engine_diagnostics(q, uid, context, bot)
     elif act == "enginediagprobe":
         await admin_trading.admin_engine_diag_probe(q, uid, context, bot)
+    elif act == "enginediagmarkets":
+        await admin_trading.admin_engine_diag_markets(q, uid, context, bot, int(arg or 0))
+    elif act == "enginediagruns":
+        await admin_trading.admin_engine_diag_runs(q, uid, context, bot, int(arg or 0))
+    elif act == "enginediagceiling":
+        await admin_trading.admin_engine_diag_ceiling(q, uid, context, bot)
     elif act == "newssendnow":
         await admin_trading.admin_news_send_now(q, uid, context, bot)
     elif act == "leaderboard":

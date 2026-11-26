@@ -162,17 +162,24 @@ def _admin_home_snapshot() -> dict:
     admin_id = config.ADMIN_ID
     try:
         with db.conn() as c:
-            users_n = int(c.execute("SELECT COUNT(*) n FROM users WHERE user_id!=?", (admin_id,)).fetchone()["n"] or 0)
-            paid_n = int(c.execute(
-                "SELECT COUNT(*) n FROM subscriptions WHERE status='ACTIVE' AND plan_code!='FREE' AND user_id!=?",
-                (admin_id,),
-            ).fetchone()["n"] or 0)
-            pending_pay = int(c.execute("SELECT COUNT(*) n FROM payments WHERE status='PENDING'").fetchone()["n"] or 0)
-            open_sigs = int(c.execute(
-                "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
-            ).fetchone()["n"] or 0)
-            ch_on = int(c.execute("SELECT COUNT(*) n FROM broadcast_channels WHERE enabled=1").fetchone()["n"] or 0)
-            tickets = int(c.execute("SELECT COUNT(*) n FROM tickets WHERE status='OPEN'").fetchone()["n"] or 0)
+            # A pooled connection still pays network latency on every execute.
+            # Independent counters can share one SQL round trip without caching
+            # user permissions or changing any existing counting rules.
+            counts = c.execute("""
+                SELECT
+                  (SELECT COUNT(*) FROM users WHERE user_id!=?) AS users_n,
+                  (SELECT COUNT(*) FROM subscriptions WHERE status='ACTIVE'
+                     AND plan_code!='FREE' AND user_id!=?) AS paid_n,
+                  (SELECT COUNT(*) FROM payments WHERE status='PENDING') AS pending_pay,
+                  (SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')) AS open_sigs,
+                  (SELECT COUNT(*) FROM broadcast_channels WHERE enabled=1) AS ch_on,
+                  (SELECT COUNT(*) FROM tickets WHERE status='OPEN') AS tickets
+            """, (admin_id, admin_id)).fetchone()
+            users_n, paid_n, pending_pay, open_sigs, ch_on, tickets = (
+                int(counts[k] or 0) for k in
+                ("users_n", "paid_n", "pending_pay", "open_sigs", "ch_on", "tickets")
+            )
             try:
                 ta_radars = int(c.execute(
                     "SELECT COUNT(*) n FROM analysis_monitors WHERE status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')"

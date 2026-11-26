@@ -361,24 +361,32 @@ def check_active_continuity(uid: int, symbol: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 100% Real Closed-Candle Verification Math (Zero Fakeouts!)
+# 100% Real Closed-Candle Verification Math (Zero Fakeouts, Zero Premature Closes!)
 # ---------------------------------------------------------------------------
-def _select_latest_closed_candle(candles: list[dict], tf: str, now_dt: datetime | None = None) -> dict | None:
-    """Return the most recent CLOSED candle (never a still-forming unclosed wick)."""
+def _select_latest_closed_candle(
+    candles: list[dict],
+    tf: str,
+    now_dt: datetime | None = None,
+) -> tuple[dict | None, datetime | None, datetime | None]:
+    """Return `(candle, open_dt, close_dt)` for the newest GENUINELY CLOSED candle.
+
+    A candle whose open timestamp is `open_dt` closes at `open_dt + tf_sec`.
+    A still-forming candle (`close_dt > now_dt`) is NEVER treated as closed —
+    not even when `len(candles) == 1`.
+    """
     if not candles:
-        return None
-    if len(candles) == 1:
-        return candles[-1]
+        return None, None, None
     now = now_dt or _now_utc()
     tf_sec = _TF_SECONDS.get(str(tf or "M15").upper(), 900)
-    last = candles[-1]
-    dt_last = _parse_utc(last.get("datetime") or "")
-    if dt_last is not None:
-        age = (now - dt_last).total_seconds()
-        # If the latest bar opened less than one full period ago, it is STILL FORMING!
-        if 0 <= age < tf_sec:
-            return candles[-2]
-    return last
+    # Scan from newest to oldest and pick the first bar whose close_dt <= now
+    for c in reversed(candles):
+        dt_open = _parse_utc(c.get("datetime") or "")
+        if dt_open is None:
+            continue
+        dt_close = dt_open + timedelta(seconds=tf_sec)
+        if dt_close <= now:
+            return c, dt_open, dt_close
+    return None, None, None
 
 
 def evaluate_closed_candle(
@@ -391,21 +399,52 @@ def evaluate_closed_candle(
     invalidation_px: float,
     min_body_pct: float = 55.0,
     after_ts: str = "",
+    min_close_dt: datetime | None = None,
+    min_open_dt: datetime | None = None,
     now_dt: datetime | None = None,
 ) -> dict:
     """Evaluate a REAL closed candle for Confirmation, Invalidation, or Still Waiting.
 
-    - Strictly requires a closed bar (never an in-progress wick).
-    - Checks invalidation FIRST to protect capital.
-    - Enforces candle direction + real body ratio >= `min_body_pct` + close beyond
-      `level_px +/- buffer_px`.
+    Hard guarantees (v8.4.2):
+      - NEVER evaluates an unclosed/forming candle (`close_dt > now_dt`).
+      - NEVER evaluates a historical candle that closed BEFORE the monitor was
+        created (`min_close_dt` gate in WATCHING_STABILITY).
+      - NEVER evaluates a confirmation candle opened BEFORE the stability bar
+        actually closed (`min_open_dt` gate in WATCHING_CONFIRM).
+      - Checks invalidation FIRST on the freshly closed bar, then enforces
+        real direction + body ratio >= `min_body_pct` + ATR buffer.
     """
-    c = _select_latest_closed_candle(candles, tf, now_dt=now_dt)
-    if not c:
-        return {"state": "WAITING", "reason": "no_candles"}
+    c, dt_open, dt_close = _select_latest_closed_candle(candles, tf, now_dt=now_dt)
+    if not c or dt_open is None or dt_close is None:
+        return {"state": "WAITING", "reason": "no_closed_candle_yet"}
     c_ts = str(c.get("datetime") or "")
+    close_iso = dt_close.strftime("%Y-%m-%d %H:%M:%S")
+    window_lbl = f"{dt_open.strftime('%H:%M')}→{dt_close.strftime('%H:%M')} UTC"
+
+    # Gate 1: Must have closed STRICTLY AFTER the monitor was created
+    if min_close_dt is not None and dt_close <= min_close_dt:
+        return {
+            "state": "WAITING",
+            "reason": "awaiting_first_close_after_analysis",
+            "candle_ts": c_ts,
+            "close_iso": close_iso,
+        }
+    # Gate 2: For Stage 2 confirmation, must have OPENED at or after Stage 1's close
+    if min_open_dt is not None and dt_open < min_open_dt:
+        return {
+            "state": "WAITING",
+            "reason": "awaiting_confirm_candle_after_stability_close",
+            "candle_ts": c_ts,
+            "close_iso": close_iso,
+        }
+    # Legacy string timestamp guard
     if after_ts and c_ts and c_ts <= after_ts:
-        return {"state": "WAITING", "reason": "awaiting_next_closed_candle", "candle_ts": c_ts}
+        return {
+            "state": "WAITING",
+            "reason": "awaiting_next_closed_candle",
+            "candle_ts": c_ts,
+            "close_iso": close_iso,
+        }
 
     op = float(c.get("open") or 0.0)
     hi = float(c.get("high") or op)
@@ -418,13 +457,15 @@ def evaluate_closed_candle(
     body_pct = round(100.0 * abs(cl - op) / rng, 1)
     is_buy = str(direction).upper() == "BUY"
 
-    # 1. Hard invalidation check on closed candle
+    # 1. Hard invalidation check on the freshly closed candle
     if invalidation_px > 0:
         if (is_buy and cl < invalidation_px) or ((not is_buy) and cl > invalidation_px):
             return {
                 "state": "INVALIDATED",
                 "candle": c,
                 "candle_ts": c_ts,
+                "close_iso": close_iso,
+                "window_lbl": window_lbl,
                 "close": cl,
                 "body_pct": body_pct,
                 "reason": "closed_beyond_invalidation",
@@ -439,6 +480,8 @@ def evaluate_closed_candle(
             "state": "CONFIRMED",
             "candle": c,
             "candle_ts": c_ts,
+            "close_iso": close_iso,
+            "window_lbl": window_lbl,
             "close": cl,
             "body_pct": body_pct,
             "reason": "closed_body_confirmed",
@@ -447,6 +490,8 @@ def evaluate_closed_candle(
         "state": "WAITING",
         "candle": c,
         "candle_ts": c_ts,
+        "close_iso": close_iso,
+        "window_lbl": window_lbl,
         "close": cl,
         "body_pct": body_pct,
         "reason": "wick_or_below_level",
@@ -611,6 +656,17 @@ def evaluate_on_analysis_created(uid: int, analysis: dict) -> dict:
     atr = float(chart_data.get("atr") or 0.0)
     activation_px = float(chart_data.get("activation_px") or cur_px)
     invalidation_px = float(chart_data.get("invalidation_px") or 0.0)
+    sp = instruments.spec(symbol, mrow_d)
+    safe_pad = max(atr * 0.8, sp.pip_size * 10.0)
+    # Invalidation sanity guard: a new monitor must NEVER start with invalidation on the wrong side of price!
+    if direction == "BUY":
+        ref_lo = min(cur_px, activation_px) if (cur_px > 0 and activation_px > 0) else cur_px
+        if invalidation_px <= 0 or invalidation_px >= ref_lo:
+            invalidation_px = round(ref_lo - safe_pad, sp.digits)
+    else:
+        ref_hi = max(cur_px, activation_px) if (cur_px > 0 and activation_px > 0) else cur_px
+        if invalidation_px <= 0 or invalidation_px <= ref_hi:
+            invalidation_px = round(ref_hi + safe_pad, sp.digits)
     buffer_px = max(atr * 0.15, 0.0)
     setup = chart_data.get("setup") or None
     strategy = str((setup or {}).get("code") or analysis.get("strategy") or "ALL").upper()
@@ -984,6 +1040,15 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
             continue
 
         last_px = float(candles[-1].get("close") or 0.0)
+        created_dt = _parse_utc(m.get("created_at") or "")
+        min_close_dt = created_dt if st == "WATCHING_STABILITY" else None
+        min_open_dt = None
+        if st == "WATCHING_CONFIRM":
+            stab_open = _parse_utc(m.get("stability_candle_ts") or "")
+            if stab_open is not None:
+                stab_sec = _TF_SECONDS.get(str(m.get("stability_tf") or "H1").upper(), 3600)
+                min_open_dt = stab_open + timedelta(seconds=stab_sec)
+
         res = evaluate_closed_candle(
             candles,
             tf=check_tf,
@@ -993,16 +1058,19 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
             invalidation_px=float(m["invalidation_px"]),
             min_body_pct=(55.0 if st == "WATCHING_STABILITY" else 45.0),
             after_ts=(str(m.get("stability_candle_ts") or "") if st == "WATCHING_CONFIRM" else ""),
+            min_close_dt=min_close_dt,
+            min_open_dt=min_open_dt,
             now_dt=now,
         )
 
         # Invalidation -> cancel immediately and alert user!
         if res["state"] == "INVALIDATED":
+            win_txt = f" ({res.get('window_lbl')})" if res.get("window_lbl") else ""
             with db.tx() as c:
                 c.execute(
                     "UPDATE analysis_monitors SET status='INVALIDATED', last_checked_at=?, last_price=?, "
                     "note=?, updated_at=? WHERE id=?",
-                    (now_iso, last_px, f"كسر مستوى الإبطال عند {res['close']}", now_iso, mid),
+                    (now_iso, last_px, f"كسر مستوى الإبطال عند {res['close']}{win_txt}", now_iso, mid),
                 )
             summary["invalidated"] += 1
             if bot:
@@ -1011,7 +1079,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                         uid,
                         f"⛔ <b><u>تم إلغاء تحليل {esc(sym)} تلقائياً لحمايتك</u></b>\n"
                         f"<blockquote>"
-                        f"▎أغلقت شمعة <b>{esc(check_tf)}</b> حقيقية عند <code>{fmt(res['close'])}</code> "
+                        f"▎أغلقت شمعة <b>{esc(check_tf)}</b> حقيقية{esc(win_txt)} عند <code>{fmt(res['close'])}</code> "
                         f"خلف مستوى الإبطال <code>{fmt(m['invalidation_px'])}</code>.\n"
                         f"▎🛡 تم إيقاف الرادار فوراً — لا توجد صفقة صالحة حالياً."
                         f"</blockquote>",
@@ -1024,6 +1092,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
         # Confirmed!
         if res["state"] == "CONFIRMED":
             same_tf = (str(m["stability_tf"]).upper() == str(m["confirm_tf"]).upper())
+            win_txt = f" ({res.get('window_lbl')})" if res.get("window_lbl") else ""
             if st == "WATCHING_STABILITY" and not same_tf:
                 # Advance to Stage 2 (WATCHING_CONFIRM) and send real milestone update!
                 with db.tx() as c:
@@ -1033,7 +1102,7 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                         "last_price=?, note=?, updated_at=? WHERE id=?",
                         (
                             res["candle_ts"], now_iso, now_iso, last_px,
-                            f"تأكد إغلاق {m['stability_tf']} ({res['body_pct']}%) — بانتظار {m['confirm_tf']}",
+                            f"تأكد إغلاق {m['stability_tf']}{win_txt} ({res['body_pct']}%) — بانتظار {m['confirm_tf']}",
                             now_iso, mid,
                         ),
                     )
@@ -1044,9 +1113,9 @@ async def poll_active_monitors(bot, *, now_dt: datetime | None = None) -> dict:
                             uid,
                             f"✅ <b><u>تحديث رادار ForexYemeni — {esc(sym)}</u></b>\n"
                             f"<blockquote>"
-                            f"▎1️⃣ <b>تم تأكيد إغلاق شمعة {esc(m['stability_tf'])} بنجاح!</b>\n"
+                            f"▎1️⃣ <b>تم تأكيد إغلاق شمعة {esc(m['stability_tf'])}{esc(win_txt)} بنجاح!</b>\n"
                             f"▎📊 إغلاق جسم حقيقي: <b>{res['body_pct']:.0f}%</b> عند <code>{fmt(res['close'])}</code>\n"
-                            f"▎2️⃣ ⏳ <b>أراقب الآن تأكيد شمعة {esc(m['confirm_tf'])}</b> لإصدار إشارتك الحقيقية مع الشارت..."
+                            f"▎2️⃣ ⏳ <b>أراقب الآن إغلاق شمعة {esc(m['confirm_tf'])} التالية</b> لإصدار إشارتك الحقيقية مع الشارت..."
                             f"</blockquote>",
                             parse_mode="HTML",
                         )

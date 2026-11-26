@@ -190,13 +190,15 @@ def test_true_analysis_two_stage_radar_rejects_wick_then_confirms_h1_and_m15(tmp
     ta_svc.grant_access(uid, 30, actor=config.ADMIN_ID)
 
     t0 = datetime(2026, 11, 26, 10, 0, 0, tzinfo=timezone.utc)
-    # Initial analysis: price 2645 below activation 2650 -> registers WATCHING_STABILITY (H1 -> M15)
+    # Initial analysis created at 09:45:00 UTC -> next H1 close is 10:00:00 (for 09:00 bar) / 11:00:00 (for 10:00 bar)
+    monkeypatch.setattr(ta_svc, "_now_utc", lambda: datetime(2026, 11, 26, 9, 45, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(config, "now", lambda: "2026-11-26T09:45:00+00:00")
     init_candles = _make_candles([
-        ("2026-11-26 09:00:00", 2640.0, 2648.0, 2638.0, 2645.0),
+        ("2026-11-26 08:00:00", 2640.0, 2648.0, 2638.0, 2645.0),
     ])
     fake_analysis = {
         "symbol": "XAUUSD", "timeframe": "H1", "strategy": "SMC", "direction": "BUY",
-        "price": 2645.0, "price_time": "2026-11-26 09:00:00", "quality": 85,
+        "price": 2645.0, "price_time": "2026-11-26 08:00:00", "quality": 85,
         "confirmation": {"stability_tf": "H1", "confirm_tf": "M15", "activated": False, "body_pct": 50},
         "chart_data": {"tf": "H1", "candles": init_candles, "atr": 10.0, "activation_px": 2650.0, "invalidation_px": 2630.0},
     }
@@ -215,7 +217,7 @@ def test_true_analysis_two_stage_radar_rejects_wick_then_confirms_h1_and_m15(tmp
     s1 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=t0 + timedelta(hours=2)))
     assert s1["stage1_confirmed"] == 0 and s1["signals_fired"] == 0
 
-    # Tick 2: Strong real closed H1 candle (open 2645, high 2662, low 2644, close 2660 -> body 83% >= 55% > 2651.5)!
+    # Tick 2: Strong real closed H1 candle (11:00 -> 12:00 UTC, open 2645, close 2660 -> body 83% >= 55% > 2651.5)!
     strong_h1 = _make_candles([
         ("2026-11-26 09:00:00", 2642.0, 2648.0, 2640.0, 2645.0),
         ("2026-11-26 11:00:00", 2645.0, 2662.0, 2644.0, 2660.0),
@@ -226,12 +228,12 @@ def test_true_analysis_two_stage_radar_rejects_wick_then_confirms_h1_and_m15(tmp
     assert s2["signals_fired"] == 0  # MUST wait for M15 confirmation!
     assert any("تم تأكيد إغلاق شمعة H1" in msg for _, msg in cap["messages"])
 
-    # Tick 3: Subsequent closed M15 confirmation candle strictly AFTER stability_candle_ts!
+    # Tick 3: Subsequent closed M15 confirmation candle opening AT/AFTER H1 close (12:00 UTC) and closed by 12:30!
     confirm_m15 = _make_candles([
-        ("2026-11-26 11:00:00", 2656.0, 2661.0, 2655.0, 2660.0),
-        ("2026-11-26 12:15:00", 2659.0, 2666.0, 2658.5, 2665.0),  # body 80% >= 45%, close > 2650
+        ("2026-11-26 11:45:00", 2656.0, 2661.0, 2655.0, 2660.0),  # inside H1 bar
+        ("2026-11-26 12:00:00", 2659.0, 2666.0, 2658.5, 2665.0),  # opens at 12:00, closes at 12:15 (body 80%)
     ])
-    monkeypatch.setattr(md, "fetch_candles", lambda *a, **kw: {"values": confirm_m15, "last_candle_iso": "2026-11-26 12:15:00"})
+    monkeypatch.setattr(md, "fetch_candles", lambda *a, **kw: {"values": confirm_m15, "last_candle_iso": "2026-11-26 12:00:00"})
     s3 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=t0 + timedelta(hours=3, minutes=30)))
     assert s3["signals_fired"] == 1
     assert len(cap["photos"]) >= 1 or any("إشارة حقيقية مؤكّدة" in msg for _, msg in cap["messages"])
@@ -278,13 +280,15 @@ def test_invalidation_protection_and_admin_editable_trial_and_payment(tmp_path, 
     st = ta_svc.has_access(uid)
     assert st["active"] is True and st["days_left"] >= 44
 
-    # Register monitor and verify auto-invalidation when price closes below invalidation_px
+    # Register monitor at 09:45 UTC and verify auto-invalidation ONLY AFTER a new H1 candle closes!
     t0 = datetime(2026, 11, 26, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ta_svc, "_now_utc", lambda: datetime(2026, 11, 26, 9, 45, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(config, "now", lambda: "2026-11-26T09:45:00+00:00")
     fake_an = {
         "symbol": "XAUUSD", "timeframe": "H1", "strategy": "ICT", "direction": "BUY",
-        "price": 2645.0, "price_time": "2026-11-26 09:00:00", "quality": 82,
+        "price": 2645.0, "price_time": "2026-11-26 08:00:00", "quality": 82,
         "confirmation": {"stability_tf": "H1", "confirm_tf": "M15", "activated": False, "body_pct": 40},
-        "chart_data": {"tf": "H1", "candles": _make_candles([("2026-11-26 09:00:00", 2642.0, 2648.0, 2640.0, 2645.0)]),
+        "chart_data": {"tf": "H1", "candles": _make_candles([("2026-11-26 08:00:00", 2642.0, 2648.0, 2640.0, 2645.0)]),
                        "atr": 8.0, "activation_px": 2655.0, "invalidation_px": 2635.0},
     }
     ta_svc.evaluate_on_analysis_created(uid, fake_an)
@@ -341,4 +345,66 @@ def test_true_analysis_full_checkout_and_all_ui_buttons_zero_crash(tmp_path, mon
         ("utarevoke", str(uid), ""),
     ]:
         assert _run(true_analysis_ui.handle_admin_true_analysis(qa, config.ADMIN_ID, act, a1, a2, ctxa, ctxa.bot)) is True
+
+
+def test_v842_never_invalidates_before_h1_candle_actually_closes_at_548am(tmp_path, monkeypatch):
+    """Exact live bug reproduction (5:48 AM):
+    User creates XAUUSD H1 SELL analysis at 05:45 UTC.
+      - Historical 04:00->05:00 H1 bar closed BEFORE analysis at 3610.10 (> invalidation 3606.50).
+      - Live 05:00->06:00 H1 bar is STILL FORMING at 05:48 UTC (price 3610.10).
+    Radar MUST NOT cancel or trigger at 05:48 UTC! It must wait until 06:00 UTC when the
+    05:00 H1 candle ACTUALLY closes!
+    """
+    _fresh_db(tmp_path, monkeypatch)
+    uid = 7148
+    users_svc.ensure_user(SimpleNamespace(id=uid, username="u7148", full_name="Gold", first_name="Gold"))
+    ta_svc.grant_access(uid, 30, actor=config.ADMIN_ID)
+
+    # Create SELL monitor at 05:45:00 UTC with invalidation above price (3606.50)
+    monkeypatch.setattr(ta_svc, "_now_utc", lambda: datetime(2026, 11, 26, 5, 45, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(config, "now", lambda: "2026-11-26T05:45:00+00:00")
+    an = {
+        "symbol": "XAUUSD", "timeframe": "H1", "strategy": "SMC", "direction": "SELL",
+        "price": 3600.0, "price_time": "2026-11-26 05:00:00", "quality": 84,
+        "confirmation": {"stability_tf": "H1", "confirm_tf": "M15", "activated": False, "body_pct": 40},
+        "chart_data": {
+            "tf": "H1",
+            "candles": _make_candles([
+                ("2026-11-26 04:00:00", 3602.0, 3612.0, 3600.0, 3610.10),  # old bar closed at 05:00!
+                ("2026-11-26 05:00:00", 3605.0, 3606.0, 3598.0, 3600.00),  # forming bar (closes 06:00)
+            ]),
+            "atr": 6.0,
+            "activation_px": 3595.0,
+            "invalidation_px": 3606.50,
+        },
+    }
+    res = ta_svc.evaluate_on_analysis_created(uid, an)
+    assert res["mode"] == "MONITORING"
+
+    _, ctx, cap = _mk_q(uid)
+
+    # Live feed at 05:48:00 UTC: old 04:00 bar closed at 3610.10, live 05:00 bar currently at 3610.10 (NOT CLOSED!)
+    live_at_548 = _make_candles([
+        ("2026-11-26 04:00:00", 3602.0, 3612.0, 3600.0, 3610.10),
+        ("2026-11-26 05:00:00", 3605.0, 3611.0, 3598.0, 3610.10),
+    ])
+    monkeypatch.setattr(md, "fetch_candles", lambda *a, **kw: {"values": live_at_548, "last_candle_iso": "2026-11-26 05:00:00"})
+
+    # Poll at 05:48:00 UTC -> MUST STAY WATCHING (ZERO invalidation, ZERO alerts!)
+    s_548 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=datetime(2026, 11, 26, 5, 48, 0, tzinfo=timezone.utc)))
+    assert s_548["invalidated"] == 0
+    assert s_548["signals_fired"] == 0
+    assert len(cap["messages"]) == 0
+    assert ta_svc.check_active_continuity(uid, "XAUUSD")["kind"] == "WATCHING"
+
+    # Poll at 05:59:55 UTC -> STILL 5 seconds before H1 close -> MUST STILL STAY WATCHING!
+    s_559 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=datetime(2026, 11, 26, 5, 59, 55, tzinfo=timezone.utc)))
+    assert s_559["invalidated"] == 0
+    assert len(cap["messages"]) == 0
+
+    # Poll at 06:00:05 UTC -> NOW the 05:00->06:00 H1 bar HAS ACTUALLY CLOSED at 3610.10 > 3606.50 -> NOW invalidates honestly!
+    s_600 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=datetime(2026, 11, 26, 6, 0, 5, tzinfo=timezone.utc)))
+    assert s_600["invalidated"] == 1
+    assert any("05:00→06:00 UTC" in msg for _, msg in cap["messages"])
+
 

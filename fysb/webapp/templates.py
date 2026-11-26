@@ -1706,6 +1706,7 @@ body{{
 .sig-card.win{{border-right:3px solid var(--green)}}
 .sig-card.live{{border-right:3px solid var(--cyan)}}
 .sig-card.loss{{border-right:3px solid var(--red)}}
+.sig-card.neutral{{border-right:3px solid #64748b;opacity:.88}}
 .sig-top{{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px}}
 .sig-sym{{font-size:15px;font-weight:900}}
 .sig-meta{{font-size:11px;color:var(--muted);margin-top:2px}}
@@ -1713,10 +1714,31 @@ body{{
 .lvl{{background:rgba(15,21,36,.85);border:1px solid var(--border);border-radius:9px;padding:5px 3px;text-align:center}}
 .lvl span{{display:block;font-size:9.5px;color:var(--muted)}}
 .lvl b{{font-family:var(--mono);font-size:11px}}
-.stats-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:11px}}
-.st-box{{background:rgba(6,8,15,.7);border:1px solid var(--border);border-radius:12px;padding:8px 6px;text-align:center}}
+.stats-strip{{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:11px}}
+@media(min-width:640px){{.stats-strip{{grid-template-columns:repeat(6,1fr)}}}}
+.st-box{{background:rgba(6,8,15,.72);border:1px solid var(--border);border-radius:12px;padding:8px 6px;text-align:center}}
 .st-box .l{{font-size:10px;color:var(--muted)}}
-.st-box .v{{font-family:var(--mono);font-size:15px;font-weight:900;margin-top:2px}}
+.st-box .v{{font-family:var(--mono);font-size:14.5px;font-weight:900;margin-top:2px}}
+.lux-filter-box{{
+  background:linear-gradient(145deg,rgba(217,176,76,.10),rgba(8,12,22,.82));
+  border:1px solid var(--gold-line);border-radius:15px;padding:11px;margin-bottom:10px;
+}}
+.lux-filter-grid{{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:8px}}
+@media(min-width:560px){{.lux-filter-grid{{grid-template-columns:repeat(3,1fr)}}}}
+.lux-fld label{{display:block;font-size:10.5px;font-weight:800;color:var(--gold2);margin-bottom:4px}}
+.lux-fld select{{
+  width:100%;font-family:'Cairo',sans-serif;font-weight:700;font-size:12px;
+  background:rgba(6,8,15,.92);border:1px solid rgba(217,176,76,.32);color:var(--text);
+  padding:8px 10px;border-radius:11px;cursor:pointer;
+}}
+.lux-fld select:focus{{border-color:var(--gold2);box-shadow:0 0 0 2px rgba(217,176,76,.18)}}
+.pill.neutral{{background:rgba(100,116,139,.18);border-color:rgba(148,163,184,.38);color:#cbd5e1}}
+.sched-bar{{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 11px}}
+.sched-pill{{
+  border:1px solid var(--border);background:rgba(6,8,15,.72);color:var(--muted);
+  border-radius:999px;padding:5px 11px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:800;cursor:pointer;
+}}
+.sched-pill.active{{background:rgba(217,176,76,.22);border-color:var(--gold2);color:var(--gold2)}}
 .item{{
   display:flex;justify-content:space-between;align-items:center;gap:8px;
   padding:11px;margin-bottom:8px;background:rgba(6,8,15,.65);
@@ -1902,14 +1924,52 @@ input:focus,select:focus{{border-color:var(--gold)}}
           <div class="st-box"><div class="l">الإجمالي</div><div class="v" style="color:var(--gold2)" id="ssTotal">0</div></div>
           <div class="st-box"><div class="l">مفتوحة</div><div class="v" style="color:var(--cyan)" id="ssOpen">0</div></div>
           <div class="st-box"><div class="l">رابحة</div><div class="v" style="color:var(--green)" id="ssWin">0</div></div>
+          <div class="st-box"><div class="l">خسارة SL</div><div class="v" style="color:var(--red)" id="ssLoss">0</div></div>
+          <div class="st-box"><div class="l">نسبة النجاح</div><div class="v" style="color:var(--gold2)" id="ssWr">0%</div></div>
           <div class="st-box"><div class="l">صافي النقاط</div><div class="v" id="ssPips">0p</div></div>
         </div>
-        <input id="sigSearch" style="width:100%;margin-bottom:9px;font-family:'Cairo',sans-serif" placeholder="🔍 ابحث بالرمز (XAUUSD) أو الاستراتيجية أو اسم المنشئ..." oninput="renderAdminSignals()"/>
+        <div class="lux-filter-box">
+          <div class="lux-filter-grid">
+            <div class="lux-fld">
+              <label for="sigSymDrop">🥇 تصفية السوق</label>
+              <select id="sigSymDrop" onchange="loadAdminSignalsFiltered()">
+                <option value="ALL">🌐 جميع الأسواق (الكل)</option>
+                <option value="XAUUSD">🥇 الذهب — XAUUSD</option>
+              </select>
+            </div>
+            <div class="lux-fld">
+              <label for="sigPeriodDrop">🗓 الفترة الزمنية</label>
+              <select id="sigPeriodDrop" onchange="loadAdminSignalsFiltered()">
+                <option value="all">🗓 كل الفترات</option>
+                <option value="today">⚡ اليوم فقط</option>
+                <option value="24h">🕒 آخر 24 ساعة</option>
+                <option value="7d">📅 آخر 7 أيام</option>
+                <option value="30d">📆 آخر 30 يوماً</option>
+                <option value="90d">🏛 آخر 90 يوماً</option>
+              </select>
+            </div>
+            <div class="lux-fld">
+              <label for="sigUserDrop">👤 المستخدم / المنشئ</label>
+              <select id="sigUserDrop" onchange="loadAdminSignalsFiltered()">
+                <option value="all">👥 كل المستخدمين والمحرك</option>
+                <option value="auto">🤖 المحرك التلقائي فقط</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-bar" style="margin-bottom:7px">
+            <button class="fchip" onclick="quickSigPreset('gold')">🥇 الذهب فقط</button>
+            <button class="fchip" onclick="quickSigPreset('today')">⚡ صفقات اليوم</button>
+            <button class="fchip" onclick="quickSigPreset('7d')">📅 آخر 7 أيام</button>
+            <button class="fchip" onclick="quickSigPreset('reset')">🔄 عرض الكل</button>
+          </div>
+          <input id="sigSearch" style="width:100%;font-family:'Cairo',sans-serif" placeholder="🔍 ابحث بالرمز (XAUUSD) أو الاستراتيجية أو اسم المستخدم أو #الرقم..." oninput="debouncedLoadSignals()"/>
+        </div>
         <div class="filter-bar">
           <button class="fchip active" onclick="setAdminSigFilter('all',this)">🗂 الكل</button>
           <button class="fchip" onclick="setAdminSigFilter('open',this)">🚀 مفتوحة</button>
           <button class="fchip" onclick="setAdminSigFilter('win',this)">🏆 رابحة</button>
-          <button class="fchip" onclick="setAdminSigFilter('loss',this)">🛑 وقف/منتهية</button>
+          <button class="fchip" onclick="setAdminSigFilter('loss',this)">🛑 خسارة SL</button>
+          <button class="fchip" onclick="setAdminSigFilter('neutral',this)">⚪ منتهية/ملغاة</button>
         </div>
         <div id="adminSignalsBox"><div class="empty">⏳ جارٍ تحميل الإشارات...</div></div>
       </div>
@@ -1974,18 +2034,32 @@ input:focus,select:focus{{border-color:var(--gold)}}
     <div id="apane-channels" class="apane">
       <div class="card gold-edge">
         <div class="card-hdr">
-          <h3>📊 إضافة قناة شارت مخصصة</h3>
+          <h3>📊 إضافة واعتماد قناة شارت فاخرة</h3>
           <span class="pill" id="schedBadge">⏹ يدوي</span>
         </div>
-        <div class="row-form">
-          <input id="ccChatId" placeholder="@MyGoldCharts أو -100..." style="flex:1;min-width:160px"/>
-          <input id="ccTitle" placeholder="اسم القناة (اختياري)" style="flex:1;min-width:130px"/>
-          <select id="ccMkt" style="flex:1;min-width:130px"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+        <div style="font-size:11.5px;color:var(--muted);margin-bottom:9px;line-height:1.6">
+          🛡 يتم التحقق الفعلي عبر Telegram API من أن البوت <b>مشرف ويملك صلاحية النشر</b>، مع إرسال شارت/رسالة تأكيد فورية للقناة لإثبات الربط الحي.
         </div>
-        <button class="btn gold" style="width:100%" onclick="addChartCh()">➕ إضافة قناة الشارت الآن</button>
+        <div class="row-form">
+          <input id="ccChatId" placeholder="@MyGoldCharts أو https://t.me/... أو -100..." style="flex:1;min-width:185px"/>
+          <input id="ccTitle" placeholder="اسم القناة (يُجلب تلقائياً إذا تُرك فارغاً)" style="flex:1;min-width:140px"/>
+          <select id="ccMkt" style="flex:1;min-width:140px"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+        </div>
+        <button class="btn gold" id="ccAddBtn" style="width:100%" onclick="addChartCh()">🛡 تحقق واعتماد القناة مع بث تجريبي فوري</button>
+        <div id="ccStatusNote" style="display:none;margin-top:9px;padding:9px 11px;border-radius:11px;font-size:11.5px;line-height:1.6"></div>
+        <div style="margin-top:11px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--gold2);font-weight:800;margin-bottom:5px">⏱ جدولة الشارتات الدورية التلقائية للقنوات:</div>
+          <div class="sched-bar" id="schedBar">
+            <button class="sched-pill" data-min="0" onclick="setChartSched(0)">⏹ يدوي</button>
+            <button class="sched-pill" data-min="5" onclick="setChartSched(5)">⚡ كل 5د</button>
+            <button class="sched-pill" data-min="15" onclick="setChartSched(15)">⏱ كل 15د</button>
+            <button class="sched-pill" data-min="30" onclick="setChartSched(30)">🕒 كل 30د</button>
+            <button class="sched-pill" data-min="60" onclick="setChartSched(60)">🕐 كل 60د</button>
+          </div>
+        </div>
       </div>
       <div class="card">
-        <div class="card-hdr"><h3>📺 قنوات الشارت فقط المربوطة</h3><span class="pill cyan" id="chCountPill">0 قناة</span></div>
+        <div class="card-hdr"><h3>📺 قنوات الشارت فقط المعتمدة</h3><span class="pill cyan" id="chCountPill">0 قناة</span></div>
         <div id="chartChBox"><div class="empty">لا توجد قنوات شارت مخصصة بعد.</div></div>
       </div>
     </div>
@@ -2125,21 +2199,150 @@ function openSigDemoChart(id){{
   window.location.href = API_BASE ? ('../?api=' + encodeURIComponent(API_BASE) + '&demo_sig=' + id) : ('/?demo_sig=' + id);
 }}
 
+let _sigSearchTimer = null;
+function debouncedLoadSignals(){{
+  clearTimeout(_sigSearchTimer);
+  _sigSearchTimer = setTimeout(loadAdminSignalsFiltered, 220);
+}}
+
 function setAdminSigFilter(mode, btn){{
   adminSigFilter = mode;
   btn.parentElement.querySelectorAll('.fchip').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
-  renderAdminSignals();
+  loadAdminSignalsFiltered();
+}}
+
+function quickSigPreset(preset){{
+  const symEl = document.getElementById('sigSymDrop');
+  const perEl = document.getElementById('sigPeriodDrop');
+  const usrEl = document.getElementById('sigUserDrop');
+  const qEl = document.getElementById('sigSearch');
+  if(preset === 'gold'){{
+    if(symEl) symEl.value = 'XAUUSD';
+  }} else if(preset === 'today'){{
+    if(perEl) perEl.value = 'today';
+  }} else if(preset === '7d'){{
+    if(perEl) perEl.value = '7d';
+  }} else if(preset === 'reset'){{
+    if(symEl) symEl.value = 'ALL';
+    if(perEl) perEl.value = 'all';
+    if(usrEl) usrEl.value = 'all';
+    if(qEl) qEl.value = '';
+    adminSigFilter = 'all';
+    const bar = document.querySelector('#apane-signals .filter-bar:last-of-type');
+    if(bar){{
+      bar.querySelectorAll('.fchip').forEach((b,i)=>b.classList.toggle('active', i===0));
+    }}
+  }}
+  loadAdminSignalsFiltered();
+}}
+
+function populateAdminSignalDropdowns(filters){{
+  if(!filters) return;
+  const symEl = document.getElementById('sigSymDrop');
+  if(symEl && Array.isArray(filters.symbols)){{
+    const prev = symEl.value || 'ALL';
+    const opts = [`<option value="ALL">🌐 جميع الأسواق (${{filters.total_all||0}})</option>`];
+    filters.symbols.forEach(item => {{
+      const s = item.symbol || '';
+      const cnt = item.count || 0;
+      const lbl = s === 'XAUUSD' ? `🥇 الذهب — XAUUSD (${{cnt}})` : `📊 ${{esc(s)}} (${{cnt}})`;
+      opts.push(`<option value="${{esc(s)}}">${{lbl}}</option>`);
+    }});
+    symEl.innerHTML = opts.join('');
+    if([...symEl.options].some(o => o.value === prev)) symEl.value = prev;
+  }}
+  const usrEl = document.getElementById('sigUserDrop');
+  if(usrEl && Array.isArray(filters.users)){{
+    const prev = usrEl.value || 'all';
+    const opts = [
+      `<option value="all">👥 كل المستخدمين والمحرك (${{filters.total_all||0}})</option>`,
+      `<option value="auto">🤖 المحرك التلقائي فقط (${{filters.auto_count||0}})</option>`,
+    ];
+    filters.users.forEach(u => {{
+      const pTag = u.plan ? ` · ${{esc(u.plan)}}` : '';
+      opts.push(`<option value="${{u.user_id}}">👤 ${{esc(u.label)}}${{pTag}} (${{u.count||0}})</option>`);
+    }});
+    usrEl.innerHTML = opts.join('');
+    if([...usrEl.options].some(o => o.value === prev)) usrEl.value = prev;
+  }}
+}}
+
+function updateSignalStatsStrip(stats, fallbackList){{
+  const list = fallbackList || adminSignalsData || [];
+  const st = stats || {{
+    total: list.length,
+    open: list.filter(s => s.is_open).length,
+    wins: list.filter(s => s.outcome === 'win').length,
+    losses: list.filter(s => s.outcome === 'loss').length,
+    win_rate: 0,
+    net_pips: list.reduce((a,s) => a + (s.outcome === 'neutral' ? 0 : (+s.pips_result||0)), 0),
+  }};
+  const tot = +(st.total || 0);
+  const openN = +(st.open || 0);
+  const winN = +(st.wins || 0);
+  const lossN = +(st.losses || 0);
+  const wr = st.win_rate != null ? +st.win_rate : ((winN + lossN) > 0 ? Math.round(1000 * winN / (winN + lossN)) / 10 : 0);
+  const netP = +(st.net_pips || 0);
+  const pill = document.getElementById('sigCountPill');
+  if(pill) pill.textContent = tot + ' إشارة';
+  const elTot = document.getElementById('ssTotal'); if(elTot) elTot.textContent = tot;
+  const elOpen = document.getElementById('ssOpen'); if(elOpen) elOpen.textContent = openN;
+  const elWin = document.getElementById('ssWin'); if(elWin) elWin.textContent = winN;
+  const elLoss = document.getElementById('ssLoss'); if(elLoss) elLoss.textContent = lossN;
+  const elWr = document.getElementById('ssWr');
+  if(elWr){{
+    elWr.textContent = `${{wr.toFixed(0)}}%`;
+    elWr.style.color = wr >= 55 ? 'var(--green)' : (wr > 0 ? 'var(--gold2)' : 'var(--muted)');
+  }}
+  const spEl = document.getElementById('ssPips');
+  if(spEl){{
+    spEl.textContent = `${{netP>=0?'+':''}}${{netP.toFixed(0)}}p`;
+    spEl.style.color = netP > 0 ? 'var(--green)' : (netP < 0 ? 'var(--red)' : 'var(--muted)');
+  }}
+}}
+
+async function loadAdminSignalsFiltered(){{
+  const sym = (document.getElementById('sigSymDrop')||{{value:'ALL'}}).value || 'ALL';
+  const period = (document.getElementById('sigPeriodDrop')||{{value:'all'}}).value || 'all';
+  const userId = (document.getElementById('sigUserDrop')||{{value:'all'}}).value || 'all';
+  const q = ((document.getElementById('sigSearch')||{{}}).value || '').trim();
+  const qs = new URLSearchParams({{
+    symbol: sym,
+    period: period,
+    user_id: userId,
+    status: adminSigFilter || 'all',
+    q: q,
+    limit: '150',
+  }});
+  const r = await api('/api/admin/signals?' + qs.toString());
+  if(r && r.ok){{
+    adminSignalsData = r.signals || [];
+    if(r.filters) populateAdminSignalDropdowns(r.filters);
+    updateSignalStatsStrip(r.stats, adminSignalsData);
+    renderAdminSignals();
+  }}
+}}
+
+function _sigStatusBadge(st){{
+  const map = {{
+    ACTIVE: '📡 نشطة',
+    RUNNING: '🚀 جارية',
+    TP1_HIT: '🎯 هدف TP1',
+    TP2_HIT: '🏆 هدف TP2',
+    TP3_HIT: '👑 هدف TP3',
+    TP1_BE: '🛡 ربح مؤمّن TP1',
+    TP2_BE: '🛡 ربح مؤمّن TP2',
+    SL_HIT: '🛑 وقف خسارة SL',
+    EXPIRED: '⏳ منتهية · لم تتفعّل',
+    CANCELLED: '🚫 ملغاة',
+  }};
+  return map[st] || st;
 }}
 
 function renderAdminSignals(){{
   const box = document.getElementById('adminSignalsBox');
-  const q = ((document.getElementById('sigSearch')||{{}}).value || '').trim().toLowerCase();
-  let list = adminSignalsData || [];
-  if(adminSigFilter === 'open') list = list.filter(s => ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes((s.status||'').toUpperCase()) && !s.closed_at);
-  if(adminSigFilter === 'win') list = list.filter(s => ['TP1_HIT','TP2_HIT','TP3_HIT'].includes((s.status||'').toUpperCase()) || (+s.pips_result||0) > 0);
-  if(adminSigFilter === 'loss') list = list.filter(s => ['SL_HIT','CANCELLED','EXPIRED'].includes((s.status||'').toUpperCase()));
-  if(q) list = list.filter(s => `${{s.symbol||""}} ${{s.strategy||""}} ${{s.creator||""}} #${{s.seq||s.id}}`.toLowerCase().includes(q));
+  const list = adminSignalsData || [];
   if(!list.length){{
     box.innerHTML = '<div class="empty">لا توجد إشارات مطابقة لهذا الفلتر.</div>';
     return;
@@ -2147,23 +2350,27 @@ function renderAdminSignals(){{
   box.innerHTML = list.map(s => {{
     const isBuy = (s.direction||'BUY').toUpperCase() === 'BUY';
     const st = (s.status||'ACTIVE').toUpperCase();
-    const isWin = ['TP1_HIT','TP2_HIT','TP3_HIT'].includes(st);
-    const isOpen = ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes(st) && !s.closed_at;
-    const cls = isWin ? 'win' : (isOpen ? 'live' : 'loss');
-    const pillCls = isWin ? 'green' : (isOpen ? 'cyan' : 'red');
+    const outcome = s.outcome || (['TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE'].includes(st) ? 'win' : (st === 'SL_HIT' ? 'loss' : (['EXPIRED','CANCELLED'].includes(st) ? 'neutral' : 'open')));
+    const isOpen = (s.is_open != null) ? !!s.is_open : (['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes(st) && !s.closed_at);
+    const cls = outcome === 'win' ? 'win' : (outcome === 'loss' ? 'loss' : (outcome === 'neutral' ? 'neutral' : 'live'));
+    const pillCls = outcome === 'win' ? 'green' : (outcome === 'loss' ? 'red' : (outcome === 'neutral' ? 'neutral' : 'cyan'));
     const pips = +(s.pips_result || 0);
-    const pTxt = pips ? ` · <b style="color:${{pips>0?'var(--green)':'var(--red)'}}">${{pips>0?'+':''}}${{pips.toFixed(1)}}p</b>` : '';
+    const pTxt = outcome === 'neutral'
+      ? ` · <span style="color:var(--muted)">0p (غير محسوبة خسارة)</span>`
+      : (pips ? ` · <b style="color:${{pips>0?'var(--green)':'var(--red)'}}">${{pips>0?'+':''}}${{pips.toFixed(1)}}p</b>` : '');
+    const dtTxt = s.created_at ? String(s.created_at).slice(0,16).replace('T',' ') : '';
+    const planTag = s.creator_plan && s.creator_plan !== 'AUTO' ? ` <span class="pill" style="font-size:9.5px">${{esc(s.creator_plan)}}</span>` : '';
     return `
       <div class="sig-card ${{cls}}">
         <div class="sig-top">
           <div>
-            <div class="sig-sym"><span style="color:var(--gold2)">#${{s.seq||s.id}}</span> ${{s.symbol}}
+            <div class="sig-sym"><span style="color:var(--gold2)">#${{s.seq||s.id}}</span> ${{esc(s.symbol)}}
               <span class="pill ${{isBuy?'green':'red'}}">${{isBuy?'▲ شراء':'▼ بيع'}}</span>
             </div>
-            <div class="sig-meta">⏱ ${{s.timeframe}} · 🧠 ${{s.strategy}} · ⭐ ${{s.score||0}}/100${{pTxt}}</div>
-            <div class="sig-meta">${{s.creator||'🤖 المحرك التلقائي'}} · 📬 ${{s.deliveries||0}} مستلم · 🎮 ${{s.demo_count||0}} تجريبي</div>
+            <div class="sig-meta">⏱ ${{esc(s.timeframe)}} · 🧠 ${{esc(s.strategy)}} · ⭐ ${{s.score||0}}/100${{pTxt}}</div>
+            <div class="sig-meta">${{esc(s.creator||'🤖 المحرك التلقائي')}}${{planTag}} · 📬 ${{s.deliveries||0}} مستلم · 🎮 ${{s.demo_count||0}} تجريبي${{dtTxt ? ' · 🕒 ' + esc(dtTxt) : ''}}</div>
           </div>
-          <span class="pill ${{pillCls}}">${{st}}</span>
+          <span class="pill ${{pillCls}}">${{_sigStatusBadge(st)}}</span>
         </div>
         <div class="lvls">
           <div class="lvl"><span>دخول</span><b style="color:var(--gold2)">${{s.entry}}</b></div>
@@ -2193,12 +2400,65 @@ async function sendLuxuryNewsNow(){{
 }}
 async function addChartCh(){{
   const chat_id = document.getElementById('ccChatId').value.trim();
-  if(!chat_id) return toast('أدخل معرف القناة أولاً', true);
-  const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{
-    op:'add', chat_id, title:document.getElementById('ccTitle').value.trim(), markets:document.getElementById('ccMkt').value
-  }})}});
-  toast(r.ok ? '✅ تمت إضافة قناة الشارت بنجاح' : (r.error||'خطأ'), !r.ok);
-  if(r.ok){{ document.getElementById('ccChatId').value=''; document.getElementById('ccTitle').value=''; loadAdmin(); }}
+  if(!chat_id) return toast('أدخل معرف القناة أولاً (@channel أو -100...)', true);
+  const btn = document.getElementById('ccAddBtn');
+  const note = document.getElementById('ccStatusNote');
+  if(btn){{ btn.disabled = true; btn.textContent = '⏳ جارٍ التحقق عبر Telegram API وإرسال اختبار...'; }}
+  if(note){{ note.style.display = 'none'; }}
+  try{{
+    const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{
+      op:'add', chat_id, title:document.getElementById('ccTitle').value.trim(), markets:document.getElementById('ccMkt').value, send_test:true
+    }})}});
+    if(r && r.ok){{
+      const verBadge = r.verified ? '🛡 موثّقة عبر تيليجرام' : '💾 محفوظة';
+      const testBadge = r.test_sent
+        ? (r.test_kind === 'chart' ? ' · 📊 تم إرسال شارت تجريبي فاخر للقناة الآن!' : ' · ✅ تم إرسال رسالة تأكيد للقناة الآن!')
+        : (r.test_error ? ` · ⚠️ تعذر الاختبار الفوري: ${{r.test_error}}` : '');
+      toast(`✅ تم اعتماد قناة الشارت بنجاح${{r.test_sent ? ' + بث تجريبي' : ''}}`);
+      if(note){{
+        note.style.display = 'block';
+        note.style.background = 'rgba(22,199,132,.14)';
+        note.style.border = '1px solid rgba(22,199,132,.4)';
+        note.style.color = '#d1fae5';
+        note.innerHTML = `✅ <b>${{esc(r.title||r.chat_id)}}</b> (<code>${{esc(r.chat_id)}}</code>) — ${{verBadge}}${{esc(testBadge)}}`;
+      }}
+      document.getElementById('ccChatId').value='';
+      document.getElementById('ccTitle').value='';
+      loadAdmin();
+    }} else {{
+      const err = (r && r.error) || 'تعذر التحقق من القناة';
+      toast(err, true);
+      if(note){{
+        note.style.display = 'block';
+        note.style.background = 'rgba(240,68,82,.14)';
+        note.style.border = '1px solid rgba(240,68,82,.42)';
+        note.style.color = '#fecdd3';
+        note.innerHTML = `⛔ <b>لم يتم اعتماد القناة:</b> ${{esc(err)}}`;
+      }}
+    }}
+  }} finally {{
+    if(btn){{ btn.disabled = false; btn.textContent = '🛡 تحقق واعتماد القناة مع بث تجريبي فوري'; }}
+  }}
+}}
+async function testChartCh(id, btn){{
+  const orig = btn ? btn.textContent : '';
+  if(btn){{ btn.disabled = true; btn.textContent = '⏳...'; }}
+  try{{
+    const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{op:'test', id}})}});
+    if(r && r.ok){{
+      toast(r.kind === 'chart' ? `📊 تم إرسال شارت ${{r.symbol||''}} الفاخر للقناة بنجاح!` : '✅ تم إرسال رسالة التأكيد للقناة بنجاح!');
+      loadAdmin();
+    }} else {{
+      toast((r && r.error) || 'فشل الإرسال التجريبي للقناة', true);
+    }}
+  }} finally {{
+    if(btn){{ btn.disabled = false; btn.textContent = orig; }}
+  }}
+}}
+async function setChartSched(minutes){{
+  const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{op:'schedule', minutes}})}});
+  toast(r && r.ok ? (minutes > 0 ? `⏱ تم تفعيل البث الدوري للشارتات كل ${{minutes}} دقيقة` : '⏹ تم تحويل الجدولة للوضع اليدوي') : ((r&&r.error)||'خطأ'), !(r&&r.ok));
+  if(r && r.ok) loadAdmin();
 }}
 async function chartChOp(op, id){{
   const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{op, id}})}});
@@ -2524,19 +2784,19 @@ async function loadAdmin(){{
   const sigDot = document.getElementById('sigDot');
   if(sigDot){{ sigDot.textContent = d.kpis.open_signals || 0; sigDot.style.display = (d.kpis.open_signals||0) ? 'inline-block' : 'none'; }}
 
-  // Page 2: Signals data & stats strip
-  adminSignalsData = d.recent_signals || [];
-  document.getElementById('sigCountPill').textContent = adminSignalsData.length + ' إشارة';
-  const openN = adminSignalsData.filter(s => ['ACTIVE','RUNNING','TP1_HIT','TP2_HIT'].includes((s.status||'').toUpperCase()) && !s.closed_at).length;
-  const winN = adminSignalsData.filter(s => ['TP1_HIT','TP2_HIT','TP3_HIT'].includes((s.status||'').toUpperCase()) || (+s.pips_result||0) > 0).length;
-  const netP = adminSignalsData.reduce((a,s) => a + (+s.pips_result||0), 0);
-  document.getElementById('ssTotal').textContent = adminSignalsData.length;
-  document.getElementById('ssOpen').textContent = openN;
-  document.getElementById('ssWin').textContent = winN;
-  const spEl = document.getElementById('ssPips');
-  spEl.textContent = `${{netP>=0?'+':''}}${{netP.toFixed(0)}}p`;
-  spEl.style.color = netP >= 0 ? 'var(--green)' : 'var(--red)';
-  renderAdminSignals();
+  // Page 2: Signals data, luxury dropdowns & institutional KPI strip
+  if(d.signal_filters) populateAdminSignalDropdowns(d.signal_filters);
+  const symVal = (document.getElementById('sigSymDrop')||{{value:'ALL'}}).value || 'ALL';
+  const perVal = (document.getElementById('sigPeriodDrop')||{{value:'all'}}).value || 'all';
+  const usrVal = (document.getElementById('sigUserDrop')||{{value:'all'}}).value || 'all';
+  const qVal = ((document.getElementById('sigSearch')||{{}}).value || '').trim();
+  if(symVal !== 'ALL' || perVal !== 'all' || usrVal !== 'all' || adminSigFilter !== 'all' || qVal){{
+    loadAdminSignalsFiltered();
+  }} else {{
+    adminSignalsData = d.recent_signals || [];
+    updateSignalStatsStrip(d.signal_stats, adminSignalsData);
+    renderAdminSignals();
+  }}
 
   // Page 1: Toggles
   const labels = {{
@@ -2600,23 +2860,28 @@ async function loadAdmin(){{
   // Page 4: Chart Channels
   const sm = d.chart_schedule_minutes || 0;
   document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${{sm}} دقيقة` : '⏹ يدوي';
+  document.querySelectorAll('#schedBar .sched-pill').forEach(p => {{
+    p.classList.toggle('active', Number(p.dataset.min) === Number(sm));
+  }});
   const mktSel = document.getElementById('ccMkt');
   if(d.markets && d.markets.length && mktSel.options.length <= 1){{
     d.markets.forEach(m => {{ const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); }});
   }}
   const cchs = d.chart_channels || [];
   document.getElementById('chCountPill').textContent = cchs.length + ' قناة';
-  document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c =>
-    `<div class="item">
+  document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c => {{
+    const lastTxt = c.last_sent ? ` · 📤 آخر بث: ${{esc(String(c.last_sent).slice(0,16).replace('T',' '))}}` : ' · لم يُبث بعد';
+    return `<div class="item">
       <div>${{c.enabled?'🟢':'⚪'}} <b>${{esc(c.title||c.chat_id)}}</b> <span class="pill">${{esc(c.markets||'ALL')}}</span>
-        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{esc(c.chat_id)}}</div>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{esc(c.chat_id)}}${{lastTxt}}</div>
       </div>
-      <div style="display:flex;gap:6px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn gold" style="padding:7px 10px" onclick="testChartCh(${{Number(c.id)||0}},this)">🧪 اختبار الآن</button>
         <button class="btn ${{c.enabled?'on':'off'}}" onclick="chartChOp('toggle',${{Number(c.id)||0}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
         <button class="btn danger" onclick="chartChOp('delete',${{Number(c.id)||0}})">🗑</button>
       </div>
-    </div>`
-  ).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه.</div>';
+    </div>`;
+  }}).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه للتحقق الفوري.</div>';
 
   // Page 5: News & Leaderboard
   const nev = d.news_events || [];

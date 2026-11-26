@@ -11,11 +11,49 @@ posts) to each channel whenever:
 from __future__ import annotations
 
 import io
+import re
 from typing import Iterable
 
 from fysb import config, db, instruments
 from fysb.config import log
 from fysb.theme import dir_badge, esc, strategy_name, tf_name
+
+
+def normalize_chat_input(raw: str) -> str:
+    """Normalize Telegram channel/group input (@user, t.me/user, -100..., 100...).
+
+    Raises ValueError on empty input or unsupported private invite links (t.me/+...).
+    """
+    s = str(raw or "").strip()
+    if not s:
+        raise ValueError("يرجى إدخال معرف القناة (@channel أو -100...)")
+    # Strip full Telegram URLs: https://t.me/channel, t.me/channel, telegram.me/channel
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([^?\s#]+)", s, flags=re.IGNORECASE)
+    if m:
+        slug = m.group(1).strip("/")
+        if slug.startswith("+") or slug.lower().startswith("joinchat/"):
+            raise ValueError(
+                "روابط الدعوة الخاصة (t.me/+...) لا تعمل مع Bot API — استخدم المعرّف الرقمي للقناة (-100...) أو @username."
+            )
+        # Handle t.me/c/1234567890/12 -> -1001234567890
+        mc = re.match(r"^c/(\d+)", slug, flags=re.IGNORECASE)
+        if mc:
+            return f"-100{mc.group(1)}"
+        slug = slug.split("/")[0].lstrip("@")
+        if not slug:
+            raise ValueError("رابط القناة غير صالح")
+        return f"@{slug}"
+    # Bare positive 100xxxxxxxxxx -> -100xxxxxxxxxx
+    if s.isdigit() and s.startswith("100") and len(s) >= 11:
+        return f"-{s}"
+    if s.lstrip("-").isdigit():
+        return s
+    if s.startswith("@"):
+        return s
+    # Bare username like MyForexChannel -> @MyForexChannel
+    if re.match(r"^[A-Za-z][A-Za-z0-9_]{3,64}$", s):
+        return f"@{s}"
+    return s
 
 
 def _norm_sym(sym: str) -> str:
@@ -69,12 +107,31 @@ def get_channel(cid: int) -> dict | None:
     return dict(r) if r else None
 
 
+def find_by_chat_id(chat_id: str) -> dict | None:
+    target = str(chat_id or "").strip().lower()
+    if not target:
+        return None
+    for row in list_channels(False):
+        if str(row.get("chat_id") or "").strip().lower() == target:
+            return row
+    return None
+
+
 def add_channel(chat_id: str, title: str = "", markets: str = "ALL") -> int:
-    cid_str = str(chat_id or "").strip()
-    if not cid_str:
-        raise ValueError("chat_id is required")
+    cid_str = normalize_chat_input(chat_id)
     mkts = ",".join(parse_markets_csv(markets))
     now_s = config.now()
+    existing = find_by_chat_id(cid_str)
+    if existing:
+        new_title = (title or existing.get("title") or cid_str).strip()[:80]
+        with db.tx() as c:
+            c.execute(
+                """UPDATE chart_channels
+                   SET title=?, markets=?, enabled=1, updated_at=?
+                   WHERE id=?""",
+                (new_title, mkts, now_s, int(existing["id"])),
+            )
+        return int(existing["id"])
     with db.tx() as c:
         cur = c.execute(
             """INSERT INTO chart_channels(
@@ -321,3 +378,198 @@ async def deliver_chart_to_matching_channels(
     if sent_ids:
         touch_last_sent(sent_ids)
     return sent
+
+
+async def verify_telegram_channel(bot, raw_chat_id: str) -> dict:
+    """Verify via real Telegram Bot API that the channel exists and the bot can post to it."""
+    try:
+        norm = normalize_chat_input(raw_chat_id)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if bot is None or not hasattr(bot, "get_chat"):
+        return {
+            "ok": True,
+            "verified": False,
+            "chat_id": norm,
+            "title": norm,
+            "username": norm.lstrip("@") if norm.startswith("@") else "",
+            "chat_type": "channel",
+        }
+    target = _norm_chat_target(norm)
+    try:
+        chat = await bot.get_chat(target)
+    except Exception as exc:
+        msg = str(exc)
+        low = msg.lower()
+        if "chat not found" in low or "not found" in low:
+            return {
+                "ok": False,
+                "error": (
+                    "تعذر العثور على القناة في تيليجرام — تأكد من المعرّف (@channel أو -100...) "
+                    "وأن البوت مضاف بالفعل كمشرف داخل القناة."
+                ),
+            }
+        if "kicked" in low or "forbidden" in low:
+            return {"ok": False, "error": "البوت محظور أو مطرود من هذه القناة — أعد إضافته كمشرف أولاً."}
+        return {"ok": False, "error": f"تعذر التحقق من القناة عبر تيليجرام: {msg[:160]}"}
+
+    resolved_id = str(getattr(chat, "id", norm))
+    resolved_title = str(getattr(chat, "title", "") or getattr(chat, "full_name", "") or norm).strip()
+    resolved_user = str(getattr(chat, "username", "") or "").strip()
+    chat_type = str(getattr(chat, "type", "channel") or "channel").lower()
+
+    if hasattr(bot, "get_me") and hasattr(bot, "get_chat_member"):
+        try:
+            me = await bot.get_me()
+            member = await bot.get_chat_member(chat.id, me.id)
+            status = str(getattr(member, "status", "") or "").lower()
+            if chat_type == "channel":
+                if status not in ("administrator", "creator"):
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"البوت ليس مشرفاً في القناة «{resolved_title}» (الحالة: {status or 'member'}) — "
+                            "قم بترقية البوت إلى مشرف مع صلاحية نشر الرسائل (Post Messages)."
+                        ),
+                    }
+                if status == "administrator" and getattr(member, "can_post_messages", True) is False:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"البوت مشرف في «{resolved_title}» لكن تنقصه صلاحية «نشر الرسائل / Post Messages» — "
+                            "فعّل الصلاحية من إعدادات مشرفي القناة ثم أعد المحاولة."
+                        ),
+                    }
+            elif chat_type in ("group", "supergroup"):
+                if status in ("left", "kicked"):
+                    return {"ok": False, "error": f"البوت غير موجود في المجموعة «{resolved_title}»."}
+                if status == "restricted" and getattr(member, "can_send_messages", True) is False:
+                    return {"ok": False, "error": f"البوت مقيّد من الإرسال في المجموعة «{resolved_title}»."}
+        except Exception as exc:
+            low = str(exc).lower()
+            if "not enough rights" in low or "forbidden" in low or "member list is inaccessible" in low:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"تعذر تأكيد صلاحيات الإشراف في «{resolved_title}» — "
+                        "تأكد أن البوت مشرف بصلاحية نشر الرسائل ثم أعد المحاولة."
+                    ),
+                }
+            log.debug("verify_telegram_channel member check warning: %s", exc)
+
+    return {
+        "ok": True,
+        "verified": True,
+        "chat_id": resolved_id,
+        "title": resolved_title or resolved_id,
+        "username": resolved_user,
+        "chat_type": chat_type,
+    }
+
+
+async def send_test_chart(bot, ch: dict) -> dict:
+    """Send an immediate live test chart/confirmation to a registered chart channel."""
+    if not ch:
+        return {"ok": False, "error": "القناة غير موجودة"}
+    if bot is None:
+        return {"ok": False, "error": "البوت غير متصل حالياً لإرسال رسالة الاختبار"}
+    target = _norm_chat_target(ch["chat_id"])
+    mkts = parse_markets_csv(ch.get("markets") or "ALL")
+    sample_sym = "XAUUSD" if "ALL" in mkts else mkts[0]
+    title = str(ch.get("title") or ch.get("chat_id") or "")
+    mkts_lbl = format_markets_label(ch.get("markets") or "ALL")
+
+    # Try rendering a real ForexYemeni luxury analysis chart first!
+    png_bytes = b""
+    caption = ""
+    try:
+        from fysb.services.analytics import run_analysis
+        from fysb.ui import charts as _charts
+        if _charts.charts_enabled():
+            res = run_analysis(0, sample_sym, "M15", "", "", "ALL", enforce_plan=False)
+            if res.get("ok") and res.get("analysis"):
+                an = res["analysis"]
+                png_bytes = _charts.render_analysis_chart(an) or b""
+                if png_bytes:
+                    caption = (
+                        f"✅ <b><u>تم ربط واعتماد قناة الشارت الفاخرة بنجاح</u></b>\n"
+                        f"<blockquote>"
+                        f"▎📺 القناة: <b>{esc(title)}</b>\n"
+                        f"▎🌐 الأسواق المفعّلة: <b>{esc(mkts_lbl)}</b>\n"
+                        f"▎📊 عيّنة فورية: <b>{esc(sample_sym)}</b> · شارت شموع حقيقي من محرك <b>{config.BRAND}</b>\n"
+                        f"</blockquote>\n"
+                        f"<i>👑 {config.BRAND} Luxury Charts Engine · {config.BOT_SIGNATURE}</i>"
+                    )
+    except Exception as exc:
+        log.debug("send_test_chart luxury preview fallback (%s): %s", sample_sym, exc)
+
+    try:
+        if png_bytes and hasattr(bot, "send_photo"):
+            await bot.send_photo(
+                chat_id=target,
+                photo=io.BytesIO(png_bytes),
+                caption=caption,
+                parse_mode="HTML",
+            )
+            touch_last_sent([int(ch["id"])])
+            return {"ok": True, "kind": "chart", "symbol": sample_sym}
+        if hasattr(bot, "send_message"):
+            msg = (
+                f"✅ <b><u>تم ربط واعتماد قناة الشارت الفاخرة بنجاح</u></b>\n"
+                f"<blockquote>"
+                f"▎📺 القناة: <b>{esc(title)}</b>\n"
+                f"▎🌐 الأسواق المفعّلة: <b>{esc(mkts_lbl)}</b>\n"
+                f"▎📡 ستستلم هذه القناة الشارتات الفاخرة تلقائياً فور صدور الإشارات والتحديثات والتحليلات.\n"
+                f"</blockquote>\n"
+                f"<i>👑 {config.BRAND} Luxury Charts Engine · {config.BOT_SIGNATURE}</i>"
+            )
+            await bot.send_message(chat_id=target, text=msg, parse_mode="HTML")
+            touch_last_sent([int(ch["id"])])
+            return {"ok": True, "kind": "message", "symbol": sample_sym}
+        return {"ok": False, "error": "كائن البوت لا يدعم الإرسال"}
+    except Exception as exc:
+        low = str(exc).lower()
+        if "not enough rights" in low or "can't send" in low or "forbidden" in low:
+            return {"ok": False, "error": "فشل الإرسال: البوت لا يملك صلاحية نشر الصور/الرسائل في القناة."}
+        if "chat not found" in low:
+            return {"ok": False, "error": "فشل الإرسال: لم يتم العثور على القناة — تحقق من المعرف."}
+        return {"ok": False, "error": f"فشل الإرسال للقناة: {str(exc)[:160]}"}
+
+
+async def deliver_analysis_chart_to_matching_channels(
+    bot,
+    symbol: str,
+    png_bytes: bytes,
+    caption: str,
+    *,
+    exclude_chat_ids: set[str] | None = None,
+) -> int:
+    """Deliver v8.1.0 luxury analysis charts to matching enabled chart_channels."""
+    if not bot or not png_bytes or not symbol:
+        return 0
+    excluded = {str(x).strip().lower() for x in (exclude_chat_ids or set()) if x}
+    sym = str(symbol).upper()
+    sent = 0
+    sent_ids: list[int] = []
+    for ch in list_channels(only_enabled=True):
+        if not market_matches(ch.get("markets") or "ALL", sym):
+            continue
+        cid_key = str(ch.get("chat_id") or "").strip().lower()
+        if cid_key in excluded:
+            continue
+        try:
+            target = _norm_chat_target(ch["chat_id"])
+            await bot.send_photo(
+                chat_id=target,
+                photo=io.BytesIO(png_bytes),
+                caption=caption[:1024],
+                parse_mode="HTML",
+            )
+            sent += 1
+            sent_ids.append(int(ch["id"]))
+        except Exception as exc:
+            log.warning("chart_channel analysis send failed id=%s chat=%s: %s", ch.get("id"), ch.get("chat_id"), exc)
+    if sent_ids:
+        touch_last_sent(sent_ids)
+    return sent
+

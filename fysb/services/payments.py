@@ -156,6 +156,9 @@ def approve_request(pid: int, actor: int) -> dict:
     if str(p_dict.get("plan_code") or "").upper() == "ACADEMY":
         from fysb.services import academy as _acad
         _acad.grant_paid_access(p_dict["user_id"], source="PAYMENT", granted_by=actor)
+    elif str(p_dict.get("plan_code") or "").upper() == "TRUE_ANALYSIS":
+        from fysb.services import true_analysis as _ta
+        _ta.grant_paid_access(p_dict["user_id"], actor=actor)
     elif plan:
         pl_dict = dict(plan)
         grant_res = grant_subscription(

@@ -1747,8 +1747,9 @@ async def admin_markets_category(q, uid, context, bot, category: str, page: int 
         icon = CATEGORY_ICON.get(cat, "🌐")
         title = CATEGORY_AR.get(cat, cat)
 
-    # Sort enabled first, then XAUUSD first, then alphabetical
-    grp.sort(key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, 0 if r["enabled"] else 1, r["symbol"]))
+    # Stable deterministic order (XAUUSD first, then alphabetical) so tapping any
+    # symbol on Page 1/2/3 NEVER jumps it off the page — it flips 🔒 ↔ 🟢 in place!
+    grp.sort(key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, r["symbol"]))
     total_cat = len(grp)
     en_cat = sum(1 for r in grp if r["enabled"])
     total_pages = max(1, (total_cat + _ADMIN_MKT_PAGE_SIZE - 1) // _ADMIN_MKT_PAGE_SIZE)
@@ -1802,6 +1803,33 @@ async def admin_markets_category(q, uid, context, bot, category: str, page: int 
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
+def _sync_enabled_symbols_to_vip(symbols: list[str]) -> None:
+    """Ensure VIP plan stays synced with Admin-activated markets immediately."""
+    syms = [str(s or "").strip().upper() for s in (symbols or []) if str(s or "").strip()]
+    if not syms:
+        return
+    with db.tx() as c:
+        row = c.execute("SELECT markets FROM plans WHERE code='VIP'").fetchone()
+        if not row:
+            return
+        cur = str(row["markets"] or "").strip()
+        if cur.upper() == "ALL":
+            return
+        cur_list = [x.strip().upper() for x in cur.split(",") if x.strip()]
+        changed = False
+        for s in syms:
+            if s not in cur_list:
+                cur_list.append(s)
+                changed = True
+        if changed:
+            c.execute("UPDATE plans SET markets=? WHERE code='VIP'", (",".join(cur_list),))
+    try:
+        from fysb.services import subscriptions as _subs
+        _subs.invalidate_plans_cache()
+    except Exception:
+        pass
+
+
 async def admin_markets_bulk(q, uid, context, bot, category: str, mode: str):
     """Enable or disable all instruments in a category at once."""
     from fysb.theme import CATEGORY_AR
@@ -1810,17 +1838,22 @@ async def admin_markets_bulk(q, uid, context, bot, category: str, mode: str):
     def _apply_bulk():
         with db.tx() as c:
             if enable:
+                syms = [r["symbol"] for r in c.execute(
+                    "SELECT symbol FROM market_catalog WHERE LOWER(category)=?", (cat,)).fetchall()]
                 cur = c.execute(
                     "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE LOWER(category)=?",
                     (config.now(), cat),
                 )
             else:
+                syms = []
                 cur = c.execute(
                     "UPDATE market_catalog SET enabled=0, updated_at=? WHERE LOWER(category)=? AND symbol<>?",
                     (config.now(), cat, db.GOLD_DEFAULT_SYMBOL),
                 )
-            return int(cur.rowcount or 0)
-    cnt = await afn.run(_apply_bulk)
+            return int(cur.rowcount or 0), syms
+    cnt, syms = await afn.run(_apply_bulk)
+    if enable and syms:
+        await afn.run(_sync_enabled_symbols_to_vip, syms)
     await afn.run(audit_log.log, uid, f"markets_bulk:{cat}:{'on' if enable else 'off'}:{cnt}")
     title = CATEGORY_AR.get(cat, cat)
     msg = (f"تم تفعيل جميع أسواق قسم {title} ({cnt} أداة) بنجاح 🟢"
@@ -1943,17 +1976,17 @@ async def admin_signal_markets_all(q, uid, context, bot):
 
 
 async def admin_market_toggle(q, uid, context, bot, symbol: str, ctx_tag: str = ""):
-    r = await afn.run(_market_state, symbol)
+    sym_clean = (symbol or "").strip().upper()
+    r = await afn.run(_market_state, sym_clean)
     if not r:
-        await render(q, "السوق غير موجود.", kb.admin_nav(), bot)
+        await render(q, f"السوق {esc(sym_clean)} غير موجود.", kb.admin_nav(), bot)
         return
-    nxt = 0 if r["enabled"] else 1
-    if nxt == 1 and not r["verified"]:
-        # Real mapped catalog instruments activate in 1 tap for Admin!
-        await afn.run(_market_verify_apply, symbol, 1)
-    await afn.run(_market_toggle_apply, symbol, nxt)
-    await afn.run(audit_log.log, uid, f"market_toggle:{symbol}:{nxt}")
-    notice = f"تم {'تفعيل' if nxt else 'إغلاق'} {symbol} بنجاح {'🟢' if nxt else '🔒'}"
+    nxt = 0 if int(r["enabled"] or 0) else 1
+    await afn.run(_market_toggle_apply, sym_clean, nxt)
+    if nxt == 1:
+        await afn.run(_sync_enabled_symbols_to_vip, [sym_clean])
+    await afn.run(audit_log.log, uid, f"market_toggle:{sym_clean}:{nxt}")
+    notice = f"تم {'تفعيل' if nxt else 'إغلاق'} {sym_clean} بنجاح {'🟢' if nxt else '🔒'}"
     if ctx_tag and "_" in ctx_tag:
         cat, pg_s = ctx_tag.rsplit("_", 1)
         try:
@@ -2323,14 +2356,22 @@ def _market_catalog_all() -> list[dict]:
 def _market_state(symbol: str):
     """(v6.11.0 thread-offload helper) enabled/verified flags of one market."""
     with db.conn() as c:
-        return c.execute("SELECT enabled,verified FROM market_catalog WHERE symbol=?", (symbol,)).fetchone()
+        return c.execute("SELECT symbol,enabled,verified FROM market_catalog WHERE UPPER(symbol)=UPPER(?)", (symbol,)).fetchone()
 
 
 def _market_toggle_apply(symbol: str, new_val: int) -> None:
-    """(v6.11.0 thread-offload helper) write the enabled flag of one market."""
-    with db.conn() as c:
-        c.execute("UPDATE market_catalog SET enabled=?,updated_at=? WHERE symbol=?",
-                  (new_val, config.now(), symbol))
+    """(v8.4.0 atomic tx) write enabled (+ auto-verify on enable) for one market."""
+    with db.tx() as c:
+        if new_val:
+            c.execute(
+                "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE UPPER(symbol)=UPPER(?)",
+                (config.now(), symbol),
+            )
+        else:
+            c.execute(
+                "UPDATE market_catalog SET enabled=0, updated_at=? WHERE UPPER(symbol)=UPPER(?)",
+                (config.now(), symbol),
+            )
 
 
 def _market_provider_symbol(symbol: str):

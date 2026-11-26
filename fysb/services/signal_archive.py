@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fysb import db
+from fysb import config, db
 from fysb.theme import esc, is_signal_closed
 
 _AR_WEEKDAYS = {
@@ -32,13 +32,13 @@ _OPEN_STATUSES = ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT")
 
 
 def today_iso() -> str:
-    """Current UTC calendar day YYYY-MM-DD (matches human_dt and created_at)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Current Mecca calendar day YYYY-MM-DD (flips at 12:00am بتوقيت مكة)."""
+    return config.mecca_today_iso()
 
 
 def yesterday_iso() -> str:
-    """Previous UTC calendar day YYYY-MM-DD."""
-    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    """Previous Mecca calendar day YYYY-MM-DD."""
+    return (config.mecca_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def is_valid_iso_date(s: str) -> bool:
@@ -64,11 +64,9 @@ def resolve_scope_date(scope: str) -> str:
 
 
 def date_bounds(day_iso: str) -> tuple[str, str]:
-    """Half-open UTC string range [day_iso, next_day_iso) — works on both
-    'YYYY-MM-DDTHH:MM:SS+00:00' and 'YYYY-MM-DD HH:MM:SS' in PG and SQLite."""
-    dt = datetime.strptime(day_iso, "%Y-%m-%d")
-    nxt = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-    return day_iso, nxt
+    """Half-open UTC ISO range [lo, hi) corresponding to the exact Mecca day
+    (12:00am -> next 12:00am بتوقيت مكة), 100% PG & SQLite compatible."""
+    return config.mecca_day_utc_bounds(day_iso)
 
 
 def ar_date_label(day_iso: str) -> str:
@@ -249,31 +247,43 @@ def admin_signals_page(
     return total, [dict(r) for r in rows], summary
 
 
+def _group_rows_by_mecca_day(raw_rows: list) -> list[dict]:
+    """Bucket signal rows by exact Mecca calendar date (12:00am KSA boundary)."""
+    buckets: dict[str, dict] = {}
+    for r in raw_rows:
+        day = config.mecca_date_of(r["created_at"])
+        if not day or len(day) != 10:
+            continue
+        b = buckets.setdefault(day, {
+            "day": day, "total_n": 0, "open_n": 0, "wins_n": 0, "losses_n": 0, "net_pips": 0.0,
+        })
+        st = (r["status"] or "").upper()
+        closed_at = (r["closed_at"] or "").strip()
+        pips = float(r["pips_result"] or 0.0)
+        b["total_n"] += 1
+        if st in _OPEN_STATUSES and not closed_at:
+            b["open_n"] += 1
+        elif st == "TP3_HIT" or (st in ("TP1_HIT", "TP2_HIT") and closed_at):
+            b["wins_n"] += 1
+        elif st == "SL_HIT":
+            b["losses_n"] += 1
+        if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+            b["net_pips"] += pips
+    return sorted(buckets.values(), key=lambda x: x["day"], reverse=True)
+
+
 def admin_dates_page(page: int = 0, size: int = 10) -> tuple[int, list[dict]]:
-    """Distinct calendar days with per-day totals, wins, losses, net pips."""
+    """Distinct Mecca calendar days with per-day totals, wins, losses, net pips."""
     with db.conn() as c:
-        total = int(
-            c.execute("SELECT COUNT(DISTINCT SUBSTR(created_at, 1, 10)) n FROM signals").fetchone()["n"] or 0
-        )
-        rows = c.execute(
-            """SELECT
-                 SUBSTR(created_at, 1, 10) AS day,
-                 COUNT(*) AS total_n,
-                 COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
-                                   AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END), 0) AS open_n,
-                 COALESCE(SUM(CASE WHEN status='TP3_HIT'
-                                   OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END), 0) AS wins_n,
-                 COALESCE(SUM(CASE WHEN status='SL_HIT' THEN 1 ELSE 0 END), 0) AS losses_n,
-                 COALESCE(SUM(CASE WHEN status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-                                   THEN pips_result ELSE 0 END), 0) AS net_pips
+        raw = c.execute(
+            """SELECT created_at, status, closed_at, pips_result
                FROM signals
-               WHERE created_at IS NOT NULL AND created_at!=''
-               GROUP BY SUBSTR(created_at, 1, 10)
-               ORDER BY day DESC
-               LIMIT ? OFFSET ?""",
-            (size, page * size),
+               WHERE created_at IS NOT NULL AND created_at!=''"""
         ).fetchall()
-    return total, [dict(r) for r in rows]
+    grouped = _group_rows_by_mecca_day(raw)
+    total = len(grouped)
+    start = max(0, int(page)) * max(1, int(size))
+    return total, grouped[start:start + max(1, int(size))]
 
 
 PL_SECTORS = (
@@ -328,7 +338,8 @@ def _period_where(period: str) -> tuple[list[str], list]:
         where.append("created_at>=? AND created_at<?")
         args.extend([lo, hi])
     elif p == "7d":
-        lo = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        lo_day = (config.mecca_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        lo, _ = date_bounds(lo_day)
         where.append("created_at>=?")
         args.append(lo)
     elif is_valid_iso_date(p):
@@ -646,35 +657,19 @@ def user_dates_page(
     page: int = 0,
     size: int = 10,
 ) -> tuple[int, list[dict]]:
-    """Distinct calendar dates containing signals visible to this user."""
+    """Distinct Mecca calendar dates containing signals visible to this user."""
     vis_sql, vis_args = _user_visibility_sql(uid, markets, timeframes, strategies, min_score)
     with db.conn() as c:
-        total = int(
-            c.execute(
-                f"""SELECT COUNT(DISTINCT SUBSTR(s.created_at, 1, 10)) n
-                    FROM signals s WHERE {vis_sql} AND s.created_at IS NOT NULL AND s.created_at!=''""",
-                vis_args,
-            ).fetchone()["n"] or 0
-        )
-        rows = c.execute(
-            f"""SELECT
-                  SUBSTR(s.created_at, 1, 10) AS day,
-                  COUNT(*) AS total_n,
-                  COALESCE(SUM(CASE WHEN s.status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
-                                    AND (s.closed_at IS NULL OR s.closed_at='') THEN 1 ELSE 0 END), 0) AS open_n,
-                  COALESCE(SUM(CASE WHEN s.status='TP3_HIT'
-                                    OR (s.status IN ('TP1_HIT','TP2_HIT') AND s.closed_at!='') THEN 1 ELSE 0 END), 0) AS wins_n,
-                  COALESCE(SUM(CASE WHEN s.status='SL_HIT' THEN 1 ELSE 0 END), 0) AS losses_n,
-                  COALESCE(SUM(CASE WHEN s.status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-                                    THEN s.pips_result ELSE 0 END), 0) AS net_pips
+        raw = c.execute(
+            f"""SELECT s.created_at, s.status, s.closed_at, s.pips_result
                 FROM signals s
-                WHERE {vis_sql} AND s.created_at IS NOT NULL AND s.created_at!=''
-                GROUP BY SUBSTR(s.created_at, 1, 10)
-                ORDER BY day DESC
-                LIMIT ? OFFSET ?""",
-            [*vis_args, size, page * size],
+                WHERE {vis_sql} AND s.created_at IS NOT NULL AND s.created_at!=''""",
+            vis_args,
         ).fetchall()
-    return total, [dict(r) for r in rows]
+    grouped = _group_rows_by_mecca_day(raw)
+    total = len(grouped)
+    start = max(0, int(page)) * max(1, int(size))
+    return total, grouped[start:start + max(1, int(size))]
 
 
 def format_date_journal_button(row: dict) -> str:

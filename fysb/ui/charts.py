@@ -403,9 +403,10 @@ def _render_board(sig: dict, candles: list[dict], row=None, proof_mode: bool = F
         draw.rounded_rectangle([plot_r + 6, lbl_y, W - 18, lbl_y + 21], radius=5, fill=LIVE_CYAN)
         draw.text((plot_r + 12, lbl_y + 3), now_txt[:22], fill=BG_DARK, font=f_mono)
 
-    # Footer bar
-    last_dt = str(bars[-1].get("datetime") or sig.get("data_time") or "")[:16]
-    foot_l = f"REAL MARKET OHLC  ·  LAST CANDLE: {last_dt} UTC  ·  {config.BOT_SIGNATURE}"
+    # Footer bar (12-hour Mecca Time — UTC+3)
+    last_dt_raw = str(bars[-1].get("datetime") or sig.get("data_time") or "")
+    last_dt_ksa = config.mecca_chart_dt_12h(last_dt_raw) if last_dt_raw else config.mecca_chart_dt_12h()
+    foot_l = f"REAL MARKET OHLC  ·  MECCA: {last_dt_ksa}  ·  {config.BOT_SIGNATURE}"
     draw.text((34, H - 36), foot_l, fill=TEXT_MUTED, font=f_sub)
     mode_tag = (
         f"ROYAL LIVE TRACKING · {ev_u}" if ev_u else
@@ -1297,10 +1298,11 @@ def render_analysis_chart(an: dict, market_row=None) -> bytes | None:
         draw.text((cx0 + 16, cy0 + 38), kv[:22], fill=kc, font=f_kpi_val)
         draw.text((cx0 + 16, cy0 + 70), ks[:28], fill=TEXT_MUTED, font=f_kpi_sub)
 
-    # ---- Bottom Institutional Signature Line ----
-    ts_str = str(an.get("price_time") or bars[-1].get("datetime") or "")[:19]
+    # ---- Bottom Institutional Signature Line (12-hour Mecca Time) ----
+    ts_raw = str(an.get("price_time") or bars[-1].get("datetime") or "")
+    ts_ksa = config.mecca_chart_dt_12h(ts_raw) if ts_raw else config.mecca_chart_dt_12h()
     draw.text((34, H - 36), f"FOREXYEMENI INSTITUTIONAL DESK  ·  REAL OHLC DATA  ·  {config.BOT_SIGNATURE}", fill=BORDER_GOLD, font=f_sub_logo)
-    draw.text((W - 290, H - 36), f"CANDLE UTC: {ts_str}", fill=TEXT_MUTED, font=f_mono_sm)
+    draw.text((W - 310, H - 36), f"MECCA: {ts_ksa}", fill=TEXT_MUTED, font=f_mono_sm)
 
     out = io.BytesIO()
     img.convert("RGB").save(out, format="PNG", optimize=True)

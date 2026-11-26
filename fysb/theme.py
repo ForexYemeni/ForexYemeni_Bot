@@ -319,10 +319,15 @@ def money(v: float, currency: str = "USD") -> str:
 
 
 def human_dt(iso: str) -> str:
-    """2026-11-21T16:00:34.144230+00:00 -> 2026-11-21 16:00 UTC"""
+    """Convert any UTC/ISO timestamp -> 12-hour Mecca time:
+    2026-11-24T06:12:00+00:00 -> 2026-11-24 · 09:12am بتوقيت مكة"""
     if not iso:
         return "—"
-    return esc(iso[:19].replace("T", " ")) + " UTC"
+    from fysb import config
+    rendered = config.mecca_dt_12h(iso)
+    if rendered and rendered != "—":
+        return esc(rendered)
+    return esc(str(iso)[:19].replace("T", " "))
 
 
 def ago(iso: str, now_iso: str) -> str:

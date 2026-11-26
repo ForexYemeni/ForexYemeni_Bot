@@ -35,8 +35,7 @@ INTERVAL_CHOICES = [30, 60, 120, 240, 360, 720, 1440]
 
 
 def mecca_now():
-    from datetime import datetime, timedelta, timezone
-    return datetime.now(timezone(timedelta(hours=MECCA_OFFSET_HOURS)))
+    return config.mecca_now()
 
 
 def in_quiet_hours(now=None) -> bool:
@@ -210,8 +209,8 @@ async def admin_chan_view(q, uid, context, bot, cid: int):
         f"▎🌐 الأسواق: <b>{esc(mkt_label)}</b>\n"
         f"▎⏱ الأطر: <b>{esc(tf_label)}</b>\n"
         f"▎🧠 الاستراتيجيات: <b>{esc(strat_label)}</b>\n"
-        f"▎⏰ الجدولة: كل <b>{ch['interval_minutes']} دقيقة</b> (توقيت مكة · سكون ليلي 01-07)\n"
-        f"▎🕐 آخر إرسال: {esc(ch['last_sent'][:19].replace('T', ' ') or '—')} مكة"
+        f"▎⏰ الجدولة: كل <b>{ch['interval_minutes']} دقيقة</b> (سكون ليلي 01:00am → 08:00am بتوقيت مكة)\n"
+        f"▎🕐 آخر إرسال: {esc(config.mecca_dt_12h(ch['last_sent']) if ch.get('last_sent') else '—')}"
         "</blockquote>",
     ]
     rows = [

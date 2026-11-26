@@ -453,11 +453,12 @@ def render_strength_card(rows: list[dict] | None = None, *, force_refresh: bool 
         )
     strongest = data[0]
     weakest = data[-1]
-    now_utc_s = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    from fysb import config as _cfg
+    now_mecca_s = _cfg.mecca_time_12h()
     lines.append("</blockquote>")
     lines.append(
         f"\n🎯 <b>أقوى تقاطع مؤسسي الآن:</b> "
         f"شراء {strongest['flag']} <b>{strongest['code']}</b> مقابل بيع {weakest['flag']} <b>{weakest['code']}</b>\n"
-        f"<i>📡 محسوب رياضياً من حركة {p_cnt}/7 أزواج رئيسية حقيقية خلال 24 ساعة · آخر تحديث: {now_utc_s}</i>"
+        f"<i>📡 محسوب رياضياً من حركة {p_cnt}/7 أزواج رئيسية حقيقية خلال 24 ساعة · آخر تحديث: {now_mecca_s}</i>"
     )
     return "\n".join(lines)

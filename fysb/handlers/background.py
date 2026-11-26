@@ -912,24 +912,23 @@ async def webapp_tunnel_loop(app):
 
 
 async def auto_digest_loop(app):
-    """v7.6.0 — Hourly check for automated Weekly (Sunday 19:00 UTC) & Monthly (Day 1 08:00 UTC) luxury digests."""
-    from datetime import datetime, timezone
+    """v8.5.3 — Hourly check for automated Weekly (Sunday 10:00pm Mecca) & Monthly (Day 1 11:00am Mecca) luxury digests."""
     from fysb.services import digest as _digest
     await asyncio.sleep(45)
     while True:
         try:
             enabled = (await afn.run(db.get_setting, "auto_digest_enabled", "1") or "1") == "1"
             if enabled:
-                now_dt = datetime.now(timezone.utc)
+                now_dt = config.mecca_now()
                 today = now_dt.strftime("%Y-%m-%d")
-                # Sunday (weekday == 6) at/after 19:00 UTC -> Weekly 7d Digest
-                if now_dt.weekday() == 6 and now_dt.hour >= 19:
+                # Sunday (weekday == 6) at/after 10:00pm Mecca -> Weekly 7d Digest
+                if now_dt.weekday() == 6 and now_dt.hour >= 22:
                     last_w = await afn.run(db.get_setting, "last_weekly_digest_day", "")
                     if last_w != today:
                         await _digest.publish_digest(app.bot, days=7, include_channels=True, notify_admin=True)
                         log.info("auto weekly performance digest published (%s)", today)
-                # 1st of month at/after 08:00 UTC -> Monthly 30d Digest
-                if now_dt.day == 1 and now_dt.hour >= 8:
+                # 1st of month at/after 11:00am Mecca -> Monthly 30d Digest
+                if now_dt.day == 1 and now_dt.hour >= 11:
                     last_m = await afn.run(db.get_setting, "last_monthly_digest_day", "")
                     if last_m != today:
                         await _digest.publish_digest(app.bot, days=30, include_channels=True, notify_admin=True)

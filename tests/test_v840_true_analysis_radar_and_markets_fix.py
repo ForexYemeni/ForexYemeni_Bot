@@ -405,6 +405,6 @@ def test_v842_never_invalidates_before_h1_candle_actually_closes_at_548am(tmp_pa
     # Poll at 06:00:05 UTC -> NOW the 05:00->06:00 H1 bar HAS ACTUALLY CLOSED at 3610.10 > 3606.50 -> NOW invalidates honestly!
     s_600 = _run(ta_svc.poll_active_monitors(ctx.bot, now_dt=datetime(2026, 11, 26, 6, 0, 5, tzinfo=timezone.utc)))
     assert s_600["invalidated"] == 1
-    assert any("05:00→06:00 UTC" in msg for _, msg in cap["messages"])
+    assert any("08:00am→09:00am بتوقيت مكة" in msg for _, msg in cap["messages"])
 
 

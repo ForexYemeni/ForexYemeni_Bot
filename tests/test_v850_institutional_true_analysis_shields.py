@@ -467,3 +467,43 @@ def test_v852_guaranteed_analysis_chart_and_clean_separation_from_true_analysis(
     assert len(ta.user_monitors(uid)) == len(mons_after_ta), "Normal «تحليل الآن» must NOT mix with True Analysis radar!"
 
 
+def test_v853_mecca_12h_clock_and_day_boundaries(tmp_path):
+    """v8.5.3: Platform displays 12-hour Mecca Time (UTC+3, e.g. '09:12am بتوقيت مكة')
+    across theme.human_dt, charts, news_guard, and signal_archive Mecca day boundaries."""
+    from fysb import config, db, theme
+    from fysb.services import signal_archive
+
+    config.DB_FILE = tmp_path / "v853_mecca.db"
+    db.init_db()
+
+    # Exact 12-hour Mecca formatting checks (UTC -> UTC+3, 12h lowercase am/pm)
+    assert config.mecca_time_12h("2026-11-24T06:12:00+00:00") == "09:12am بتوقيت مكة"
+    assert config.mecca_dt_12h("2026-11-24T06:12:00+00:00") == "2026-11-24 · 09:12am بتوقيت مكة"
+    assert theme.human_dt("2026-11-24T06:12:00+00:00") == "2026-11-24 · 09:12am بتوقيت مكة"
+    assert config.mecca_chart_dt_12h("2026-11-24T06:12:00+00:00") == "2026-11-24 09:12am KSA"
+
+    # Afternoon (pm), midnight (12:00am next Mecca day), noon (12:00pm)
+    assert config.mecca_time_12h("2026-11-24T12:05:00+00:00") == "03:05pm بتوقيت مكة"
+    assert config.mecca_dt_12h("2026-11-23T21:00:00+00:00") == "2026-11-24 · 12:00am بتوقيت مكة"
+    assert config.mecca_dt_12h("2026-11-24T09:00:00+00:00") == "2026-11-24 · 12:00pm بتوقيت مكة"
+
+    # Mecca day boundary: 2026-11-23T22:30:00+00:00 == 2026-11-24 01:30am KSA -> belongs to 2026-11-24!
+    lo, hi = config.mecca_day_utc_bounds("2026-11-24")
+    assert lo == "2026-11-23T21:00:00+00:00"
+    assert hi == "2026-11-24T21:00:00+00:00"
+    assert config.mecca_date_of("2026-11-23T22:30:00+00:00") == "2026-11-24"
+
+    with db.conn() as c:
+        c.execute(
+            """INSERT INTO signals(symbol,direction,entry,stop,tp1,tp2,tp3,rr,score,strategy,timeframe,
+                                   reason,source,status,created_by,created_at)
+               VALUES('XAUUSD','BUY',2650,2640,2660,2670,2680,3.0,85,'ICT','H1','test','AUTO','ACTIVE',1,?)""",
+            ("2026-11-23T22:30:00+00:00",),
+        )
+    tot, rows, _ = signal_archive.admin_signals_page(scope="2026-11-24")
+    assert tot == 1 and rows[0]["symbol"] == "XAUUSD"
+    _, days = signal_archive.admin_dates_page()
+    assert days[0]["day"] == "2026-11-24"
+
+
+

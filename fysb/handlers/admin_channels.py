@@ -599,6 +599,14 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
                             parse_mode="HTML",
                             reply_markup=kb.strip_button_styles(cta_mk) if cta_mk else None,
                         )
+                    # v8.1.1: Also mirror luxury analysis chart to matching custom Chart Channels
+                    try:
+                        from fysb.services import chart_channels as _cch
+                        await _cch.deliver_analysis_chart_to_matching_channels(
+                            bot, sym, png, cap, exclude_chat_ids={str(chat_ref), str(ch.get("chat_id") or "")}
+                        )
+                    except Exception:
+                        pass
         except Exception as _ce:
             log.debug("channel analysis chart skipped (%s): %s", sym, _ce)
         card = render_analysis_card(an, market_row=row)

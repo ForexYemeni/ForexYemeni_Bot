@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fysb import config, db, instruments
 from fysb.config import log
@@ -124,6 +124,257 @@ def set_bot_runtime(bot, loop=None) -> None:
     """Attach the live Telegram bot & asyncio loop so Admin Web Panel actions can broadcast."""
     _BOT_RUNTIME["bot"] = bot
     _BOT_RUNTIME["loop"] = loop
+
+
+def _run_bot_async(coro, timeout: float = 14.0):
+    """Run an async bot coroutine from the HTTP worker thread cleanly and synchronously."""
+    bot_obj = _BOT_RUNTIME.get("bot")
+    loop_obj = _BOT_RUNTIME.get("loop")
+    if bot_obj is None:
+        coro.close()
+        return None
+    if loop_obj is not None and getattr(loop_obj, "is_running", lambda: False)():
+        fut = asyncio.run_coroutine_threadsafe(coro, loop_obj)
+        return fut.result(timeout=timeout)
+    return asyncio.run(coro)
+
+
+def _parse_iso_utc(ts: str) -> datetime | None:
+    s = str(ts or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _period_cutoff_utc(period: str) -> datetime | None:
+    p = str(period or "all").strip().lower()
+    now_u = datetime.now(timezone.utc)
+    if p == "today":
+        return now_u.replace(hour=0, minute=0, second=0, microsecond=0)
+    if p == "24h":
+        return now_u - timedelta(hours=24)
+    if p == "7d":
+        return now_u - timedelta(days=7)
+    if p == "30d":
+        return now_u - timedelta(days=30)
+    if p == "90d":
+        return now_u - timedelta(days=90)
+    return None
+
+
+def _classify_signal_outcome(sig: dict) -> tuple[str, bool]:
+    """Return (outcome_bucket, is_open) with institutional accuracy.
+
+    * TP1_HIT / TP2_HIT / TP3_HIT / TP1_BE / TP2_BE -> 'win'
+    * SL_HIT -> 'loss'
+    * EXPIRED / CANCELLED -> 'neutral' (entry never triggered or cancelled: 0 pips, NEVER a loss!)
+    * ACTIVE / RUNNING -> 'open'
+    """
+    st = str(sig.get("status") or "ACTIVE").strip().upper()
+    closed = bool(str(sig.get("closed_at") or "").strip())
+    pips = _safe_float(sig.get("pips_result"), 0.0)
+    is_open = st in ("ACTIVE", "RUNNING", "TP1_HIT", "TP2_HIT") and not closed
+    if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE"):
+        return "win", is_open
+    if st == "SL_HIT":
+        return "loss", False
+    if st in ("EXPIRED", "CANCELLED"):
+        return "neutral", False
+    if is_open:
+        return "open", True
+    if pips > 0:
+        return "win", False
+    if pips < 0:
+        return "loss", False
+    return "neutral", False
+
+
+def _query_admin_signals(
+    *,
+    symbol: str = "ALL",
+    period: str = "all",
+    user_filter: str = "all",
+    status_filter: str = "all",
+    q: str = "",
+    limit: int = 100,
+) -> dict:
+    """Luxury Admin Signals query with dropdown metadata (Gold/All/Markets, Period, User) & exact KPIs."""
+    from fysb.engines.tracker import seq_of
+    from fysb.ui.cards import signal_creator_label
+
+    sym_f = str(symbol or "ALL").strip().upper()
+    per_f = str(period or "all").strip().lower()
+    usr_f = str(user_filter or "all").strip().lower()
+    st_f = str(status_filter or "all").strip().lower()
+    q_f = str(q or "").strip().lower()
+    lim = max(1, min(250, _safe_int(limit, 100)))
+    cutoff = _period_cutoff_utc(per_f)
+
+    with db.conn() as c:
+        all_rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC").fetchall()]
+        cids = sorted({int(r.get("created_by") or 0) for r in all_rows if int(r.get("created_by") or 0) > 0})
+        umap: dict[int, dict] = {}
+        pmap: dict[int, str] = {}
+        if cids:
+            ph = ",".join("?" * len(cids))
+            for u in c.execute(
+                f"SELECT user_id, username, full_name FROM users WHERE user_id IN ({ph})",
+                tuple(cids),
+            ).fetchall():
+                umap[int(u["user_id"])] = dict(u)
+            for s in c.execute(
+                f"SELECT user_id, plan_code FROM subscriptions WHERE status='ACTIVE' AND user_id IN ({ph})",
+                tuple(cids),
+            ).fetchall():
+                pmap[int(s["user_id"])] = str(s["plan_code"] or "FREE").upper()
+
+        # Build dropdown metadata across ALL signals in DB
+        sym_counts: dict[str, int] = {}
+        user_counts: dict[int, int] = {}
+        auto_count = 0
+        for r in all_rows:
+            s_code = str(r.get("symbol") or "").upper()
+            if s_code:
+                sym_counts[s_code] = sym_counts.get(s_code, 0) + 1
+            cb = int(r.get("created_by") or 0)
+            if cb > 0:
+                user_counts[cb] = user_counts.get(cb, 0) + 1
+            else:
+                auto_count += 1
+
+        # Filter signals according to dropdowns + search
+        matched: list[dict] = []
+        for r in all_rows:
+            if sym_f and sym_f != "ALL" and str(r.get("symbol") or "").upper() != sym_f:
+                continue
+            if cutoff is not None:
+                dt = _parse_iso_utc(r.get("created_at") or "")
+                if dt is None or dt < cutoff:
+                    continue
+            cb = int(r.get("created_by") or 0)
+            if usr_f == "auto":
+                if cb > 0:
+                    continue
+            elif usr_f and usr_f != "all":
+                try:
+                    want_uid = int(usr_f)
+                    if cb != want_uid:
+                        continue
+                except ValueError:
+                    pass
+            outcome, is_open = _classify_signal_outcome(r)
+            if st_f == "open" and not is_open:
+                continue
+            if st_f == "win" and outcome != "win":
+                continue
+            if st_f == "loss" and outcome != "loss":
+                continue
+            if st_f == "neutral" and outcome != "neutral":
+                continue
+            creator_lbl = signal_creator_label(r, umap)
+            if q_f:
+                hay = (
+                    f"{r.get('symbol') or ''} {r.get('strategy') or ''} {r.get('timeframe') or ''} "
+                    f"{r.get('status') or ''} {creator_lbl} #{r.get('id')} {cb}"
+                ).lower()
+                if q_f not in hay:
+                    continue
+            r["_outcome"] = outcome
+            r["_is_open"] = is_open
+            r["_creator"] = creator_lbl
+            matched.append(r)
+
+        # Exact aggregate KPIs over ALL matched rows
+        total_n = len(matched)
+        open_n = sum(1 for r in matched if r["_is_open"])
+        win_n = sum(1 for r in matched if r["_outcome"] == "win")
+        loss_n = sum(1 for r in matched if r["_outcome"] == "loss")
+        neutral_n = sum(1 for r in matched if r["_outcome"] == "neutral")
+        decided_n = win_n + loss_n
+        win_rate = round((100.0 * win_n / decided_n), 1) if decided_n > 0 else 0.0
+        net_pips = round(sum(_safe_float(r.get("pips_result"), 0.0) for r in matched if r["_outcome"] != "neutral"), 1)
+
+        page_rows = matched[:lim]
+        sids = [int(r["id"]) for r in page_rows]
+        dcnt: dict[int, int] = {}
+        deliv_cnt: dict[int, int] = {}
+        if sids:
+            ph = ",".join("?" * len(sids))
+            for d in c.execute(
+                f"SELECT signal_id, COUNT(*) n FROM demo_positions WHERE signal_id IN ({ph}) GROUP BY signal_id",
+                tuple(sids),
+            ).fetchall():
+                dcnt[int(d["signal_id"])] = int(d["n"])
+            for dl in c.execute(
+                f"SELECT signal_id, COUNT(*) n FROM signal_deliveries WHERE signal_id IN ({ph}) GROUP BY signal_id",
+                tuple(sids),
+            ).fetchall():
+                deliv_cnt[int(dl["signal_id"])] = int(dl["n"])
+
+    signals_out: list[dict] = []
+    for r in page_rows:
+        sid_i = int(r["id"])
+        cb = int(r.get("created_by") or 0)
+        item = {k: v for k, v in r.items() if not k.startswith("_")}
+        item["seq"] = seq_of(sid_i)
+        item["creator"] = r["_creator"]
+        item["creator_plan"] = pmap.get(cb, "AUTO" if cb <= 0 else "FREE")
+        item["outcome"] = r["_outcome"]
+        item["is_open"] = r["_is_open"]
+        item["demo_count"] = dcnt.get(sid_i, 0)
+        item["deliveries"] = deliv_cnt.get(sid_i, 0)
+        signals_out.append(item)
+
+    # Sort symbols with Gold (XAUUSD) always featured first!
+    def _sym_sort_key(kv):
+        return (0 if kv[0] == "XAUUSD" else 1, -kv[1], kv[0])
+
+    symbols_meta = [{"symbol": s, "count": cnt} for s, cnt in sorted(sym_counts.items(), key=_sym_sort_key)]
+    if not any(x["symbol"] == "XAUUSD" for x in symbols_meta):
+        symbols_meta.insert(0, {"symbol": "XAUUSD", "count": 0})
+
+    users_meta = []
+    for uid_k, cnt in sorted(user_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        uinfo = umap.get(uid_k) or {}
+        uname = str(uinfo.get("username") or "").strip()
+        fname = str(uinfo.get("full_name") or "").strip()
+        disp = fname or (f"@{uname}" if uname else f"#{uid_k}")
+        if uname and fname and uname.lower() not in fname.lower():
+            disp = f"{fname} (@{uname})"
+        users_meta.append({
+            "user_id": uid_k,
+            "label": disp,
+            "username": uname,
+            "plan": pmap.get(uid_k, "FREE"),
+            "count": cnt,
+        })
+
+    return {
+        "ok": True,
+        "signals": signals_out,
+        "stats": {
+            "total": total_n,
+            "open": open_n,
+            "wins": win_n,
+            "losses": loss_n,
+            "neutral": neutral_n,
+            "decided": decided_n,
+            "win_rate": win_rate,
+            "net_pips": net_pips,
+        },
+        "filters": {
+            "symbols": symbols_meta,
+            "users": users_meta,
+            "auto_count": auto_count,
+            "total_all": len(all_rows),
+        },
+    }
 
 
 ALLOWED_ADMIN_TOGGLES = (
@@ -249,8 +500,6 @@ def dispatch_request(
                 return _json_resp(403, {"ok": False, "error": "Forbidden: ADMIN_ID required"})
 
             if m == "GET" and path == "/api/admin/overview":
-                from fysb.engines.tracker import seq_of
-                from fysb.ui.cards import signal_creator_label
                 with db.conn() as c:
                     users_n = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
                     paid_subs = c.execute(
@@ -259,30 +508,7 @@ def dispatch_request(
                     open_sigs = c.execute(
                         "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
                     ).fetchone()["n"]
-                    raw_sigs = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 20").fetchall()]
-                    cids = sorted({int(r.get("created_by") or 0) for r in raw_sigs if int(r.get("created_by") or 0) > 0})
-                    sids = [int(r["id"]) for r in raw_sigs]
-                    umap: dict[int, dict] = {}
-                    dcnt: dict[int, int] = {}
-                    deliv_cnt: dict[int, int] = {}
-                    if cids:
-                        ph = ",".join("?" * len(cids))
-                        for u in c.execute(f"SELECT user_id, username, full_name FROM users WHERE user_id IN ({ph})", tuple(cids)).fetchall():
-                            umap[int(u["user_id"])] = dict(u)
-                    if sids:
-                        ph = ",".join("?" * len(sids))
-                        for d in c.execute(f"SELECT signal_id, COUNT(*) n FROM demo_positions WHERE signal_id IN ({ph}) GROUP BY signal_id", tuple(sids)).fetchall():
-                            dcnt[int(d["signal_id"])] = int(d["n"])
-                        for dl in c.execute(f"SELECT signal_id, COUNT(*) n FROM signal_deliveries WHERE signal_id IN ({ph}) GROUP BY signal_id", tuple(sids)).fetchall():
-                            deliv_cnt[int(dl["signal_id"])] = int(dl["n"])
-                recent_signals = []
-                for r in raw_sigs:
-                    sid_i = int(r["id"])
-                    r["seq"] = seq_of(sid_i)
-                    r["creator"] = signal_creator_label(r, umap)
-                    r["demo_count"] = dcnt.get(sid_i, 0)
-                    r["deliveries"] = deliv_cnt.get(sid_i, 0)
-                    recent_signals.append(r)
+                sig_bundle = _query_admin_signals(limit=60)
                 toggles = {k: (db.get_setting(k, "0") == "1") for k in ALLOWED_ADMIN_TOGGLES}
                 from fysb.services import auto_bridge as _ab, digest as _digest, promos as _promos
                 with db.conn() as c:
@@ -296,7 +522,9 @@ def dispatch_request(
                         "open_signals": open_sigs,
                     },
                     "toggles": toggles,
-                    "recent_signals": recent_signals,
+                    "recent_signals": sig_bundle["signals"],
+                    "signal_stats": sig_bundle["stats"],
+                    "signal_filters": sig_bundle["filters"],
                     "pending_payments": payments.list_requests("PENDING", 15),
                     "pending_payouts": affiliates.list_payouts("PENDING", 15),
                     "chart_channels": chart_channels.list_channels(False),
@@ -313,6 +541,17 @@ def dispatch_request(
                     "bridge_policy": _ab.get_policy(),
                     "bridge_connections_count": len(_ab.list_connections(None, 200)),
                 })
+
+            if m == "GET" and path == "/api/admin/signals":
+                res = _query_admin_signals(
+                    symbol=qs.get("symbol") or "ALL",
+                    period=qs.get("period") or "all",
+                    user_filter=qs.get("user_id") or "all",
+                    status_filter=qs.get("status") or "all",
+                    q=qs.get("q") or "",
+                    limit=_safe_int(qs.get("limit"), 120),
+                )
+                return _json_resp(200, res)
 
             if m == "GET" and path == "/api/admin/bridge/overview":
                 from fysb.services import auto_bridge as _ab
@@ -701,14 +940,90 @@ def dispatch_request(
             if m == "POST" and path == "/api/admin/chart-channel":
                 op = str(payload.get("op") or "").lower()
                 if op == "add":
-                    chat_id = str(payload.get("chat_id") or "").strip()
+                    raw_chat = str(payload.get("chat_id") or "").strip()
                     title = str(payload.get("title") or "").strip()
                     mkts = str(payload.get("markets") or "ALL").strip()
-                    if not chat_id:
-                        return _json_resp(400, {"ok": False, "error": "chat_id required"})
-                    cid = chart_channels.add_channel(chat_id, title, mkts)
-                    audit_log.log(uid, f"webapp_chart_channel_add:{cid}:{chat_id}")
-                    return _json_resp(200, {"ok": True, "id": cid, "channels": chart_channels.list_channels(False)})
+                    send_test = bool(payload.get("send_test", True))
+                    if not raw_chat:
+                        return _json_resp(400, {"ok": False, "error": "يرجى إدخال معرف القناة (@channel أو -100...)"})
+                    try:
+                        norm_chat = chart_channels.normalize_chat_input(raw_chat)
+                    except ValueError as exc:
+                        return _json_resp(400, {"ok": False, "error": str(exc)})
+                    verified = False
+                    resolved_id = norm_chat
+                    resolved_title = title
+                    bot_obj = _BOT_RUNTIME.get("bot")
+                    if bot_obj is not None:
+                        try:
+                            ver = _run_bot_async(chart_channels.verify_telegram_channel(bot_obj, norm_chat), timeout=14.0)
+                        except Exception as exc:
+                            return _json_resp(400, {"ok": False, "error": f"انتهت مهلة التحقق من تيليجرام: {exc}"})
+                        if not ver or not ver.get("ok"):
+                            return _json_resp(400, {"ok": False, "error": (ver or {}).get("error") or "فشل التحقق من القناة"})
+                        verified = bool(ver.get("verified"))
+                        resolved_id = str(ver.get("chat_id") or norm_chat)
+                        if not resolved_title:
+                            resolved_title = str(ver.get("title") or resolved_id)
+                    cid = chart_channels.add_channel(resolved_id, resolved_title, mkts)
+                    ch_row = chart_channels.get_channel(cid)
+                    test_sent = False
+                    test_kind = ""
+                    test_error = ""
+                    if bot_obj is not None and send_test and ch_row:
+                        try:
+                            tres = _run_bot_async(chart_channels.send_test_chart(bot_obj, ch_row), timeout=20.0)
+                            if tres and tres.get("ok"):
+                                test_sent = True
+                                test_kind = str(tres.get("kind") or "message")
+                            elif tres:
+                                test_error = str(tres.get("error") or "")
+                        except Exception as exc:
+                            test_error = str(exc)[:140]
+                    audit_log.log(uid, f"webapp_chart_channel_add:{cid}:{resolved_id}:verified={int(verified)}:test={int(test_sent)}")
+                    return _json_resp(200, {
+                        "ok": True,
+                        "id": cid,
+                        "chat_id": resolved_id,
+                        "title": (ch_row or {}).get("title") or resolved_title or resolved_id,
+                        "verified": verified,
+                        "test_sent": test_sent,
+                        "test_kind": test_kind,
+                        "test_error": test_error,
+                        "channels": chart_channels.list_channels(False),
+                    })
+                if op == "test":
+                    cid = _safe_int(payload.get("id"), 0)
+                    ch_row = chart_channels.get_channel(cid)
+                    if not ch_row:
+                        return _json_resp(404, {"ok": False, "error": "القناة غير موجودة"})
+                    bot_obj = _BOT_RUNTIME.get("bot")
+                    if bot_obj is None:
+                        return _json_resp(400, {"ok": False, "error": "البوت غير متصل حالياً لإرسال الاختبار"})
+                    try:
+                        ver = _run_bot_async(chart_channels.verify_telegram_channel(bot_obj, ch_row["chat_id"]), timeout=12.0)
+                        if not ver or not ver.get("ok"):
+                            return _json_resp(400, {"ok": False, "error": (ver or {}).get("error") or "فشل التحقق من صلاحيات البوت"})
+                        tres = _run_bot_async(chart_channels.send_test_chart(bot_obj, ch_row), timeout=22.0)
+                    except Exception as exc:
+                        return _json_resp(500, {"ok": False, "error": f"خطأ أثناء البث التجريبي: {exc}"})
+                    if not tres or not tres.get("ok"):
+                        return _json_resp(400, {"ok": False, "error": (tres or {}).get("error") or "فشل إرسال البث التجريبي"})
+                    audit_log.log(uid, f"webapp_chart_channel_test:{cid}:{tres.get('kind')}")
+                    return _json_resp(200, {
+                        "ok": True,
+                        "id": cid,
+                        "kind": tres.get("kind"),
+                        "symbol": tres.get("symbol"),
+                        "channels": chart_channels.list_channels(False),
+                    })
+                if op == "schedule":
+                    mins = _safe_int(payload.get("minutes"), 0)
+                    if mins not in (0, 5, 10, 15, 30, 60):
+                        return _json_resp(400, {"ok": False, "error": "قيمة الجدولة يجب أن تكون 0 أو 5 أو 10 أو 15 أو 30 أو 60"})
+                    db.set_setting("chart_schedule_minutes", str(mins))
+                    audit_log.log(uid, f"webapp_chart_schedule:{mins}")
+                    return _json_resp(200, {"ok": True, "minutes": mins})
                 if op == "toggle":
                     cid = int(payload.get("id") or 0)
                     en = chart_channels.toggle_channel(cid)

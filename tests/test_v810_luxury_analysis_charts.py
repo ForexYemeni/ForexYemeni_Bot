@@ -92,7 +92,7 @@ def test_01_run_analysis_attaches_chart_data_and_renders_1600x1000_png(env):
 
     cap = charts.render_analysis_caption(an)
     assert config.BRAND in cap and "XAUUSD" in cap and len(cap) <= 1024
-    assert config.VERSION == "8.1.0"
+    assert tuple(int(x) for x in config.VERSION.split(".")) >= (8, 1, 0)
 
 
 def test_02_user_and_admin_analytics_automatically_send_luxury_chart_photo(env):

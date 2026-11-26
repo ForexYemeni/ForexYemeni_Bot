@@ -84,6 +84,10 @@ def capture(code: str, invitee_id: int) -> dict:
         return {"captured": False, "reason": "self_referral"}
     try:
         with db.tx(immediate=True) as c:
+            # v8.7.0 Cross-table first-link-wins: if invitee was already bound
+            # via an affiliate_links deep link (`?start=ref_<uid>`), never hijack!
+            if c.execute("SELECT 1 FROM affiliate_links WHERE invitee_id=?", (int(invitee_id),)).fetchone():
+                return {"captured": False, "reason": "already_linked"}
             c.execute("""INSERT INTO referrals(campaign_id,invitee_id,invited_at)
                          VALUES(?,?,?)""", (camp["id"], invitee_id, config.now()))
         return {"captured": True, "campaign": camp["title"]}

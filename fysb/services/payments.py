@@ -153,12 +153,39 @@ def approve_request(pid: int, actor: int) -> dict:
     with db.conn() as c:
         plan = c.execute("SELECT * FROM plans WHERE code=?", (p_dict["plan_code"],)).fetchone()
     grant_res = {}
-    if str(p_dict.get("plan_code") or "").upper() == "ACADEMY":
-        from fysb.services import academy as _acad
+    p_code_up = str(p_dict.get("plan_code") or "").upper()
+    if p_code_up == "ACADEMY":
+        from fysb.services import academy as _acad, partners as _partners
         _acad.grant_paid_access(p_dict["user_id"], source="PAYMENT", granted_by=actor)
-    elif str(p_dict.get("plan_code") or "").upper() == "TRUE_ANALYSIS":
-        from fysb.services import true_analysis as _ta
+        # v8.7.0: Channel Partners also earn their exact commission on Academy purchases!
+        try:
+            p_comm = _partners.credit_commission_on_subscription(
+                p_dict["user_id"],
+                "ACADEMY",
+                payment_id=pid,
+                amount=float(p_dict.get("amount") or 0),
+                currency=p_dict.get("currency") or "USD",
+            )
+            if p_comm:
+                grant_res["commission"] = p_comm
+        except Exception:
+            pass
+    elif p_code_up == "TRUE_ANALYSIS":
+        from fysb.services import partners as _partners, true_analysis as _ta
         _ta.grant_paid_access(p_dict["user_id"], actor=actor)
+        # v8.7.0: Channel Partners also earn their exact commission on True Analysis purchases!
+        try:
+            p_comm = _partners.credit_commission_on_subscription(
+                p_dict["user_id"],
+                "TRUE_ANALYSIS",
+                payment_id=pid,
+                amount=float(p_dict.get("amount") or 0),
+                currency=p_dict.get("currency") or "USD",
+            )
+            if p_comm:
+                grant_res["commission"] = p_comm
+        except Exception:
+            pass
     elif plan:
         pl_dict = dict(plan)
         grant_res = grant_subscription(
@@ -170,7 +197,7 @@ def approve_request(pid: int, actor: int) -> dict:
             amount=float(p_dict.get("amount") or 0),
             currency=p_dict.get("currency") or pl_dict.get("currency") or "USD",
         )
-    # v8.0.0 (PAY-2): Tiered Affiliate Commission — NEVER double-credit if a Channel Partner
+    # v8.0.0 (PAY-2) & v8.7.0: User Affiliate Commission — NEVER double-credit if a Channel Partner
     # commission was already credited for this exact payment!
     aff_comm = None
     partner_credited = bool(isinstance(grant_res, dict) and grant_res.get("commission"))

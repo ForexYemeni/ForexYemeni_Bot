@@ -303,7 +303,7 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
          btn("🎟 أكواد الخصم (Promo)", "a:promos", style="success")],
         [btn("👑 تحليل ForexYemeni الحقيقي", "a:true_analysis", style="success")],
         [btn("👑 شركاء القنوات و VIP", "a:partners", style="success"),
-         btn("💸 عمولات الشركاء", "a:affiliates", style="success")],
+         btn("💸 عمولات المستخدمين وفتح الباقات", "a:affiliates", style="success")],
         [btn("🤝 نظام الإحالات", "a:refs", style="success"),
          btn("🎁 الهدايا والأكواد", "a:gifts", style="success")],
         [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),

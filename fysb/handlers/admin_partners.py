@@ -602,14 +602,10 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
                 return dict(r) if r else None
         row = await afn.run(_load_mrow)
         try:
-            if await afn.run(_charts.charts_enabled):
-                png = await _asyncio.to_thread(_charts.render_analysis_chart, an, row)
-                if png and bot is not None and hasattr(bot, "send_photo"):
-                    chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
-                    cap = _charts.render_analysis_caption(an, market_row=row)
-                    await bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png), caption=cap, parse_mode="HTML")
-        except Exception:
-            pass
+            chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
+            await _charts.send_analysis_chart_photo(bot, chat_id, an, market_row=row)
+        except Exception as _pce:
+            log.warning("partner analysis chart failed (%s): %s", an.get("symbol"), _pce)
         card_text = render_analysis_card(an, market_row=row)
         await render(
             q,

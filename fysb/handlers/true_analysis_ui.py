@@ -69,7 +69,7 @@ async def render_user_true_analysis(q, uid: int, context, bot, notice: str = "")
                     rows_kb.append([kb.btn(f"🗑 إلغاء مراقبة {sym}", f"u:tamoncancel:{m['id']}", style="danger")])
                 lines.append(f"▎<b>{esc(sym)}</b> ({d_ic}) — {st_lbl}")
 
-        rows_kb.append([kb.btn("🔬 ابدأ تحليلاً مؤسسياً الآن", "u:analytics", style="success")])
+        rows_kb.append([kb.btn("👑 ابدأ تحليل ForexYemeni الحقيقي الآن", "u:ta_anl", style="success")])
         if st["mode"] == "TRIAL":
             rows_kb.append([kb.btn(f"👑 الترقية للاشتراك الكامل ({price:g}$ / {days} يوم)", "u:tabuy", style="primary")])
         await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
@@ -228,11 +228,272 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
         except ValueError:
             mid = 0
         ok = await afn.run(ta_svc.cancel_monitor, uid, mid) if mid else False
-        msg = "تم إلغاء المراقبة بنجاح — يمكنك الآن طلب تحليل جديد في أي وقت." if ok else "المراقبة غير نشطة أو انتهت مسبقاً."
+        msg = "تم إلغاء المراقبة بنجاح — يمكنك الآن طلب تحليل ForexYemeni الحقيقي من جديد." if ok else "المراقبة غير نشطة أو انتهت مسبقاً."
         await render_user_true_analysis(q, uid, context, bot, notice=msg)
         return True
 
+    # ------------------------------------------------------------------
+    # v8.5.2: Dedicated, 100% Separate «👑 تحليل ForexYemeni الحقيقي» Wizard
+    # (u:ta_anl -> u:ta_cat: -> u:ta_sym: -> u:ta_tf: -> u:ta_run:)
+    # Completely separated from standard «🔬 تحليل الآن» (u:analytics)!
+    # ------------------------------------------------------------------
+    if action == "ta_anl" or action.startswith("ta_cat:"):
+        st = await afn.run(ta_svc.has_access, uid)
+        if not st["active"]:
+            await render_user_true_analysis(
+                q, uid, context, bot,
+                notice="هذه الميزة الحصرية تتطلب تفعيل اشتراك أو فترة تجريبية لـ «تحليل ForexYemeni الحقيقي».",
+            )
+            return True
+        parts = action.split(":") if action.startswith("ta_cat:") else []
+        cat = parts[1].strip().lower() if len(parts) > 1 else ""
+        try:
+            pg = max(1, int(parts[2])) if len(parts) > 2 else 1
+        except ValueError:
+            pg = 1
+        await _render_ta_market_hub(q, uid, bot, category=cat, page=pg)
+        return True
+
+    if action.startswith("ta_sym:"):
+        st = await afn.run(ta_svc.has_access, uid)
+        if not st["active"]:
+            await render_user_true_analysis(q, uid, context, bot)
+            return True
+        symbol = instruments.normalize(action.split(":", 1)[1].strip())
+        # Continuity Guard runs EXCLUSIVELY inside True Analysis (never blocks normal «تحليل الآن»)
+        cont = await afn.run(ta_svc.check_active_continuity, uid, symbol)
+        if cont:
+            live_px = 0.0
+            if cont["kind"] == "ACTIVE_SIGNAL":
+                try:
+                    import asyncio as _asyncio
+                    from fysb.engines import market_data as _md
+                    mrow_c = await afn.run(_load_market_row, symbol)
+                    psym_c = (mrow_c["provider_symbol"] if mrow_c else symbol)
+                    q_px = await _asyncio.to_thread(_md.fetch_price, psym_c, config.market_api_key(), True)
+                    live_px = float((q_px or {}).get("price") or 0.0)
+                except Exception:
+                    live_px = 0.0
+            c_body, c_rows = await afn.run(ta_svc.render_continuity_card, cont, live_px)
+            await render(q, c_body, kb.user_nav(c_rows), bot)
+            return True
+
+        context.user_data["ta_draft"] = {"symbol": symbol}
+        tf_pairs = [
+            ("M15", "⏱ M15 → M5 (مضاربة سريعة)"),
+            ("M30", "⏱ M30 → M15 (متوازن)"),
+            ("H1",  "👑 H1 → M15 (مؤسسي موصى به)"),
+            ("H4",  "💎 H4 → H1 (اتجاهي كبير)"),
+            ("D1",  "🏛 D1 → H1 (يومي سوينغ)"),
+        ]
+        body = (
+            f"👑 <b><u>تحليل ForexYemeni الحقيقي — {esc(symbol)}</u></b>\n"
+            "<blockquote>"
+            "▎⏱ <b>اختر إطار الثبات والتأكيد للرادار الحي:</b>\n"
+            "▎سيراقب الرادار إغلاق الشمعة الكبرى بجسم حقيقي (≥ 55%) ثم تأكيد الإطار الأصغر "
+            "مع جميع الدروع المؤسسية الـ 5 (عطلة السوق · الأخبار القوية · منع المطاردة · ارتداد OB/FVG · أهداف السيولة)."
+            "</blockquote>"
+        )
+        rows = [[kb.btn(lbl, f"u:ta_tf:{code}", style="success" if code == "H1" else "primary")]
+                for code, lbl in tf_pairs]
+        rows.append([kb.btn("↩️ تغيير السوق", "u:ta_anl")])
+        await render(q, body, kb.user_nav(rows), bot)
+        return True
+
+    if action.startswith("ta_tf:"):
+        st = await afn.run(ta_svc.has_access, uid)
+        if not st["active"]:
+            await render_user_true_analysis(q, uid, context, bot)
+            return True
+        draft = context.user_data.get("ta_draft") or {}
+        if not draft.get("symbol"):
+            await _render_ta_market_hub(q, uid, bot)
+            return True
+        tf_code = action.split(":", 1)[1].strip().upper()
+        draft["tf"] = tf_code
+        context.user_data["ta_draft"] = draft
+        from fysb.services import strategy_stats as _ss
+        from fysb.theme import strategy_name
+        enabled_s = await afn.run(_enabled_strategy_codes_sync)
+        universe = await afn.run(_ss.ordered_codes, sorted(enabled_s)) if enabled_s else ["ICT", "SMC", "PRICE_ACTION"]
+        body = (
+            f"👑 <b><u>تحليل ForexYemeni الحقيقي — {esc(draft['symbol'])} ({esc(tf_code)})</u></b>\n"
+            "<blockquote>▎🧠 اختر المنهجية المؤسسية لتشغيل التحليل الحقيقي والرادار الحي:</blockquote>"
+        )
+        rows = [[kb.btn("👑 المنظومة المؤسسية الشاملة (تختار الأقوى تلقائياً)", "u:ta_run:ALL", style="success")]]
+        for i in range(0, len(universe), 2):
+            rows.append([kb.btn(strategy_name(s), f"u:ta_run:{s}") for s in universe[i:i + 2]])
+        rows.append([kb.btn("↩️ تغيير الإطار", f"u:ta_sym:{draft['symbol']}")])
+        await render(q, body, kb.user_nav(rows), bot)
+        return True
+
+    if action.startswith("ta_run:"):
+        import asyncio as _asyncio
+        from fysb.services import analytics as anl
+        from fysb.ui import charts as _charts
+        from fysb.ui.cards import render_analysis_card
+
+        st = await afn.run(ta_svc.has_access, uid)
+        if not st["active"]:
+            await render_user_true_analysis(q, uid, context, bot)
+            return True
+        draft = context.user_data.get("ta_draft") or {}
+        if not draft.get("symbol") or not draft.get("tf"):
+            await _render_ta_market_hub(q, uid, bot)
+            return True
+        strategy = action.split(":", 1)[1].strip().upper() or "ALL"
+        sym = draft["symbol"]
+        tf_code = draft["tf"]
+        context.user_data.pop("ta_draft", None)
+
+        await render(
+            q,
+            f"👑 <b>جارٍ تشغيل محرك تحليل ForexYemeni الحقيقي...</b>\n"
+            f"<blockquote>▎💎 السوق: <b>{esc(sym)}</b> · الإطار: <b>{esc(tf_code)}</b> · المنهجية: <b>{esc(strategy)}</b>\n"
+            f"▎🛡 جارٍ فحص الشموع المغلقة الحقيقية ومناطق الأوامر (OB/FVG) ودرع الأخبار والسيولة...</blockquote>",
+            None,
+        )
+        res = await _asyncio.to_thread(
+            anl.run_analysis, uid, sym, tf_code, "", "", strategy, enforce_plan=False,
+        )
+        if not res.get("ok"):
+            await render(
+                q,
+                f"⛔ {esc(res.get('error') or 'تعذر قراءة السوق حالياً')}",
+                kb.user_nav([[kb.btn("↩️ المحاولة مرة أخرى", "u:ta_anl", style="primary")]]),
+                bot,
+            )
+            return True
+
+        an = res["analysis"]
+        row = await afn.run(_load_market_row, an["symbol"])
+        chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
+        # Always send Ultra-Luxury 1600x1000 Institutional Analysis Chart PNG!
+        await _charts.send_analysis_chart_photo(bot, chat_id, an, market_row=row)
+
+        card_text = render_analysis_card(an, market_row=row)
+        ta_res = await afn.run(ta_svc.evaluate_on_analysis_created, uid, an)
+        ta_mode = ta_res.get("mode")
+        rows_out = [
+            [kb.btn("👑 لوحة رادار تحليلاتي", "u:true_analysis", style="success")],
+            [kb.btn("👑 تحليل سوق آخر (ForexYemeni الحقيقي)", "u:ta_anl", style="primary")],
+        ]
+        if ta_mode == "MONITORING":
+            card_text += ta_svc.render_monitoring_started_banner(ta_res)
+        elif ta_mode == "INSTANT_SIGNAL":
+            card_text += (
+                "\n\n⚡ <b><u>تنفيذ فوري حقيقي — رادار ForexYemeni الحقيقي</u></b>\n"
+                "<blockquote>▎شروط الإغلاق والثبات مكتملة فعلياً على الشارت الآن! "
+                "تم إصدار إشارتك الحقيقية الخاصة مع الشارت في الرسالة التالية فوراً ✅</blockquote>"
+            )
+        elif ta_mode == "NEUTRAL":
+            card_text += (
+                "\n\n🟡 <b><u>رادار ForexYemeni الحقيقي — وضع الانتظار الذكي</u></b>\n"
+                "<blockquote>▎السوق حيادي/عرضي حالياً بلا اتجاه مؤسسي حاسم — لم يُفعّل رادار وهمي حفاظاً على رأس مالك.</blockquote>"
+            )
+
+        await render(q, card_text, kb.user_nav(rows_out), bot)
+
+        if ta_mode == "INSTANT_SIGNAL" and bot is not None:
+            try:
+                await ta_svc._deliver_private_signal_with_chart(
+                    bot,
+                    uid,
+                    ta_res["signal"],
+                    instant=True,
+                    stab_tf=ta_res["stability_tf"],
+                    conf_tf=ta_res["confirm_tf"],
+                    body_pct=float(ta_res.get("body_pct") or 65.0),
+                    candles=ta_res.get("candles") or [],
+                    trigger_kind=str(ta_res.get("trigger_kind") or "BREAKOUT"),
+                    tp_grounded=bool(ta_res.get("tp_grounded")),
+                )
+            except Exception:
+                pass
+        return True
+
     return False
+
+
+def _load_market_row(symbol: str) -> dict | None:
+    with db.conn() as c:
+        r = c.execute("SELECT * FROM market_catalog WHERE UPPER(symbol)=?", (symbol.upper(),)).fetchone()
+    return dict(r) if r else None
+
+
+def _enabled_strategy_codes_sync() -> list[str]:
+    with db.conn() as c:
+        rows = c.execute("SELECT code FROM strategy_catalog WHERE enabled=1").fetchall()
+    return [str(r["code"]).upper() for r in rows if r["code"]]
+
+
+async def _render_ta_market_hub(q, uid: int, bot, *, category: str = "", page: int = 1) -> None:
+    """Dedicated categorized market selector for «👑 تحليل ForexYemeni الحقيقي»."""
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON, CATEGORY_ORDER
+
+    def _fetch_live_markets():
+        with db.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT symbol, title, category FROM market_catalog WHERE enabled=1 AND verified=1 ORDER BY symbol"
+            ).fetchall()]
+
+    rows_db = await afn.run(_fetch_live_markets)
+    by_cat: dict[str, list[dict]] = {}
+    for r in rows_db:
+        c_key = str(r.get("category") or instruments.spec(r["symbol"]).category or "forex").lower()
+        by_cat.setdefault(c_key, []).append(r)
+
+    ordered_cats = [c for c in CATEGORY_ORDER if by_cat.get(c)] + [c for c in by_cat if c not in CATEGORY_ORDER]
+    cat = (category or "").strip().lower()
+
+    if cat and by_cat.get(cat):
+        items = sorted(by_cat[cat], key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, r["symbol"]))
+        per_page = 12
+        total_pages = max(1, (len(items) + per_page - 1) // per_page)
+        pg = max(1, min(page, total_pages))
+        chunk = items[(pg - 1) * per_page: pg * per_page]
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        body = (
+            f"👑 <b><u>تحليل ForexYemeni الحقيقي — {icon} {title}</u></b>\n"
+            f"<blockquote>▎اختر السوق لتشغيل التحليل الحقيقي + الرادار المزدوج + الشارت المؤسسي "
+            f"(صفحة {pg}/{total_pages}):</blockquote>"
+        )
+        kb_rows = [[kb.btn(f"👑 {r['symbol']}", f"u:ta_sym:{r['symbol']}", style="primary") for r in chunk[i:i + 3]]
+                   for i in range(0, len(chunk), 3)]
+        if total_pages > 1:
+            nav = []
+            if pg > 1:
+                nav.append(kb.btn("◀️ السابق", f"u:ta_cat:{cat}:{pg - 1}"))
+            if pg < total_pages:
+                nav.append(kb.btn("التالي ▶️", f"u:ta_cat:{cat}:{pg + 1}"))
+            if nav:
+                kb_rows.append(nav)
+        kb_rows.append([kb.btn("↩️ جميع الأقسام", "u:ta_anl")])
+        await render(q, body, kb.user_nav(kb_rows), bot)
+        return
+
+    body = (
+        "👑 <b><u>تحليل ForexYemeni الحقيقي — اختر السوق</u></b>\n"
+        "<blockquote>"
+        "▎💎 <b>منفصل بالكامل عن «تحليل الآن» العادي!</b>\n"
+        "▎هنا يعمل المحرك المؤسسي الكامل (الشارت الفاخر + رادار الإغلاق المزدوج + ارتداد OB/FVG + درع الأخبار وعطلة السوق + إشاراتك الخاصة)."
+        "</blockquote>"
+    )
+    kb_rows = []
+    # Quick royal picks (XAUUSD, BTCUSD, EURUSD if enabled)
+    live_syms = {r["symbol"].upper() for r in rows_db}
+    quick = [s for s in ("XAUUSD", "BTCUSD", "EURUSD", "GBPUSD") if s in live_syms]
+    if quick:
+        kb_rows.append([kb.btn(f"⚡ {s}", f"u:ta_sym:{s}", style="success") for s in quick[:3]])
+    cat_btns = [
+        kb.btn(f"{CATEGORY_ICON.get(c, '🌐')} {CATEGORY_AR.get(c, c)} ({len(by_cat[c])})", f"u:ta_cat:{c}:1", style="primary")
+        for c in ordered_cats
+    ]
+    for i in range(0, len(cat_btns), 2):
+        kb_rows.append(cat_btns[i:i + 2])
+    kb_rows.append([kb.btn("👁‍🗨 لوحة رادار تحليلاتي", "u:true_analysis")])
+    await render(q, body, kb.user_nav(kb_rows), bot)
 
 
 # ===========================================================================
@@ -259,6 +520,7 @@ async def render_admin_studio(q, uid: int, context, bot, notice: str = "") -> No
         lines.append(f"\n<i>✨ {esc(notice)}</i>")
 
     rows_kb = [
+        [kb.btn("👑 تشغيل تحليل ForexYemeni الحقيقي الآن", "u:ta_anl", style="success")],
         [kb.btn(f"💰 تعديل السعر ({cfg['price_usd']:g}$)", "a:taset:price", style="primary"),
          kb.btn(f"📅 تعديل المدة ({cfg['duration_days']} يوم)", "a:taset:days", style="primary")],
         [kb.btn(f"🎁 تعديل المدة التجريبية ({cfg['trial_days']} يوم)", "a:taset:trial", style="success")],

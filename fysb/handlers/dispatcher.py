@@ -144,9 +144,9 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers import crypto_api
         if await crypto_api.handle_user_crypto_api(q, uid, action, context, context.bot):
             return
-    # v8.4.0: Royal True Analysis Radar Subscription (price / duration / trial)
-    if action in ("true_analysis", "tatrial", "tabuy") or action.startswith(
-        ("tausdt:", "tapay:", "tamoncancel:")
+    # v8.4.0 / v8.5.2: Royal True Analysis Radar Subscription + Dedicated Separate Wizard
+    if action in ("true_analysis", "tatrial", "tabuy", "ta_anl") or action.startswith(
+        ("tausdt:", "tapay:", "tamoncancel:", "ta_cat:", "ta_sym:", "ta_tf:", "ta_run:")
     ):
         from fysb.handlers import true_analysis_ui
         if await true_analysis_ui.handle_user_true_analysis(q, uid, action, context, context.bot):

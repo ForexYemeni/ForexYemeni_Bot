@@ -598,7 +598,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                 f"🌍 أسواقك ({esc(_format_user_markets(u['market'] or ''))}): <b>{mstate_txt}</b>\n"
                 f"📈 إجمالي الإشارات المسجلة: <b>{total}</b> (نشطة: {active} · مكتملة: {wins})")
         dash_rows = [
-            [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل جديد", "u:analytics")],
+            [kb.btn("👑 تحليل ForexYemeni الحقيقي", "u:true_analysis", style="success")],
+            [kb.btn("📡 فتح الإشارات", "u:signals"), kb.btn("🔬 تحليل الآن", "u:analytics")],
             [kb.btn("🚀 إشارة الآن", "u:signow"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences")],
             [kb.btn("🎓 الأكاديمية المستقلة", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
             [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans")],
@@ -648,27 +649,8 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             await _upsell(q, uid, bot, f"السوق {symbol.upper()} غير مشمول في باقتك الحالية",
                           unlock_kind="markets", unlock_item=symbol.upper())
             return
-        # v8.4.0 CONTINUITY GUARD: if subscriber ALREADY has an active True Analysis
-        # signal or live chart radar on this symbol, inform them that their previous
-        # analysis & signal are still active instead of creating conflicting views!
-        from fysb.services import true_analysis as _ta
-        ta_acc = await afn.run(_ta.has_access, uid)
-        if ta_acc["active"]:
-            cont = await afn.run(_ta.check_active_continuity, uid, symbol)
-            if cont:
-                live_px = 0.0
-                if cont["kind"] == "ACTIVE_SIGNAL":
-                    try:
-                        from fysb.engines import market_data as _md
-                        mrow_c = await afn.run(_market_row, symbol)
-                        psym_c = (mrow_c["provider_symbol"] if mrow_c else symbol)
-                        q_px = await asyncio.to_thread(_md.fetch_price, psym_c, config.market_api_key(), True)
-                        live_px = float((q_px or {}).get("price") or 0.0)
-                    except Exception:
-                        live_px = 0.0
-                c_body, c_rows = await afn.run(_ta.render_continuity_card, cont, live_px)
-                await render(q, c_body, kb.user_nav(c_rows), bot)
-                return
+        # v8.5.2: «🔬 تحليل الآن» is 100% independent from «👑 تحليل ForexYemeni الحقيقي»
+        # (no continuity blocking here — True Analysis has its own dedicated u:ta_anl flow!).
         # v6.8.1 NOTE: the picker NEVER dead-ends (regression-pinned live bug) —
         # even a ⚪ closed market keeps flowing; the analysis stage itself is
         # honest when provider data is unavailable.
@@ -784,62 +766,28 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         an = res["analysis"]
         q_state = res.get("quota") or (await afn.run(anl.quota_state, uid))
         row = await afn.run(_market_row, an["symbol"])
-        # v8.1.0: Automatic Ultra-Luxury Institutional ForexYemeni Analysis Chart for Users & Admin
+        # v8.5.2: GUARANTEED Ultra-Luxury Institutional ForexYemeni Analysis Chart for «🔬 تحليل الآن»
         try:
-            import io as _io
             from fysb.ui import charts as _charts
-            if await afn.run(_charts.charts_enabled):
-                png = await asyncio.to_thread(_charts.render_analysis_chart, an, row)
-                if png and bot is not None and hasattr(bot, "send_photo"):
-                    chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
-                    cap = _charts.render_analysis_caption(an, market_row=row)
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=_io.BytesIO(png),
-                        caption=cap,
-                        parse_mode="HTML",
-                    )
+            chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
+            await _charts.send_analysis_chart_photo(bot, chat_id, an, market_row=row)
         except Exception as _ce:
-            log.debug("analysis chart photo delivery skipped: %s", _ce)
+            log.warning("analysis chart photo delivery failed: %s", _ce)
+
         card_text = render_analysis_card(an, market_row=row)
         card_text += f"\n\n📊 <b>حصتك الآن:</b> <b>{q_state['used']}/{q_state['quota']}</b> {bar(q_state['used'], q_state['quota'])}"
 
-        # v8.4.0 Royal True Analysis Radar Hook (100% Real Instant Execution OR 2-Stage Closed-Candle Monitoring)
+        # v8.5.2: «🔬 تحليل الآن» is pure instant analysis + luxury chart — cleanly separated
+        # from «👑 تحليل ForexYemeni الحقيقي» (which runs its own dedicated live radar flow!).
         from fysb.services import true_analysis as _ta
-        ta_res = await afn.run(_ta.evaluate_on_analysis_created, uid, an)
-        ta_mode = ta_res.get("mode")
-        anl_rows = [[kb.btn("🔬 تحليل جديد", "u:analytics"), kb.btn("📡 الإشارات", "u:signals")]]
-        if ta_mode == "MONITORING":
-            card_text += _ta.render_monitoring_started_banner(ta_res)
-            anl_rows.insert(0, [kb.btn("👁‍🗨 لوحة رادار تحليلاتي", "u:true_analysis", style="success")])
-        elif ta_mode == "INSTANT_SIGNAL":
-            card_text += (
-                "\n\n⚡ <b><u>تنفيذ فوري حقيقي — رادار ForexYemeni</u></b>\n"
-                "<blockquote>▎شروط الإغلاق والثبات مكتملة فعلياً على الشارت الآن! "
-                "تم إصدار إشارتك الحقيقية الخاصة مع الشارت في الرسالة التالية فوراً ✅</blockquote>"
-            )
-            anl_rows.insert(0, [kb.btn("👑 رادار تحليلاتي وإشارتي", "u:true_analysis", style="success")])
-        elif ta_mode == "NO_ACCESS" and (ta_res.get("access") or {}).get("enabled_global"):
-            anl_rows.insert(0, [kb.btn("👑 فعّل رادار تحليل ForexYemeni الحقيقي ✨", "u:true_analysis", style="primary")])
+        ta_acc = await afn.run(_ta.has_access, uid)
+        anl_rows = [[kb.btn("🔬 تحليل الآن (سوق آخر)", "u:analytics", style="primary"), kb.btn("📡 الإشارات", "u:signals")]]
+        if ta_acc["active"]:
+            anl_rows.insert(0, [kb.btn("👑 فتح تحليل ForexYemeni الحقيقي (رادار حي + إشارات)", "u:ta_anl", style="success")])
+        elif ta_acc.get("enabled_global"):
+            anl_rows.insert(0, [kb.btn("👑 اكتشف تحليل ForexYemeni الحقيقي ✨", "u:true_analysis", style="success")])
 
         await render(q, card_text, kb.user_nav(anl_rows), bot)
-
-        if ta_mode == "INSTANT_SIGNAL" and bot is not None:
-            try:
-                await _ta._deliver_private_signal_with_chart(
-                    bot,
-                    uid,
-                    ta_res["signal"],
-                    instant=True,
-                    stab_tf=ta_res["stability_tf"],
-                    conf_tf=ta_res["confirm_tf"],
-                    body_pct=float(ta_res.get("body_pct") or 65.0),
-                    candles=ta_res.get("candles") or [],
-                    trigger_kind=str(ta_res.get("trigger_kind") or "BREAKOUT"),
-                    tp_grounded=bool(ta_res.get("tp_grounded")),
-                )
-            except Exception as _tae:
-                log.debug("instant true_analysis signal delivery failed: %s", _tae)
 
     # ---------- Signals (v6.20.4 luxury date-grouped archive: Today / Yesterday / By Date) ----------
     elif action == "signals" or action.startswith("sigday:"):

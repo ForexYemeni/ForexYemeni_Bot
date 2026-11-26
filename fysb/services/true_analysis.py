@@ -1086,7 +1086,7 @@ def render_continuity_card(cont: dict, live_px: float = 0.0) -> tuple[str, list[
         rows = [
             [kb.btn("📊 عرض شارت الصفقة الحي", f"u:sigchart:{sig['id']}", style="success")],
             [kb.btn("👑 لوحة رادار تحليلاتي", "u:true_analysis", style="primary")],
-            [kb.btn("🔬 تحليل سوق آخر", "u:analytics")],
+            [kb.btn("👑 تحليل سوق آخر (ForexYemeni الحقيقي)", "u:ta_anl")],
         ]
         return body, rows
 
@@ -1111,7 +1111,7 @@ def render_continuity_card(cont: dict, live_px: float = 0.0) -> tuple[str, list[
     rows = [
         [kb.btn("🗑 إلغاء هذه المراقبة وطلب تحليل جديد", f"u:tamoncancel:{mon['id']}", style="danger")],
         [kb.btn("👑 لوحة رادار تحليلاتي", "u:true_analysis", style="primary")],
-        [kb.btn("🔬 تحليل سوق آخر", "u:analytics")],
+        [kb.btn("👑 تحليل سوق آخر (ForexYemeni الحقيقي)", "u:ta_anl")],
     ]
     return body, rows
 

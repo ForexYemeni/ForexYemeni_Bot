@@ -32,6 +32,10 @@ def _fresh_db(tmp_path, monkeypatch):
     db.set_setting("min_rr", "1.0")
     from fysb.engines import news_guard
     news_guard.set_cached_events([])
+    # v8.11.0 hermetic fix: these tests verify the INSTANT/RADAR decision logic,
+    # not the session calendar — without this they flake whenever the suite runs
+    # inside the 22:00 UTC settlement hour or on weekends (observed 2026-11-26).
+    monkeypatch.setattr(ta_svc, "is_market_open_at", lambda *a, **k: True)
     monkeypatch.setattr(md, "execution_quote", lambda *a, **kw: {"ok": True, "price": 2660.})
 
 

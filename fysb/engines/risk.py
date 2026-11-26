@@ -80,6 +80,87 @@ def daily_signal_pnl_pct(conn_obj=None) -> tuple[float, int]:
     return round(net_r * risk_per, 2), sl_hits
 
 
+def open_caps_snapshot() -> dict:
+    """v8.11.0 (P5) — live visibility of the hidden issuance ceiling.
+
+    The risk caps silently block NEW signals when full (12 open public signals
+    by default, 3 per symbol, 3 correlated, daily-loss breaker). This snapshot
+    exposes counts vs caps for the admin diagnostics panel so a full ceiling is
+    never an invisible mystery again. Public AUTO rows only — the same query
+    scope check_signal() enforces.
+    """
+    from collections import Counter
+    from datetime import datetime, timezone
+    max_per_sym = max(1, int(_s("max_open_per_symbol", 3)))
+    max_open = max(1, int(_s("max_open_signals", 12)))
+    max_corr = max(1, int(_s("max_correlated_signals", 3)))
+    max_daily_loss = abs(_s("max_daily_loss_pct", 5.0))
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT symbol, direction, created_at FROM signals "
+            "WHERE COALESCE(private_user_id,0)=0 AND (source IS NULL OR UPPER(source) NOT IN "
+            "('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED')) "
+            "AND (closed_at IS NULL OR closed_at='') "
+            "AND status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')"
+        ).fetchall()]
+        daily_pct, _sl_today = daily_signal_pnl_pct(c)
+    per_symbol = Counter(
+        (r["symbol"] or "").strip().upper().replace("/", "") for r in rows)
+    buckets = Counter(
+        exposure_bucket(r["symbol"], r["direction"]) for r in rows)
+    oldest_h = 0.0
+    now_dt = datetime.now(timezone.utc)
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(str(r["created_at"] or "").replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            oldest_h = max(oldest_h, (now_dt - dt).total_seconds() / 3600.0)
+        except (ValueError, TypeError):
+            continue
+    worst_sym, worst_sym_n = (per_symbol.most_common(1)[0] if per_symbol else ("", 0))
+    worst_bucket, worst_bucket_n = (buckets.most_common(1)[0] if buckets else ("", 0))
+    worst_bucket = worst_bucket or ""
+    open_rows = []
+    for r in rows[:12]:
+        hours = 0.0
+        try:
+            dt = datetime.fromisoformat(str(r["created_at"] or "").replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            hours = max(0.0, round((now_dt - dt).total_seconds() / 3600.0, 1))
+        except (ValueError, TypeError):
+            pass
+        open_rows.append({"symbol": (r["symbol"] or ""), "direction": (r["direction"] or ""),
+                          "hours": hours})
+    return {
+        "open": len(rows),
+        "cap_open": max_open,
+        "ceiling_full": len(rows) >= max_open,
+        "cap_per_symbol": max_per_sym,
+        "worst_symbol": worst_sym,
+        "worst_symbol_open": worst_sym_n,
+        "symbol_full": worst_sym_n >= max_per_sym,
+        "cap_correlated": max_corr,
+        "worst_bucket": worst_bucket,
+        "worst_bucket_open": worst_bucket_n,
+        "correlated_full": bool(worst_bucket) and worst_bucket_n >= max_corr,
+        "daily_pnl_pct": daily_pct,
+        "max_daily_loss_pct": max_daily_loss,
+        "daily_breached": daily_pct <= -max_daily_loss,
+        "oldest_open_hours": round(oldest_h, 1),
+        "open_rows": open_rows,
+    }
+
+
+def _parse_ok(ts) -> bool:
+    try:
+        datetime.fromisoformat(str(ts or "").replace("Z", "+00:00"))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def check_signal(symbol: str, rr: float, atr_pct_value: float,
                  source: str = "AUTO", created_by: int = 0,
                  direction: str = "") -> RiskDecision:

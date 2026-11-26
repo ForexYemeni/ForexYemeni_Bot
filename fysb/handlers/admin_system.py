@@ -13,6 +13,7 @@ from fysb.services import analytics as analytics_service
 from fysb.services import audit as audit_log
 from fysb.services import backup as backup_service
 from fysb.services import broadcast as broadcast_service
+from fysb.services import secrets as secrets_service
 from fysb.services import support as support_service
 from fysb.theme import ICON, esc, human_dt
 from fysb.ui import keyboards as kb
@@ -328,8 +329,65 @@ async def admin_security(q, uid, context, bot):
     if not events:
         lines.append("  لا أحداث أمنية مسجلة.")
     rows_kb = [[kb.btn("🔧 وضع الصيانة", "a:togglemaintenance"),
-                kb.btn(f"🆕 منع الجدد: {'إيقاف' if bn == '1' else 'تفعيل'}", "a:toggleblocknew")]]
+                kb.btn(f"🆕 منع الجدد: {'إيقاف' if bn == '1' else 'تفعيل'}", "a:toggleblocknew")],
+               [kb.btn("🔑 مفتاح بيانات الأسعار الموسّع (TwelveData)", "a:sys_tdkey", style="success")]]
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+# --- v8.11.0: Admin-panel TwelveData API key (encrypted at rest, never displayed) ---
+def _td_key_store_sync(raw_key: str) -> None:
+    blob = secrets_service.encrypt_json({"key": raw_key.strip()})
+    db.set_setting("twelvedata_api_key_enc", blob)
+
+
+def _td_key_clear_sync() -> None:
+    db.set_setting("twelvedata_api_key_enc", "")
+
+
+async def admin_tdkey(q, uid, context, bot, notice: str = ""):
+    src = config.market_api_key_source()
+    state_txt = {"env": "✅ مضبوط من .env (له الأولوية دائماً)",
+                 "panel": "✅ مضبوط من هذه اللوحة — مشفّر تشفيراً معتمداً عند التخزين",
+                 "": "⚪ غير مضبوط — طبقة البيانات الموسّعة (KEYED) خارج السلسلة"}.get(src, "؟")
+    lines = [
+        "🔑 <b><u>مفتاح بيانات الأسعار الموسّع — TwelveData</u></b>",
+        "<blockquote>"
+        "▎🔑 إدخال مفتاح <b>TWELVEDATA_API_KEY</b> من هنا يضيف طبقة شموع وسعر حقيقية موسّعة\n"
+        "▎🌐 تغطي الفوركس والمعادن (ذهب/فضة) والأسهم كشبكة أمان إضافية بعد المراجع اللحظية\n"
+        "▎🔐 يُخزَّن مشفّراً بالكامل (لا يُعرض ولا يُسجل أبداً) ويعمل فوراً دون إعادة تشغيل\n"
+        f"▎📌 الحالة الحالية: <b>{state_txt}</b>\n"
+        "▎💡 بلا مفتاح تعمل السلسلة الافتراضية المجانية بالكامل — المفتاح يوسّع التغطية فقط"
+        "</blockquote>",
+    ]
+    if notice:
+        lines.insert(0, f"<blockquote>✅ {esc(notice)}</blockquote>")
+    rows_kb = [
+        [kb.btn("✍️ إدخال / تحديث المفتاح", "a:sys_tdset", style="success")],
+        [kb.btn("🧪 فحص البيانات الحي بعد الإدخال", "a:enginediagprobe", style="primary")],
+    ]
+    if src == "panel":
+        rows_kb.append([kb.btn("🗑 مسح مفتاح اللوحة", "a:sys_tdclear", style="danger")])
+    rows_kb.append([kb.btn("↩️ مركز الأمان", "a:security")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_tdkey_set(q, uid, context, bot):
+    context.user_data["awaiting_td_key"] = True
+    body = (
+        "✍️ <b>أرسل مفتاح TwelveData الآن</b>\n"
+        "<blockquote>▎أرسل المفتاح كرسالة نصية واحدة (16–64 حرفاً إنجليزياً/رقماً).\n"
+        "▎يُستبدل المفتاح المضبوط من اللوحة إن وُجد، ولا يمس قيمة .env إطلاقاً.\n"
+        "▎بعد الاستلام يُشفَّر فوراً ويدخل السلسلة مباشرة — بلا إعادة تشغيل.\n"
+        "▎للإلغاء: اضغط أي زر تنقل.</blockquote>"
+    )
+    await render(q, body, kb.admin_nav([[kb.btn("↩️ مفتاح البيانات", "a:sys_tdkey")]]), bot)
+
+
+async def admin_tdkey_clear(q, uid, context, bot):
+    await afn.run(_td_key_clear_sync)
+    config.invalidate_market_key_cache()
+    await afn.run(audit_log.log, uid, "twelvedata_key:cleared")
+    await admin_tdkey(q, uid, context, bot, notice="أُزيل مفتاح اللوحة — عادت السلسلة إلى .env أو الوضع المجاني.")
 
 
 def masked_admin() -> str:

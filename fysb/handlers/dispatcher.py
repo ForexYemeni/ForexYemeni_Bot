@@ -522,6 +522,16 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_news_auto_toggle(q, uid, context, bot)
     elif act == "newsdest":
         await admin_trading.admin_news_dest_toggle(q, uid, context, bot, arg)
+    elif act == "newsfailopen":
+        await admin_trading.admin_news_fail_open(q, uid, context, bot)
+    elif act == "newscachehrs":
+        await admin_trading.admin_news_cache_hours(q, uid, context, bot)
+    elif act == "newscachehrsset":
+        await admin_trading.admin_news_cache_hours_set(q, uid, context, bot, int(arg or 48))
+    elif act == "enginediag":
+        await admin_trading.admin_engine_diagnostics(q, uid, context, bot)
+    elif act == "enginediagprobe":
+        await admin_trading.admin_engine_diag_probe(q, uid, context, bot)
     elif act == "newssendnow":
         await admin_trading.admin_news_send_now(q, uid, context, bot)
     elif act == "leaderboard":
@@ -686,6 +696,12 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_ticket_reopen(q, uid, context, bot, int(arg))
     elif act == "security":
         await admin_system.admin_security(q, uid, context, bot)
+    elif act == "sys_tdkey":
+        await admin_system.admin_tdkey(q, uid, context, bot)
+    elif act == "sys_tdset":
+        await admin_system.admin_tdkey_set(q, uid, context, bot)
+    elif act == "sys_tdclear":
+        await admin_system.admin_tdkey_clear(q, uid, context, bot)
     elif act == "togglemaintenance":
         await admin_system.admin_toggle_maintenance(q, uid, context, bot)
     elif act == "toggleblocknew":

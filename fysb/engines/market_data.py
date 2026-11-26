@@ -610,6 +610,10 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
       * custom : KEYED (if TWELVEDATA_API_KEY configured) -> error
     Raises RuntimeError with SANITIZED Arabic messages when everything fails —
     callers must never fabricate prices.
+
+    v8.11.0 (P2): freshness-aware failover — a provider answering with STALE
+    candles no longer blocks the remaining chain; the freshest stale payload is
+    returned only as an honest last resort (never cached as fresh evidence).
     """
     internal = _norm(symbol)
     interval = interval or "15min"
@@ -624,6 +628,11 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
     base_chain = _CANDLE_CHAINS.get(cls, ["twelvedata"] if cls is None else [])
     chain = _ordered_chain(base_chain, config.PRICE_PROVIDER, config.has_market_api())
     venue = _provider_key(internal) if internal != "XAUUSD" else None
+    # v8.11.0 (P2): a SUCCESSFUL but STALE provider response no longer stops the
+    # failover chain. The freshest stale payload is kept only as a last resort
+    # and returned honestly (callers still reject it by their own freshness
+    # gates) — it is NEVER cached, so the next attempt re-tries the chain live.
+    stale_fallback: dict | None = None
 
     for provider in chain:
         if in_cooldown(provider, internal, interval):
@@ -678,11 +687,30 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                                            config.market_api_key(), outputsize)
             else:
                 continue
-            return _assemble(internal, interval, values, "LIVE", use_cache, cache_key, symbol,
-                             provider_name=provider)
+            # v8.11.0 (P2): freshness-aware chain traversal — fresh data wins
+            # immediately; stale data never blocks the remaining alternatives.
+            payload = _assemble(internal, interval, values, "LIVE", False, cache_key, symbol,
+                                provider_name=provider)
+            if not is_stale(payload):
+                if use_cache:
+                    _cache[cache_key] = {"t": time.time(), "payload": payload}
+                    if len(_cache) > 200:
+                        for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
+                            _cache.pop(k, None)
+                return payload
+            if stale_fallback is None or payload["age_seconds"] < stale_fallback["age_seconds"]:
+                stale_fallback = payload
+            errors.append(f"{provider}:stale(age={int(payload['age_seconds']) // 60}min)")
         except Exception as exc:
             _mark_failure(provider, internal, interval)
             errors.append(f"{provider}:" + type(exc).__name__)
+
+    # v8.11.0 (P2): every live alternative failed or was stale — the freshest
+    # stale payload is returned HONESTLY as a last resort (never cached, never
+    # presented as fresh). Callers apply their own staleness gates and speak
+    # the sanitized Arabic reason — no fabricated freshness, no silent halt.
+    if stale_fallback is not None:
+        return stale_fallback
 
     if internal in FOREX_ONLY and not config.has_market_api():
         raise RuntimeError("تعذر جلب شموع الفوركس من المرجع اللحظي — أعد المحاولة بعد قليل")

@@ -5,6 +5,8 @@ isolation: one failing loop never kills the bot.
 """
 import asyncio
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fysb import afn, config, db
@@ -291,6 +293,12 @@ async def market_engine_loop(app):
 
     bot_send._bot = app.bot
 
+    # v8.11.0 (P4): engine-silence watchdog — the loop can run while EVERY scan
+    # attempt is blocked (stale data, news data void, full risk ceiling …).
+    # The admin hears the truth with real reasons, rate-limited, instead of a
+    # silent "no opportunities" that is actually an infrastructure block.
+    silence = {"streak": 0, "alerted": False}
+
     while True:
         try:
             # v6.25.0 / v7.4.0: Luxury Pre-News Alert to Admin + Auto-Broadcast to Users/Partners/Channels
@@ -312,10 +320,14 @@ async def market_engine_loop(app):
                     and await afn.run(db.get_setting, "signal_push_enabled", "1") == "1":
                 markets = await afn.run(_armed_market_rows)
                 scan_tfs = await afn.run(_armed_scan_timeframes)
+                iter_results: list[dict] = []
                 for m in markets:
                     for tf in scan_tfs:
                         try:
                             result = await asyncio.to_thread(generate_signal, m["symbol"], tf)
+                            iter_results.append({"symbol": m["symbol"], "tf": tf,
+                                                 "status": str(result.get("status") or "ERROR"),
+                                                 "reason": str(result.get("reason") or "")})
                             if result["status"] == "SIGNAL_CREATED":
                                 sig = await afn.run(_signal_row_by_id, result["signal_id"])
                                 if sig:
@@ -367,14 +379,97 @@ async def market_engine_loop(app):
                                         log.info("free companion signal #%s (%s %s): %s",
                                                  free_sid, m["symbol"], tf, f_stats)
                         except Exception as e:
+                            iter_results.append({"symbol": m["symbol"], "tf": tf,
+                                                 "status": "ERROR", "reason": type(e).__name__})
                             log.warning("engine scan failed for %s %s: %s", m["symbol"], tf, type(e).__name__)
                         await asyncio.sleep(config.MARKET_SYMBOL_DELAY_SECONDS)
+                # v8.11.0 (P4): end-of-cycle silence evaluation — two consecutive
+                # fully-blocked cycles raise ONE rate-limited admin card with the
+                # real gate reasons; a later productive cycle sends ONE recovery
+                # card. NO_SETUP/DUPLICATE are honest market states, not silence.
+                blocked = [r for r in iter_results if r["status"] in ("REJECTED", "ERROR")]
+                if iter_results and len(blocked) == len(iter_results):
+                    silence["streak"] += 1
+                else:
+                    if silence["alerted"] and iter_results:
+                        try:
+                            await _safe_send(app.bot, config.ADMIN_ID,
+                                             "✅ <b>عاد الماسح الآلي إلى الإنتاج</b>\n"
+                                             "الحجب السابق انتهى — المحرك يجد فرصاً مؤهلة أو حالات سوق صادقة من جديد.")
+                        except Exception:
+                            pass
+                    silence["alerted"] = False
+                    silence["streak"] = 0
+                if silence["streak"] >= 2 and not silence["alerted"]:
+                    if await _maybe_silence_alert(app, iter_results):
+                        silence["alerted"] = True
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("market engine loop iteration failed")
         interval = await afn.run(db.get_setting_int, "engine_interval_seconds", 300)
         await asyncio.sleep(max(60, interval))
+
+
+def _silence_card(iter_results: list[dict]) -> str:
+    """v8.11.0 (P4) luxury admin card: why every attempt was blocked (no vendor names)."""
+    from fysb.theme import esc
+    from fysb.engines import news_guard as _ng, risk as _risk
+    counts: dict[str, int] = {}
+    samples: dict[str, list[str]] = {}
+    for r in iter_results:
+        key = (r["reason"][:90] or r["status"])
+        counts[key] = counts.get(key, 0) + 1
+        lst = samples.setdefault(key, [])
+        if len(lst) < 4:
+            lst.append(f"{esc(r['symbol'])} {esc(r['tf'])}")
+    lines = [
+        "🔇 <b><u>الماسح الآلي يعمل بلا فرص مؤهلة — التشخيص الحقيقي</u></b>",
+        f"<blockquote>▎♻️ دورتان متتاليتان بلا نتيجة واحدة · {len(iter_results)} محاولة كلها محجوبة</blockquote>",
+        "",
+        "<b>🚧 أسباب الحجب الفعلية (من سجل المحرك):</b>",
+    ]
+    for key, n in sorted(counts.items(), key=lambda kv: -kv[1])[:6]:
+        lines.append(f"  • <b>{n}×</b> {esc(key)} <i>({ '، '.join(samples[key]) })</i>")
+    nh = _ng.feed_health()
+    nh_txt = {"OK": "🟢 سليم ومحدّث",
+              "CACHED": f"🟡 يعمل ببيانات محفوظة ({nh['cache_age_minutes']} د) — القرار يبقى صادقاً",
+              "UNKNOWN": "🔴 لا توجد بيانات تقويم صالحة"}.get(nh["state"], "؟")
+    lines += ["", "<b>🚦 حالة البوابات الآن:</b>",
+              f"  🛡 مفتاح القتل: {'⛔ مشغّل — لا إصدار إطلاقاً' if db.kill_switch_on() else '✅ حر'}",
+              f"  📰 درع الأخبار: {nh_txt}" + ("" if nh["state"] != "UNKNOWN" else
+                    (" (وضع الفتح عند الفراغ مفعّل من الإدارة)" if _ng.fail_open() else " (يمنع الإصدار)")),
+              f"  🔑 مفتاح البيانات الموسّع (KEYED): {'✅ مضبوط' if config.has_market_api() else '⚪ غير مضبوط — سلسلة البيانات أضيق'}"]
+    try:
+        rk = _risk.open_caps_snapshot()
+        if rk["ceiling_full"]:
+            lines.append(f"  🛡 السقف الكلي: ⛔ ممتلئ ({rk['open']}/{rk['cap_open']}) — يحجب أي إشارة جديدة")
+        else:
+            lines.append(f"  🛡 السقف الكلي: ✅ متاح ({rk['open']}/{rk['cap_open']})")
+        if rk["daily_breached"]:
+            lines.append(f"  💥 قاطع الخسارة اليومي: ⛔ مشغّل ({rk['daily_pnl_pct']:+.1f}% ≤ -{rk['max_daily_loss_pct']:.1f}%)")
+    except Exception:
+        pass
+    lines += ["",
+              "<i>💡 افتح 🔍 تشخيص بوابات الإشارات من المحرك لعرض كل بوابة لحظياً، أو جرّب «🧪 فحص بيانات حي».</i>"]
+    return "\n".join(lines)
+
+
+async def _maybe_silence_alert(app, iter_results: list[dict]) -> bool:
+    """v8.11.0 (P4): rate-limited (default once / 6h) — admin config via
+    `engine_silence_alert_hours`. Returns True when a card was actually sent."""
+    hours = max(1, await afn.run(db.get_setting_int, "engine_silence_alert_hours", 6))
+    last = await afn.run(db.get_setting_int, "engine_last_silence_alert", 0)
+    if time.time() - last < hours * 3600:
+        return False
+    if not config.ADMIN_ID:
+        return False
+    card = await afn.run(_silence_card, iter_results)
+    ok = await _safe_send(app.bot, config.ADMIN_ID, card)
+    if ok:
+        await afn.run(db.set_setting, "engine_last_silence_alert", int(time.time()))
+        log.info("engine silence alert sent (%s blocked attempts)", len(iter_results))
+    return ok
 
 
 def _norm_chat_id(chat_id):
@@ -715,7 +810,9 @@ async def channels_loop(app):
 
 async def watchers_loop(app):
     """v6.10.0 + v8.4.0 — Runs BOTH «إشارة الآن» auto-search watchers AND the
-    Royal «تحليل ForexYemeni الحقيقي» 2-stage closed-candle radar every 60s."""
+    Royal «تحليل ForexYemeni الحقيقي» 2-stage closed-candle radar every 60s.
+    v8.11.0 (P4): a DISABLED engine is a decision, not silence — one gentle
+    daily admin reminder so «لا فرص تلقائية» is never mistaken for a fault."""
     from fysb.handlers import signal_now
     from fysb.services import true_analysis
     while True:
@@ -731,7 +828,36 @@ async def watchers_loop(app):
             raise
         except Exception:
             log.exception("true_analysis radar loop failed")
+        try:
+            await _engine_disabled_daily_notice(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("engine disabled notice failed")
         await asyncio.sleep(60)
+
+
+async def _engine_disabled_daily_notice(app) -> None:
+    """v8.11.0 (P4): once per UTC day, if the AUTO engine is disabled, the
+    admin gets a single honest reminder (never spammed). All DB ops offloaded."""
+    if not config.ADMIN_ID:
+        return
+    if await afn.run(db.get_setting, "engine_enabled", "0") == "1":
+        return
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if await afn.run(db.get_setting, "engine_disabled_notice_day", "") == today:
+        return
+    await afn.run(db.set_setting, "engine_disabled_notice_day", today)
+    await _send_disabled_notice(app)
+
+
+async def _send_disabled_notice(app) -> None:
+    await _safe_send(
+        app.bot, config.ADMIN_ID,
+        "🧠 <b>تذكير لطيف:</b> المحرك الآلي <b>متوقف</b> حالياً — لن تُولَد أي إشارات تلقائية.\n"
+        "▎إن أردت استئناف البحث الآلي عن الفرص: افتح 🧠 <b>محرك السوق</b> واضغط «▶️ تشغيل المحرك».\n"
+        "▎التتبع وإدارة الإشارات المفتوحة يستمران بالكامل رغم توقف المحرك.",
+    )
 
 
 async def scheduled_charts_loop(app):

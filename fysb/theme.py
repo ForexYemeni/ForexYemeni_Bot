@@ -159,6 +159,93 @@ def status_ar(status: str) -> str:
     return STATUS_AR.get((status or "").upper(), esc(status) if status else "—")
 
 
+# --- v8.11.1 (luxury diagnostics): engine-run verdict & reason Arabic layer ---
+# The engine stores terse English codes/details for log honesty; the DISPLAY
+# layer presents them in the royal Arabic voice everywhere users/admins read.
+RESULT_AR = {
+    "SIGNAL_CREATED": ("✅", "إشارة ولدت وسُلّمت"),
+    "NO_SETUP": ("🧭", "لا فرصة مؤهلة — شروط الاستراتيجيات غير مكتملة فعلاً"),
+    "DUPLICATE": ("♻️", "إشارة مطابقة حديثة — منع التكرار"),
+    "MARKET_CLOSED": ("🌐", "السوق مغلق الآن وفق تقويم الجلسات"),
+    "STALE_DATA": ("⏳", "بيانات أقدم من الحد المسموح — رفض صادق"),
+    "DATA_ERROR": ("📡", "تعذر جلب بيانات لحظية — لا إشارة من بيانات مشكّلة"),
+    "NEWS_BLOCKED": ("📰", "خبر قوي قريب — درع الأخبار يحمي الدخول"),
+    "KILL_SWITCH": ("🛡", "مفتاح القتل مشغّل — لا إصدار إطلاقاً"),
+    "INSUFFICIENT_DATA": ("📉", "شموع غير كافية للتحقق المؤسسي"),
+    "QUALITY_REJECTED": ("⭐", "جودة دون الحد المؤسسي — امتناع حماية"),
+    "RISK_REJECTED": ("🛡", "بوابة المخاطر رفضت — سقف/حد وقائي"),
+    "STALE_ENTRY": ("🎯", "السعر ابتعد عن منطقة الدخول قبل النشر"),
+    "CONFLICT_REJECTED": ("⚔️", "تعارض اتجاهي بين الاستراتيجيات — رفض حماية"),
+    "CONFLICT_RESOLVED": ("⚖️", "تعارض اتجاهي حُلّ بأوزان الذكاء"),
+    "CANDIDATE_FALLBACK": ("🔁", "اختيار أفضل مرشح بعد رفض الأعلى درجة"),
+    "STRATEGY_NOT_LIVE": ("🧠", "المنهجية المطلوبة غير مفعلة أو غير موثقة"),
+    "PROXY_REJECTED": ("💠", "بيانات بديلة للعرض فقط — ليست دليل تنفيذ"),
+    "REJECTED": ("⛔", "مرفوض ببوابة حماية"),
+    "ERROR": ("⚠️", "خطأ تشغيلي في المحاولة"),
+}
+
+_REASON_SUBS = (
+    # (lowercase needle OR regex, Arabic replacement) — first match wins
+    ("session calendar says market is closed; no signal manufactured", ""),
+    ("no strategy conditions met; no signal manufactured", ""),
+    ("market closed", "السوق مغلق الآن وفق تقويم الجلسات — التزام صادق"),
+    ("kill switch engaged", "مفتاح القتل مشغّل — لا إصدار إطلاقاً"),
+    ("global kill switch engaged", "مفتاح القتل مشغّل — لا إصدار إطلاقاً"),
+    ("proxy candles are indicative only, not execution evidence",
+     "بيانات بديلة معايرة للعرض فقط — ليست دليل تنفيذ"),
+    ("no qualifying setup", "لا فرصة مؤهلة — شروط الاستراتيجيات غير مكتملة فعلاً"),
+    ("recent duplicate", "إشارة مطابقة حديثة — منع التكرار"),
+    ("strategy disabled or unverified", "الاستراتيجية غير مفعلة أو غير موثقة"),
+    ("news status unknown", "حالة الأخبار غير معروفة — لا توجد بيانات تقويم صالحة"),
+)
+
+
+def ar_result(code: str) -> str:
+    """Engine-run verdict code -> 'emoji Arabic label' (code passthrough if unknown)."""
+    c = (code or "").strip().upper()
+    icon, label = RESULT_AR.get(c, ("•", c))
+    return f"{icon} {label}" if label else c
+
+
+def ar_reason(reason: str) -> str:
+    """Translate the common English engine reasons to the royal Arabic voice.
+
+    Arabic reasons (quality gate, risk engine, news guard) pass through
+    untouched; unknown English is preserved honestly rather than dropped.
+    """
+    s = (reason or "").strip()
+    if not s:
+        return ""
+    import re as _re
+    low = s.lower()
+    for needle, ar in _REASON_SUBS:
+        if needle in low:
+            return ar
+    m = _re.search(r"data stale \(age (\d+)min\)", low)
+    if m:
+        return f"بيانات أقدم من الحد المسموح ({m.group(1)} دقيقة) — رفض صادق، لا إشارة من شموع جامدة"
+    m = _re.search(r"insufficient candles \((\d+)\)", low)
+    if m:
+        return f"شموع غير كافية للتحقق المؤسسي ({m.group(1)} شمعة فقط)"
+    if "stale entry" in low:
+        return s  # already mixed Arabic — keep as authored
+    return s
+
+
+def _has_arabic(s: str) -> bool:
+    return any("\u0600" <= ch <= "\u06FF" for ch in (s or ""))
+
+
+def ar_run_line(result: str, detail: str = "") -> str:
+    """One engine_runs entry rendered in Arabic; only Arabic-bearing detail is
+    appended — raw English log leftovers never reach the display layer."""
+    line = ar_result(result)
+    ar_d = ar_reason(detail)
+    if ar_d and _has_arabic(ar_d) and ar_d not in line:
+        line += f" — {ar_d}"
+    return line
+
+
 def is_signal_closed(sig) -> bool:
     """True when a signal is finished (terminal status OR closed_at stamped, e.g. TP1/TP2 Breakeven)."""
     if sig is None:

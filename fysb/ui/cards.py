@@ -9,7 +9,7 @@ rendered through the Arabic name maps, and the data source is shown as a
 neutral "بيانات السوق اللحظية" (provider names are never exposed).
 """
 from fysb import instruments
-from fysb.theme import (DIRECTION_EMOJI, ICON, bar, card, dir_badge, esc,
+from fysb.theme import (DIRECTION_EMOJI, ICON, ar_reason as theme_ar_reason, bar, card, dir_badge, esc,
                         expandable, footer, human_dt, is_signal_closed, rich,
                         signal_status_ar, signal_status_badge, status_ar, status_badge,
                         strategy_name, tf_name)
@@ -397,7 +397,7 @@ def render_no_signal_card(
 ) -> str:
     """Luxury Royal Institutional Protection Card shown whenever a live scan
     or Signal-Now finds no qualifying setup (v6.20.9)."""
-    icon, title, explanation, recommendation = diagnose_no_signal(status, reason)
+    icon, title, explanation, recommendation = diagnose_no_signal(status, theme_ar_reason(reason))
     meta_parts = []
     if symbol:
         meta_parts.append(f"🌐 <b>السوق:</b> <code>{esc(symbol)}</code>")
@@ -425,7 +425,7 @@ def render_no_signal_card(
 
     quote = [f"{icon} <b>{title}</b>", ""]
     if reason and reason.upper() not in ("NO_SETUP", "REJECTED"):
-        quote.append(f"▎📌 <b>التشخيص الفني الدقيق:</b>\n<code>{esc(reason)}</code>")
+        quote.append(f"▎📌 <b>التشخيص الفني الدقيق:</b> {esc(theme_ar_reason(reason))}")
         quote.append("")
     quote.append(f"▎💡 <b>لماذا لم تُصدر إشارة؟</b>\n{explanation}")
     if show_watch_hint:

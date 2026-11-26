@@ -652,7 +652,7 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
     from fysb.theme import dir_badge, esc, status_ar, tf_name
     sig_src = (sig.get("source") or "AUTO").upper()
     sig_owner = int(sig.get("created_by") or 0)
-    olds = opposite_close_advisory_targets(
+    olds = await _asyncio.to_thread(opposite_close_advisory_targets,
         sig["symbol"], sig["direction"], int(sig.get("id") or 0),
         source=sig_src, created_by=sig_owner,
     )
@@ -690,11 +690,14 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
             else:
                 hit_txt = " · عند نقطة الدخول ⚖️"
 
-            with db.conn() as c:
-                deliv_rows = c.execute(
-                    "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?",
-                    (old["id"],),
-                ).fetchall()
+            def _advisory_holders(signal_id):
+                with db.conn() as c:
+                    return [dict(r) for r in c.execute(
+                        "SELECT user_id, chat_id FROM signal_deliveries WHERE signal_id=?",
+                        (signal_id,),
+                    ).fetchall()]
+
+            deliv_rows = await _asyncio.to_thread(_advisory_holders, old["id"])
             targets: list = []
             seen_targets: set[str] = set()
             for dr in deliv_rows:
@@ -747,8 +750,9 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
                     "قبل دخول الإشارة العكسية الجديدة.\n"
                 )
 
+            old_seq = await _asyncio.to_thread(seq_of, old["id"])
             text = (
-                f"🔄 <b><u>تنبيه إغلاق صفقة متعاكسة — الإشارة #{seq_of(old['id'])}</u></b> — {esc(old['symbol'])} {dir_badge(old['direction'])} ⏱ {tf_name(old['timeframe'])}\n"
+                f"🔄 <b><u>تنبيه إغلاق صفقة متعاكسة — الإشارة #{old_seq}</u></b> — {esc(old['symbol'])} {dir_badge(old['direction'])} ⏱ {tf_name(old['timeframe'])}\n"
                 "<blockquote>"
                 f"▎📌 الحالة الحالية: <b>{status_ar(old['status'])}</b>{hit_txt}\n"
                 + px_line
@@ -766,7 +770,7 @@ async def opposite_close_advisory(sig: dict, bot_send) -> int:
             # Admin copy only for non-private signals, and only if Admin wasn't already in targets
             if (sig_src != "SIGNAL_NOW" and config.ADMIN_ID
                     and str(config.ADMIN_ID) not in seen_targets
-                    and admin_accepts_market(old["symbol"])):
+                    and await _asyncio.to_thread(admin_accepts_market, old["symbol"])):
                 try:
                     await bot_send(config.ADMIN_ID, text)
                     sent += 1
@@ -988,7 +992,7 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
         if is_free_only and str(plan.get("code") or "").upper() != "FREE":
             stats["skipped_filters"] += 1
             continue
-        if is_free_trial_expired(uid, user_row=u, plan_row=plan):
+        if await _afn.run(is_free_trial_expired, uid, user_row=u, plan_row=plan):
             stats["skipped_quota"] += 1
             continue
         p_markets = {_norm_sym(x) for x in str(plan["markets"] or "").split(",") if x.strip()}
@@ -1010,13 +1014,13 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             continue
 
         # 3) quota (atomic, reusing preloaded plan_row)
-        if not try_consume_signal(uid, sig, plan_row=plan):
+        if not await _afn.run(try_consume_signal, uid, sig, plan_row=plan):
             stats["skipped_quota"] += 1
             continue
 
         # 4) deliver: pre-rendered luxury card + personal plan block + interactive action bar
         acc = demo_map.get(uid)
-        personal = user_trade.personal_block(sig, uid, row=row, acc=acc)
+        personal = await _afn.run(user_trade.personal_block, sig, uid, row=row, acc=acc)
         text = base_card + ("\n\n<blockquote>" + personal + "</blockquote>" if personal else "")
         try:
             from fysb.ui import keyboards as _kb
@@ -1027,10 +1031,10 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
                 msg = await bot_send(uid, text)
             stats["sent"] += 1
             delivered_uids.append(uid)
-            record_delivery_refs(uid, sig["id"], msg)
+            await _afn.run(record_delivery_refs, uid, sig["id"], msg)
         except Exception:
             stats["failed"] += 1
-            release_signal(uid, sig["id"])
+            await _afn.run(release_signal, uid, sig["id"])
             continue
 
         # Queue demo auto-execution off the critical delivery path

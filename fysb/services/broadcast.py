@@ -6,7 +6,7 @@ panel reflects the live state and a repeat tap cannot double-send.
 """
 import asyncio
 
-from fysb import config, db
+from fysb import afn, config, db
 from fysb.config import log
 from fysb.theme import esc
 
@@ -144,31 +144,46 @@ async def _send_one(bot, uid: int, text: str, file_id: str) -> bool:
         raise
 
 
+def _claim_broadcast(bid: int, total: int):
+    """Atomic PENDING -> RUNNING claim; repeated taps cannot start two workers."""
+    with db.conn() as c:
+        claimed = c.execute(
+            "UPDATE broadcasts SET total=?, status='RUNNING' WHERE id=? AND status='PENDING'",
+            (total, bid),
+        ).rowcount
+        if claimed != 1:
+            return None
+        row = c.execute("SELECT * FROM broadcasts WHERE id=?", (bid,)).fetchone()
+        return dict(row) if row else None
+
+
 async def run_broadcast(bid: int, bot, targets: list[int]) -> dict:
-    """Throttled sender with persisted progress. Never exceeds rate limit."""
-    b = get(bid)
-    if not b:
-        return {"error": "broadcast not found"}
-    set_total(bid, len(targets))
-    ABORTS[bid] = AbortFlag()
-    flag = ABORTS[bid]
-    rate = max(1, min(30, db.get_setting_int("broadcast_rate_per_sec", 20)))
-    delay = 1.0 / rate
-    sent = failed = 0
-    for uid in targets:
-        if flag.aborted:
-            break
-        try:
-            if await _send_one(bot, uid, b["text"], b["file_id"]):
-                sent += 1
-        except Exception as e:
-            failed += 1
-            log.debug("broadcast fail uid=%s err=%s", uid, type(e).__name__)
-        if (sent + failed) % 10 == 0:
-            update_progress(bid, sent, failed)
-        await asyncio.sleep(delay)
-    update_progress(bid, sent, failed)
-    mark_status(bid, "ABORTED" if flag.aborted else "DONE")
-    ABORTS.pop(bid, None)
-    log.info("broadcast #%s finished sent=%s failed=%s", bid, sent, failed)
-    return {"sent": sent, "failed": failed, "aborted": flag.aborted}
+    """Throttled sender. All database I/O stays off the Telegram event loop."""
+    if bid in ABORTS:
+        return {"error": "broadcast already running"}
+    flag = ABORTS[bid] = AbortFlag()
+    try:
+        b = await afn.run(_claim_broadcast, bid, len(targets))
+        if not b:
+            return {"error": "broadcast not pending"}
+        rate = max(1, min(30, await afn.run(db.get_setting_int, "broadcast_rate_per_sec", 20)))
+        delay = 1.0 / rate
+        sent = failed = 0
+        for uid in targets:
+            if flag.aborted:
+                break
+            try:
+                if await _send_one(bot, uid, b["text"], b["file_id"]):
+                    sent += 1
+            except Exception as e:
+                failed += 1
+                log.debug("broadcast fail uid=%s err=%s", uid, type(e).__name__)
+            if (sent + failed) % 10 == 0:
+                await afn.run(update_progress, bid, sent, failed)
+            await asyncio.sleep(delay)
+        await afn.run(update_progress, bid, sent, failed)
+        await afn.run(mark_status, bid, "ABORTED" if flag.aborted else "DONE")
+        log.info("broadcast #%s finished sent=%s failed=%s", bid, sent, failed)
+        return {"sent": sent, "failed": failed, "aborted": flag.aborted}
+    finally:
+        ABORTS.pop(bid, None)

@@ -335,30 +335,20 @@ def partner_stats(pid: int) -> dict:
         invited = 0
         converted = 0
         if camp:
-            invited = c.execute(
-                "SELECT COUNT(*) n FROM referrals WHERE campaign_id=?", (camp["id"],)
-            ).fetchone()["n"]
-            converted = c.execute(
-                "SELECT COUNT(*) n FROM referrals WHERE campaign_id=? AND converted=1", (camp["id"],)
-            ).fetchone()["n"]
-        gross = float(
-            c.execute(
-                "SELECT COALESCE(SUM(gross_amount), 0) s FROM partner_commissions WHERE partner_id=?",
-                (int(pid),),
-            ).fetchone()["s"] or 0.0
-        )
-        pending = float(
-            c.execute(
-                "SELECT COALESCE(SUM(commission_amount), 0) s FROM partner_commissions WHERE partner_id=? AND status='EARNED'",
-                (int(pid),),
-            ).fetchone()["s"] or 0.0
-        )
-        paid = float(
-            c.execute(
-                "SELECT COALESCE(SUM(commission_amount), 0) s FROM partner_commissions WHERE partner_id=? AND status='PAID'",
-                (int(pid),),
-            ).fetchone()["s"] or 0.0
-        )
+            refs = c.execute(
+                "SELECT COUNT(*) AS invited, COUNT(CASE WHEN converted=1 THEN 1 END) AS converted "
+                "FROM referrals WHERE campaign_id=?", (camp["id"],)
+            ).fetchone()
+            invited, converted = refs["invited"], refs["converted"]
+        money = c.execute("""
+            SELECT COALESCE(SUM(gross_amount),0) AS gross,
+                   COALESCE(SUM(CASE WHEN status='EARNED' THEN commission_amount END),0) AS pending,
+                   COALESCE(SUM(CASE WHEN status='PAID' THEN commission_amount END),0) AS paid
+            FROM partner_commissions WHERE partner_id=?
+        """, (int(pid),)).fetchone()
+        gross = float(money["gross"] or 0.0)
+        pending = float(money["pending"] or 0.0)
+        paid = float(money["paid"] or 0.0)
         chans = c.execute(
             "SELECT id FROM broadcast_channels WHERE owner_partner_id=?", (int(pid),)
         ).fetchall()

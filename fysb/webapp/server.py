@@ -205,7 +205,6 @@ def _query_admin_signals(
     limit: int = 100,
 ) -> dict:
     """Luxury Admin Signals query with dropdown metadata (Gold/All/Markets, Period, User) & exact KPIs."""
-    from fysb.engines.tracker import seq_of
     from fysb.ui.cards import signal_creator_label
 
     sym_f = str(symbol or "ALL").strip().upper()
@@ -217,7 +216,9 @@ def _query_admin_signals(
     cutoff = _period_cutoff_utc(per_f)
 
     with db.conn() as c:
-        all_rows = [dict(r) for r in c.execute("SELECT * FROM signals ORDER BY id DESC").fetchall()]
+        all_rows = [dict(r) for r in c.execute(
+            "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS _seq FROM signals ORDER BY id DESC"
+        ).fetchall()]
         cids = sorted({int(r.get("created_by") or 0) for r in all_rows if int(r.get("created_by") or 0) > 0})
         umap: dict[int, dict] = {}
         pmap: dict[int, str] = {}
@@ -322,7 +323,7 @@ def _query_admin_signals(
         sid_i = int(r["id"])
         cb = int(r.get("created_by") or 0)
         item = {k: v for k, v in r.items() if not k.startswith("_")}
-        item["seq"] = seq_of(sid_i)
+        item["seq"] = int(r["_seq"])
         item["creator"] = r["_creator"]
         item["creator_plan"] = pmap.get(cb, "AUTO" if cb <= 0 else "FREE")
         item["outcome"] = r["_outcome"]

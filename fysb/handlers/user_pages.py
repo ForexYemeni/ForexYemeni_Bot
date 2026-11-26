@@ -141,14 +141,14 @@ def _home_snapshot(uid: int, preloaded_u=None) -> tuple[dict | None, dict | None
             r = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
             u = dict(r) if r else None
         plan = subs.plan_for(uid, conn_obj=c)
-        used = c.execute(
-            "SELECT COUNT(*) n FROM signal_deliveries WHERE user_id=? AND delivered_at>=?",
-            (uid, day),
-        ).fetchone()["n"]
-        ta_radars = int(c.execute(
-            "SELECT COUNT(*) n FROM analysis_monitors WHERE user_id=? AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')",
-            (uid,),
-        ).fetchone()["n"] or 0)
+        counters = c.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM signal_deliveries WHERE user_id=? AND delivered_at>=?) AS used,
+              (SELECT COUNT(*) FROM analysis_monitors WHERE user_id=?
+                 AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')) AS radars
+        """, (uid, day, uid)).fetchone()
+        used = int(counters["used"] or 0)
+        ta_radars = int(counters["radars"] or 0)
         ta_cfg = {
             r["key"]: r["value"]
             for r in c.execute(
@@ -2528,18 +2528,17 @@ def _dashboard_snapshot(uid: int, first_mkt: str, user_row=None) -> dict:
             "COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END),0) active, "
             "COALESCE(SUM(CASE WHEN status='TP3_HIT' OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END),0) wins FROM signals"
         ).fetchone()
-        drow = c.execute(
-            "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) today "
-            "FROM signal_deliveries WHERE user_id=?",
-            (day, uid),
-        ).fetchone()
-        anl_used = c.execute("SELECT COUNT(*) n FROM analyses WHERE user_id=? AND created_at>=?",
-                             (uid, day)).fetchone()["n"]
+        drow = c.execute("""
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN delivered_at>=? THEN 1 ELSE 0 END),0) AS today,
+                   (SELECT COUNT(*) FROM analyses WHERE user_id=? AND created_at>=?) AS analyses_today,
+                   (SELECT COUNT(*) FROM analysis_monitors WHERE user_id=?
+                     AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')) AS radars
+            FROM signal_deliveries WHERE user_id=?
+        """, (day, uid, day, uid, uid)).fetchone()
+        anl_used = int(drow["analyses_today"] or 0)
+        ta_radars = int(drow["radars"] or 0)
         mrow = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (first_mkt,)).fetchone()
-        ta_radars = int(c.execute(
-            "SELECT COUNT(*) n FROM analysis_monitors WHERE user_id=? AND status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')",
-            (uid,),
-        ).fetchone()["n"] or 0)
         ta_cfg = {
             r["key"]: r["value"]
             for r in c.execute(

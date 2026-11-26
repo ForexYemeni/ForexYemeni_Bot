@@ -829,7 +829,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             val = int(float(text))
             if not (1 <= val <= 10):
                 raise ValueError("القيمة يجب أن تكون بين 1 و 10")
-            db.set_setting("free_daily_signals", val)
+            await afn.run(db.set_setting, "free_daily_signals", val)
             await afn.run(audit_log.log, uid, f"free_quota_set:{val}")
             await update.effective_message.reply_text(f"✅ أصبح الحد اليومي للباقة المجانية: <b>{val}</b> إشارة.", parse_mode="HTML")
         except ValueError as e:
@@ -843,7 +843,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             val = float(text.replace(",", ""))
             if not (10 <= val <= 10_000_000):
                 raise ValueError("الرصيد يجب أن يكون بين 10 و 10,000,000")
-            db.set_setting("demo_start_balance", val)
+            await afn.run(db.set_setting, "demo_start_balance", val)
             await afn.run(audit_log.log, uid, f"demo_balance_set:{val:g}")
             await update.effective_message.reply_text(
                 f"✅ أصبح الرصيد الابتدائي للحسابات التجريبية الجديدة: <b>{val:,.2f} USD</b>.\n"
@@ -859,7 +859,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             val = int(float(text))
             if not (2 <= val <= 720):
                 raise ValueError("الصلاحية يجب أن تكون بين 2 و 720 ساعة")
-            db.set_setting("signal_expiry_hours", val)
+            await afn.run(db.set_setting, "signal_expiry_hours", val)
             await afn.run(audit_log.log, uid, f"signal_expiry_set:{val}")
             await update.effective_message.reply_text(f"✅ صلاحية الإشارة الجديدة: <b>{val} ساعة</b>.", parse_mode="HTML")
         except ValueError as e:

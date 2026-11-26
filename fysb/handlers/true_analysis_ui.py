@@ -129,7 +129,7 @@ async def _render_ta_checkout(q, uid: int, context, bot) -> None:
     st = await afn.run(ta_svc.has_access, uid)
     price = st["price_usd"]
     days = st["duration_days"]
-    methods = await afn.run(payments_service.active_methods)
+    methods = await afn.run(payments_service.list_methods, enabled_only=True)
     chains = await afn.run(payments_service.configured_chains)
     rows_kb = []
     for ch in chains:
@@ -137,6 +137,7 @@ async def _render_ta_checkout(q, uid: int, context, bot) -> None:
     for m in methods:
         rows_kb.append([kb.btn(f"💳 {m['title']} — {price:g}$", f"u:tapay:{m['id']}", style="primary")])
     if not rows_kb:
+        rows_kb.append([kb.btn("🧾 طلب اشتراك (دفع يدوي)", "u:tapay:0", style="primary")])
         rows_kb.append([kb.btn("🎧 تواصل مع الإدارة للتفعيل المباشر", "u:support", style="primary")])
     rows_kb.append([kb.btn("↩️ العودة إلى تفاصيل الميزة", "u:true_analysis")])
     body = (
@@ -196,7 +197,8 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
         except ValueError:
             mid = 0
         cfg = await afn.run(ta_svc.settings_snapshot)
-        method = await afn.run(payments_service.get_method, mid) if mid else None
+        m_row = await afn.run(payments_service.get_method, mid) if mid else None
+        method = dict(m_row) if m_row else None
         pid = await afn.run(
             payments_service.create_request,
             uid,
@@ -205,15 +207,15 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
             method["title"] if method else "MANUAL",
         )
         context.user_data["awaiting_receipt"] = pid
+        acct_ref = (method.get("account_ref") or "") if method else ""
+        instr = (method.get("instructions") or "") if method else ""
         lines = [
             f"🧾 <b><u>طلب اشتراك تحليل ForexYemeni الحقيقي #{pid}</u></b>",
             f"<blockquote>"
             f"▎💰 <b>المبلغ:</b> <b>{cfg['price_usd']:g} USD</b> · المدة: <b>{cfg['duration_days']} يوماً</b>\n"
             f"▎💳 <b>الوسيلة:</b> {esc(method['title'] if method else 'تحويل يدوي')}\n"
-            + (f"▎📋 <b>بيانات التحويل:</b> <code>{esc(method['account_info'])}</code>\n"
-               if (method and method.get("account_info")) else "")
-            + (f"▎📝 <b>التعليمات:</b> {esc(method['instructions'])}\n"
-               if (method and method.get("instructions")) else "")
+            + (f"▎📋 <b>بيانات التحويل:</b> <code>{esc(acct_ref)}</code>\n" if acct_ref else "")
+            + (f"▎📝 <b>التعليمات:</b> {esc(instr)}\n" if instr else "")
             + "</blockquote>\n"
             "📸 <b>أرسل الآن صورة إيصال التحويل أو رقم العملية هنا في المحادثة</b>، وسيتم التفعيل فور مراجعة الإدارة.",
         ]

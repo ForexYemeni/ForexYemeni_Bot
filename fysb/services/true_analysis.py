@@ -457,7 +457,10 @@ def evaluate_closed_candle(
         return {"state": "WAITING", "reason": "no_closed_candle_yet"}
     c_ts = str(c.get("datetime") or "")
     close_iso = dt_close.strftime("%Y-%m-%d %H:%M:%S")
-    window_lbl = f"{dt_open.strftime('%H:%M')}→{dt_close.strftime('%H:%M')} UTC"
+    window_lbl = (
+        f"{config.mecca_time_12h(dt_open, with_label=False)}"
+        f"→{config.mecca_time_12h(dt_close)}"
+    )
 
     # Gate 1: Must have closed STRICTLY AFTER the monitor was created
     if min_close_dt is not None and dt_close <= min_close_dt:

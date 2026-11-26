@@ -2368,7 +2368,27 @@ function renderAdminSignals(){{
     const pTxt = outcome === 'neutral'
       ? ` · <span style="color:var(--muted)">0p (غير محسوبة خسارة)</span>`
       : (pips ? ` · <b style="color:${{pips>0?'var(--green)':'var(--red)'}}">${{pips>0?'+':''}}${{pips.toFixed(1)}}p</b>` : '');
-    const dtTxt = s.created_at ? String(s.created_at).slice(0,16).replace('T',' ') : '';
+    const fmtMecca12 = (iso) => {{
+      if (!iso) return '';
+      try {{
+        let raw = String(iso).trim();
+        if (raw.length >= 19 && raw[10] === ' ') raw = raw.slice(0, 10) + 'T' + raw.slice(11);
+        if (!/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(raw)) raw += 'Z';
+        const d = new Date(raw);
+        if (isNaN(d.getTime())) return String(iso).slice(0, 16).replace('T', ' ');
+        const m = new Date(d.getTime() + 3 * 3600000);
+        const yyyy = m.getUTCFullYear();
+        const mo = String(m.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(m.getUTCDate()).padStart(2, '0');
+        let h = m.getUTCHours();
+        const ampm = h < 12 ? 'am' : 'pm';
+        h = h % 12; if (h === 0) h = 12;
+        const hh = String(h).padStart(2, '0');
+        const mm = String(m.getUTCMinutes()).padStart(2, '0');
+        return `${{yyyy}}-${{mo}}-${{dd}} · ${{hh}}:${{mm}}${{ampm}} بتوقيت مكة`;
+      }} catch (_e) {{ return String(iso).slice(0, 16).replace('T', ' '); }}
+    }};
+    const dtTxt = s.created_at ? fmtMecca12(s.created_at) : '';
     const planTag = s.creator_plan && s.creator_plan !== 'AUTO' ? ` <span class="pill" style="font-size:9.5px">${{esc(s.creator_plan)}}</span>` : '';
     return `
       <div class="sig-card ${{cls}}">

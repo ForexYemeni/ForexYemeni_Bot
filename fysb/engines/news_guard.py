@@ -271,7 +271,12 @@ def upcoming_high_impact(
         if ev_dt is None or not (now - timedelta(minutes=15) <= ev_dt <= end):
             continue
         mins = int(round((ev_dt - now).total_seconds() / 60.0))
-        out.append({**ev, "minutes_delta": mins, "time_utc": ev_dt.strftime("%m-%d %H:%M UTC")})
+        mecca_ev = config.to_mecca(ev_dt)
+        t_mecca = (
+            f"{mecca_ev.strftime('%m-%d')} · {config.mecca_time_12h(mecca_ev)}"
+            if mecca_ev is not None else config.mecca_dt_12h(ev_dt)
+        )
+        out.append({**ev, "minutes_delta": mins, "time_mecca": t_mecca, "time_utc": t_mecca})
     return out
 
 
@@ -302,7 +307,7 @@ def render_luxury_news_alert_card(ev: dict, *, buf_min: int | None = None) -> st
     ccy_ar = _CURRENCY_NAMES_AR.get(ccy, ccy)
     title = str(ev.get("title") or "خبر اقتصادي عالي التأثير")
     mins = int(ev.get("minutes_delta") or 30)
-    t_utc = str(ev.get("time_utc") or ev.get("dt_utc", "")[:16])
+    t_mecca = str(ev.get("time_mecca") or ev.get("time_utc") or config.mecca_dt_12h(ev.get("dt_utc")))
     wmin = window_minutes() if buf_min is None else buf_min
     affected = affected_markets_for_currency(ccy)
     mkt_line = " · ".join(f"<code>{esc(m)}</code>" for m in affected) if affected else f"<code>{esc(ccy)}</code>"
@@ -321,7 +326,7 @@ def render_luxury_news_alert_card(ev: dict, *, buf_min: int | None = None) -> st
         f"<blockquote>"
         f"▎{flag} العملة المتأثرة: <b>{esc(ccy)} ({esc(ccy_ar)})</b>\n"
         f"▎🔴 الحدث الاقتصادي: <b>{esc(title)}</b>\n"
-        f"▎⏰ الموعد: <code>{esc(t_utc)}</code> ({when_txt})\n"
+        f"▎⏰ الموعد: <code>{esc(t_mecca)}</code> ({when_txt})\n"
         f"{data_line}"
         f"▎🌐 الأسواق الأكثر تأثراً: {mkt_line}\n"
         f"▎🛡 <b>بروتوكول الحماية الملكي:</b> يُتوقّع تذبذب حاد واتساع في السبريد — "
@@ -340,7 +345,7 @@ def render_luxury_news_digest_card(
     """Ultra-luxury Arabic 48-hour High-Impact Economic Bulletin for broadcast."""
     evs = upcoming_high_impact(48, force_refresh=force_refresh) if events is None else events
     wmin = window_minutes() if buf_min is None else buf_min
-    now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_s = config.mecca_dt_12h()
     if not evs:
         return (
             f"📰 <b><u>النشرة الاقتصادية الملكية — {config.BRAND}</u></b>\n"

@@ -37,7 +37,8 @@ def now() -> str:
 
 
 def day_start_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
+    """Exact UTC ISO start of the current Mecca calendar day (12:00am بتوقيت مكة)."""
+    return config.mecca_day_utc_bounds(config.mecca_today_iso())[0]
 
 
 def conn():

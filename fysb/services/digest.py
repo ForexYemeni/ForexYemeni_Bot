@@ -195,6 +195,6 @@ async def publish_digest(bot, days: int = 7, include_channels: bool = True, noti
             errors.append(f"{t}: {e}")
             log.warning("digest send failed target=%s err=%s", t, e)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = config.mecca_today_iso()
     db.set_setting("last_weekly_digest_day" if days <= 10 else "last_monthly_digest_day", today)
     return {"ok": True, "days": days, "sent": len(sent_targets), "errors": len(errors), "stats": d}

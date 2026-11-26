@@ -1396,7 +1396,7 @@ def render_certificate_png(user_id: int, student_name: str, track: str = "PAID")
         else "FOUNDATION TRADING TRACK"
     )
     serial = certificate_serial(user_id, t_upper)
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d UTC")
+    date_str = config.mecca_chart_dt_12h()
 
     _cx("FOREXYEMENI ROYAL TRADING ACADEMY", f_brand, 92, gold)
     draw.line([(360, 142), (w - 360, 142)], fill=gold_dim, width=2)

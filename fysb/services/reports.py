@@ -101,7 +101,7 @@ def dashboard_view() -> str:
     le = d["last_engine"]
     if le:
         out.append(f"🧠 <b>آخر دورة محرك:</b> <b>{esc(le['symbol'])}</b> {esc(le['timeframe'])} → "
-                   f"<b>{esc(le['result'])}</b> ({esc(le['created_at'][:19].replace('T', ' '))} UTC)")
+                   f"<b>{esc(le['result'])}</b> ({esc(config.mecca_dt_12h(le['created_at']))})")
     return "\n".join(out)
 
 

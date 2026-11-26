@@ -182,7 +182,7 @@ def render_pnl_share_card(payload: dict) -> bytes | None:
     brand = str(config.BRAND or "FOREXYEMENI").upper()
     kind = str(payload.get("kind") or "signal").lower()
     badge_txt = "VERIFIED SIGNAL RESULT" if kind == "signal" else "VERIFIED DEMO TRADE"
-    ts_str = str(payload.get("timestamp") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))[:16].replace("T", " ")
+    ts_str = config.mecca_chart_dt_12h(payload.get("timestamp") or None)
 
     draw.text((54, 46), f"{brand}  ROYAL", font=f_brand, fill=GOLD_BRIGHT)
     draw.text((54, 82), f"INSTITUTIONAL TRADING INTELLIGENCE  •  v{config.VERSION}", font=f_sub, fill=TEXT_MUTED)
@@ -303,7 +303,7 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     days = int(digest.get("days") or 7)
     period_en = f"WEEKLY REPORT • LAST {days} DAYS" if days <= 10 else f"MONTHLY REPORT • LAST {days} DAYS"
     brand = str(config.BRAND or "FOREXYEMENI").upper()
-    ts = str(digest.get("generated_at") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))[:16].replace("T", " ")
+    ts = config.mecca_chart_dt_12h(digest.get("generated_at") or None)
 
     draw.text((54, 44), f"{brand}  EXECUTIVE DIGEST", font=f_title, fill=GOLD_BRIGHT)
     draw.text((54, 86), f"VERIFIED SIGNAL PERFORMANCE AUDIT  •  {ts}", font=f_sub, fill=TEXT_MUTED)

@@ -510,7 +510,7 @@ def should_send_full_signal(ch: dict, partner: dict | None = None) -> bool:
         return False
     # mode == "sample": allow up to sample_daily_limit full signals per UTC day
     limit = int((partner or {}).get("sample_daily_limit") or 2)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = config.mecca_today_iso()
     with db.tx(immediate=True) as c:
         row = c.execute(
             "SELECT daily_full_date, daily_full_count FROM broadcast_channels WHERE id=?",

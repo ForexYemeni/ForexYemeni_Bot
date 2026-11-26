@@ -753,20 +753,114 @@ def render_analysis_caption(an: dict, market_row=None) -> str:
         cf_tf = _esc(str(conf.get("confirm_tf") or st_tf))
         st_ico = "🟢 مؤكّد فعلياً الآن" if conf.get("activated") else "⏳ بانتظار إغلاق جسم حقيقي"
         conf_line = f"\n▎🔐 الثبات والتأكيد: إغلاق <b>{st_tf}</b> + تأكيد <b>{cf_tf}</b> ({st_ico})"
-    cap = (
-        f"👑 <b>{config.BRAND} · الشارت التحليلي المؤسسي الفاخر</b>\n"
-        f"<blockquote>"
-        f"▎📊 السوق: <b>{_esc(sym)}</b> · الإطار: <b>{_esc(tf)}</b>\n"
-        f"▎💵 السعر الحي: <code>{px_str}</code>{kz_txt}\n"
-        f"▎🧭 الاتجاه: <b>{dir_badge}</b>\n"
-        f"▎⭐ جودة السياق: <b>{quality}/100</b> {qbar}\n"
-        f"▎📈 مؤشر RSI(14): <b>{rsi_v:.1f}</b> · المنهجية: <b>{_esc(an.get('strategy_name') or 'مؤسسي شامل')}</b>"
-        f"{conf_line}"
-        f"{setup_line}"
-        f"</blockquote>\n"
-        f"<i>⬇️ التقرير التفصيلي الكامل بالمناطق والأرقام أسفل الشارت مباشرة · {config.BOT_SIGNATURE}</i>"
+    def _build(include_setup: bool, include_conf: bool) -> str:
+        s_ln = setup_line if include_setup else ""
+        c_ln = conf_line if include_conf else ""
+        return (
+            f"👑 <b>{config.BRAND} · الشارت التحليلي المؤسسي الفاخر</b>\n"
+            f"<blockquote>"
+            f"▎📊 السوق: <b>{_esc(sym)}</b> · الإطار: <b>{_esc(tf)}</b>\n"
+            f"▎💵 السعر الحي: <code>{px_str}</code>{kz_txt}\n"
+            f"▎🧭 الاتجاه: <b>{dir_badge}</b>\n"
+            f"▎⭐ جودة السياق: <b>{quality}/100</b> {qbar}\n"
+            f"▎📈 مؤشر RSI(14): <b>{rsi_v:.1f}</b> · المنهجية: <b>{_esc(str(an.get('strategy_name') or 'مؤسسي شامل')[:48])}</b>"
+            f"{c_ln}"
+            f"{s_ln}"
+            f"</blockquote>\n"
+            f"<i>⬇️ التقرير التفصيلي الكامل بالمناطق والأرقام أسفل الشارت مباشرة · {config.BOT_SIGNATURE}</i>"
+        )
+
+    # Guarantee valid closed HTML tags <= 1020 chars (NEVER slice mid-tag!)
+    for inc_s, inc_c in ((True, True), (False, True), (False, False)):
+        cap = _build(inc_s, inc_c)
+        if len(cap) <= 1020:
+            return cap
+    return (
+        f"👑 <b>{config.BRAND} · الشارت التحليلي</b>\n"
+        f"▎📊 <b>{_esc(sym)}</b> ({_esc(tf)}) · <code>{px_str}</code> · <b>{dir_badge}</b> · {quality}/100"
     )
-    return cap[:1020]
+
+
+async def send_analysis_chart_photo(
+    bot,
+    chat_id,
+    an: dict,
+    *,
+    market_row=None,
+    reply_markup=None,
+    brand_footer: str = "",
+) -> tuple[bytes | None, str]:
+    """v8.5.2: Guaranteed resilient delivery of Ultra-Luxury 1600x1000 Analysis Chart PNG.
+
+    Independent of global periodic-chart toggles (just like v7.5.0 signal charts):
+    analysis requests in Channels, Partners, Users, and True Analysis ALWAYS send
+    the luxury chart PNG, with multi-step fallback (strip button styles -> plain
+    caption -> minimal caption) so Telegram NEVER silently drops the chart!
+    Returns `(png_bytes_or_None, final_caption)`.
+    """
+    import asyncio
+    import re
+    from fysb.ui import keyboards as _kb
+
+    if bot is None or not hasattr(bot, "send_photo") or not an:
+        return None, ""
+    try:
+        png = await asyncio.to_thread(render_analysis_chart, an, market_row)
+    except Exception as exc:
+        log.warning("render_analysis_chart failed for %s: %s", an.get("symbol"), exc)
+        return None, ""
+    if not png:
+        log.warning("render_analysis_chart returned empty PNG for %s", an.get("symbol"))
+        return None, ""
+
+    cap = render_analysis_caption(an, market_row=market_row)
+    if brand_footer and (len(cap) + len(brand_footer) <= 1020):
+        cap = cap + brand_footer
+
+    kw_base = {"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        kw_base["reply_markup"] = reply_markup
+
+    # Attempt 1: Full luxury HTML caption + styled buttons
+    try:
+        await bot.send_photo(photo=io.BytesIO(png), **kw_base)
+        return png, cap
+    except Exception as e1:
+        log.warning("analysis chart send_photo attempt 1 failed (%s -> %s): %s", an.get("symbol"), chat_id, e1)
+
+    # Attempt 2: Strip custom Telegram button styles (older Bot API clients / groups)
+    if reply_markup is not None:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=io.BytesIO(png),
+                caption=cap,
+                parse_mode="HTML",
+                reply_markup=_kb.strip_button_styles(reply_markup),
+            )
+            return png, cap
+        except Exception as e2:
+            log.warning("analysis chart send_photo attempt 2 failed (%s -> %s): %s", an.get("symbol"), chat_id, e2)
+
+    # Attempt 3: Plain-text caption (guards against any malformed HTML entity in brand footer)
+    plain_cap = re.sub(r"<[^>]+>", "", cap)[:980]
+    try:
+        kw_plain = {"chat_id": chat_id, "photo": io.BytesIO(png), "caption": plain_cap}
+        if reply_markup is not None:
+            kw_plain["reply_markup"] = _kb.strip_button_styles(reply_markup)
+        await bot.send_photo(**kw_plain)
+        return png, plain_cap
+    except Exception as e3:
+        log.warning("analysis chart send_photo attempt 3 failed (%s -> %s): %s", an.get("symbol"), chat_id, e3)
+
+    # Attempt 4: Minimal guaranteed delivery
+    try:
+        short_cap = f"👑 {config.BRAND} · {an.get('symbol', '')} ({an.get('timeframe', '')})"
+        await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(png), caption=short_cap)
+        return png, short_cap
+    except Exception as e4:
+        log.warning("analysis chart send_photo final attempt failed (%s -> %s): %s", an.get("symbol"), chat_id, e4)
+        return None, ""
 
 
 def render_analysis_chart(an: dict, market_row=None) -> bytes | None:

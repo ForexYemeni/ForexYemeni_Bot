@@ -369,3 +369,101 @@ def test_v851_admin_webapp_channel_edit_instruments_and_stop_periodic_charts(tmp
     assert "تعديل الأدوات" in html
     assert "قنوات الشارت فقط" in html
 
+
+def test_v852_guaranteed_analysis_chart_and_clean_separation_from_true_analysis(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fysb.handlers import admin_channels, true_analysis_ui, user_pages
+
+    _init_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "ADMIN_ID", 999852)
+    uid = 85201
+    _ensure_subscriber(uid)
+
+    # CRITICAL: Even if Admin turned OFF periodic charts (`charts_enabled = "0"`),
+    # «تحليل الآن» in Channels & Users + «تحليل ForexYemeni الحقيقي» MUST ALWAYS send the luxury chart PNG!
+    db.set_setting("charts_enabled", "0")
+
+    # Deterministic live candles (60 H1 bars)
+    t0 = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=60)
+    vals = []
+    px = 3580.0
+    for i in range(60):
+        o = px
+        c = px + (2.0 if i % 3 else -1.0)
+        vals.append({
+            "datetime": (t0 + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": o, "high": max(o, c) + 2.0, "low": min(o, c) - 2.0, "close": c,
+        })
+        px = c
+    monkeypatch.setattr(
+        market_data, "fetch_candles",
+        lambda *a, **kw: {"values": vals, "last_candle_iso": vals[-1]["datetime"], "provider": "TEST"},
+    )
+
+    # 1. Admin Channel «🚀 تحليل الآن» (`post_analysis`) MUST send PNG photo + text card!
+    ch_id = admin_channels.add_channel("@TestAnlCh852", "VIP Analysis Channel", "public")
+    with db.tx() as c:
+        c.execute("UPDATE broadcast_channels SET markets='XAUUSD', timeframes='H1', strategies='ALL' WHERE id=?", (ch_id,))
+
+    class _ChBot(_DummyBot):
+        async def get_me(self):
+            return SimpleNamespace(id=777)
+
+        async def get_chat_member(self, chat_id, user_id):
+            return SimpleNamespace(status="administrator", can_post_messages=True)
+
+    ch_bot = _ChBot()
+    res_ch = asyncio.run(admin_channels.post_analysis(ch_id, ch_bot))
+    assert res_ch["ok"] is True
+    assert len(ch_bot.photos) >= 1, "Channel «تحليل الآن» MUST send the luxury PNG chart even when charts_enabled=0!"
+    assert len(ch_bot.messages) >= 1
+
+    # 2. Dedicated «👑 تحليل ForexYemeni الحقيقي» wizard (`ta_anl` -> `ta_sym` -> `ta_tf` -> `ta_run`)
+    ta_bot = _DummyBot()
+
+    def _mk_q_ctx(bot_inst):
+        msg = SimpleNamespace(
+            chat_id=uid,
+            message_id=10,
+            reply_text=lambda text="", **kw: bot_inst.send_message(uid, text, **kw),
+        )
+        q = SimpleNamespace(
+            from_user=SimpleNamespace(id=uid, username="sub852", full_name="Royal Sub"),
+            message=msg,
+            get_bot=lambda: bot_inst,
+            answer=lambda *a, **k: asyncio.sleep(0),
+        )
+        ctx = SimpleNamespace(bot=bot_inst, user_data={})
+        return q, ctx
+
+    q, ctx = _mk_q_ctx(ta_bot)
+    assert asyncio.run(true_analysis_ui.handle_user_true_analysis(q, uid, "ta_anl", ctx, ta_bot)) is True
+    assert asyncio.run(true_analysis_ui.handle_user_true_analysis(q, uid, "ta_sym:XAUUSD", ctx, ta_bot)) is True
+    assert asyncio.run(true_analysis_ui.handle_user_true_analysis(q, uid, "ta_tf:H1", ctx, ta_bot)) is True
+    assert asyncio.run(true_analysis_ui.handle_user_true_analysis(q, uid, "ta_run:ALL", ctx, ta_bot)) is True
+    assert len(ta_bot.photos) >= 1, "«تحليل ForexYemeni الحقيقي» MUST send the luxury PNG chart!"
+
+    # Ensure a True Analysis monitor exists now (or active signal)
+    mons_after_ta = ta.user_monitors(uid)
+    assert len(mons_after_ta) >= 1
+
+    # 3. Continuity Guard MUST trigger inside `u:ta_sym:XAUUSD` (True Analysis)...
+    ta_bot2 = _DummyBot()
+    q2, ctx2 = _mk_q_ctx(ta_bot2)
+    assert asyncio.run(true_analysis_ui.handle_user_true_analysis(q2, uid, "ta_sym:XAUUSD", ctx2, ta_bot2)) is True
+    assert any(("يراقب الشارت" in m["text"] or "ما زالا مستمر" in m["text"]) for m in ta_bot2.messages)
+
+    # 4. ...but normal «🔬 تحليل الآن» (`u:anlsym:XAUUSD` -> `u:anlstrat:ALL`) MUST NEVER be blocked by Continuity Guard
+    #    AND MUST ALWAYS send the luxury Analysis Chart PNG WITHOUT creating a duplicate True Analysis monitor!
+    from fysb.services import subscriptions
+    subscriptions.grant_subscription(uid, "VIP", override_days=30)
+    norm_bot = _DummyBot()
+    qn, ctxn = _mk_q_ctx(norm_bot)
+    asyncio.run(user_pages.user_page(qn, "anlsym:XAUUSD", uid, ctxn))
+    assert ctxn.user_data.get("anl_draft", {}).get("symbol") == "XAUUSD", "Normal «تحليل الآن» must NOT be blocked by True Analysis continuity guard!"
+    ctxn.user_data["anl_draft"] = {"symbol": "XAUUSD", "tf": "H1"}
+    asyncio.run(user_pages.user_page(qn, "anlstrat:ALL", uid, ctxn))
+    assert len(norm_bot.photos) >= 1, "User «تحليل الآن» MUST send the luxury PNG chart even when charts_enabled=0!"
+    assert len(ta.user_monitors(uid)) == len(mons_after_ta), "Normal «تحليل الآن» must NOT mix with True Analysis radar!"
+
+

@@ -572,43 +572,29 @@ async def post_analysis(cid: int, bot, ch: dict | None = None) -> dict:
         partner = await afn.run(partners_svc.partner_for_channel, ch)
         row = await afn.run(_market_row, sym)
         cta_mk = partners_svc.channel_cta_markup(ch, partner=partner)
-        # v8.1.0: Automatic Ultra-Luxury ForexYemeni Analysis Chart before every Channel Analysis post
+        # v8.5.2: GUARANTEED Ultra-Luxury ForexYemeni Analysis Chart before every Channel Analysis post
         try:
-            import io as _io
             from fysb.ui import charts as _charts
-            if await afn.run(_charts.charts_enabled):
-                png = await asyncio.to_thread(_charts.render_analysis_chart, an, row)
-                if png and bot is not None and hasattr(bot, "send_photo"):
-                    cap = _charts.render_analysis_caption(an, market_row=row)
-                    brand_f = partners_svc.channel_brand_footer(ch, partner=partner)
-                    if brand_f and len(cap) + len(brand_f) <= 1020:
-                        cap = cap + brand_f
-                    try:
-                        await bot.send_photo(
-                            chat_id=chat_ref,
-                            photo=_io.BytesIO(png),
-                            caption=cap,
-                            parse_mode="HTML",
-                            reply_markup=cta_mk,
-                        )
-                    except Exception:
-                        await bot.send_photo(
-                            chat_id=chat_ref,
-                            photo=_io.BytesIO(png),
-                            caption=cap,
-                            parse_mode="HTML",
-                            reply_markup=kb.strip_button_styles(cta_mk) if cta_mk else None,
-                        )
-                    # v8.1.1: Also mirror luxury analysis chart to matching custom Chart Channels
-                    try:
-                        from fysb.services import chart_channels as _cch
-                        await _cch.deliver_analysis_chart_to_matching_channels(
-                            bot, sym, png, cap, exclude_chat_ids={str(chat_ref), str(ch.get("chat_id") or "")}
-                        )
-                    except Exception:
-                        pass
+            brand_f = partners_svc.channel_brand_footer(ch, partner=partner)
+            png, cap = await _charts.send_analysis_chart_photo(
+                bot,
+                chat_ref,
+                an,
+                market_row=row,
+                reply_markup=cta_mk,
+                brand_footer=brand_f,
+            )
+            if png:
+                # Mirror luxury analysis chart to matching custom Chart Channels
+                try:
+                    from fysb.services import chart_channels as _cch
+                    await _cch.deliver_analysis_chart_to_matching_channels(
+                        bot, sym, png, cap, exclude_chat_ids={str(chat_ref), str(ch.get("chat_id") or "")}
+                    )
+                except Exception:
+                    pass
         except Exception as _ce:
-            log.debug("channel analysis chart skipped (%s): %s", sym, _ce)
+            log.warning("channel analysis chart failed (%s): %s", sym, _ce)
         card = render_analysis_card(an, market_row=row)
         text = (f"👑 <b>{config.BRAND}</b> — التحليل الدوري · <b>{esc(sym)}</b> ({tf_name(tf)})\n\n"
                 + card

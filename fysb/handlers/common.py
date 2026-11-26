@@ -24,6 +24,7 @@ from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
 from fysb.config import log
+from fysb.handlers import callback_feedback
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
@@ -104,11 +105,13 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
             )
             log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
                      q.from_user.id, (time.monotonic() - t0) * 1000)
+            callback_feedback.page_delivered(q)
             return msg if msg is not None else q.message
         except BadRequest as e:
             if "message is not modified" in str(e).lower():
                 log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
                          q.from_user.id, (time.monotonic() - t0) * 1000)
+                callback_feedback.page_delivered(q)
                 return q.message
             log.debug("edit_text fallback (%s) -> sending fresh page", e)
         except Exception as e:
@@ -116,6 +119,7 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
 
     if q.message is not None and hasattr(q.message, "reply_text"):
         msg = await _send_guarded(q.message.reply_text, text, markup)
+        callback_feedback.page_delivered(q)
         log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
                  q.from_user.id, (time.monotonic() - t0) * 1000)
         return msg
@@ -130,6 +134,7 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
         return await bot.send_message(chat.id, t, **kw)
 
     msg = await _send_guarded(_chat_send, text, markup)
+    callback_feedback.page_delivered(q)
     log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
     return msg

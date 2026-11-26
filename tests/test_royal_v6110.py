@@ -61,8 +61,8 @@ def _range_spring(volume_surge: bool = True) -> list[dict]:
         up = i % 2 == 0
         o = 100.3 if up else 101.7
         c = 101.6 if up else 100.4
-        h = c + 0.35
-        l = o - 0.35
+        h = max(o, c) + 0.35
+        l = min(o, c) - 0.35
         vals.append((o, h, l, c))
     candles = make_candles(vals)
     spring = dict(candles[-1])
@@ -78,12 +78,12 @@ def _range_upthrust() -> list[dict]:
         up = i % 2 == 0
         o = 100.3 if up else 101.7
         c = 101.6 if up else 100.4
-        h = c + 0.35
-        l = o - 0.35
+        h = max(o, c) + 0.35
+        l = min(o, c) - 0.35
         vals.append((o, h, l, c))
     candles = make_candles(vals)
     thrust = dict(candles[-1])
-    thrust.update({"open": 101.5, "high": 103.3, "low": 101.4, "close": 101.1})
+    thrust.update({"open": 101.5, "high": 103.3, "low": 100.9, "close": 101.1})
     thrust["volume"] = 4000.0
     return candles[:-1] + [thrust]
 

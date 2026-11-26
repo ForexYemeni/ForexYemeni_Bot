@@ -1,7 +1,7 @@
 """Central callback dispatcher — the proven button-fix pattern, hardened.
 
 Preserved behaviors (from the working V5 build, non-negotiable):
-  1. await q.answer() IMMEDIATELY on every callback (visible response)
+  1. start q.answer() on every callback without waiting for DB/routing
   2. pages render through the living-panel contract (see common.render)
   3. every action logged, every failure caught with a visible reply
   4. admin guard checked SERVER-SIDE in both the dispatcher and each page module
@@ -24,22 +24,30 @@ from telegram.ext import ContextTypes
 from fysb import afn, config, db
 from fysb.config import log
 from fysb.handlers import admin_channels, admin_core, admin_partners, admin_referrals, admin_system, admin_trading, user_pages
+from fysb.handlers import callback_feedback
 from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
 
 BOT_REF = None  # set in post_init for background tasks
+ACK_TIMEOUT_SECONDS = 2.0
 
 
 async def _quiet_answer(q) -> None:
     try:
-        await q.answer()
+        await asyncio.wait_for(q.answer(), ACK_TIMEOUT_SECONDS)
     except Exception:
         pass  # stale/timeout answers must not block the action
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # All u:/a:/p:/unknown routes share the same feedback and worker isolation.
+    with afn.interactive():
+        await _buttons(update, context)
+
+
+async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_REF
     q = update.callback_query
     if not q:
@@ -52,8 +60,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # v6.20.1 latency upgrade: acknowledge callback IN PARALLEL with DB/render
     # instead of stalling 150-400ms before even starting work!
     ans_task = asyncio.create_task(_quiet_answer(q))
+    feedback = callback_feedback.CallbackFeedback(q, context.bot)
+    feedback_token = callback_feedback.bind(feedback)
+    feedback.start()
 
     try:
+        # Give the receipt task a scheduling opportunity before route code runs.
+        await asyncio.sleep(0)
         if data.startswith("u:"):
             await _route_user(q, context, uid, data[2:])
         elif data.startswith("a:"):
@@ -84,13 +97,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             detail = f" ({type(exc).__name__})" if uid == config.ADMIN_ID else ""
             await q.message.reply_text(f"⚠️ حدث خطأ أثناء تنفيذ الزر{detail}. أعد المحاولة أو راجع سجل الإدارة.")
+            feedback.page_delivered()
         except Exception:
             pass
     finally:
+        # Stop the watchdog before waiting for a slow/failed acknowledgement.
+        # Neither deadline cancels or retries a financial/business action.
         try:
+            await feedback.close()
             await ans_task
-        except Exception:
-            pass
+        finally:
+            if not ans_task.done():
+                ans_task.cancel()
+                await asyncio.gather(ans_task, return_exceptions=True)
+            callback_feedback.unbind(feedback_token)
         log.info("BUTTON DONE | %.0fms | data=%s",
                  (time.monotonic() - t0) * 1000, data[:32])
 
@@ -713,7 +733,9 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "webapp_seturl":
         await admin_system.admin_webapp_set_url(q, uid, context, bot)
     elif act == "updates":
-        await admin_system.admin_updates(q, uid, context, bot)
+        await admin_system.admin_updates(q, uid, context, bot, max(1, user_pages._safe_int(arg) or 1))
+    elif act == "updnotes":
+        await admin_system.admin_release_notes(q, uid, context, bot, arg, max(1, user_pages._safe_int(arg2) or 1))
     elif act == "updlatest":
         await admin_system.admin_update_latest(q, uid, context, bot)
     elif act == "updver":

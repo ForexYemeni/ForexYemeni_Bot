@@ -24,6 +24,7 @@ from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
 from fysb.config import log
+from fysb.handlers import callback_feedback
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
@@ -104,11 +105,13 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
             )
             log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
                      q.from_user.id, (time.monotonic() - t0) * 1000)
+            callback_feedback.page_delivered(q)
             return msg if msg is not None else q.message
         except BadRequest as e:
             if "message is not modified" in str(e).lower():
                 log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
                          q.from_user.id, (time.monotonic() - t0) * 1000)
+                callback_feedback.page_delivered(q)
                 return q.message
             log.debug("edit_text fallback (%s) -> sending fresh page", e)
         except Exception as e:
@@ -116,6 +119,7 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
 
     if q.message is not None and hasattr(q.message, "reply_text"):
         msg = await _send_guarded(q.message.reply_text, text, markup)
+        callback_feedback.page_delivered(q)
         log.info("PAGE RENDERED | user=%s | method=new_message | %.0fms",
                  q.from_user.id, (time.monotonic() - t0) * 1000)
         return msg
@@ -130,6 +134,7 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
         return await bot.send_message(chat.id, t, **kw)
 
     msg = await _send_guarded(_chat_send, text, markup)
+    callback_feedback.page_delivered(q)
     log.info("PAGE RENDERED | user=%s | method=chat_fallback | %.0fms",
              q.from_user.id, (time.monotonic() - t0) * 1000)
     return msg
@@ -162,17 +167,24 @@ def _admin_home_snapshot() -> dict:
     admin_id = config.ADMIN_ID
     try:
         with db.conn() as c:
-            users_n = int(c.execute("SELECT COUNT(*) n FROM users WHERE user_id!=?", (admin_id,)).fetchone()["n"] or 0)
-            paid_n = int(c.execute(
-                "SELECT COUNT(*) n FROM subscriptions WHERE status='ACTIVE' AND plan_code!='FREE' AND user_id!=?",
-                (admin_id,),
-            ).fetchone()["n"] or 0)
-            pending_pay = int(c.execute("SELECT COUNT(*) n FROM payments WHERE status='PENDING'").fetchone()["n"] or 0)
-            open_sigs = int(c.execute(
-                "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
-            ).fetchone()["n"] or 0)
-            ch_on = int(c.execute("SELECT COUNT(*) n FROM broadcast_channels WHERE enabled=1").fetchone()["n"] or 0)
-            tickets = int(c.execute("SELECT COUNT(*) n FROM tickets WHERE status='OPEN'").fetchone()["n"] or 0)
+            # A pooled connection still pays network latency on every execute.
+            # Independent counters can share one SQL round trip without caching
+            # user permissions or changing any existing counting rules.
+            counts = c.execute("""
+                SELECT
+                  (SELECT COUNT(*) FROM users WHERE user_id!=?) AS users_n,
+                  (SELECT COUNT(*) FROM subscriptions WHERE status='ACTIVE'
+                     AND plan_code!='FREE' AND user_id!=?) AS paid_n,
+                  (SELECT COUNT(*) FROM payments WHERE status='PENDING') AS pending_pay,
+                  (SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')) AS open_sigs,
+                  (SELECT COUNT(*) FROM broadcast_channels WHERE enabled=1) AS ch_on,
+                  (SELECT COUNT(*) FROM tickets WHERE status='OPEN') AS tickets
+            """, (admin_id, admin_id)).fetchone()
+            users_n, paid_n, pending_pay, open_sigs, ch_on, tickets = (
+                int(counts[k] or 0) for k in
+                ("users_n", "paid_n", "pending_pay", "open_sigs", "ch_on", "tickets")
+            )
             try:
                 ta_radars = int(c.execute(
                     "SELECT COUNT(*) n FROM analysis_monitors WHERE status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')"
@@ -347,6 +359,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     import updater
+    from fysb.services import update_notices
+    update_bot = getattr(context, "bot", None)
     args = list(getattr(context, "args", None) or [])
     arg = (args[0].strip() if args else "")
     arg_l = arg.lower()
@@ -379,6 +393,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"a:updver:{tag}",
                     style="success" if updater.is_newer(tag, config.VERSION) else ("primary" if not is_cur else ""),
                 )])
+                rows_kb.append([kb.btn(f"📋 إصلاحات وتحسينات {ver}", f"a:updnotes:{tag}", style="primary")])
         else:
             lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك كتابة <code>/update v6.14.1</code> مباشرة أو استخدام التراجع المحلي.")
         if snaps:
@@ -387,6 +402,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "a:updrollback",
                 style="danger",
             )])
+        rows_kb.append([kb.btn("📚 أرشيف جميع الإصدارات", "a:updates", style="primary")])
         lines.append("\n<i>مثال سريع للرجوع لأي إصدار: <code>/update v6.14.1</code></i>")
         await _send_guarded(msg.edit_text, "\n".join(lines), kb.InlineKeyboardMarkup(rows_kb) if rows_kb else None)
         return
@@ -435,14 +451,14 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"◆ الإصدار الحالي: v{config.VERSION}\n"
             "<i>سيتم حفظ نسخة تراجع تلقائية قبل التثبيت دون المساس بـ .env أو قاعدة البيانات.</i>",
             parse_mode=ParseMode.HTML)
-        res = await asyncio.to_thread(updater.self_update, None, norm, True)
+        res = await update_notices.install(update_bot, norm, True)
     else:
         # --- 4) Default: upgrade to latest GitHub release --------------------
         msg = await update.effective_message.reply_text(
             "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
             f"◆ الإصدار الحالي: v{config.VERSION}",
             parse_mode=ParseMode.HTML)
-        res = await asyncio.to_thread(updater.self_update)
+        res = await update_notices.install(update_bot)
 
     status = res.get("status")
     if status == "updated":
@@ -451,7 +467,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "downgrade": "⬇️ تم الرجوع وتثبيت الإصدار",
             "reinstall": "🔄 تمت إعادة تثبيت الإصدار",
         }.get(direction, "✅ تم تنزيل وتثبيت الإصدار")
-        sha_line = "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
+        sha_line = update_notices.summary(res)
+        sha_line += "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
         bak_line = (f"◆ نسخة تراجع محفوظة: <code>{safe(res.get('rollback_backup'))}</code>\n"
                     if res.get("rollback_backup") else "")
         await afn.run(audit_log.log, uid,

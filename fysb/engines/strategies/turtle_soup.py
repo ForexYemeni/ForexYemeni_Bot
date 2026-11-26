@@ -1,31 +1,25 @@
-"""Turtle Soup (ICT) — failed breakout of a 20-bar extreme, fully mechanical.
+"""TURTLE_SOUP — single-sided failed break of the prior 20-bar extreme.
 
-Documented rules:
-  1. Prior 20-bar high/low defines the level everyone watches (stop clusters).
-  2. A candle pierces the level (stop-hunt) but CLOSES back on the other side.
-  3. Trade AGAINST the failed breakout (the "soup"): failed upside break -> SELL,
-     failed downside break -> BUY.
-  4. Stop beyond the sweep wick; targets are risk multiples (1R/2R/3.5R style).
+Latest wick pierces one side and closes strictly inside the prior range.
+Reject a bar sweeping both sides instead of selecting a direction by if-order.
+HTF, rejection wick and reclaim margin are bonuses, not mandatory conditions.
+Entry: close. Stop: sweep extreme +/-0.3 ATR, widened if too tight.
+Targets: planned 2R/3R/4.5R.
+Weights: range6, false-break18, reclaim-margin12, HTF12, wick10,
+kill-zone6, volatility4, RR8 (total76). Minimum score58; minimum32 bars.
 
-Score weights (deterministic):
-  20-bar level defined ....... +6
-  false breakout up/down ..... +18
-  close-back margin >= 25% ....+12
-  HTF bias alignment ......... +12
-  wick dominance (rejection). +10
-  kill zone .................. +6
-  volatility regime ok ....... +4
-  RR >= 2 .................... +8
-Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 LOOKBACK = 20
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < LOOKBACK + 12:
@@ -41,6 +35,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     direction, level = "", 0.0
     body = abs(last["close"] - last["open"])
     range_ = max(last["high"] - last["low"], 1e-12)
+    if last["high"] > hi and last["low"] < lo:
+        return None  # both sides swept: do not choose SELL merely by if-order
+    if not lo < last["close"] < hi:
+        return None
     if last["high"] > hi and last["close"] < hi:
         direction, level = "SELL", hi          # failed upside breakout
     elif last["low"] < lo and last["close"] > lo:

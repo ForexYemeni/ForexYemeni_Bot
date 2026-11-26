@@ -1,33 +1,19 @@
-"""FIBONACCI — Golden-Pocket Retracement (real, rule-based, 100% mechanical).
+"""FIBONACCI — largest directed impulse in a rolling40-bar window.
 
-Documented rules (pure swing geometry, no invented levels):
-  1. IMPULSE  : the window must contain a real impulse leg — from the swing
-                origin to the swing extreme — spanning >= 2.5 ATR (a leg worth
-                retracing, not noise).
-  2. RETRACE  : price has pulled back INTO the golden pocket (61.8%–78.6% of
-                the impulse) — the institutional entry band of the Fib playbook.
-  3. ENTRY    : at the current close inside the pocket (limit-grade location).
-  4. STOP     : beyond the 100% retracement (the impulse origin) + 0.5 ATR —
-                 where the swing structure is objectively wrong.
-  5. TARGETS  : TP1 = the swing extreme (0%), floored at 2R (platform rule);
-                TP2 = the -27.2% extension; TP3 = the -61.8% extension.
-  6. ORDER    : the retrace must be orderly — price may pierce the pocket but
-                may NOT close beyond the impulse origin (structure break).
+Minimum impulse2.5 ATR; current close inside61.8..78.6% retracement.
+HTF/MSS and pocket sweep are bonuses, not mandatory candle-confirmation rules.
+Entry: close. Stop beyond impulse origin +/-0.5 ATR; never tighten inward.
+Raw targets: swing extreme, extreme +/-0.272 impulse, +/-0.618 impulse.
+Apply platform2R/3R/4.5R floors separately; reasons disclose raw vs planned levels.
+Weights: impulse12, pocket18, orderly8, pocket-sweep8, bias12,
+kill-zone6, volatility4, RR8 (total76). Minimum score58; minimum45 bars.
 
-Score weights (deterministic, auditable):
-  impulse >= 2.5 ATR ....... +12
-  golden-pocket touch ...... +18
-  HTF bias alignment ....... +12
-  orderly retrace .......... +8
-  pocket wick sweep ........ +8   (pierced 78.6% then closed above 61.8%)
-  kill zone ................ +6
-  volatility regime ok ..... +4
-  RR(TP1) >= 2 ............. +8
-Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 IMPULSE_ATR = 2.5
@@ -53,6 +39,7 @@ def _impulse_leg(window: list[dict], direction: str) -> tuple[int, int, float] |
     return (origin, ext, size) if size > 0 else None
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
@@ -130,15 +117,15 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     if risk <= 0:
         return None
 
-    if direction == "BUY":
-        raw_tp1 = max(extreme_px, entry + risk * 2.0)
-        raw_tp2 = raw_tp1 + 0.272 * impulse
-        raw_tp3 = raw_tp1 + 0.618 * impulse
-    else:
-        raw_tp1 = min(extreme_px, entry - risk * 2.0)
-        raw_tp2 = raw_tp1 - 0.272 * impulse
-        raw_tp3 = raw_tp1 - 0.618 * impulse
+    # Fibonacci extensions are measured from the swing EXTREME, not from a
+    # TP1 already moved by the platform's RR floor. Keep both meanings explicit.
+    sign = 1.0 if direction == "BUY" else -1.0
+    raw_tp1 = extreme_px
+    raw_tp2 = extreme_px + sign * 0.272 * impulse
+    raw_tp3 = extreme_px + sign * 0.618 * impulse
     tp1, tp2, tp3, rr = ensure_min_tp_rr(entry, stop, raw_tp1, raw_tp2, raw_tp3, direction)
+    checks["targets_adjusted"] = any(abs(x-y) > 1e-9 for x, y in zip(
+        (tp1, tp2, tp3), (raw_tp1, raw_tp2, raw_tp3)))
     checks["rr_ok"] = rr >= 2.0
     earned += 8 if checks["rr_ok"] else 0
 
@@ -151,7 +138,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"golden-pocket retrace {depth * 100:.1f}% (61.8-78.6%) @ {entry:.5g}",
         f"HTF bias={bias['trend']} / MSS dir={mss['bos_dir'] or '—'}",
         f"invalidation beyond 100% Fib = {stop:.5g}",
-        f"targets: 0% = {tp1:.5g} · -27.2% = {tp2:.5g} · -61.8% = {tp3:.5g}",
+        f"raw Fibonacci levels: 0%={raw_tp1:.5g} / -27.2%={raw_tp2:.5g} / -61.8%={raw_tp3:.5g}",
+        f"planned targets after RR floors: {tp1:.5g} / {tp2:.5g} / {tp3:.5g} (adjusted={checks['targets_adjusted']})",
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]

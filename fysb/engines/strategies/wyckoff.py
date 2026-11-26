@@ -1,41 +1,22 @@
-"""WYCKOFF — Accumulation Spring / Distribution Upthrust (100% mechanical).
+"""WYCKOFF — range spring/upthrust subset, not full Wyckoff phase inference.
 
-The last honest gap in the catalog, now a real rule engine (v6.11.0).
-Richard Wyckoff's core playbook, reduced to auditable mechanical checks:
+Prior26-bar width<=3 ATR with>=3 midline crossings. Latest bar must sweep
+ONE boundary and close strictly INSIDE the range; dual-sided events are rejected.
+When every supplied volume is positive, event volume must be>=1.1x window
+average. Missing/zero volume skips this check explicitly; provider volume does
+not prove centralized spot volume. HTF is a bonus. Entry: event close.
+Stop beyond event wick +/-0.5 ATR, never tightened inside structural invalidation.
+Targets: opposite boundary/measured extensions with2R/3R/4.5R floors.
+Weights: range10, alternations8, event16, reclaim8, volume8, HTF12,
+kill-zone6, volatility4, RR4 (total76; total68 without volume).
+Minimum score55; minimum40 bars.
 
-  1. RANGE      : the window (last RANGE_WINDOW candles, EXCLUDING the final
-                 candle) must be a sideways trading range — width <= 3.0 ATR
-                 AND the close crosses the range midline >= 3 times (a real
-                 two-sided auction, never a diagonal drift pretending to be
-                 consolidation).
-  2. EVENT      : the FINAL candle is the Wyckoff event —
-                 SPRING (BUY):  low pierces BELOW the range floor, close back
-                                INSIDE the range (the stop-run below support
-                                that instantly reverses);
-                 UPTHRUST (SELL): high pierces ABOVE the range ceiling, close
-                                back INSIDE (the buy-side liquidity grab).
-  3. INTACT     : the candle BEFORE the event must have closed inside the
-                 range — the structure was intact right before the test.
-  4. EFFORT     : when real volume data exists (event volume and window average
-                 both > 0), the event must carry >= 1.1× the average volume —
-                 effort without result = absorption. When the feed has no
-                 volume (typical FX spot quotes) the check is SKIPPED, never
-                 failed — honesty over cosmetics.
-  5. ENTRY      : the event's close.
-  6. STOP       : beyond the event's wick extreme ± 0.5 ATR — where the sweep
-                 becomes a genuine breakdown.
-  7. TARGETS    : TP1 = the opposite range boundary, FLOORED at 2R (platform
-                 rule) · TP2 = the measured move (one range height) ·
-                 TP3 = the 1.618× extension of the range height.
-
-Score weights (deterministic, auditable): valid range +14 · alternations +10 ·
-sweep beyond boundary +22 · close back inside +14 · volume surge +8 (only with
-real volume data) · kill zone +6 · volatility regime +4 · RR(TP1)>=2 +8.
-Base 40. Cap 95. Minimum 55 to fire — a weak spring is no spring at all.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 RANGE_WINDOW = 26          # candles defining the trading range (excluding the event)
@@ -58,10 +39,11 @@ def _alternations(closes: list[float], mid: float) -> int:
 
 
 def _real_volume(candles: list[dict]) -> bool:
-    """True only when the feed carries usable volume (> 0) for every candle."""
+    """Usable positive provider volume; this does not prove centralized spot volume."""
     return all(float(c.get("volume") or 0) > 0 for c in candles)
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < RANGE_WINDOW + 14:
@@ -106,6 +88,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     lo = float(event["low"])
     hi = float(event["high"])
+    # A close outside the opposite boundary is a breakout, not a range reclaim.
+    if not range_low < close < range_high:
+        return None
+    # An outside bar sweeping BOTH boundaries has no unambiguous event side.
+    if lo < range_low and hi > range_high:
+        return None
     if lo < range_low and close > range_low:
         direction = "BUY"
         wick_extreme = lo
@@ -126,9 +114,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         avg_v = sum(float(c.get("volume") or 0) for c in window) / len(window)
         surge = float(event.get("volume") or 0) >= VOLUME_SURGE * avg_v
         checks["volume_surge"] = surge
-        if surge:
-            earned += 8
-            reasons.append(f"event volume {float(event.get('volume') or 0):.0f} >= {VOLUME_SURGE:g}× window average {avg_v:.0f}")
+        if not surge:
+            return None
+        earned += 8
+        reasons.append(f"event volume {float(event.get('volume') or 0):.0f} >= {VOLUME_SURGE:g}× window average {avg_v:.0f}")
     else:
         checks["volume_surge"] = None
         max_pts -= 8  # Don't penalize FX instruments that lack tick volume

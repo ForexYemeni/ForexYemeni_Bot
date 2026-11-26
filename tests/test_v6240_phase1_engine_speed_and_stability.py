@@ -83,11 +83,11 @@ class TestV6240Phase1EngineSpeedAndStability(unittest.TestCase):
         self._tmp.cleanup()
 
     # 1) Universal cap_stop across BUY & SELL
-    def test_cap_stop_enforces_side_min_and_spike_ceiling(self):
-        # BUY freak spike stop ($90 away when ATR=$10) -> capped at 2.4 * ATR = $24
-        self.assertAlmostEqual(cap_stop(3500.0, 3410.0, "BUY", 10.0), 3476.0, places=2)
-        # SELL freak spike stop ($90 away when ATR=$10) -> capped at 2.4 * ATR = $24
-        self.assertAlmostEqual(cap_stop(3500.0, 3590.0, "SELL", 10.0), 3524.0, places=2)
+    def test_cap_stop_enforces_side_min_and_preserves_structure(self):
+        # Wide BUY stop stays beyond structural invalidation; issuance may reject it.
+        self.assertAlmostEqual(cap_stop(3500.0, 3410.0, "BUY", 10.0), 3410.0, places=2)
+        # Symmetric SELL rule: never cosmetically tighten a structural stop.
+        self.assertAlmostEqual(cap_stop(3500.0, 3590.0, "SELL", 10.0), 3590.0, places=2)
         # Reversed BUY stop -> corrected to fallback_atr below entry
         self.assertAlmostEqual(cap_stop(3500.0, 3510.0, "BUY", 10.0, fallback_atr=1.6), 3484.0, places=2)
         # Normal stop inside [min_atr, max_atr] -> preserved untouched

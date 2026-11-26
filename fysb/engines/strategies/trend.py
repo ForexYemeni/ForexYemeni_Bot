@@ -1,29 +1,19 @@
-"""TREND — Trend-Following Pullback (classic, 100% mechanical).
+"""TREND — EMA9/21/50 stack, historical value visit, then resumption.
 
-The most traded playbook in the world, implemented honestly:
-  1. TREND     : EMA9/EMA21/EMA50 stacked IN ORDER with real separation
-                 (each layer >= 0.25 ATR apart — BUY: 9>21>50 · SELL: 9<21<50);
-                 an EMAs-equal market is not a trend, never chase noise.
-  2. HTF BIAS  : the higher-timeframe EMA21/EMA50 relationship must agree with
-                 the entry direction (trend-with-trend only, never counter).
-  3. PULLBACK  : price must have VISITED the value zone (within 1.0 ATR of
-                 EMA21) during the last 6 candles — a continuation entry needs
-                 a retracement, not a chase.
-  4. RESUMPTION: the LAST candle closes back in the trend direction AND above
-                 EMA9 (BUY) / below EMA9 (SELL) — the trend reclaiming itself.
-  5. ENTRY     : last close.
-  6. STOP      : the extreme of the pullback (swing low/high of the last 8
-                 candles) ± 0.5 ATR — where the pullback becomes a reversal.
-  7. TARGETS   : TP1 = 2R (platform floor); TP2 = 3R; TP3 = 5R — the measured
-                 continuation ladder of trend playbooks.
+Require stack layers separated by0.25 entry ATR, agreeing bias EMA21/50
+separated by0.1 entry ATR. One of SIX preceding bars must intersect the band
+EMA21 +/-1 ATR computed using history through THAT bar (not today's EMA).
+Latest directional candle closes past EMA9. Entry: close.
+Stop: last-eight-bar extreme +/-0.5 ATR; targets2R/3R/5R.
+Weights: stack14, HTF10, pullback12, resumption10, momentum6,
+kill-zone6, volatility4, RR5 (total67). Minimum score58; minimum55 bars.
 
-Score weights (deterministic, auditable): stack +18 · HTF bias +12 ·
-pullback visit +16 · resumption candle +14 · momentum (close vs EMA9) +6 ·
-kill zone +6 · volatility regime +4 · RR>=2 +8. Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 STACK_ATR = 0.25      # each EMA layer must be separated by >= 0.25 ATR —
@@ -36,6 +26,7 @@ def _stack(candles: list[dict]) -> tuple[float, float, float]:
     return ema(closes, 9), ema(closes, 21), ema(closes, 50)
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 55:
@@ -69,15 +60,17 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     earned += 10
 
     visited = False
-    for c in candles[-6:]:
-        if direction == "BUY":
-            if float(c["low"]) <= e21 + PULLBACK_ATR * a:
-                visited = True
-                break
-        else:
-            if float(c["high"]) >= e21 - PULLBACK_ATR * a:
-                visited = True
-                break
+    # Six bars BEFORE resumption. Compare each bar with the EMA/ATR known at
+    # that time; today's EMA must not rewrite an earlier pullback location.
+    for i in range(max(21, len(candles) - 7), len(candles) - 1):
+        history = candles[:i + 1]
+        historical_ema = ema([float(c["close"]) for c in history], 21)
+        historical_atr = atr(history)
+        c = candles[i]
+        band = PULLBACK_ATR * historical_atr
+        if float(c["low"]) <= historical_ema + band and float(c["high"]) >= historical_ema - band:
+            visited = True
+            break
     checks["pullback"] = visited
     if not visited:
         return None

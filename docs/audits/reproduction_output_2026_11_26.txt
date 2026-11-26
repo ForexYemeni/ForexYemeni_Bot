@@ -1,0 +1,15 @@
+CONFIRMED | tracker polling dependence | batch=TP3_HIT; after first TP1, next pass=TP1_BE
+CONFIRMED | disabled catalog fallback | ['PRICE_ACTION']
+CONFIRMED | HTF historical bins shift | first group ends 2026-11-18 08:45:00 -> 2026-11-18 09:00:00
+CONFIRMED | leaderboard counts open private TP1 | {'code': 'ICT', 'n': 1, 'wins': 1, 'sl': 0, 'tp2': 0, 'tp3': 0, 'win_rate': 100.0, 'avg_r': 2.0, 'tp3_share': 0.0, 'strength': 110.0, 'rank': 1}
+CONFIRMED | public digest includes private open runner | wins=1; decided=1
+CONFIRMED | private radar admin alert | targets=[42, 9001]
+CONFIRMED | structural stop shortened | raw=90; capped=97.6
+CONFIRMED | score is checklist transformation | zero earned -> 42
+CONFIRMED | radar RR denotes TP2 | reported RR=2.6; TP1 RR=1.50
+CONFIRMED | analytics timeframe mix | Ctx.timeframe=H1; candles=M5; chart=H1
+CONFIRMED | analytics ALL bypasses plan/catalog | plan=ICT; disabled catalog; evaluated=['ICT', 'SMC', 'PRICE_ACTION', 'CRT', 'AMD', 'TURTLE_SOUP', 'SILVER_BULLET', 'FIBONACCI', 'TREND', 'ICHIMOKU', 'CLASSIC', 'SK', 'WYCKOFF']
+CONFIRMED | Wyckoff optional mandatory rules | signal=BUY; close_inside=False; volume_surge=False; score=84
+CONFIRMED | Silver Bullet gap timestamp unchecked | pre-window mocked gap accepted as fvg_in_window=True
+CONFIRMED | backtest accepts untouched entry | entry=100; candle low=101; outcome=TIME_EXIT
+DONE: 14 offline observations reproduced; no production files or network used.

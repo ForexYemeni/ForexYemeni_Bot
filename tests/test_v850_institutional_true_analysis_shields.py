@@ -400,6 +400,14 @@ def test_v852_guaranteed_analysis_chart_and_clean_separation_from_true_analysis(
         lambda *a, **kw: {"values": vals, "last_candle_iso": vals[-1]["datetime"], "provider": "TEST"},
     )
 
+    # Chart/wizard integration is not a promise that every rising series must
+    # trigger a rule engine. Fix the lens decision independently of strategies.
+    from fysb.engines.strategies.base import StrategyResult
+    entry = vals[-1]["close"]
+    monkeypatch.setattr(analytics, "evaluate_all", lambda *a, **kw: [StrategyResult(
+        "ICT", "BUY", entry, entry-4, entry+8, entry+12, entry+18,
+        2.0, 82, ["chart wizard fixture"], {})])
+
     # 1. Admin Channel «🚀 تحليل الآن» (`post_analysis`) MUST send PNG photo + text card!
     ch_id = admin_channels.add_channel("@TestAnlCh852", "VIP Analysis Channel", "public")
     with db.tx() as c:

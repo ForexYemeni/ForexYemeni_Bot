@@ -1,31 +1,20 @@
-"""ICHIMOKU — Ichimoku Kinko Hyo (classic Japanese system, 100% mechanical).
+"""ICHIMOKU — explicit mechanical subset of Ichimoku, not every trading variant.
 
-Documented rules (no invented components):
-  * Tenkan-sen  = (highest high + lowest low) / 2 over 9 periods
-  * Kijun-sen   = same over 26 periods
-  * Senkou A/B  = (Tenkan+Kijun)/2 and (HH+LL)/2 over 52 — computed 26 periods
-                  ago so they describe the CLOUD the current candle trades in
-  * Chikou span = the close plotted 26 periods back — above (BUY) the price of
-                  that moment
+Tenkan9/Kijun26; current cloud from calculations26 bars back with SpanB52.
+Require close outside cloud, TK alignment, matching forward cloud, current close
+beyond close26 bars ago (Chikou proxy), and bias close beyond its Kijun.
+A fresh TK cross is a bonus, NOT mandatory. Entry: close.
+Stop: Kijun +/-0.5 ATR, widened if tight (not the cloud boundary).
+Targets2R/3R/5R. Weights: cloud14, TK10, fresh-cross8, forward-cloud8,
+Chikou8, bias8, kill-zone6, volatility4, RR5 (total71).
+Minimum score58; minimum83 bars.
 
-Entry rules (BUY; mirrored for SELL):
-  1. CLOUD    : close is ABOVE the Kumo (both Senkou A and B) — cloud breakout
-  2. TK CROSS : Tenkan > Kijun (or a fresh cross within the last 5 candles)
-  3. FUTURE   : the forward cloud (computed NOW, plotted 26 ahead) is bullish
-                (SenkouA_now > SenkouB_now) — the trend has continuation room
-  4. CHIKOU   : the close 26 periods ago is above the close 52 periods ago —
-                the lagging line confirms the momentum regime
-  5. HTF BIAS : bias-TF close sits above its own Kijun — trend-with-trend
-  ENTRY = last close · STOP = Kijun ± 0.5 ATR (the classic invalidation)
-  TARGETS = 2R / 3R / 5R measured ladder (platform floor 2R).
-
-Score weights (deterministic): cloud position +18 · TK alignment +14 ·
-fresh cross bonus +6 · future cloud color +12 · chikou confirm +10 ·
-HTF bias +12 · kill zone +6 · volatility +4 · RR +8. Base 40. Cap 95.
+Checklist merit is normalized to42..95, NOT a win probability. Callers must
+supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
 from fysb.engines.strategies.base import (
-    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score,
+    Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
 TENKAN_P, KIJUN_P, SENKOU_B_P, DISPLACEMENT = 9, 26, 52, 26
@@ -36,6 +25,7 @@ def _mid(candles: list[dict], period: int) -> float:
     return (max(float(c["high"]) for c in win) + min(float(c["low"]) for c in win)) / 2.0
 
 
+@checked_strategy
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < SENKOU_B_P + DISPLACEMENT + 5:

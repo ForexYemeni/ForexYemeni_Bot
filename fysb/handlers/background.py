@@ -1027,6 +1027,7 @@ async def post_shutdown(app):
             await t
         except asyncio.CancelledError:
             pass
+    afn.shutdown()
     log.info("background loops stopped")
 
 

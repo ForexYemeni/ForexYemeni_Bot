@@ -72,11 +72,13 @@ class TestPipeline(unittest.TestCase):
     def test_duplicate_rejected(self):
         # The Real-Entry gate needs a live quote; in this suite the candles are
         # synthetic — freeze the quote to the payload's own close (no network)
-        # and bypass the stale check so the DUPLICATE semantics stay isolated.
+        # Bypass entry/geometry gates: synthetic trend prices are not a gold
+        # setup; this test isolates duplicate semantics, not stop sizing.
         payload = _valid_payload()
         with patch.object(market_data, "fetch_candles", return_value=payload), \
              patch.object(market_data, "fetch_price", side_effect=RuntimeError("no quote in tests")), \
              patch.object(signal_engine, "is_stale_entry", return_value=(False, "")), \
+             patch.object(signal_engine, "validate_signal_geometry", return_value=(True, "")), \
              patch("fysb.engines.intelligence.dxy_bias_check", return_value={"delta": 0, "note": ""}), \
              patch("fysb.engines.signal_engine._allowed_strategies", return_value=["PRICE_ACTION"]):
             with db.conn() as c:

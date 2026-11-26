@@ -13,32 +13,39 @@ def dashboard() -> dict:
     week_ago = _days_ago(7)
     admin_id = config.ADMIN_ID
     with db.conn() as c:
-        users = {
-            "total": c.execute("SELECT COUNT(*) n FROM users WHERE user_id!=?", (admin_id,)).fetchone()["n"],
-            "active_7d": c.execute("SELECT COUNT(*) n FROM users WHERE last_seen>=? AND user_id!=?", (week_ago, admin_id)).fetchone()["n"],
-            "new_7d": c.execute("SELECT COUNT(*) n FROM users WHERE joined_at>=? AND user_id!=?", (week_ago, admin_id)).fetchone()["n"],
-            "blocked": c.execute("SELECT COUNT(*) n FROM users WHERE is_blocked=1 AND user_id!=?", (admin_id,)).fetchone()["n"],
-        }
-        subs = {
-            "free": c.execute("SELECT COUNT(*) n FROM subscriptions WHERE status='ACTIVE' AND plan_code='FREE'").fetchone()["n"],
-            "paid": c.execute("SELECT COUNT(*) n FROM subscriptions WHERE status='ACTIVE' AND plan_code!='FREE'").fetchone()["n"],
-            "expired": c.execute("SELECT COUNT(*) n FROM subscriptions WHERE status IN ('EXPIRED','REPLACED')").fetchone()["n"],
-        }
-        pays = {
-            "pending": c.execute("SELECT COUNT(*) n FROM payments WHERE status='PENDING'").fetchone()["n"],
-            "approved": c.execute("SELECT COUNT(*) n FROM payments WHERE status='APPROVED'").fetchone()["n"],
-            "rejected": c.execute("SELECT COUNT(*) n FROM payments WHERE status='REJECTED'").fetchone()["n"],
-            "approved_amount": c.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='APPROVED'").fetchone()["s"],
-        }
-        signals = {
-            "total": c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"],
-            "open": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')").fetchone()["n"],
-            "completed": c.execute("SELECT COUNT(*) n FROM signals WHERE status IN ('TP3_HIT','SL_HIT','CLOSED_WIN')").fetchone()["n"],
-            "cancelled": c.execute("SELECT COUNT(*) n FROM signals WHERE status='CANCELLED'").fetchone()["n"],
-            "expired": c.execute("SELECT COUNT(*) n FROM signals WHERE status='EXPIRED'").fetchone()["n"],
-            "wins": c.execute("SELECT COUNT(*) n FROM signals WHERE status='TP3_HIT'").fetchone()["n"],
-            "sl_hits": c.execute("SELECT COUNT(*) n FROM signals WHERE status='SL_HIT'").fetchone()["n"],
-        }
+        # One aggregate per table, not one WAN round trip per counter.
+        # COUNT(CASE...) returns zero on an empty table on SQLite AND PostgreSQL.
+        users = dict(c.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(CASE WHEN last_seen>=? THEN 1 END) AS active_7d,
+                   COUNT(CASE WHEN joined_at>=? THEN 1 END) AS new_7d,
+                   COUNT(CASE WHEN is_blocked=1 THEN 1 END) AS blocked
+            FROM users WHERE user_id!=?
+        """, (week_ago, week_ago, admin_id)).fetchone())
+        subs = dict(c.execute("""
+            SELECT COUNT(CASE WHEN status='ACTIVE' AND plan_code='FREE' THEN 1 END) AS free,
+                   COUNT(CASE WHEN status='ACTIVE' AND plan_code!='FREE' THEN 1 END) AS paid,
+                   COUNT(CASE WHEN status IN ('EXPIRED','REPLACED') THEN 1 END) AS expired
+            FROM subscriptions
+        """).fetchone())
+        pays = dict(c.execute("""
+            SELECT COUNT(CASE WHEN status='PENDING' THEN 1 END) AS pending,
+                   COUNT(CASE WHEN status='APPROVED' THEN 1 END) AS approved,
+                   COUNT(CASE WHEN status='REJECTED' THEN 1 END) AS rejected,
+                   COALESCE(SUM(CASE WHEN status='APPROVED' THEN amount END),0) AS approved_amount
+            FROM payments
+        """).fetchone())
+        signals = dict(c.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
+                         AND (closed_at IS NULL OR closed_at='') THEN 1 END) AS open,
+                   COUNT(CASE WHEN status IN ('TP3_HIT','SL_HIT','CLOSED_WIN') THEN 1 END) AS completed,
+                   COUNT(CASE WHEN status='CANCELLED' THEN 1 END) AS cancelled,
+                   COUNT(CASE WHEN status='EXPIRED' THEN 1 END) AS expired,
+                   COUNT(CASE WHEN status='TP3_HIT' THEN 1 END) AS wins,
+                   COUNT(CASE WHEN status='SL_HIT' THEN 1 END) AS sl_hits
+            FROM signals
+        """).fetchone())
         analyses_today = c.execute("SELECT COUNT(*) n FROM analyses WHERE created_at>=?", (db.day_start_utc(),)).fetchone()["n"]
         syshealth = {
             "engine_enabled": db.get_setting("engine_enabled", "0") == "1",

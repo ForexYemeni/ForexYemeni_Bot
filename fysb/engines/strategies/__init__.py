@@ -1,11 +1,15 @@
 """Strategy registry — the only place strategy codes are bound to logic.
 
 A strategy is usable only when its catalog row has verified=1 AND enabled=1.
-Verification is earned by implementation + passing the automated test-suite
-(tests/test_strategies.py) and is flipped by the admin Verify action, never by
-marketing labels.
+The database seeds implemented engines as verified; this is internal software
+status, not external certification or evidence of profitability. Catalog and
+package authorization belong to callers; this registry enforces rule contracts.
 """
-from fysb.engines.strategies.base import Ctx, StrategyResult
+import logging
+
+from fysb.engines.strategies.base import Ctx, StrategyResult, result_error
+
+log = logging.getLogger(__name__)
 from fysb.engines.strategies import amd, classic, crt, fibonacci, ichimoku, ict, price_action, silver_bullet, sk, smc, trend, turtle_soup, wyckoff
 
 REGISTRY: dict[str, object] = {
@@ -35,15 +39,20 @@ def get(code: str):
 def evaluate_all(ctx: Ctx, allowed_codes: list[str]) -> list[StrategyResult]:
     """Run every allowed, implemented strategy; return valid results sorted by score."""
     results: list[StrategyResult] = []
-    for code in allowed_codes:
+    for code in dict.fromkeys(c.upper() for c in allowed_codes):
         module = REGISTRY.get((code or "").upper())
         if module is None:
             continue
         try:
             res = module.evaluate(ctx)
         except Exception:
-            continue  # a broken strategy never blocks the pipeline; logged upstream
+            log.exception("strategy evaluation failed code=%s symbol=%s timeframe=%s", code, ctx.symbol, ctx.timeframe)
+            continue  # isolate one broken engine without hiding its traceback
         if res is not None:
+            error = result_error(res, code)
+            if error:
+                log.error("strategy result rejected code=%s reason=%s", code, error)
+                continue
             results.append(res)
     results.sort(key=lambda r: r.score, reverse=True)
     return results
@@ -57,11 +66,13 @@ def consensus_filter(results: list[StrategyResult]) -> tuple[list[StrategyResult
 
     Returns (filtered_candidates_sorted_by_score, conflict_note):
       * Single direction (or <= 1 result): unchanged, no conflict.
-      * Clear directional winner (more votes OR >= 15% higher total score
-        while not outnumbered by >= 2): keeps only the winning direction's
-        candidates sorted by score.
-      * Genuine deadlock (equal votes & close scores < 10% apart): returns
-        ([], reason) so the engine stays honestly flat rather than flipping a coin.
+      * Equal vote counts with abs(score difference)/total < 0.08: reject.
+      * A majority of >= 2 votes wins, or a non-minority with higher score sum.
+      * A one-vote minority can win only with a score margin >= 0.12;
+        otherwise follow the vote majority. Return score-sorted winners.
+
+    These are deterministic voting heuristics, not independent probabilistic
+    evidence (many engines share the same price primitives).
     """
     if len(results) <= 1:
         return list(results), ""

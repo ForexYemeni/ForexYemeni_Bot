@@ -57,33 +57,83 @@ CALIB_MAX_AGE = 48 * 3600        # persisted offset older than this is ignored
 
 # Symbol maps (internal normalized symbol -> venue/reference symbol).
 YAHOO_FX_MAP = {
+    # 7 Forex Majors
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
     "NZDUSD": "NZDUSD=X",
-    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "EURGBP": "EURGBP=X",
-    "AUDJPY": "AUDJPY=X", "CADJPY": "CADJPY=X", "CHFJPY": "CHFJPY=X",
-    "NZDJPY": "NZDJPY=X", "EURAUD": "EURAUD=X", "EURCHF": "EURCHF=X",
-    "EURCAD": "EURCAD=X", "GBPAUD": "GBPAUD=X", "GBPCHF": "GBPCHF=X",
-    "GBPCAD": "GBPCAD=X", "AUDCAD": "AUDCAD=X", "AUDNZD": "AUDNZD=X",
+    # All 21 G8 Crosses
+    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "AUDJPY": "AUDJPY=X",
+    "CADJPY": "CADJPY=X", "CHFJPY": "CHFJPY=X", "NZDJPY": "NZDJPY=X",
+    "EURGBP": "EURGBP=X", "EURAUD": "EURAUD=X", "EURCHF": "EURCHF=X",
+    "EURCAD": "EURCAD=X", "EURNZD": "EURNZD=X",
+    "GBPAUD": "GBPAUD=X", "GBPCHF": "GBPCHF=X", "GBPCAD": "GBPCAD=X",
+    "GBPNZD": "GBPNZD=X",
+    "AUDCAD": "AUDCAD=X", "AUDCHF": "AUDCHF=X", "AUDNZD": "AUDNZD=X",
+    "CADCHF": "CADCHF=X", "NZDCAD": "NZDCAD=X", "NZDCHF": "NZDCHF=X",
+    # Major Global Exotics
+    "USDMXN": "USDMXN=X", "USDZAR": "USDZAR=X", "USDTRY": "USDTRY=X",
+    "USDSGD": "USDSGD=X", "USDNOK": "USDNOK=X", "USDSEK": "USDSEK=X",
+}
+YAHOO_METAL_MAP = {
+    "XAGUSD": "SI=F",
+    "XPTUSD": "PL=F",
+    "XPDUSD": "PA=F",
+}
+YAHOO_EQUITY_MAP = {
+    # Industrial Metal (Copper futures)
+    "XCUUSD": "HG=F",
+    # Global Indices (10)
+    "US30": "^DJI", "DJI": "^DJI",
+    "NAS100": "^NDX", "NDX": "^NDX",
+    "SPX500": "^GSPC", "SPX": "^GSPC",
+    "US2000": "^RUT", "RUT": "^RUT",
+    "GER40": "^GDAXI", "DAX": "^GDAXI",
+    "UK100": "^FTSE", "FTSE": "^FTSE",
+    "FRA40": "^FCHI", "FCHI": "^FCHI",
+    "JPN225": "^N225", "N225": "^N225",
+    "HK50": "^HSI", "HSI": "^HSI",
+    "DXY": "DX-Y.NYB",
+    # Global Commodities & Energy (5)
+    "USOIL": "CL=F", "WTI": "CL=F",
+    "UKOIL": "BZ=F", "BRENT": "BZ=F",
+    "NGAS": "NG=F",
+    "WHEAT": "ZW=F",
+    "CORN": "ZC=F",
+    # Top 22 Global Wall Street Stocks
+    "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT",
+    "AMZN": "AMZN", "META": "META", "GOOGL": "GOOGL", "NFLX": "NFLX",
+    "AMD": "AMD", "INTC": "INTC", "ORCL": "ORCL", "AVGO": "AVGO",
+    "CRM": "CRM", "PLTR": "PLTR", "COIN": "COIN",
+    "JPM": "JPM", "V": "V", "MA": "MA", "BA": "BA",
+    "DIS": "DIS", "KO": "KO", "BABA": "BABA",
 }
 BINANCE_MAP = {
     "XAUUSD": "PAXGUSDT",
     "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
-    "XRPUSD": "XRPUSDT", "ADAUSD": "ADAUSDT", "DOGEUSD": "DOGEUSDT",
+    "XRPUSD": "XRPUSDT", "BNBUSD": "BNBUSDT", "ADAUSD": "ADAUSDT",
+    "DOGEUSD": "DOGEUSDT", "AVAXUSD": "AVAXUSDT", "LINKUSD": "LINKUSDT",
+    "DOTUSD": "DOTUSDT", "TONUSD": "TONUSDT", "LTCUSD": "LTCUSDT",
+    "BCHUSD": "BCHUSDT", "TRXUSD": "TRXUSDT", "SHIBUSD": "SHIBUSDT",
+    "SUIUSD": "SUIUSDT", "NEARUSD": "NEARUSDT", "ATOMUSD": "ATOMUSDT",
+    "UNIUSD": "UNIUSDT", "APTUSD": "APTUSDT", "ARBUSD": "ARBUSDT",
+    "OPUSD": "OPUSDT", "XLMUSD": "XLMUSDT", "HBARUSD": "HBARUSDT",
+    "PEPEUSD": "PEPEUSDT",
 }
-BYBIT_MAP = {
-    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
-    "XRPUSD": "XRPUSDT", "ADAUSD": "ADAUSDT", "DOGEUSD": "DOGEUSDT",
-}
+BYBIT_MAP = {k: v for k, v in BINANCE_MAP.items() if k != "XAUUSD"}
 GOLD_API_MAP = {   # real spot quote reference (no candles)
-    "XAUUSD": "XAU", "XAGUSD": "XAG", "BTCUSD": "BTC", "ETHUSD": "ETH",
+    "XAUUSD": "XAU", "XAGUSD": "XAG", "XPTUSD": "XPT", "XPDUSD": "XPD",
+    "BTCUSD": "BTC", "ETHUSD": "ETH",
 }
 TWELVEDATA_MAP = {
-    "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD", "EURUSD": "EUR/USD",
-    "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY", "BTCUSD": "BTC/USD",
-    "ETHUSD": "ETH/USD",
+    "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD", "XPTUSD": "XPT/USD", "XPDUSD": "XPD/USD",
+    "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
+    "BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD",
 }
 FOREX_ONLY = set(YAHOO_FX_MAP.keys())
+
+
+def _yahoo_symbol_for(internal: str) -> str | None:
+    return YAHOO_FX_MAP.get(internal) or YAHOO_METAL_MAP.get(internal) or YAHOO_EQUITY_MAP.get(internal)
 
 _cache: dict[tuple, dict] = {}
 _fail_streak: dict[str, tuple[float, int]] = {}
@@ -109,14 +159,16 @@ def _provider_key(internal: str) -> str | None:
 # chain. "twelvedata" enters a chain only when TWELVEDATA_API_KEY is set.
 _CANDLE_CHAINS = {
     "gold":   ["venue-gold", "twelvedata"],
-    "metal":  ["twelvedata"],
+    "metal":  ["fx-ref", "twelvedata"],
     "fx":     ["fx-ref", "twelvedata"],
+    "equity": ["fx-ref", "twelvedata"],
     "crypto": ["binance", "bybit", "twelvedata"],
 }
 _QUOTE_CHAINS = {
     "gold":   ["spot-ref", "venue-gold", "twelvedata"],
     "metal":  ["spot-ref", "twelvedata"],
     "fx":     ["fx-ref", "twelvedata"],
+    "equity": ["fx-ref", "twelvedata"],
     "crypto": ["binance", "bybit", "twelvedata"],
 }
 _PREFERRED_ALIASES = {
@@ -133,10 +185,12 @@ def _class_of(internal: str) -> str | None:
         return "gold"
     if internal in BYBIT_MAP or _provider_key(internal):
         return "crypto"
-    if internal in GOLD_API_MAP:          # XAGUSD — real spot quote, no venue candles
+    if internal in YAHOO_METAL_MAP or internal in GOLD_API_MAP:
         return "metal"
     if internal in YAHOO_FX_MAP:
         return "fx"
+    if internal in YAHOO_EQUITY_MAP:
+        return "equity"
     return None
 
 
@@ -603,7 +657,10 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     except Exception as s_exc:
                         log.debug("gold futures spot calibration skipped: %s", s_exc)
             elif provider == "fx-ref":
-                values = _fetch_yahoo_candles(YAHOO_FX_MAP[internal], interval, outputsize)
+                ysym = _yahoo_symbol_for(internal)
+                if not ysym:
+                    continue
+                values = _fetch_yahoo_candles(ysym, interval, outputsize)
             elif provider == "binance":
                 if not venue:
                     continue
@@ -686,6 +743,8 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
         t0 = time.monotonic()
         try:
             if provider == "spot-ref":
+                if internal not in GOLD_API_MAP:
+                    continue
                 ref = _fetch_goldapi_price(GOLD_API_MAP[internal])
                 provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
@@ -693,7 +752,10 @@ def fetch_price(symbol: str, api_key: str = "", use_cache: bool = True) -> dict:
                                      "fetched_at": config.now(), "source": "LIVE", "spot_ref": True},
                                     use_cache)
             if provider == "fx-ref":
-                ref = _fetch_yahoo_quote(YAHOO_FX_MAP[internal])
+                ysym = _yahoo_symbol_for(internal)
+                if not ysym:
+                    continue
+                ref = _fetch_yahoo_quote(ysym)
                 provider_health.record_success(provider, (time.monotonic() - t0) * 1000.0)
                 return _store_quote(internal, provider,
                                     {"symbol": symbol, "price": ref["price"],

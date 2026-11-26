@@ -419,6 +419,9 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "signowstyle":
         from fysb.handlers import signal_now
         await signal_now.pick_style(q, uid, context, bot, arg)
+    elif act == "signowcat":
+        from fysb.handlers import signal_now
+        await signal_now.pick_category(q, uid, context, bot, arg, int(arg2 or 1))
     elif act == "signowsym":
         from fysb.handlers import signal_now
         await signal_now.pick_symbol(q, uid, context, bot, arg)
@@ -549,8 +552,12 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_vol_filter(q, uid, context, bot)
     elif act == "markets":
         await admin_trading.admin_markets(q, uid, context, bot)
+    elif act == "mktcat":
+        await admin_trading.admin_markets_category(q, uid, context, bot, arg, int(arg2 or 1))
+    elif act == "mktbulk":
+        await admin_trading.admin_markets_bulk(q, uid, context, bot, arg, arg2)
     elif act == "market_toggle":
-        await admin_trading.admin_market_toggle(q, uid, context, bot, arg)
+        await admin_trading.admin_market_toggle(q, uid, context, bot, arg, arg2)
     elif act == "market_verify":
         await admin_trading.admin_market_verify(q, uid, context, bot, arg)
     elif act == "adminmkts":

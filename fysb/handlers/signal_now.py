@@ -215,6 +215,86 @@ def _strat_label(code: str) -> str:
     return "جميع المنهجيات (أقوى فرصة)" if c == "ALL" else c
 
 
+def _symbol_category_map() -> dict[str, str]:
+    with db.conn() as c:
+        return {r["symbol"].upper(): (r["category"] or "forex").lower()
+                for r in c.execute("SELECT symbol, category FROM market_catalog").fetchall()}
+
+
+async def _render_market_picker(q, uid: int, context, bot, d: dict, category: str = "", page: int = 1) -> None:
+    from fysb import instruments
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON, CATEGORY_ORDER
+    ch = await afn.run(choices_for, uid, d.get("is_admin", False))
+    mkts = ch["markets"]
+    if not mkts:
+        await _render(q, "⛔ لا توجد أسواق مفعلة وموثقة متاحة لباقتك بعد — تواصل مع الإدارة.",
+                      kb.user_nav(), bot)
+        return
+    cat_map = await afn.run(_symbol_category_map)
+    sections: dict[str, list[str]] = {}
+    for m in mkts:
+        c = cat_map.get(m.upper()) or instruments.spec(m).category or "forex"
+        sections.setdefault(c, []).append(m)
+    ordered_cats = [c for c in CATEGORY_ORDER if c in sections] + \
+                   [c for c in sections if c not in CATEGORY_ORDER]
+    pfx = _prefix(d["is_admin"])
+    nav = kb.admin_nav if d.get("is_admin") else kb.user_nav
+    style = d.get("style", "INTRADAY")
+
+    cat = (category or "").strip().lower()
+    if cat and cat in sections:
+        grp = sections[cat]
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        per_page = 12
+        total_pages = max(1, (len(grp) + per_page - 1) // per_page)
+        page = max(1, min(int(page or 1), total_pages))
+        chunk = grp[(page - 1) * per_page: page * per_page]
+        rows = [[kb.btn(f"{icon} {m}", f"{pfx}:signowsym:{m}", style="primary") for m in chunk[i:i + 3]]
+                for i in range(0, len(chunk), 3)]
+        if total_pages > 1:
+            pnav = []
+            if page > 1:
+                pnav.append(kb.btn("◀️ السابق", f"{pfx}:signowcat:{cat}:{page - 1}"))
+            pnav.append(kb.btn(f"📄 {page}/{total_pages}", f"{pfx}:signowcat:{cat}:{page}"))
+            if page < total_pages:
+                pnav.append(kb.btn("التالي ▶️", f"{pfx}:signowcat:{cat}:{page + 1}"))
+            rows.append(pnav)
+        rows.append([kb.btn("↩️ كل أقسام الأسواق", f"{pfx}:signowstyle:{style}", style="primary")])
+        body = (f"✅ نوع التداول: <b>{STYLE_AR[style]}</b>\n"
+                f"{icon} <b>المرحلة 2/4 — قسم {title} ({len(grp)} سوق مفعّل):</b>")
+        await _render(q, body, nav(rows), bot)
+        return
+
+    rows = []
+    if len(ordered_cats) > 1 or len(mkts) > 9:
+        # 1-tap quick launch row (always keeps XAUUSD + top symbols 1 tap away)
+        quick = sorted(mkts, key=lambda s: (0 if s == "XAUUSD" else 1, s))[:3]
+        rows.append([kb.btn(f"⚡ {m}", f"{pfx}:signowsym:{m}", style="success") for m in quick])
+        # Luxury category buttons (2 per row!)
+        pair = []
+        for c in ordered_cats:
+            icon = CATEGORY_ICON.get(c, "🌐")
+            title = CATEGORY_AR.get(c, c)
+            pair.append(kb.btn(f"{icon} {title} ({len(sections[c])})", f"{pfx}:signowcat:{c}:1", style="primary"))
+            if len(pair) == 2:
+                rows.append(pair)
+                pair = []
+        if pair:
+            rows.append(pair)
+        if len(mkts) <= 9:
+            rest = [m for m in mkts if m not in quick]
+            for i in range(0, len(rest), 3):
+                rows.append([kb.btn(f"🌐 {m}", f"{pfx}:signowsym:{m}") for m in rest[i:i + 3]])
+    else:
+        rows = [[kb.btn(("🌐 " + m), f"{pfx}:signowsym:{m}", style="primary") for m in mkts[i:i + 3]]
+                for i in range(0, len(mkts), 3)]
+    body = (f"✅ نوع التداول: <b>{STYLE_AR[style]}</b>\n"
+            f"🌐 <b>المرحلة 2/4 — اختر السوق/الأداة ({len(mkts)} سوق مفعّل):</b>\n"
+            f"<i>{'كل الأسواق المفعلة والموثقة بأقسامها الملكية (وضع الإدارة).' if d.get('is_admin') else 'الأسواق المفعلة داخل باقتك بأقسامها الملكية.'}</i>")
+    await _render(q, body, nav(rows), bot)
+
+
 async def pick_style(q, uid: int, context, bot, style: str) -> None:
     d = context.user_data.get(DRAFT_KEY) or {}
     if not d:
@@ -225,18 +305,16 @@ async def pick_style(q, uid: int, context, bot, style: str) -> None:
     d["style"] = style
     d["stage"] = "market"
     context.user_data[DRAFT_KEY] = d
-    ch = await afn.run(choices_for, uid, d.get("is_admin", False))
-    mkts = ch["markets"]
-    if not mkts:
-        await _render(q, "⛔ لا توجد أسواق مفعلة وموثقة متاحة لباقتك بعد — تواصل مع الإدارة.",
-                      kb.user_nav(), bot)
-        return
-    rows = [[kb.btn(("🌐 " + m), f"{_prefix(d['is_admin'])}:signowsym:{m}") for m in mkts[i:i + 3]]
-            for i in range(0, len(mkts), 3)]
-    body = (f"✅ نوع التداول: <b>{STYLE_AR[style]}</b>\n"
-            f"🌐 <b>المرحلة 2/4 — اختر السوق/الأداة:</b>\n"
-            f"<i>{'كل الأسواق المفعلة والموثقة (وضع الإدارة).' if d.get('is_admin') else 'مقيّد بالأسواق المفعلة داخل باقتك.'}</i>")
-    await _render(q, body, kb.user_nav(rows) if not d.get("is_admin") else kb.admin_nav(rows), bot)
+    await _render_market_picker(q, uid, context, bot, d)
+
+
+async def pick_category(q, uid: int, context, bot, category: str, page: int = 1) -> None:
+    d = context.user_data.get(DRAFT_KEY) or {}
+    if not d:
+        return await open_flow(q, uid, context, bot, uid == config.ADMIN_ID)
+    d["stage"] = "market"
+    context.user_data[DRAFT_KEY] = d
+    await _render_market_picker(q, uid, context, bot, d, category=category, page=page)
 
 
 async def pick_symbol(q, uid: int, context, bot, symbol: str) -> None:

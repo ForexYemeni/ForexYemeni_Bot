@@ -278,7 +278,7 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">{config.BRAND} ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> متصل بالسوق اللحظي · v{config.VERSION}</div>
+      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockUser">--:--am بتوقيت مكة</span> · v{config.VERSION}</div>
     </div>
   </div>
   <div class="top-right">
@@ -1552,6 +1552,22 @@ async function boot(){{
     openTab(reqTab, document.getElementById('tab-' + reqTab));
   }}
 }}
+function _tickMeccaClock(elId){{
+  try{{
+    const el = document.getElementById(elId);
+    if(!el) return;
+    const m = new Date(Date.now() + 3 * 3600000);
+    let h = m.getUTCHours();
+    const ampm = h < 12 ? 'am' : 'pm';
+    h = h % 12; if(h === 0) h = 12;
+    const hh = String(h).padStart(2, '0');
+    const mm = String(m.getUTCMinutes()).padStart(2, '0');
+    el.textContent = `${{hh}}:${{mm}}${{ampm}} بتوقيت مكة`;
+  }}catch(_e){{}}
+}}
+_tickMeccaClock('meccaClockUser');
+setInterval(()=>_tickMeccaClock('meccaClockUser'), 15000);
+
 function loadOptionalAssets(){{
   // Non-blocking fonts & chart CDN — NEVER delays first paint even if ISP blocks external CDNs!
   try{{
@@ -1795,7 +1811,7 @@ input:focus,select:focus{{border-color:var(--gold)}}
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">{config.BRAND} ADMIN</div>
-      <div class="brand-sub"><span class="live-dot"></span> مركز القيادة الملكي · v{config.VERSION}</div>
+      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockAdmin">--:--am بتوقيت مكة</span> · v{config.VERSION}</div>
     </div>
   </div>
   <div class="top-actions">
@@ -3114,6 +3130,21 @@ async function loadAdmin(){{
     openAdminTab(reqPage);
   }}
 }}
+function _tickMeccaClockAdmin(){{
+  try{{
+    const el = document.getElementById('meccaClockAdmin');
+    if(!el) return;
+    const m = new Date(Date.now() + 3 * 3600000);
+    let h = m.getUTCHours();
+    const ampm = h < 12 ? 'am' : 'pm';
+    h = h % 12; if(h === 0) h = 12;
+    const hh = String(h).padStart(2, '0');
+    const mm = String(m.getUTCMinutes()).padStart(2, '0');
+    el.textContent = `${{hh}}:${{mm}}${{ampm}} بتوقيت مكة`;
+  }}catch(_e){{}}
+}}
+_tickMeccaClockAdmin();
+setInterval(_tickMeccaClockAdmin, 15000);
 loadAdmin();
 setTimeout(()=>{{
   try{{

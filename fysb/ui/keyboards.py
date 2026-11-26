@@ -272,71 +272,79 @@ def admin_menu() -> InlineKeyboardMarkup:
 
 
 def admin_hub_trading() -> InlineKeyboardMarkup:
+    """v8.6.1: Perfectly organized 2-column institutional Trading & Engine Hub."""
     return admin_nav([
+        [btn("👑 تحليل ForexYemeni الحقيقي", "a:true_analysis", style="success")],
         [btn("📡 إدارة الإشارات", "a:signals", style="success"),
          btn("🧠 محرك السوق", "a:engine", style="primary")],
         [btn("⚡ إشارة الآن", "a:signow", style="success"),
-         btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")],
-        [btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success"),
-         btn("📰 درع الأخبار", "a:newsguard", style="primary")],
-        [btn("🧭 قوة العملات (8)", "a:strength", style="primary"),
-         btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary")],
-        [btn("🛡 إدارة المخاطر", "a:risk", style="danger"),
-         btn("🌐 الأسواق", "a:markets", style="primary")],
-        [btn("⏱ الأطر الزمنية", "a:timeframes", style="primary"),
          btn("🔬 إدارة التحليلات", "a:analytics", style="primary")],
-        [btn("⚙️ أوضاع التشغيل", "a:modes", style="primary")],
+        [btn("📊 مركز الشارتات", "a:chartsmenu", style="primary"),
+         btn("📰 درع الأخبار", "a:newsguard", style="primary")],
+        [btn("🏆 مصفوفة الاستراتيجيات", "a:leaderboard", style="success"),
+         btn("🧭 قوة العملات (8)", "a:strength", style="primary")],
+        [btn("🌐 الأسواق العالمية", "a:markets", style="primary"),
+         btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")],
+        [btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary"),
+         btn("⏱ الأطر الزمنية", "a:timeframes", style="primary")],
+        [btn("🛡 إدارة المخاطر", "a:risk", style="danger"),
+         btn("⚙️ أوضاع التشغيل", "a:modes", style="primary")],
     ])
 
 
 def admin_hub_finance() -> InlineKeyboardMarkup:
+    """v8.6.1: Perfectly balanced Users, Subscriptions, Payments, Growth & Reports Hub."""
     return admin_nav([
-        [btn("👥 المستخدمون", "a:users", style="primary"),
+        [btn("👥 دليل المستخدمين", "a:users", style="primary"),
          btn("💎 الاشتراكات", "a:subscriptions", style="success")],
         [btn("💳 المدفوعات", "a:payments", style="success"),
-         btn("💠 الباقات", "a:plans", style="primary")],
-        [btn("🎟 أكواد الخصم (Promo)", "a:promos", style="success"),
-         btn("📊 بث تقرير الأداء الآن", "a:digest_now", style="primary")],
+         btn("💠 الباقات والأسعار", "a:plans", style="primary")],
         [btn("🏦 وسائل الدفع", "a:paymethods", style="primary"),
-         btn("🤝 نظام الإحالات", "a:refs", style="success")],
-        [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),
-         btn("🎁 الهدايا والأكواد", "a:gifts", style="success")],
+         btn("🎟 أكواد الخصم (Promo)", "a:promos", style="success")],
         [btn("👑 تحليل ForexYemeni الحقيقي", "a:true_analysis", style="success")],
-        [btn("💸 عمولات الشركاء", "a:affiliates", style="success"),
-         btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
-        [btn("📈 الإحصائيات", "a:statistics", style="primary"),
-         btn("📋 التقارير", "a:reports", style="primary")],
+        [btn("👑 شركاء القنوات و VIP", "a:partners", style="success"),
+         btn("💸 عمولات الشركاء", "a:affiliates", style="success")],
+        [btn("🤝 نظام الإحالات", "a:refs", style="success"),
+         btn("🎁 الهدايا والأكواد", "a:gifts", style="success")],
+        [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),
+         btn("📊 بث تقرير الأداء الآن", "a:digest_now", style="primary")],
+        [btn("📈 الإحصائيات التفصيلية", "a:statistics", style="primary"),
+         btn("📋 التقارير الشاملة", "a:reports", style="primary")],
     ])
 
 
 def admin_hub_comms() -> InlineKeyboardMarkup:
+    """v8.6.1: Perfectly symmetrical 3-row Channels, Partners & Support Hub."""
     return admin_nav([
         [btn("📺 القنوات والمجموعات", "a:channels", style="primary"),
-         btn("👑 شركاء القنوات و VIP", "a:partners", style="success")],
-        [btn("📣 الإعلانات", "a:broadcast", style="success"),
-         btn("🎧 الدعم الفني", "a:support", style="success")],
-        [btn("🔔 الإشعارات", "a:notifications", style="primary")],
+         btn("📊 قنوات الشارت فقط", "a:chartchs", style="success")],
+        [btn("👑 شركاء القنوات و VIP", "a:partners", style="success"),
+         btn("📣 الإعلانات والبث", "a:broadcast", style="success")],
+        [btn("🎧 الدعم الفني", "a:support", style="success"),
+         btn("🔔 الإشعارات", "a:notifications", style="primary")],
     ])
 
 
 def admin_hub_execution() -> InlineKeyboardMarkup:
+    """v8.6.1: Execution, Brokers, Copy-Bridge & Crypto API Hub."""
     return admin_nav([
         [btn("⚡ جسر النسخ الملكي (cTrader / Demo / Live)", "a:bridge", style="success")],
-        [btn("🏦 الوسطاء", "a:brokers", style="primary"),
-         btn("🔗 حسابات التداول", "a:accounts", style="primary")],
         [btn("🟡 منصات الكريبتو API (مجاني)", "a:cryptoapi", style="success")],
+        [btn("🏦 الوسطاء المعتمدون", "a:brokers", style="primary"),
+         btn("🔗 حسابات التداول", "a:accounts", style="primary")],
         [btn("🧪 التداول التجريبي", "a:demo", style="success"),
          btn("🔒 التداول الحقيقي", "a:live", style="danger")],
     ])
 
 
 def admin_hub_system() -> InlineKeyboardMarkup:
+    """v8.6.1: Security, Backup, Mini App, Updates & System Health Hub."""
     return admin_nav([
-        [btn("🔐 الأمان", "a:security", style="danger"),
-         btn("💾 النسخ الاحتياطي", "a:backup", style="primary")],
-        [btn("⚙️ الإعدادات", "a:settings", style="primary"),
-         btn("🧾 سجل الإدارة", "a:audit", style="primary")],
         [btn("🌐 تطبيق الويب (Mini App)", "a:webapp", style="success")],
+        [btn("🔐 الأمان والصلاحيات", "a:security", style="danger"),
+         btn("💾 النسخ الاحتياطي", "a:backup", style="primary")],
+        [btn("⚙️ الإعدادات العامة", "a:settings", style="primary"),
+         btn("🧾 سجل الإدارة", "a:audit", style="primary")],
         [btn("🔄 إدارة التحديثات", "a:updates", style="primary"),
          btn("🖥 حالة النظام", "a:health", style="success")],
     ])
@@ -358,11 +366,56 @@ def webapp_btn(text: str, url: str, style: str | None = "success") -> InlineKeyb
 
 
 ADMIN_HUBS = {
-    "trading": ("📡 <b><u>مركز التداول والإشارات</u></b>\n▎إدارة الإشارات، محرك السوق، الـ 13 استراتيجية الحقيقية، الأسواق والمخاطر:", admin_hub_trading),
-    "finance": ("👥 <b><u>مركز المستخدمين والمالية</u></b>\n▎دليل المستخدمين، الاشتراكات، الباقات، المدفوعات، الإحالات والتقارير:", admin_hub_finance),
-    "comms": ("📺 <b><u>مركز القنوات والتواصل</u></b>\n▎القنوات والمجموعات، الإعلانات المجدولة، الإشعارات وتذاكر الدعم:", admin_hub_comms),
-    "execution": ("🏦 <b><u>مركز الوسطاء والتنفيذ</u></b>\n▎إدارة الوسطاء المشفرين، حسابات التداول، التجريبي وقفل التداول الحقيقي:", admin_hub_execution),
-    "system": ("🛡 <b><u>مركز النظام والأمان</u></b>\n▎الأمان، النسخ الاحتياطي، الإعدادات العامة، سجل الإدارة وصحة النظام:", admin_hub_system),
+    "trading": (
+        "📡 <b><u>مركز الإشارات والمحرك المؤسسي</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        "▎👑 <b>القيادة الفورية:</b> تحليل ForexYemeni الحقيقي · إدارة الإشارات · المحرك · إشارة الآن\n"
+        "▎📊 <b>الذكاء والشارتات:</b> مركز الشارتات · درع الأخبار · مصفوفة الاستراتيجيات · قوة العملات\n"
+        "▎⚙️ <b>الضبط والمخاطر:</b> الأسواق · الاستراتيجيات (13) · الأطر الزمنية · المخاطر وأوضاع التشغيل"
+        "</blockquote>",
+        admin_hub_trading,
+    ),
+    "finance": (
+        "👥 <b><u>مركز المستخدمين والمالية والنمو</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        "▎💎 <b>العضويات والمال:</b> المستخدمون · الاشتراكات · المدفوعات · الباقات · وسائل الدفع والخصومات\n"
+        "▎🚀 <b>النمو والشراكة:</b> تحليل ForexYemeni الحقيقي · الشركاء · العمولات · الإحالات · الهدايا والأكاديمية\n"
+        "▎📈 <b>التحليلات والتقارير:</b> الإحصائيات التفصيلية · التقارير الشاملة · بث تقرير الأداء"
+        "</blockquote>",
+        admin_hub_finance,
+    ),
+    "comms": (
+        "📺 <b><u>مركز القنوات والشركاء والتواصل</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        "▎📺 <b>البث والقنوات:</b> قنوات الإشارات والتحليلات · قنوات الشارت فقط حسب السوق\n"
+        "▎👑 <b>الشراكة والحملات:</b> شركاء القنوات وحارس VIP · الإعلانات والبث الجماعي\n"
+        "▎🎧 <b>خدمة الأعضاء:</b> تذاكر الدعم الفني المباشر · مركز الإشعارات"
+        "</blockquote>",
+        admin_hub_comms,
+    ),
+    "execution": (
+        "🏦 <b><u>مركز الوسطاء والتنفيذ الآلي</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        "▎⚡ <b>النسخ والتكامل:</b> جسر النسخ الملكي (cTrader / Demo / Live) · ربط منصات الكريبتو API\n"
+        "▎🏦 <b>الحسابات والوسطاء:</b> الوسطاء المشفرون · حسابات التداول المرتبطة\n"
+        "▎🛡 <b>بيئات التداول:</b> إدارة التداول التجريبي · قفل أمان التداول الحقيقي"
+        "</blockquote>",
+        admin_hub_execution,
+    ),
+    "system": (
+        "🛡 <b><u>مركز النظام والأمان والتحديثات</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<blockquote>"
+        "▎🌐 <b>الواجهات الحديثة:</b> تطبيق الويب الملكي (Mini App) والرابط التلقائي\n"
+        "▎🔐 <b>الحماية والاستمرارية:</b> الأمان والصلاحيات · النسخ الاحتياطي · الإعدادات · سجل الإدارة\n"
+        "▎🖥 <b>المراقبة والتطوير:</b> إدارة التحديثات الفورية · فحص صحة النظام"
+        "</blockquote>",
+        admin_hub_system,
+    ),
 }
 
 

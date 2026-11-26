@@ -2043,18 +2043,28 @@ input:focus,select:focus{{border-color:var(--gold)}}
         <div class="row-form">
           <input id="ccChatId" placeholder="@MyGoldCharts أو https://t.me/... أو -100..." style="flex:1;min-width:185px"/>
           <input id="ccTitle" placeholder="اسم القناة (يُجلب تلقائياً إذا تُرك فارغاً)" style="flex:1;min-width:140px"/>
-          <select id="ccMkt" style="flex:1;min-width:140px"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+          <select id="ccMkt" style="flex:1;min-width:140px" onchange="syncAddMktFromSelect(this.value)"><option value="ALL">🌐 جميع الأسواق (ALL)</option></select>
+        </div>
+        <div style="margin:6px 0 9px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px">🎯 اختر أداة واحدة أو عدة أدوات معاً (اضغط على الرموز لتفعيلها أو إلغائها):</div>
+          <div id="ccAddMktChips" style="display:flex;gap:5px;flex-wrap:wrap"></div>
         </div>
         <button class="btn gold" id="ccAddBtn" style="width:100%" onclick="addChartCh()">🛡 تحقق واعتماد القناة مع بث تجريبي فوري</button>
         <div id="ccStatusNote" style="display:none;margin-top:9px;padding:9px 11px;border-radius:11px;font-size:11.5px;line-height:1.6"></div>
         <div style="margin-top:11px;padding-top:10px;border-top:1px solid var(--border)">
-          <div style="font-size:11px;color:var(--gold2);font-weight:800;margin-bottom:5px">⏱ جدولة الشارتات الدورية التلقائية للقنوات:</div>
+          <div style="font-size:11.5px;color:var(--gold2);font-weight:800;margin-bottom:4px">⏱ تحديث الشارت الملكي الدوري التلقائي (للأدمن والقنوات):</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:7px;line-height:1.5">يتحكم برسائل <b>«تحديث شارت ملكي دوري (كل Xد)»</b> مع الشارت. لإيقافها نهائياً اضغط الزر الأحمر أدناه أو اختر <b>⏹ إيقاف</b>.</div>
+          <button class="btn danger" id="schedStopBtn" style="width:100%;margin-bottom:8px;display:none" onclick="setChartSched(0)">⏹ إيقاف التحديث الدوري للشارتات الآن</button>
           <div class="sched-bar" id="schedBar">
-            <button class="sched-pill" data-min="0" onclick="setChartSched(0)">⏹ يدوي</button>
+            <button class="sched-pill" data-min="0" onclick="setChartSched(0)">⏹ إيقاف (يدوي)</button>
             <button class="sched-pill" data-min="5" onclick="setChartSched(5)">⚡ كل 5د</button>
+            <button class="sched-pill" data-min="10" onclick="setChartSched(10)">⏱ كل 10د</button>
             <button class="sched-pill" data-min="15" onclick="setChartSched(15)">⏱ كل 15د</button>
             <button class="sched-pill" data-min="30" onclick="setChartSched(30)">🕒 كل 30د</button>
             <button class="sched-pill" data-min="60" onclick="setChartSched(60)">🕐 كل 60د</button>
+          </div>
+          <div style="margin-top:8px">
+            <button class="btn off" id="schedChToggleBtn" style="width:100%" onclick="toggleKey('chart_schedule_channels')">📺 إرسال التحديث الدوري للقنوات العامة: ⚪ للأدمن فقط</button>
           </div>
         </div>
       </div>
@@ -2398,6 +2408,100 @@ async function sendLuxuryNewsNow(){{
   toast(r.ok ? '📤 تم بث نشرة الأخبار الفاخرة بنجاح' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }}
+let _ccAddSelected = ['ALL'];
+let _adminAllMarkets = [];
+let _ccEditDrafts = {{}};
+
+function _normMktList(arr){{
+  const clean = (arr||[]).map(x=>String(x||'').trim().toUpperCase()).filter(Boolean);
+  if(!clean.length || clean.includes('ALL')) return ['ALL'];
+  return Array.from(new Set(clean));
+}}
+function syncAddMktFromSelect(val){{
+  _ccAddSelected = _normMktList([val||'ALL']);
+  renderAddMktChips();
+}}
+function toggleAddMktChip(sym){{
+  const s = String(sym||'ALL').toUpperCase();
+  if(s === 'ALL'){{
+    _ccAddSelected = ['ALL'];
+  }} else {{
+    let cur = _ccAddSelected.filter(x => x !== 'ALL');
+    if(cur.includes(s)) cur = cur.filter(x => x !== s);
+    else cur.push(s);
+    _ccAddSelected = cur.length ? cur : ['ALL'];
+  }}
+  const sel = document.getElementById('ccMkt');
+  if(sel) sel.value = _ccAddSelected.length === 1 ? _ccAddSelected[0] : 'ALL';
+  renderAddMktChips();
+}}
+function renderAddMktChips(){{
+  const box = document.getElementById('ccAddMktChips');
+  if(!box) return;
+  const allList = ['ALL', ..._adminAllMarkets];
+  box.innerHTML = allList.map(sym => {{
+    const active = _ccAddSelected.includes(sym);
+    const lbl = sym === 'ALL' ? '🌐 جميع الأسواق (ALL)' : sym;
+    return `<button type="button" class="sched-pill ${{active?'active':''}}" style="padding:5px 9px;font-size:11px" onclick="toggleAddMktChip('${{esc(sym)}}')">${{esc(lbl)}}</button>`;
+  }}).join('');
+}}
+function openEditChartCh(id){{
+  const panel = document.getElementById('ccEditPanel_' + id);
+  if(!panel) return;
+  const isOpen = panel.style.display === 'block';
+  panel.style.display = isOpen ? 'none' : 'block';
+  if(!isOpen) renderEditMktChips(id);
+}}
+function toggleEditMktChip(id, sym){{
+  const d = _ccEditDrafts[id];
+  if(!d) return;
+  const s = String(sym||'ALL').toUpperCase();
+  if(s === 'ALL'){{
+    d.markets = ['ALL'];
+  }} else {{
+    let cur = (d.markets||[]).filter(x => x !== 'ALL');
+    if(cur.includes(s)) cur = cur.filter(x => x !== s);
+    else cur.push(s);
+    d.markets = cur.length ? cur : ['ALL'];
+  }}
+  renderEditMktChips(id);
+}}
+function renderEditMktChips(id){{
+  const box = document.getElementById('ccEditChips_' + id);
+  const d = _ccEditDrafts[id];
+  if(!box || !d) return;
+  const allList = ['ALL', ...Array.from(new Set([..._adminAllMarkets, ...(d.markets||[]).filter(x=>x!=='ALL')]))];
+  box.innerHTML = allList.map(sym => {{
+    const active = (d.markets||['ALL']).includes(sym);
+    const lbl = sym === 'ALL' ? '🌐 ALL' : sym;
+    return `<button type="button" class="sched-pill ${{active?'active':''}}" style="padding:5px 9px;font-size:11px" onclick="toggleEditMktChip(${{id}},'${{esc(sym)}}')">${{esc(lbl)}}</button>`;
+  }}).join('');
+}}
+async function saveEditChartCh(id, btn){{
+  const d = _ccEditDrafts[id];
+  if(!d) return;
+  const titleEl = document.getElementById('ccEditTitle_' + id);
+  const sigEl = document.getElementById('ccEditSig_' + id);
+  const trkEl = document.getElementById('ccEditTrk_' + id);
+  const schEl = document.getElementById('ccEditSch_' + id);
+  const orig = btn ? btn.textContent : '';
+  if(btn){{ btn.disabled = true; btn.textContent = '⏳ جارٍ الحفظ...'; }}
+  try{{
+    const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{
+      op:'update',
+      id,
+      title: titleEl ? titleEl.value.trim() : d.title,
+      markets: _normMktList(d.markets).join(','),
+      send_on_signal: sigEl ? !!sigEl.checked : true,
+      send_on_tracking: trkEl ? !!trkEl.checked : true,
+      send_on_schedule: schEl ? !!schEl.checked : true,
+    }})}});
+    toast(r && r.ok ? '✅ تم حفظ تعديلات القناة والأدوات بنجاح!' : ((r&&r.error)||'خطأ في الحفظ'), !(r&&r.ok));
+    if(r && r.ok) loadAdmin();
+  }} finally {{
+    if(btn){{ btn.disabled = false; btn.textContent = orig; }}
+  }}
+}}
 async function addChartCh(){{
   const chat_id = document.getElementById('ccChatId').value.trim();
   if(!chat_id) return toast('أدخل معرف القناة أولاً (@channel أو -100...)', true);
@@ -2406,8 +2510,9 @@ async function addChartCh(){{
   if(btn){{ btn.disabled = true; btn.textContent = '⏳ جارٍ التحقق عبر Telegram API وإرسال اختبار...'; }}
   if(note){{ note.style.display = 'none'; }}
   try{{
+    const mktsCsv = _normMktList(_ccAddSelected.length ? _ccAddSelected : [document.getElementById('ccMkt').value]).join(',');
     const r = await api('/api/admin/chart-channel',{{method:'POST',body:JSON.stringify({{
-      op:'add', chat_id, title:document.getElementById('ccTitle').value.trim(), markets:document.getElementById('ccMkt').value, send_test:true
+      op:'add', chat_id, title:document.getElementById('ccTitle').value.trim(), markets:mktsCsv, send_test:true
     }})}});
     if(r && r.ok){{
       const verBadge = r.verified ? '🛡 موثّقة عبر تيليجرام' : '💾 محفوظة';
@@ -2806,6 +2911,7 @@ async function loadAdmin(){{
     news_guard_enabled:'📰 درع الأخبار', news_auto_broadcast:'📢 بث الأخبار التلقائي',
     news_broadcast_users:'👥 بث للمستخدمين', news_broadcast_partners:'🤝 بث للشركاء',
     news_broadcast_channels:'📺 بث للقنوات', charts_enabled:'📊 الشارتات المحلية',
+    chart_schedule_channels:'⏱ شارت دوري للقنوات',
     academy_enabled:'🎓 الأكاديمية', crypto_api_enabled:'🔗 منصات الكريبتو',
     auto_digest_enabled:'📊 التقارير التلقائية', stars_enabled:'⭐ نجوم تيليجرام XTR'
   }};
@@ -2859,26 +2965,68 @@ async function loadAdmin(){{
 
   // Page 4: Chart Channels
   const sm = d.chart_schedule_minutes || 0;
-  document.getElementById('schedBadge').textContent = sm > 0 ? `⏱ كل ${{sm}} دقيقة` : '⏹ يدوي';
+  const schedBadge = document.getElementById('schedBadge');
+  schedBadge.textContent = sm > 0 ? `🟢 كل ${{sm}}د (نشط)` : '⏹ متوقف (يدوي)';
+  schedBadge.className = 'pill ' + (sm > 0 ? 'green' : '');
+  const stopBtn = document.getElementById('schedStopBtn');
+  if(stopBtn) stopBtn.style.display = sm > 0 ? 'block' : 'none';
+  const schChOn = !!(d.chart_schedule_channels || (d.toggles && d.toggles.chart_schedule_channels));
+  const schChBtn = document.getElementById('schedChToggleBtn');
+  if(schChBtn){{
+    schChBtn.className = 'btn ' + (schChOn ? 'on' : 'off');
+    schChBtn.textContent = '📺 إرسال التحديث الدوري للقنوات العامة: ' + (schChOn ? '🟢 مفعّل' : '⚪ للأدمن فقط');
+  }}
   document.querySelectorAll('#schedBar .sched-pill').forEach(p => {{
     p.classList.toggle('active', Number(p.dataset.min) === Number(sm));
   }});
+  _adminAllMarkets = Array.isArray(d.markets) && d.markets.length ? d.markets : ['XAUUSD','BTCUSD','EURUSD','GBPUSD','ETHUSD'];
   const mktSel = document.getElementById('ccMkt');
-  if(d.markets && d.markets.length && mktSel.options.length <= 1){{
-    d.markets.forEach(m => {{ const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); }});
+  if(mktSel && mktSel.options.length <= 1){{
+    _adminAllMarkets.forEach(m => {{ const o = document.createElement('option'); o.value = m; o.textContent = m; mktSel.appendChild(o); }});
   }}
+  renderAddMktChips();
   const cchs = d.chart_channels || [];
   document.getElementById('chCountPill').textContent = cchs.length + ' قناة';
+  _ccEditDrafts = {{}};
   document.getElementById('chartChBox').innerHTML = cchs.length ? cchs.map(c => {{
+    const cid = Number(c.id)||0;
+    const mktsList = _normMktList(String(c.markets||'ALL').split(','));
+    _ccEditDrafts[cid] = {{
+      title: String(c.title||c.chat_id||''),
+      markets: mktsList.slice(),
+    }};
     const lastTxt = c.last_sent ? ` · 📤 آخر بث: ${{esc(String(c.last_sent).slice(0,16).replace('T',' '))}}` : ' · لم يُبث بعد';
-    return `<div class="item">
-      <div>${{c.enabled?'🟢':'⚪'}} <b>${{esc(c.title||c.chat_id)}}</b> <span class="pill">${{esc(c.markets||'ALL')}}</span>
-        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{esc(c.chat_id)}}${{lastTxt}}</div>
+    const sigOn = Number(c.send_on_signal ?? 1) === 1;
+    const trkOn = Number(c.send_on_tracking ?? 1) === 1;
+    const schOn = Number(c.send_on_schedule ?? 1) === 1;
+    const modesTxt = [sigOn?'📡 إشارات':'', trkOn?'🎯 تتبع':'', schOn?'⏱ دوري':''].filter(Boolean).join(' · ') || '⚪ بدون بث تلقائي';
+    return `<div class="item" style="flex-direction:column;align-items:stretch;gap:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <div>${{c.enabled?'🟢':'⚪'}} <b>${{esc(c.title||c.chat_id)}}</b> <span class="pill">${{esc(c.markets||'ALL')}}</span>
+          <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-top:2px">${{esc(c.chat_id)}}${{lastTxt}}</div>
+          <div style="color:var(--cyan);font-size:10.5px;margin-top:3px">${{modesTxt}}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn ghost" style="padding:7px 10px" onclick="openEditChartCh(${{cid}})">✏️ تعديل الأدوات</button>
+          <button class="btn gold" style="padding:7px 10px" onclick="testChartCh(${{cid}},this)">🧪 اختبار</button>
+          <button class="btn ${{c.enabled?'on':'off'}}" onclick="chartChOp('toggle',${{cid}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
+          <button class="btn danger" onclick="chartChOp('delete',${{cid}})">🗑</button>
+        </div>
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class="btn gold" style="padding:7px 10px" onclick="testChartCh(${{Number(c.id)||0}},this)">🧪 اختبار الآن</button>
-        <button class="btn ${{c.enabled?'on':'off'}}" onclick="chartChOp('toggle',${{Number(c.id)||0}})">${{c.enabled?'مفعّلة':'متوقفة'}}</button>
-        <button class="btn danger" onclick="chartChOp('delete',${{Number(c.id)||0}})">🗑</button>
+      <div id="ccEditPanel_${{cid}}" style="display:none;padding:10px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(212,175,55,.28)">
+        <div style="font-size:11.5px;color:var(--gold2);font-weight:800;margin-bottom:7px">✏️ تعديل اسم القناة والأدوات المختارة ونوع البث:</div>
+        <input id="ccEditTitle_${{cid}}" value="${{esc(c.title||c.chat_id)}}" placeholder="اسم القناة" style="width:100%;margin-bottom:8px"/>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:5px">🎯 الأدوات/الأسواق المسموحة لهذه القناة (اضغط للتبديل):</div>
+        <div id="ccEditChips_${{cid}}" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:9px"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;margin-bottom:9px">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ccEditSig_${{cid}}" ${{sigOn?'checked':''}}/> 📡 عند صدور الإشارة</label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ccEditTrk_${{cid}}" ${{trkOn?'checked':''}}/> 🎯 تحديثات التتبع الحي</label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="ccEditSch_${{cid}}" ${{schOn?'checked':''}}/> ⏱ التحديث الدوري للشارت</label>
+        </div>
+        <div class="btn-row">
+          <button class="btn gold" onclick="saveEditChartCh(${{cid}},this)">💾 حفظ التعديلات</button>
+          <button class="btn ghost" style="flex:0;min-width:74px" onclick="openEditChartCh(${{cid}})">إغلاق</button>
+        </div>
       </div>
     </div>`;
   }}).join('') : '<div class="empty">لا توجد قنوات شارت مخصصة بعد — أضف قناة أعلاه للتحقق الفوري.</div>';

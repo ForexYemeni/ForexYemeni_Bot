@@ -775,9 +775,13 @@ async def scheduled_charts_loop(app):
                                 f"▎🛡 متابعة حية تلقائية من محرك ForexYemeni Royal."
                             )
                             if config.ADMIN_ID and admin_sent < 5:
-                                pub_kb = _kb.InlineKeyboardMarkup([[
-                                    _kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success"),
-                                ]])
+                                pub_kb = _kb.InlineKeyboardMarkup([
+                                    [_kb.btn("🏆 نشر الإثبات للقنوات الآن", f"a:sigproof:{sig['id']}", style="success")],
+                                    [
+                                        _kb.btn("⏹ إيقاف التحديث الدوري الآن", "a:chartsched:0", style="danger"),
+                                        _kb.btn("⚙️ إعدادات الشارتات", "a:chartsmenu", style="primary"),
+                                    ],
+                                ])
                                 await app.bot.send_photo(
                                     chat_id=config.ADMIN_ID,
                                     photo=_io.BytesIO(b["png"]),

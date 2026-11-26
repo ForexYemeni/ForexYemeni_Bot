@@ -1669,62 +1669,163 @@ async def admin_vol_filter(q, uid, context, bot):
 
 
 # --- Markets ---------------------------------------------------------------------
-CATEGORY_ORDER = ["metal", "forex", "crypto", "index", "stock", "commodity"]
+CATEGORY_ORDER = ["metal", "forex", "crypto", "stock", "index", "commodity"]
+_ADMIN_MKT_PAGE_SIZE = 12
 
 
-async def admin_markets(q, uid, context, bot):
-    """v6.8.1 — LUXURY CATALOG BOARD: every market inside its royal category
-    section (المعادن · الفوركس · الرقمية · المؤشرات · الأسهم · السلع), with
-    real counts, live-state markers and a 2-per-row button grid — the old
-    flat alphabetical wall is gone."""
+async def admin_markets(q, uid, context, bot, notice: str = ""):
+    """v8.3.0 — ULTRA-LUXURY ROYAL MARKETS HUB: clean category buttons
+    (المعادن · الفوركس · العملات الرقمية · الأسهم · المؤشرات · السلع) with
+    real enabled/total counts across 101 global instruments — zero clutter."""
     from fysb.theme import CATEGORY_AR, CATEGORY_ICON
     rows = await afn.run(_market_catalog_all)
     if not rows:
         await render(q, "🌐 لا توجد أسواق في الفهرس بعد.", kb.admin_nav([[kb.btn("➕ إضافة سوق", "a:market_add")]]), bot)
         return
     total = len(rows)
-    verified = sum(1 for r in rows if r["verified"])
     enabled = sum(1 for r in rows if r["enabled"])
-    live = sum(1 for r in rows if r["enabled"] and r["verified"])
-    lines = ["🌐 <b><u>إدارة الأسواق — الفهرس الملكي بأقسامه</u></b>",
-             "<blockquote>"
-             f"▎🗂 إجمالي الأدوات: <b>{total}</b> · موثقة: <b>{verified}</b> · مفعلة: <b>{enabled}</b> · جاهزة للتداول: <b>{live}</b>\n"
-             "▎السوق الجديد يبقى مغلقاً حتى يثبت المزود بياناته فعلياً (زر تحقق)</blockquote>"]
+    closed = total - enabled
     sections: dict[str, list] = {}
     for r in rows:
         sections.setdefault((r.get("category") or "forex"), []).append(r)
     ordered = [c for c in CATEGORY_ORDER if c in sections] + \
               [c for c in sections if c not in CATEGORY_ORDER]
-    rows_kb = []
+
+    lines = [
+        "🌐 <b><u>مركز إدارة الأسواق العالمي الملكي — FOREXYEMENI</u></b>",
+        "<blockquote>"
+        f"▎🗂 إجمالي الأدوات الحقيقية: <b>{total}</b> أداة عالمية\n"
+        f"▎🟢 مفعّلة حالياً: <b>{enabled}</b> · 🔒 مغلقة افتراضياً: <b>{closed}</b>\n"
+        "▎⚡ اختر أي قسم بالأسفل ثم اضغط على أي سوق لتفعيله 🟢 أو إغلاقه 🔒 بضغطة واحدة."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>✨ {esc(notice)}</i>")
+    lines.append("\n<b>📋 ملخص الأقسام العالمية:</b>")
     for cat in ordered:
         icon = CATEGORY_ICON.get(cat, "🌐")
         title = CATEGORY_AR.get(cat, cat)
         grp = sections[cat]
-        sec_ver = sum(1 for r in grp if r["verified"])
         sec_en = sum(1 for r in grp if r["enabled"])
-        lines.append(f"\n{icon} <b><u>{title}</u></b> — {len(grp)} أدوات · موثقة {sec_ver} · مفعلة {sec_en}")
-        for r in grp:
-            state = "🟢" if (r["enabled"] and r["verified"]) else ("🔵" if r["verified"] else "⚪")
-            lines.append(f"▎{state} <b>{esc(r['symbol'])}</b> — {esc(r['title'])} · <code>{esc(r['provider_symbol'])}</code>"
-                         f" · pip={r['pip_size']} · digits={r['digits']}")
-        # 2-per-row toggle grid per section (compact luxury board)
-        grid = []
-        for r in grp:
-            mark = "🟢" if (r["enabled"] and r["verified"]) else ("🔵" if r["verified"] else "⚪")
-            grid.append(kb.btn(f"{mark} {r['symbol']}: {'إيقاف' if r['enabled'] else 'تفعيل'}",
-                               f"a:market_toggle:{r['symbol']}"))
-            if len(grid) == 2:
-                rows_kb.append(grid)
-                grid = []
-        if grid:
-            rows_kb.append(grid)
-        unverified = [r for r in grp if not r["verified"]]
-        while unverified:
-            pair, unverified = unverified[:2], unverified[2:]
-            rows_kb.append([kb.btn(f"✅ تحقق {r['symbol']} من المزود", f"a:market_verify:{r['symbol']}") for r in pair])
-    rows_kb.append([kb.btn("➕ إضافة سوق جديد", "a:market_add")])
-    rows_kb.append([kb.btn("🎯 أسواق إشارات حساب الإدارة", "a:adminmkts", style="primary")])
+        st_dot = "🟢" if sec_en > 0 else "🔒"
+        lines.append(f"▎{st_dot} {icon} <b>{title}</b>: <b>{sec_en}</b> مفعّل من أصل <code>{len(grp)}</code>")
+
+    # 2-per-row luxury category buttons (المعادن | الفوركس / العملات الرقمية | الأسهم / المؤشرات | السلع)
+    rows_kb = []
+    pair_buf = []
+    for cat in ordered:
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        grp = sections[cat]
+        sec_en = sum(1 for r in grp if r["enabled"])
+        btn_style = "success" if sec_en > 0 else "primary"
+        pair_buf.append(kb.btn(f"{icon} {title} ({sec_en}/{len(grp)})", f"a:mktcat:{cat}:1", style=btn_style))
+        if len(pair_buf) == 2:
+            rows_kb.append(pair_buf)
+            pair_buf = []
+    if pair_buf:
+        rows_kb.append(pair_buf)
+
+    rows_kb.append([kb.btn(f"🟢 عرض الأسواق المفعّلة الآن فقط ({enabled})", "a:mktcat:enabled:1", style="success")])
+    rows_kb.append([
+        kb.btn("🎯 أسواق إشارات الإدارة", "a:adminmkts", style="primary"),
+        kb.btn("➕ إضافة سوق مخصص", "a:market_add"),
+    ])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_markets_category(q, uid, context, bot, category: str, page: int = 1, notice: str = ""):
+    """v8.3.0 — Paginated luxury board for a single market category with 1-tap toggle."""
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON
+    cat = (category or "metal").strip().lower()
+    rows = await afn.run(_market_catalog_all)
+    if cat == "enabled":
+        grp = [r for r in rows if r["enabled"]]
+        icon, title = "🟢", "الأسواق المفعّلة حالياً"
+    else:
+        grp = [r for r in rows if (r.get("category") or "forex").lower() == cat]
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+
+    # Sort enabled first, then XAUUSD first, then alphabetical
+    grp.sort(key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, 0 if r["enabled"] else 1, r["symbol"]))
+    total_cat = len(grp)
+    en_cat = sum(1 for r in grp if r["enabled"])
+    total_pages = max(1, (total_cat + _ADMIN_MKT_PAGE_SIZE - 1) // _ADMIN_MKT_PAGE_SIZE)
+    page = max(1, min(int(page or 1), total_pages))
+    chunk = grp[(page - 1) * _ADMIN_MKT_PAGE_SIZE: page * _ADMIN_MKT_PAGE_SIZE]
+
+    lines = [
+        f"{icon} <b><u>قسم {title} — إدارة الأسواق</u></b>",
+        "<blockquote>"
+        f"▎📊 المفعّلة: <b>{en_cat}</b> من أصل <b>{total_cat}</b> · صفحة <code>{page}/{total_pages}</code>\n"
+        "▎⚡ اضغط أي سوق بالأسفل لتفعيله 🟢 أو إغلاقه 🔒 فوراً بضغطة واحدة."
+        "</blockquote>",
+    ]
+    if notice:
+        lines.append(f"<i>✨ {esc(notice)}</i>")
+    if not chunk:
+        lines.append("\n⚪ لا توجد أدوات مفعّلة في هذا العرض حالياً.")
+    else:
+        for r in chunk:
+            st = "🟢 مفعّل" if r["enabled"] else "🔒 مغلق"
+            lines.append(f"▎{st} · <b>{esc(r['symbol'])}</b> — {esc(r['title'])}")
+
+    rows_kb = []
+    grid = []
+    ctx_tag = f"{cat}_{page}"
+    for r in chunk:
+        is_on = bool(r["enabled"])
+        lbl = f"{'🟢' if is_on else '🔒'} {r['symbol']}"
+        grid.append(kb.btn(lbl, f"a:market_toggle:{r['symbol']}:{ctx_tag}", style="success" if is_on else "primary"))
+        if len(grid) == 2:
+            rows_kb.append(grid)
+            grid = []
+    if grid:
+        rows_kb.append(grid)
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(kb.btn("◀️ السابق", f"a:mktcat:{cat}:{page - 1}"))
+        nav_row.append(kb.btn(f"📄 {page}/{total_pages}", f"a:mktcat:{cat}:{page}"))
+        if page < total_pages:
+            nav_row.append(kb.btn("التالي ▶️", f"a:mktcat:{cat}:{page + 1}"))
+        rows_kb.append(nav_row)
+
+    if cat != "enabled" and total_cat > 0:
+        rows_kb.append([
+            kb.btn(f"✅ تفعيل كل {title}", f"a:mktbulk:{cat}:on", style="success"),
+            kb.btn(f"🔒 إغلاق كل {title}", f"a:mktbulk:{cat}:off", style="danger"),
+        ])
+    rows_kb.append([kb.btn("↩️ كل أقسام الأسواق", "a:markets", style="primary")])
+    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_markets_bulk(q, uid, context, bot, category: str, mode: str):
+    """Enable or disable all instruments in a category at once."""
+    from fysb.theme import CATEGORY_AR
+    cat = (category or "").strip().lower()
+    enable = (mode or "").strip().lower() == "on"
+    def _apply_bulk():
+        with db.tx() as c:
+            if enable:
+                cur = c.execute(
+                    "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE LOWER(category)=?",
+                    (config.now(), cat),
+                )
+            else:
+                cur = c.execute(
+                    "UPDATE market_catalog SET enabled=0, updated_at=? WHERE LOWER(category)=? AND symbol<>?",
+                    (config.now(), cat, db.GOLD_DEFAULT_SYMBOL),
+                )
+            return int(cur.rowcount or 0)
+    cnt = await afn.run(_apply_bulk)
+    await afn.run(audit_log.log, uid, f"markets_bulk:{cat}:{'on' if enable else 'off'}:{cnt}")
+    title = CATEGORY_AR.get(cat, cat)
+    msg = (f"تم تفعيل جميع أسواق قسم {title} ({cnt} أداة) بنجاح 🟢"
+           if enable else f"تم إغلاق أسواق قسم {title} ({cnt} أداة) بنجاح 🔒")
+    await admin_markets_category(q, uid, context, bot, cat, page=1, notice=msg)
 
 
 # --- Admin personal signal-receive market filter (v6.17.0) ----------------------
@@ -1841,17 +1942,27 @@ async def admin_signal_markets_all(q, uid, context, bot):
     await admin_signal_markets(q, uid, context, bot, notice="تم تفعيل استلام جميع الأسواق المفعّلة على حساب الإدارة.")
 
 
-async def admin_market_toggle(q, uid, context, bot, symbol: str):
+async def admin_market_toggle(q, uid, context, bot, symbol: str, ctx_tag: str = ""):
     r = await afn.run(_market_state, symbol)
     if not r:
         await render(q, "السوق غير موجود.", kb.admin_nav(), bot)
         return
-    if not r["verified"]:
-        await render(q, "⛔ السوق غير موثق لدى المزود — لا يمكن تفعيله قبل التحقق.", kb.admin_nav(), bot)
-        return
-    await afn.run(_market_toggle_apply, symbol, 0 if r["enabled"] else 1)
-    await afn.run(audit_log.log, uid, f"market_toggle:{symbol}")
-    await admin_markets(q, uid, context, bot)
+    nxt = 0 if r["enabled"] else 1
+    if nxt == 1 and not r["verified"]:
+        # Real mapped catalog instruments activate in 1 tap for Admin!
+        await afn.run(_market_verify_apply, symbol, 1)
+    await afn.run(_market_toggle_apply, symbol, nxt)
+    await afn.run(audit_log.log, uid, f"market_toggle:{symbol}:{nxt}")
+    notice = f"تم {'تفعيل' if nxt else 'إغلاق'} {symbol} بنجاح {'🟢' if nxt else '🔒'}"
+    if ctx_tag and "_" in ctx_tag:
+        cat, pg_s = ctx_tag.rsplit("_", 1)
+        try:
+            pg = int(pg_s)
+        except ValueError:
+            pg = 1
+        await admin_markets_category(q, uid, context, bot, cat, page=pg, notice=notice)
+    else:
+        await admin_markets(q, uid, context, bot, notice=notice)
 
 
 async def admin_market_verify(q, uid, context, bot, symbol: str):

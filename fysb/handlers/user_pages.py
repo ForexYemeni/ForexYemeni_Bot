@@ -186,12 +186,34 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
     )
 
 
-async def _render_user_markets(q, uid: int, u, bot, notice: str = ""):
-    """v6.17.0: Multi-toggle user market subscriptions within their plan."""
+_USER_MKT_PAGE_SIZE = 12
+
+
+def _all_catalog_map() -> list[dict]:
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT symbol,title,category,enabled,verified FROM market_catalog ORDER BY symbol").fetchall()]
+
+
+async def _render_user_markets(q, uid: int, u, bot, notice: str = "", category: str = "", page: int = 1):
+    """v8.3.0: Ultra-Luxury Categorized User Markets Hub (المعادن · الفوركس ·
+    العملات الرقمية · الأسهم · المؤشرات · السلع) + 1-tap subscription toggles."""
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON, CATEGORY_ORDER
     plan = await afn.run(subs.plan_for, uid)
-    allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
-    rows = await afn.run(_live_market_rows)
-    available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+    is_admin = (uid == config.ADMIN_ID)
+    allowed_raw = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
+    all_plan = is_admin or ("ALL" in allowed_raw)
+
+    all_cat_rows = await afn.run(_all_catalog_map)
+    live_rows = [r for r in all_cat_rows if int(r.get("enabled") or 0) and int(r.get("verified") or 0)]
+    if all_plan:
+        available = [r["symbol"].upper().replace("/", "") for r in live_rows]
+    else:
+        available = [r["symbol"].upper().replace("/", "") for r in live_rows
+                     if r["symbol"].upper().replace("/", "") in allowed_raw]
+    if not available:
+        available = [s for s in allowed_raw if s != "ALL"] or ["XAUUSD"]
+
     selected = _parse_user_markets(u["market"] or "")
     all_mode = (not selected)
     active_set = set(available) if all_mode else (set(selected) & set(available))
@@ -199,34 +221,291 @@ async def _render_user_markets(q, uid: int, u, bot, notice: str = ""):
         all_mode = True
         active_set = set(available)
 
-    summary = "🌍 كل أسواق باقتك" if all_mode else " · ".join(sorted(active_set))
+    # Group live enabled markets + full catalog by royal category
+    live_by_cat: dict[str, list[dict]] = {c: [] for c in CATEGORY_ORDER}
+    all_by_cat: dict[str, list[dict]] = {c: [] for c in CATEGORY_ORDER}
+    for r in all_cat_rows:
+        c = (r.get("category") or instruments.spec(r["symbol"]).category or "forex").lower()
+        all_by_cat.setdefault(c, []).append(r)
+        if int(r.get("enabled") or 0) and int(r.get("verified") or 0):
+            live_by_cat.setdefault(c, []).append(r)
+
+    ordered_cats = [c for c in CATEGORY_ORDER if c in all_by_cat] + \
+                   [c for c in all_by_cat if c not in CATEGORY_ORDER]
+
+    cat = (category or "").strip().lower()
+    if cat:
+        # --- Category Drill-Down View ---
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        grp_live = list(live_by_cat.get(cat, []))
+        grp_live.sort(key=lambda r: (
+            0 if r["symbol"] == "XAUUSD" else 1,
+            0 if r["symbol"].upper() in active_set else (1 if r["symbol"].upper() in available else 2),
+            r["symbol"],
+        ))
+        total_live = len(grp_live)
+        total_cat_all = len(all_by_cat.get(cat, []))
+        total_pages = max(1, (total_live + _USER_MKT_PAGE_SIZE - 1) // _USER_MKT_PAGE_SIZE)
+        page = max(1, min(int(page or 1), total_pages))
+        chunk = grp_live[(page - 1) * _USER_MKT_PAGE_SIZE: page * _USER_MKT_PAGE_SIZE]
+        open_in_cat = sum(1 for r in grp_live if r["symbol"].upper() in available)
+        active_in_cat = sum(1 for r in grp_live if r["symbol"].upper() in active_set)
+
+        lines = [
+            f"{icon} <b><u>أسواق إشاراتي — قسم {title}</u></b>",
+            "<blockquote>"
+            f"▎💎 باقتك: <b>{esc(plan['title'])}</b>\n"
+            f"▎🟢 مفعّلة في البوت: <b>{total_live}</b> من <code>{total_cat_all}</code> · متاحة لباقتك: <b>{open_in_cat}</b> · نشطة لديك: <b>{active_in_cat}</b>\n"
+            "▎✨ اضغط أي سوق متاح لتشغيل إشاراته ✅ أو إيقافها ⚪."
+            "</blockquote>",
+        ]
+        if notice:
+            lines.append(f"<i>✨ {esc(notice)}</i>")
+        if not chunk:
+            lines.append(
+                f"\n🔒 <i>جميع أدوات قسم <b>{title}</b> ({total_cat_all} أداة عالمية) مغلقة حالياً من الإدارة — "
+                "تظهر تلقائياً هنا فور تفعيل الإدارة لأي منها.</i>"
+            )
+        else:
+            for r in chunk:
+                sym = r["symbol"].upper()
+                if sym in active_set:
+                    st = "✅ نشط"
+                elif sym in available:
+                    st = "⚪ متاح"
+                else:
+                    st = "🔒 ترقية"
+                lines.append(f"▎{st} · <b>{esc(sym)}</b> — {esc(r['title'])}")
+
+        rows_kb = []
+        ctx_tag = f"{cat}_{page}"
+        for i in range(0, len(chunk), 2):
+            row_btns = []
+            for r in chunk[i:i + 2]:
+                sym = r["symbol"].upper()
+                if sym in active_set:
+                    row_btns.append(kb.btn(f"✅ {sym}", f"u:togmarket:{sym}:{ctx_tag}", style="success"))
+                elif sym in available:
+                    row_btns.append(kb.btn(f"⚪ {sym}", f"u:togmarket:{sym}:{ctx_tag}", style="primary"))
+                else:
+                    row_btns.append(kb.btn(f"🔒 {sym}", f"u:togmarket:{sym}"))
+            rows_kb.append(row_btns)
+
+        if total_pages > 1:
+            nav = []
+            if page > 1:
+                nav.append(kb.btn("◀️ السابق", f"u:mktcat:{cat}:{page - 1}"))
+            nav.append(kb.btn(f"📄 {page}/{total_pages}", f"u:mktcat:{cat}:{page}"))
+            if page < total_pages:
+                nav.append(kb.btn("التالي ▶️", f"u:mktcat:{cat}:{page + 1}"))
+            rows_kb.append(nav)
+        rows_kb.append([kb.btn("↩️ كل أقسام الأسواق", "u:markets", style="primary")])
+        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        return
+
+    # --- Overview Hub (`u:markets`) ---
+    summary = "🌍 كل أسواق باقتك" if all_mode else " · ".join(sorted(active_set)[:8]) + (
+        f" (+{len(active_set) - 8})" if len(active_set) > 8 else ""
+    )
     lines = [
-        "🌐 <b><u>أسواق إشاراتي</u></b>",
+        "🌐 <b><u>أسواق إشاراتي — الفهرس العالمي الفاخر</u></b>",
         "<blockquote>"
-        f"▎💎 باقتك: <b>{esc(plan['title'])}</b> ({len(available)} سوق متاح)\n"
-        f"▎📌 الأسواق النشطة حالياً: <b>{esc(summary)}</b>\n"
-        "▎✨ اضغط أي سوق لتشغيله ✅ أو إيقافه ⚪ — مثلاً أغلق الذهب وأبقِ البيتكوين حسب باقتك."
+        f"▎💎 باقتك: <b>{esc(plan['title'])}</b> ({len(available)} سوق متاح حالياً)\n"
+        f"▎📌 الأسواق النشطة لديك: <b>{esc(summary)}</b>\n"
+        "▎✨ تصفح الأسواق حسب القسم بالأسفل، أو فعّل/أوقف أسواقك المتاحة مباشرة بضغطة واحدة."
         "</blockquote>",
     ]
     if notice:
-        lines.append(f"<i>{esc(notice)}</i>")
+        lines.append(f"<i>✨ {esc(notice)}</i>")
 
     rows_kb = [[kb.btn(
         ("✅ " if all_mode else "🌍 ") + "تفعيل كل أسواق باقتي",
         "u:setmarket:ALL",
         style="success" if all_mode else "primary",
     )]]
-    for i in range(0, len(available), 3):
+
+    # Luxury 6-Category Buttons (2 per row!)
+    cat_pair = []
+    for c in ordered_cats:
+        icon = CATEGORY_ICON.get(c, "🌐")
+        title = CATEGORY_AR.get(c, c)
+        live_cnt = len(live_by_cat.get(c, []))
+        open_cnt = sum(1 for r in live_by_cat.get(c, []) if r["symbol"].upper() in available)
+        badge = f"({open_cnt}/{live_cnt})" if live_cnt else "(مغلق)"
+        cat_pair.append(kb.btn(
+            f"{icon} {title} {badge}",
+            f"u:mktcat:{c}:1",
+            style="primary" if open_cnt > 0 else "",
+        ))
+        if len(cat_pair) == 2:
+            rows_kb.append(cat_pair)
+            cat_pair = []
+    if cat_pair:
+        rows_kb.append(cat_pair)
+
+    # Quick 1-tap toggle chips for user's unlocked live markets (max 12 on overview; full list per category!)
+    quick_avail = sorted(available, key=lambda s: (0 if s == "XAUUSD" else 1, 0 if s in active_set else 1, s))[:12]
+    for i in range(0, len(quick_avail), 3):
         rows_kb.append([
             kb.btn(
                 ("✅ " if s in active_set else "⚪ ") + s,
                 f"u:togmarket:{s}",
                 style="success" if s in active_set else "",
             )
-            for s in available[i:i + 3]
+            for s in quick_avail[i:i + 3]
         ])
     rows_kb.append([kb.btn("💎 ترقية الباقة لمزيد من الأسواق", "u:plans", style="primary")])
     rows_kb.append([kb.btn("↩️ التخصيص", "u:preferences")])
+    await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+
+
+async def _render_analytics_markets(q, uid: int, u, bot, category: str = "", page: int = 1):
+    """v8.3.0: Ultra-Luxury Categorized Global Markets Picker for Institutional Analytics."""
+    from fysb.services import analytics as anl
+    from fysb.theme import CATEGORY_AR, CATEGORY_ICON, CATEGORY_ORDER
+    if await _guard_free_trial(q, uid, u, bot, "التحليلات الفورية"):
+        return
+    state = await afn.run(anl.quota_state, uid)
+    plan = await afn.run(subs.plan_for, uid)
+    is_admin = uid == config.ADMIN_ID
+    if not is_admin and (state["quota"] <= 0 or state["remaining"] <= 0):
+        why_txt = (
+            "التحليلات الفورية غير مفعّلة في باقتك الحالية"
+            if state["quota"] <= 0
+            else f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"
+        )
+        await _upsell(q, uid, bot, why_txt, quota_exhausted=True)
+        return
+
+    p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
+    all_plan = is_admin or ("ALL" in p_markets)
+    rows = await afn.run(_catalog_rows)
+    if not rows:
+        from fysb.db import SEED_MARKETS
+        titles = {m: (t, c) for m, t, _p, c, *_rest in SEED_MARKETS}
+        rows = [
+            {"symbol": m, "title": titles.get(m, (m, "metal"))[0],
+             "category": titles.get(m, (m, "metal"))[1], "enabled": 1, "verified": 1}
+            for m in (p_markets or ["XAUUSD"]) if m != "ALL"
+        ]
+    if not rows:
+        await render(q, "لا توجد أسواق مفعلة بعد — تواصل مع الإدارة.", kb.user_nav(), bot)
+        return
+
+    allowed_syms = {r["symbol"].upper() for r in rows} if all_plan else {
+        r["symbol"].upper() for r in rows if r["symbol"].upper() in p_markets
+    }
+    sections: dict[str, list[dict]] = {}
+    for r in rows:
+        c = (r.get("category") or instruments.spec(r["symbol"]).category or "forex").lower()
+        sections.setdefault(c, []).append(r)
+    ordered_sections = [c for c in CATEGORY_ORDER if c in sections] + \
+                       [c for c in sections if c not in CATEGORY_ORDER]
+
+    def _st_icon(r: dict) -> str:
+        en, ver = int(r.get("enabled") or 0), int(r.get("verified") or 0)
+        if not is_admin and r["symbol"].upper() not in allowed_syms:
+            return "🔒"
+        if en and ver:
+            return "🟢"
+        return "🔵" if ver else "⚪"
+
+    cat = (category or "").strip().lower()
+    if cat and cat in sections:
+        icon = CATEGORY_ICON.get(cat, "🌐")
+        title = CATEGORY_AR.get(cat, cat)
+        grp = list(sections[cat])
+        grp.sort(key=lambda r: (
+            0 if r["symbol"] == "XAUUSD" else 1,
+            0 if (int(r.get("enabled") or 0) and (is_admin or r["symbol"].upper() in allowed_syms)) else 1,
+            0 if (is_admin or r["symbol"].upper() in allowed_syms) else 1,
+            r["symbol"],
+        ))
+        total_pages = max(1, (len(grp) + _USER_MKT_PAGE_SIZE - 1) // _USER_MKT_PAGE_SIZE)
+        page = max(1, min(int(page or 1), total_pages))
+        chunk = grp[(page - 1) * _USER_MKT_PAGE_SIZE: page * _USER_MKT_PAGE_SIZE]
+        open_n = sum(1 for r in grp if is_admin or r["symbol"].upper() in allowed_syms)
+        live_n = sum(1 for r in grp if int(r.get("enabled") or 0))
+
+        lines = [
+            f"🔬 <b><u>التحليلات المؤسسية — {icon} {title}</u></b>",
+            "<blockquote>"
+            f"▎🗂 الأدوات: <b>{len(grp)}</b> · مفعّلة بالإدارة: <b>{live_n}</b> · مفتوحة لك: <b>{open_n}</b> · صفحة <code>{page}/{total_pages}</code>\n"
+            "▎🟢 مفعّل ومفتوح · 🔵 متاح للتحليل · 🔒 يفتح بالترقية"
+            "</blockquote>",
+        ]
+        for r in chunk:
+            lines.append(f"▎{_st_icon(r)} <b>{esc(r['symbol'])}</b> — {esc(r['title'])}")
+
+        rows_kb = []
+        for i in range(0, len(chunk), 3):
+            rows_kb.append([
+                kb.btn(f"{_st_icon(r)} {r['symbol']}", f"u:anlsym:{r['symbol']}",
+                       style="success" if (int(r.get("enabled") or 0) and (is_admin or r["symbol"].upper() in allowed_syms)) else "")
+                for r in chunk[i:i + 3]
+            ])
+        if total_pages > 1:
+            nav = []
+            if page > 1:
+                nav.append(kb.btn("◀️ السابق", f"u:anlcat:{cat}:{page - 1}"))
+            nav.append(kb.btn(f"📄 {page}/{total_pages}", f"u:anlcat:{cat}:{page}"))
+            if page < total_pages:
+                nav.append(kb.btn("التالي ▶️", f"u:anlcat:{cat}:{page + 1}"))
+            rows_kb.append(nav)
+        rows_kb.append([kb.btn("↩️ كل أقسام الأسواق", "u:analytics", style="primary")])
+        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        return
+
+    # --- Analytics Overview Hub (`u:analytics`) ---
+    total_all = len(rows)
+    total_live = sum(1 for r in rows if int(r.get("enabled") or 0))
+    lines = [
+        "🔬 <b><u>التحليلات الاحترافية المؤسسية — الأسواق العالمية</u></b>",
+        "<blockquote>"
+        + (f"▎👑 لوحة الإدارة: <b>تحليل حر على {total_all} أداة عالمية — بلا حدود</b>\n"
+           if is_admin else
+           f"▎حصة اليوم: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
+           f"▎💎 باقتك: <b>{esc(plan['title'])}</b> · مفعّل بالمنصة: <b>{total_live}</b> من <code>{total_all}</code>\n")
+        + "▎⚡ اختر القسم العالمي بالأسفل أو ابدأ التحليل السريع بضغطة واحدة."
+        "</blockquote>",
+    ]
+    for c in ordered_sections:
+        icon = CATEGORY_ICON.get(c, "🌐")
+        title = CATEGORY_AR.get(c, c)
+        grp = sections[c]
+        live_c = sum(1 for r in grp if int(r.get("enabled") or 0))
+        lines.append(f"▎{icon} <b>{title}</b>: <code>{len(grp)}</code> أداة · مفعّل حالياً <b>{live_c}</b>")
+
+    rows_kb = []
+    # 1-Tap Quick Launch Row (top unlocked/live instruments — always includes XAUUSD if present!)
+    quick = sorted(
+        [r for r in rows if is_admin or r["symbol"].upper() in allowed_syms],
+        key=lambda r: (0 if r["symbol"] == "XAUUSD" else 1, 0 if int(r.get("enabled") or 0) else 1, r["symbol"]),
+    )[:3]
+    if quick:
+        rows_kb.append([
+            kb.btn(f"⚡ {_st_icon(r)} {r['symbol']}", f"u:anlsym:{r['symbol']}", style="success")
+            for r in quick
+        ])
+
+    # 6 Luxury Category Buttons (2 per row!)
+    pair = []
+    for c in ordered_sections:
+        icon = CATEGORY_ICON.get(c, "🌐")
+        title = CATEGORY_AR.get(c, c)
+        grp = sections[c]
+        live_c = sum(1 for r in grp if int(r.get("enabled") or 0))
+        pair.append(kb.btn(
+            f"{icon} {title} ({live_c}/{len(grp)})",
+            f"u:anlcat:{c}:1",
+            style="primary" if live_c > 0 else "",
+        ))
+        if len(pair) == 2:
+            rows_kb.append(pair)
+            pair = []
+    if pair:
+        rows_kb.append(pair)
     await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
 
 
@@ -322,108 +601,24 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
     elif action == "analytics":
-        if await _guard_free_trial(q, uid, u, bot, "التحليلات الفورية"):
-            return
         from fysb.services import analytics as anl
         if not await afn.run(anl.analytics_enabled):
             await render(q, "🔬 قسم التحليلات معطل حالياً من الإدارة.", kb.user_nav(), bot)
             return
-        state = await afn.run(anl.quota_state, uid)
-        plan = await afn.run(subs.plan_for, uid)
-        is_admin = uid == config.ADMIN_ID
-        if not is_admin and (state["quota"] <= 0 or state["remaining"] <= 0):
-            why_txt = (
-                "التحليلات الفورية غير مفعّلة في باقتك الحالية"
-                if state["quota"] <= 0
-                else f"انتهت حصة التحليلات اليومية ({state['used']}/{state['quota']}) — تتجدد يومياً"
-            )
-            await _upsell(q, uid, bot, why_txt, quota_exhausted=True)
+        await _render_analytics_markets(q, uid, u, bot)
+
+    elif action.startswith("anlcat:"):
+        from fysb.services import analytics as anl
+        if not await afn.run(anl.analytics_enabled):
+            await render(q, "🔬 قسم التحليلات معطل حالياً من الإدارة.", kb.user_nav(), bot)
             return
-        p_markets = [x.strip().upper() for x in (plan["markets"] or "").split(",") if x.strip()]
-        rows = await afn.run(_catalog_rows)
-        if not rows:
-            # LEGACY-DEAD CATALOG FALLBACK (picker-empty bug 2026-11-22): the
-            # picker must never dead-end — offer the plan's own markets (the
-            # catalog self-heals on the next boot anyway).
-            from fysb.db import SEED_MARKETS
-            titles = {m: t for m, t, *_rest in SEED_MARKETS}
-            rows = [{"symbol": m, "title": titles.get(m, m), "enabled": 1, "verified": 1}
-                    for m in p_markets]
-        if is_admin:
-            allowed_rows, locked_rows = list(rows), []
-        else:
-            allowed_rows = [r for r in rows if r["symbol"].upper() in p_markets]
-            locked_rows = [r for r in rows if r["symbol"].upper() not in p_markets]
-        if not allowed_rows and not locked_rows:
-            await render(q, "لا توجد أسواق مفعلة بعد — تواصل مع الإدارة.", kb.user_nav(), bot)
-            return
-
-        # v6.8.0 — LUXURY CATEGORY SECTIONS (المعادن · الفوركس · العملات الرقمية
-        # · المؤشرات · الأسهم): every market belongs to its royal section, with
-        # a real state marker (🟢 open trading / 🔵 verified analysis / ⚪ closed).
-        # v6.8.1 — OWNER RULE: «يجب أن تظهر له الكل ولكن الباقيات مغلقة ليشترك»
-        # — the FULL catalog is rendered for everyone; markets outside the plan
-        # appear with a 🔒 lock badge and tapping one opens the luxury upsell
-        # card (subscribe path) instead of being hidden.
-        from fysb.theme import CATEGORY_AR, CATEGORY_ICON
-
-        allowed_syms = {r["symbol"].upper() for r in allowed_rows}
-
-        def _state_icon(r) -> str:
-            en, ver = int(r.get("enabled") or 0), int(r.get("verified") or 0)
-            if r["symbol"].upper() not in allowed_syms and not is_admin:
-                return "🔒"
-            if en and ver:
-                return "🟢"
-            return "🔵" if ver else "⚪"
-
-        def _section_rows(section_rows: list[dict]) -> list[list]:
-            out: list[list] = []
-            for i in range(0, len(section_rows), 3):
-                chunk = section_rows[i:i + 3]
-                out.append([kb.btn(f"{_state_icon(r)} {esc(r['symbol'])}",
-                                   f"u:anlsym:{r['symbol']}")
-                            for r in chunk])
-            return out
-
-        sections: dict[str, list] = {}
-        for r in (list(rows) if not is_admin else allowed_rows):
-            sections.setdefault((r.get("category") or instruments.spec(r["symbol"]).category),
-                                []).append(r)
-        from fysb.handlers.admin_trading import CATEGORY_ORDER
-        ordered_sections = [c for c in CATEGORY_ORDER if c in sections] + \
-                           [c for c in sections if c not in CATEGORY_ORDER]
-
-        mkt_block = ""
-        for cat in ordered_sections:
-            icon = CATEGORY_ICON.get(cat, "🌐")
-            title = CATEGORY_AR.get(cat, cat)
-            grp = sections[cat]
-            open_n = sum(1 for r in grp if r["symbol"].upper() in allowed_syms or is_admin)
-            mkt_block += (f"\n{icon} <b><u>{title}</u></b> — "
-                          f"{('كلها مفتوحة لك' if open_n == len(grp) else f'مفتوح لك {open_n} من {len(grp)}')}\n")
-            for r in grp:
-                mkt_block += f"▎{_state_icon(r)} <b>{esc(r['symbol'])}</b> — {esc(r['title'])}\n"
-        if not is_admin and locked_rows:
-            mkt_block += (f"\n{ICON['lock']} <b>الأسواق المقفولة 🔒 تفتح فوراً مع باقة أعلى — اضغط عليها لعرض الباقات.</b>")
-
-        body = (f"🔬 <b><u>التحليلات الاحترافية المؤسسية</u></b>\n"
-                f"<blockquote>"
-                + (f"▎👑 لوحة الإدارة: <b>تحليل حر — أي سوق × أي منهجية × أي إطار، بلا حدود</b>\n"
-                   if is_admin else
-                   f"▎حصة اليوم: <b>{state['used']}/{state['quota']}</b> {bar(state['used'], state['quota'])}\n"
-                   f"▎💎 باقتك: <b>{esc(plan['title'])}</b>\n")
-                + "</blockquote>\n"
-                + ("<blockquote>▎🟢 مفتوح للتداول والإشارات · 🔵 موثق للتحليل · ⚪ مغلق بانتظار الإدارة</blockquote>"
-                   if is_admin else
-                   "<blockquote>▎🟢 مفتوح لك الآن · 🔵 موثق داخل باقتك · 🔒 مقفول — يفتح مع باقة أعلى</blockquote>")
-                + f"{ICON['globe']} <b>{'كل أسواق العالم — بأقسامها الملكية:' if is_admin else 'كل أسواق العالم — مفتوح لك 🔎 والمقفول 🔒 ينتظر ترقيتك:'}</b>"
-                + mkt_block)
-
-        mkt_rows: list[list] = []
-        for cat in ordered_sections:
-            mkt_rows.extend(_section_rows(sections[cat]))
-        await render(q, body, kb.user_nav(mkt_rows), bot)
+        parts = action.split(":")
+        cat = parts[1] if len(parts) > 1 else ""
+        try:
+            pg = int(parts[2]) if len(parts) > 2 else 1
+        except ValueError:
+            pg = 1
+        await _render_analytics_markets(q, uid, u, bot, category=cat, page=pg)
 
     elif action == "upgrade":
         await _upsell(
@@ -855,16 +1050,31 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     elif action == "markets":
         await _render_user_markets(q, uid, u, bot)
 
+    elif action.startswith("mktcat:"):
+        parts = action.split(":")
+        cat = parts[1] if len(parts) > 1 else ""
+        try:
+            pg = int(parts[2]) if len(parts) > 2 else 1
+        except ValueError:
+            pg = 1
+        await _render_user_markets(q, uid, u, bot, category=cat, page=pg)
+
     elif action.startswith("togmarket:"):
-        symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
+        parts = action.split(":")
+        symbol = (parts[1] if len(parts) > 1 else "").strip().upper().replace("/", "")
+        ctx_tag = parts[2] if len(parts) > 2 else ""
         plan = await afn.run(subs.plan_for, uid)
+        is_admin = (uid == config.ADMIN_ID)
         allowed = [x.strip().upper().replace("/", "") for x in (plan["markets"] or "").split(",") if x.strip()]
-        if "ALL" not in allowed and symbol not in allowed:
+        if not is_admin and "ALL" not in allowed and symbol not in allowed:
             await _upsell(q, uid, bot, f"السوق {symbol} غير متاح في باقتك الحالية",
                           unlock_kind="markets", unlock_item=symbol)
             return
         rows = await afn.run(_live_market_rows)
-        available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
+        if is_admin or "ALL" in allowed:
+            available = [r["symbol"].upper().replace("/", "") for r in rows] or [symbol]
+        else:
+            available = [r["symbol"].upper().replace("/", "") for r in rows if r["symbol"].upper().replace("/", "") in allowed] or allowed
         selected = _parse_user_markets(u["market"] or "")
         cur = list(available) if not selected else [s for s in selected if s in available]
         if not cur:
@@ -882,7 +1092,14 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         new_val = "" if set(cur) >= set(available) else ",".join(sorted(set(cur)))
         await afn.run(users_service.set_preference, uid, "market", new_val, {"market"})
         u2 = await afn.run(users_service.get_user, uid)
-        await _render_user_markets(q, uid, u2 or u, bot, notice=notice)
+        cat_back, pg_back = "", 1
+        if ctx_tag and "_" in ctx_tag:
+            cat_back, pg_s = ctx_tag.rsplit("_", 1)
+            try:
+                pg_back = int(pg_s)
+            except ValueError:
+                pg_back = 1
+        await _render_user_markets(q, uid, u2 or u, bot, notice=notice, category=cat_back, page=pg_back)
 
     elif action.startswith("setmarket:"):
         symbol = action.split(":", 1)[1].strip().upper().replace("/", "")
@@ -1820,6 +2037,16 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
     elif action.startswith("signowstyle:"):
         from fysb.handlers import signal_now as _sn
         await _sn.pick_style(q, uid, context, bot, action.split(":", 1)[1])
+
+    elif action.startswith("signowcat:"):
+        from fysb.handlers import signal_now as _sn
+        parts = action.split(":")
+        cat = parts[1] if len(parts) > 1 else ""
+        try:
+            pg = int(parts[2]) if len(parts) > 2 else 1
+        except ValueError:
+            pg = 1
+        await _sn.pick_category(q, uid, context, bot, cat, pg)
 
     elif action.startswith("signowsym:"):
         from fysb.handlers import signal_now as _sn

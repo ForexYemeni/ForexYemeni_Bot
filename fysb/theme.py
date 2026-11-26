@@ -99,16 +99,18 @@ TIMEFRAME_AR = {
 # الأسهم as separated royal sections). Any unknown category falls back to its code.
 CATEGORY_AR = {
     "metal": "المعادن",
-    "forex": "الفوركس والعملات",
+    "forex": "الفوركس",
     "crypto": "العملات الرقمية",
+    "stock": "الأسهم",
     "index": "المؤشرات العالمية",
-    "stock": "الأسهم الأمريكية",
-    "commodity": "السلع",
+    "commodity": "السلع والطاقة",
 }
 
 CATEGORY_ICON = {
-    "metal": "🥇", "forex": "💱", "crypto": "🪙", "index": "📊", "stock": "🏛", "commodity": "🛢",
+    "metal": "🥇", "forex": "💱", "crypto": "🪙", "stock": "🏛", "index": "📊", "commodity": "🛢",
 }
+
+CATEGORY_ORDER = ["metal", "forex", "crypto", "stock", "index", "commodity"]
 
 STATUS_AR = {
     "ACTIVE": "نشطة — بانتظار التنفيذ",

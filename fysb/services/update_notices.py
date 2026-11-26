@@ -19,7 +19,8 @@ from fysb.theme import esc
 _INSTALL_LOCK = threading.Lock()
 NOTICE_INTERVAL = 1 / 20
 SEND_TIMEOUT = 8.0
-LOGO_PATH = Path(__file__).resolve().parents[1] / "ui" / "assets" / "update_emblem.jpg"
+# Owner-supplied original PNG: no resizing, cropping, re-encoding or generation.
+LOGO_PATH = Path(__file__).resolve().parents[1] / "ui" / "assets" / "update_emblem.png"
 
 
 def notice_card(source, target, *, cancelled=False):
@@ -107,6 +108,30 @@ async def _deliver(bot, chat_id, text, logo):
     return False
 
 
+async def _notice_media(bot):
+    """Prefer the exact approved file; otherwise use the bot's current avatar.
+
+    Resolve once per announcement, not once per recipient. Never substitute
+    generated artwork. If neither is available, the notice remains HTML text.
+    """
+    try:
+        original = await afn.run(LOGO_PATH.read_bytes)
+        if original:
+            return {"bytes": original}
+    except OSError:
+        pass
+    try:
+        me = await asyncio.wait_for(bot.get_me(), SEND_TIMEOUT)
+        profile = await asyncio.wait_for(
+            bot.get_user_profile_photos(user_id=me.id, limit=1), SEND_TIMEOUT
+        )
+        if profile.photos and profile.photos[0]:
+            return {"file_id": profile.photos[0][-1].file_id}
+    except Exception as exc:
+        log.warning("update notice avatar unavailable (%s); using text", type(exc).__name__)
+    return None
+
+
 async def announce(bot, info, *, targets=None, cancelled=False):
     if bot is None:
         return {"sent": 0, "failed": 0, "targets": []}
@@ -114,11 +139,7 @@ async def announce(bot, info, *, targets=None, cancelled=False):
     source = "v" + str(info.get("local") or config.VERSION).lstrip("vV")
     target = "v" + str(info.get("remote") or "?").lstrip("vV")
     text = notice_card(source, target, cancelled=cancelled)
-    try:
-        logo = await afn.run(LOGO_PATH.read_bytes) if not cancelled else None
-    except OSError:
-        logo = None
-    media = {"bytes": logo} if logo else None
+    media = await _notice_media(bot) if not cancelled and targets else None
     sent, failed, reached = 0, 0, []
     for chat_id in targets:
         if await _deliver(bot, chat_id, text, media):

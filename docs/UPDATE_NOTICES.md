@@ -1,4 +1,4 @@
-# Maintenance notices and release archive (v8.9.3)
+# Maintenance notices and release archive (v8.10.1)
 
 ## Ordering and scope
 
@@ -39,9 +39,26 @@ these new features; boot auto-update can re-upgrade unless `AUTO_UPDATE=0`.
   duplicate destinations across channel registries. A username and a numeric ID
   for the same channel cannot be resolved without extra Telegram API calls;
   register consistently if this matters.
-- `fysb/ui/assets/update_emblem.jpg` is a custom AI-generated gold emblem on navy.
-  First successful photo delivery provides a Telegram file ID reused for the
-  remainder of that announcement; missing/invalid media falls back to HTML text.
+- `fysb/ui/assets/update_emblem.png` is the owner's exact original PNG attachment
+  (1254 × 1254, SHA-256 `19b837fc40d3f646c8dee1f6ce4ac62f7a2652f39d0c9b8b7e9538d384d656ca`).
+  No crop, resize, recoloring, regeneration or re-encoding is applied. The older
+  generated emblem is no longer selected by this version.
+- If that file is missing, unreadable or empty, resolve the bot's own current
+  profile photo once per announcement (`get_me` + `get_user_profile_photos`,
+  bounded by request deadlines). Prefer the largest size and reuse its file ID.
+  No bot profile photo is changed by this feature. If no avatar is available,
+  send HTML text; cancellation notices stay text-only.
+- First successful original-photo delivery provides a Telegram file ID reused
+  for the remainder of that announcement. Invalid photo requests fall back to
+  HTML text; forbidden/ambiguous network outcomes never trigger a duplicate.
+  Telegram itself may compress/re-encode `send_photo`; byte identity is
+  guaranteed for the packaged source and first-upload bytes, not Telegram's
+  rendered/downloaded photo variants. Sending an original document would be a
+  different delivery mode and is not silently added here.
+- The OLD running version still controls the pre-install notice into v8.10.1.
+  That one notice may retain the old image; subsequent notices from the new
+  code use the approved image. No package can retroactively alter a message
+  already sent by old code.
 - Send attempts are sequential, paced at up to 20/second, each with an 8-second
   request deadline. One `RetryAfter` delay up to 30 seconds may be honored. A
   forbidden destination or unknown network delivery outcome is not retried with

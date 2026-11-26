@@ -619,9 +619,12 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         profile = await afn.run(users_service.profile_summary, uid, u)
         await render(q, render_user_card(u, profile),
                      kb.user_nav([
-                         [kb.btn("📈 إحصائياتي", "u:my_stats", style="primary"), kb.btn("🎛 تخصيص الإشارات", "u:preferences")],
-                         [kb.btn("💎 الاشتراك", "u:plans", style="success"), kb.btn("🧾 مدفوعاتي", "u:payments")],
-                         [kb.btn("🎧 الدعم", "u:support")],
+                         [kb.btn("📈 إحصائياتي", "u:my_stats", style="primary"),
+                          kb.btn("🎛 تخصيص الإشارات", "u:preferences", style="primary")],
+                         [kb.btn("💎 الاشتراك والباقات", "u:plans", style="success"),
+                          kb.btn("🧾 سجل مدفوعاتي", "u:payments", style="primary")],
+                         [kb.btn("👑 تحليل ForexYemeni الحقيقي", "u:true_analysis", style="success"),
+                          kb.btn("🎧 الدعم الفني", "u:support", style="primary")],
                      ]), bot)
 
     elif action == "dashboard":
@@ -663,16 +666,22 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         )
         dash_rows = [
             [kb.btn(
-                "👑 تحليل ForexYemeni الحقيقي (🟢 مفعّل)" if ta_st["active"] else "👑 تحليل ForexYemeni الحقيقي",
+                "👑 تحليل ForexYemeni الحقيقي (🟢 مفعّل)" if ta_st["active"] else "👑 تحليل ForexYemeni الحقيقي ✨",
                 "u:true_analysis",
                 style="success",
             )],
-            [kb.btn("📡 فتح الإشارات", "u:signals", style="primary"), kb.btn("🔬 تحليل الآن", "u:analytics", style="primary")],
-            [kb.btn("⚡ إشارة الآن", "u:signow", style="success"), kb.btn("🎛 تخصيص التنبيهات", "u:preferences", style="primary")],
-            [kb.btn("🎓 الأكاديمية الملكية", "u:academy", style="primary"), kb.btn("🎁 كود هدية", "u:redeem", style="success")],
-            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"), kb.btn("💎 الباقات", "u:plans", style="primary")],
-            [kb.btn("🛡 ملف المخاطرة", "u:risk", style="primary"), kb.btn("📓 مفكرة التداول", "u:journal", style="primary")],
-            [kb.btn("🔗 ربط منصات الكريبتو (Binance/Bybit/OKX)", "u:exchange", style="primary")],
+            [kb.btn("⚡ إشارة الآن", "u:signow", style="success"),
+             kb.btn("🔬 تحليل الآن", "u:analytics", style="primary")],
+            [kb.btn("📡 الإشارات المباشرة", "u:signals", style="primary"),
+             kb.btn("🧪 التداول التجريبي", "u:demo", style="success")],
+            [kb.btn("🎛 أسواقي وتخصيصي", "u:preferences", style="primary"),
+             kb.btn("🛡 ملف المخاطرة", "u:risk", style="primary")],
+            [kb.btn("📓 مفكرة التداول", "u:journal", style="primary"),
+             kb.btn("🔗 منصات الكريبتو API", "u:exchange", style="primary")],
+            [kb.btn("🎓 الأكاديمية الملكية", "u:academy", style="primary"),
+             kb.btn("💎 الباقات والاشتراك", "u:plans", style="success")],
+            [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"),
+             kb.btn("🎁 تفعيل كود هدية", "u:redeem", style="success")],
         ]
         if config.webapp_ready():
             dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", config.webapp_page_url("/"), style="success")])

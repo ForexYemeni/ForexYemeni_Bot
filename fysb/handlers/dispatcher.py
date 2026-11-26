@@ -199,13 +199,13 @@ async def _route_admin(q, context, uid: int, action: str):
         from fysb.handlers import true_analysis_ui
         await true_analysis_ui.handle_admin_true_analysis(q, uid, act, arg, arg2, context, bot)
     elif act == "hub":
-        from fysb.handlers.common import render
+        from fysb.handlers.common import build_admin_home_card, render
         hub = kb.ADMIN_HUBS.get(arg)
         if hub:
             title, builder = hub
-            await render(q, title, builder(), bot)
+            now_ksa = config.mecca_time_12h()
+            await render(q, f"{title}\n🕒 <code>{now_ksa}</code>", builder(), bot)
         else:
-            from fysb.handlers.common import build_admin_home_card
             await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
     # --- core ---
     elif act == "stats":

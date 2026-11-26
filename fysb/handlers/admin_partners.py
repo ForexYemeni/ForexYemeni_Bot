@@ -572,11 +572,16 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         vip = " 🔐VIP" if c.get("is_vip_gate") else ""
         rows_kb.append([kb.btn(f"{dot} إدارة: {c['title'][:24]}{vip}", f"p:ch:{c['id']}", style="primary")])
     if p.get("perm_custom_branding"):
-        rows_kb.append([kb.btn("🏷 تعديل توقيع قناتي", "p:brand", style="primary")])
-    rows_kb.append([
-        kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary"),
-        kb.btn("🔄 تحديث اللوحة", "p:home", style="primary"),
-    ])
+        rows_kb.append([
+            kb.btn("🏷 توقيع قناتي", "p:brand", style="primary"),
+            kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary"),
+        ])
+        rows_kb.append([kb.btn("🔄 تحديث لوحة الشريك", "p:home", style="primary")])
+    else:
+        rows_kb.append([
+            kb.btn("🎧 تواصل مع الإدارة", "p:contact", style="primary"),
+            kb.btn("🔄 تحديث لوحة الشريك", "p:home", style="primary"),
+        ])
     return "\n".join(body), _partner_nav(rows_kb, include_home=False)
 
 

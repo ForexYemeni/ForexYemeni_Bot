@@ -313,21 +313,70 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
             "SELL": "انحياز هابط — البحث عن فرص بيع في مناطق التعزز والعلاوة",
             "NEUTRAL": "انتظاري — لا انحياز واضح، الانتظار أفضل من الإجبار"}[direction]
 
+    activation_px = 0.0
+    invalidation_px = 0.0
     if direction == "BUY":
+        activation_px = float(main["sr"]["resistance"]) if main["sr"].get("resistance") else float(max(c["high"] for c in candles[-10:]))
+        invalidation_px = float(min(c["low"] for c in candles[-10:]))
         activation = (f"ثبات الشموع فوق <code>{fmt(main['sr']['resistance'])}</code>"
                       if main["sr"].get("resistance") else
-                      f"إغلاق فوق آخر قمة متأرجحة <code>{fmt(max(c['high'] for c in candles[-10:]))}</code>")
-        invalidation = fmt(min(c["low"] for c in candles[-10:]))
+                      f"إغلاق فوق آخر قمة متأرجحة <code>{fmt(activation_px)}</code>")
+        invalidation = fmt(invalidation_px)
     elif direction == "SELL":
+        activation_px = float(main["sr"]["support"]) if main["sr"].get("support") else float(min(c["low"] for c in candles[-10:]))
+        invalidation_px = float(max(c["high"] for c in candles[-10:]))
         activation = (f"كسر وثبات تحت <code>{fmt(main['sr']['support'])}</code>"
                       if main["sr"].get("support") else
-                      f"إغلاق تحت آخر قاع متأرجح <code>{fmt(min(c['low'] for c in candles[-10:]))}</code>")
-        invalidation = fmt(max(c["high"] for c in candles[-10:]))
+                      f"إغلاق تحت آخر قاع متأرجح <code>{fmt(activation_px)}</code>")
+        invalidation = fmt(invalidation_px)
     else:
         activation = "انتظار كسر مؤكد لأحد طرفي النطاق مع إغلاق خارج النطاق"
         invalidation = "غير منطبق في الوضع الانتظاري"
 
     risk_note = "التزم بحجم مخاطرة 1-2% من رأس المال لكل فكرة، وطبّق وقف الخسارة المخطط بلا مساومة — الانضباط التنفيذي هو ما يحول التحليل إلى نتائج."
+
+    # v8.1.0: Rich real-data payload for Ultra-Luxury Institutional Analysis Charts
+    chart_bars = list(main.get("candles") or candles or [])[-95:]
+    setup_overlay = None
+    if lens_result is not None:
+        setup_overlay = {
+            "code": str(getattr(lens_result, "code", strategy or "") or "").upper(),
+            "direction": str(getattr(lens_result, "direction", direction) or direction).upper(),
+            "entry": float(getattr(lens_result, "entry", 0.0) or 0.0),
+            "stop": float(getattr(lens_result, "stop", 0.0) or 0.0),
+            "tp1": float(getattr(lens_result, "tp1", 0.0) or 0.0),
+            "tp2": float(getattr(lens_result, "tp2", 0.0) or 0.0),
+            "tp3": float(getattr(lens_result, "tp3", 0.0) or 0.0),
+            "rr": float(getattr(lens_result, "rr", 0.0) or 0.0),
+            "score": int(getattr(lens_result, "score", quality) or quality),
+        }
+    tf_votes = [
+        (f["tf"], "BUY" if f["bull"] > f["bear"] else ("SELL" if f["bear"] > f["bull"] else "NEUTRAL"))
+        for f in frames
+    ]
+    chart_data = {
+        "candles": chart_bars,
+        "tf": main["tf"],
+        "multi_tf": multi_tf,
+        "tf_votes": tf_votes,
+        "sr": dict(main.get("sr") or {}),
+        "obs": [dict(x) for x in (main.get("obs") or [])[:3]],
+        "fvgs": [dict(x) for x in (main.get("fvgs") or [])[:3]],
+        "pd": dict(main.get("pd") or {}),
+        "sweep": dict(main.get("sweep") or {}),
+        "struct": dict(main.get("struct") or {}),
+        "breakout": dict(main.get("breakout") or {}),
+        "e9": float(main.get("e9") or 0.0),
+        "e21": float(main.get("e21") or 0.0),
+        "e50": float(main.get("e50") or 0.0),
+        "rsi": float(main.get("rsi") or 50.0),
+        "atr": float(main.get("atr") or 0.0),
+        "atr_pct": float(main.get("atr_pct") or 0.0),
+        "kz": str(main.get("kz") or ""),
+        "activation_px": activation_px,
+        "invalidation_px": invalidation_px,
+        "setup": setup_overlay,
+    }
 
     tf_label = "متعدد الأطباق (من الأدنى للأعلى)" if multi_tf else main["tf"]
     analysis = {
@@ -340,6 +389,7 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         "recommendation": recommendation, "activation": activation,
         "invalidation": invalidation, "risk_note": risk_note,
         "market_open": market_open, "stale": stale,
+        "chart_data": chart_data,
     }
     try:
         if enforce_plan:

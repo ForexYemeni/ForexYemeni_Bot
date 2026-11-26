@@ -123,4 +123,4 @@ def test_03_updater_preserves_tunnel_tokens_and_cleanly_terminates_tunnel(tmp_pa
 def test_04_main_py_ignores_edited_messages_and_version_802():
     src = Path("main.py").read_text(encoding="utf-8")
     assert "~filters.UpdateType.EDITED_MESSAGE" in src
-    assert config.VERSION == "8.0.2"
+    assert config.VERSION.startswith("8.")

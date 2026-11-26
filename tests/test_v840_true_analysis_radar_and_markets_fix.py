@@ -299,3 +299,46 @@ def test_invalidation_protection_and_admin_editable_trial_and_payment(tmp_path, 
     qa, ctxa, capa = _mk_q(config.ADMIN_ID, "a:true_analysis")
     _run(true_analysis_ui.handle_admin_true_analysis(qa, config.ADMIN_ID, "true_analysis", "", "", ctxa, ctxa.bot))
     assert "149" in capa["text"] and "45" in capa["text"] and "5" in capa["text"]
+
+
+def test_true_analysis_full_checkout_and_all_ui_buttons_zero_crash(tmp_path, monkeypatch):
+    """v8.4.1 regression: u:tabuy, u:tausdt, u:tapay, u:tatrial, a:utamenu/utagrant/utarevoke."""
+    _fresh_db(tmp_path, monkeypatch)
+    uid = 7099
+    users_svc.ensure_user(SimpleNamespace(id=uid, username="buyer99", full_name="Buyer 99", first_name="Buyer"))
+
+    # Add a real payment method + USDT TRC20 wallet
+    mid = payments_svc.add_method("محفظة جوالي", "أرسل الإيصال بعد التحويل", "777123456", "اليمن")
+    payments_svc.set_chain_wallet("TRC20", "TTestWalletAddress123456789012345678")
+
+    # 1. User opens u:true_analysis -> sees offer + trial + buy
+    q, ctx, cap = _mk_q(uid, "u:true_analysis")
+    assert _run(true_analysis_ui.handle_user_true_analysis(q, uid, "true_analysis", ctx, ctx.bot)) is True
+    assert "u:tabuy" in _btns(cap["markup"])
+
+    # 2. User taps u:tabuy (the exact button that crashed in v8.4.0!) -> renders cleanly with BOTH TRC20 & Jawali!
+    assert _run(true_analysis_ui.handle_user_true_analysis(q, uid, "tabuy", ctx, ctx.bot)) is True
+    btns_buy = _btns(cap["markup"])
+    assert "u:tausdt:TRC20" in btns_buy
+    assert f"u:tapay:{mid}" in btns_buy
+
+    # 3. User taps manual method u:tapay:<mid> -> renders account_ref + sets awaiting_receipt cleanly!
+    assert _run(true_analysis_ui.handle_user_true_analysis(q, uid, f"tapay:{mid}", ctx, ctx.bot)) is True
+    assert "777123456" in cap["text"]
+    assert int(ctx.user_data.get("awaiting_receipt") or 0) > 0
+
+    # 4. User taps u:tausdt:TRC20 -> renders chain payment page cleanly!
+    assert _run(true_analysis_ui.handle_user_true_analysis(q, uid, "tausdt:TRC20", ctx, ctx.bot)) is True
+    assert "TTestWalletAddress123456789012345678" in cap["text"]
+
+    # 5. Admin per-user menu, grant trial, grant 30d, list, revoke -> all zero-crash!
+    qa, ctxa, capa = _mk_q(config.ADMIN_ID)
+    for act, a1, a2 in [
+        ("utamenu", str(uid), ""),
+        ("utagrant", str(uid), "trial"),
+        ("talist", "", ""),
+        ("utagrant", str(uid), "30"),
+        ("utarevoke", str(uid), ""),
+    ]:
+        assert _run(true_analysis_ui.handle_admin_true_analysis(qa, config.ADMIN_ID, act, a1, a2, ctxa, ctxa.bot)) is True
+

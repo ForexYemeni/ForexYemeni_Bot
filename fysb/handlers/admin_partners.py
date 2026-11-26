@@ -509,6 +509,7 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         "</blockquote>",
     ]
     rows_kb = [
+        [kb.btn("🔬 تحليل فوري بالشارت", "p:anl", style="success")],
         [kb.copy_btn("📋 نسخ رابط الإحالة", link, style="success"),
          kb.url_btn("📤 مشاركة الرابط", f"https://t.me/share/url?url={link}", style="primary")],
         [kb.btn("➕ ربط قناتي بالبوت", "p:addch", style="success"),
@@ -542,6 +543,82 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
     if act == "home":
         text, markup = await _build_partner_home(p)
         await render(q, text, markup, bot)
+        return
+
+    if act == "anl":
+        # v8.1.0: Partner Instant Institutional Analysis + Ultra-Luxury ForexYemeni Chart
+        sym_arg = parts[1].upper() if len(parts) > 1 else ""
+        tf_arg = parts[2].upper() if len(parts) > 2 else ""
+        if not sym_arg:
+            def _load_mkts():
+                with db.conn() as c:
+                    return [r["symbol"] for r in c.execute(
+                        "SELECT symbol FROM market_catalog WHERE enabled=1 ORDER BY category, symbol LIMIT 12"
+                    ).fetchall()]
+            mkts = await afn.run(_load_mkts) or ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
+            rows_m = [
+                [kb.btn(f"📊 {m}", f"p:anl:{m}", style="primary") for m in mkts[i:i + 3]]
+                for i in range(0, len(mkts), 3)
+            ]
+            await render(
+                q,
+                "🔬 <b><u>التحليل المؤسسي الفوري بالشارت — لوحة الشريك</u></b>\n"
+                "<blockquote>اختر السوق لتوليد شارت <b>FOREXYEMENI</b> المؤسسي الفاخر + التحليل الكامل فوراً:</blockquote>",
+                _partner_nav(rows_m, include_home=True),
+                bot,
+            )
+            return
+        if not tf_arg:
+            rows_tf = [
+                [kb.btn("M15", f"p:anl:{sym_arg}:M15", style="primary"),
+                 kb.btn("H1", f"p:anl:{sym_arg}:H1", style="primary"),
+                 kb.btn("H4", f"p:anl:{sym_arg}:H4", style="primary")],
+                [kb.btn("🌟 تحليل متعدد الأطباق (ALL)", f"p:anl:{sym_arg}:ALL", style="success")],
+                [kb.btn("↩️ اختيار سوق آخر", "p:anl", style="primary")],
+            ]
+            await render(
+                q,
+                f"🔬 <b><u>اختيار الإطار الزمني — {esc(sym_arg)}</u></b>\n"
+                "<blockquote>سيتم إرسال الشارت التحليلي الفاخر بشعار <b>FOREXYEMENI</b> تلقائياً مع التقرير:</blockquote>",
+                _partner_nav(rows_tf, include_home=True),
+                bot,
+            )
+            return
+        await render(q, f"🔬 <b>جارٍ توليد التحليل المؤسسي والشارت الفاخر ({esc(sym_arg)} · {esc(tf_arg)})...</b>", None)
+        import asyncio as _asyncio
+        import io as _io
+        from fysb.services import analytics as _anl
+        from fysb.ui import charts as _charts
+        from fysb.ui.cards import render_analysis_card
+        res = await _asyncio.to_thread(_anl.run_analysis, uid, sym_arg, tf_arg, "", "", "ALL", enforce_plan=False)
+        if not res.get("ok"):
+            await render(q, f"⛔ {esc(res.get('error', 'تعذر توليد التحليل'))}",
+                         _partner_nav([[kb.btn("↩️ التحليل الفوري", "p:anl")]]), bot)
+            return
+        an = res["analysis"]
+        def _load_mrow():
+            with db.conn() as c:
+                r = c.execute("SELECT * FROM market_catalog WHERE symbol=?", (an["symbol"],)).fetchone()
+                return dict(r) if r else None
+        row = await afn.run(_load_mrow)
+        try:
+            if await afn.run(_charts.charts_enabled):
+                png = await _asyncio.to_thread(_charts.render_analysis_chart, an, row)
+                if png and bot is not None and hasattr(bot, "send_photo"):
+                    chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
+                    cap = _charts.render_analysis_caption(an, market_row=row)
+                    await bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png), caption=cap, parse_mode="HTML")
+        except Exception:
+            pass
+        card_text = render_analysis_card(an, market_row=row)
+        await render(
+            q,
+            card_text,
+            _partner_nav([
+                [kb.btn("🔬 تحليل سوق آخر", "p:anl", style="success")],
+            ], include_home=True),
+            bot,
+        )
         return
 
     if act == "contact":

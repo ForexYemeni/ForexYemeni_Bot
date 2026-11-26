@@ -557,6 +557,23 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         an = res["analysis"]
         q_state = res.get("quota") or (await afn.run(anl.quota_state, uid))
         row = await afn.run(_market_row, an["symbol"])
+        # v8.1.0: Automatic Ultra-Luxury Institutional ForexYemeni Analysis Chart for Users & Admin
+        try:
+            import io as _io
+            from fysb.ui import charts as _charts
+            if await afn.run(_charts.charts_enabled):
+                png = await asyncio.to_thread(_charts.render_analysis_chart, an, row)
+                if png and bot is not None and hasattr(bot, "send_photo"):
+                    chat_id = getattr(getattr(q, "message", None), "chat_id", None) or uid
+                    cap = _charts.render_analysis_caption(an, market_row=row)
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=_io.BytesIO(png),
+                        caption=cap,
+                        parse_mode="HTML",
+                    )
+        except Exception as _ce:
+            log.debug("analysis chart photo delivery skipped: %s", _ce)
         card_text = render_analysis_card(an, market_row=row)
         card_text += f"\n\n📊 <b>حصتك الآن:</b> <b>{q_state['used']}/{q_state['quota']}</b> {bar(q_state['used'], q_state['quota'])}"
         await render(q, card_text,

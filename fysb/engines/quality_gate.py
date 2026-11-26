@@ -190,4 +190,12 @@ def evaluate_quality_gate(
             if direction == "SELL" and ltf_sep >= 0.35 and last_cl >= last_op:
                 return False, f"صعود حاد على الفريم التنفيذي (EMA9>EMA21, {ltf_sep:+.2f} ATR) — منع البيع ضد الزخم"
 
+    # 6) v8.8.0 HTF Liquidity Obstruction Guard — NEVER enter directly into a
+    # major HTF wall (PDH/PDL or HTF swing) blocking the path to TP1 (2.0R)
+    # unless the setup carries extraordinary A++ multi-confluence conviction.
+    if checks.get("clear_path_to_2r") is False:
+        req_clear = min(92, min_score + 12)
+        if score < req_clear:
+            return False, f"عائق سيولة على الفريم الأعلى قبل TP1 (مطلوب جودة ≥ {req_clear}، الحالي {score:.0f})"
+
     return True, ""

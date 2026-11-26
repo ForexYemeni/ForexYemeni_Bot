@@ -313,15 +313,18 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     draw.line([(54, 126), (W - 54, 126)], fill=(212, 175, 55, 90), width=1)
 
     total = int(digest.get("total") or 0)
+    decided = int(digest.get("decided") or (int(digest.get("wins") or 0) + int(digest.get("losses") or 0)))
     wr = float(digest.get("win_rate") or 0.0)
     net_pips = float(digest.get("net_pips") or 0.0)
-    best_st = str(digest.get("best_strategy") or "—").upper()[:12]
+    net_r = float(digest.get("net_r") or 0.0)
+    pf = float(digest.get("profit_factor") or 0.0)
+    usd_001 = float(digest.get("net_usd_001") or 0.0)
 
     kpis = [
-        ("TOTAL SIGNALS", f"{total}", TEXT_MAIN),
-        ("WIN RATE", f"{wr:.1f}%", EMERALD if wr >= 55 else GOLD_BRIGHT),
-        ("NET PIPS", f"{'+' if net_pips >= 0 else ''}{net_pips:.1f}", EMERALD if net_pips >= 0 else CRIMSON),
-        ("TOP STRATEGY", best_st, GOLD_BRIGHT),
+        ("NET RETURN (R)", f"{net_r:+.1f}R", EMERALD if net_r >= 0 else CRIMSON),
+        ("PROFIT FACTOR", f"{pf:.2f}", EMERALD if pf >= 1.25 else (GOLD_BRIGHT if pf >= 1.0 else CRIMSON)),
+        ("WIN RATE", f"{wr:.1f}%", EMERALD if wr >= 50 else GOLD_BRIGHT),
+        ("NET PIPS", f"{net_pips:+.1f}p", EMERALD if net_pips >= 0 else CRIMSON),
     ]
     cw, gap, sx, ky = 258, 18, 54, 148
     for i, (lbl, val, col) in enumerate(kpis):
@@ -332,10 +335,10 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
         draw.text((x0 + 20, ky + 20), lbl, font=f_kpi_lbl, fill=TEXT_MUTED)
         draw.text((x0 + 20, ky + 56), val, font=f_kpi_val, fill=col)
 
-    # Left panel: Strategy Win-Rate Bars
+    # Left panel: Strategy Performance Matrix (ranked by true Net R!)
     lx0, ly0, lx1, ly1 = 54, 302, 740, 650
     draw.rounded_rectangle([lx0, ly0, lx1, ly1], radius=20, fill=CARD_BG, outline=LINE_SUB, width=1)
-    draw.text((lx0 + 24, ly0 + 20), "STRATEGY PERFORMANCE MATRIX", font=f_sec, fill=GOLD_BRIGHT)
+    draw.text((lx0 + 24, ly0 + 20), "STRATEGY PERFORMANCE MATRIX (BY R-MULTIPLE)", font=f_sec, fill=GOLD_BRIGHT)
 
     strats = list(digest.get("top_strategies") or [])[:5]
     if not strats:
@@ -343,42 +346,57 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     else:
         for idx, s in enumerate(strats):
             ry = ly0 + 68 + idx * 54
-            name = str(s.get("strategy") or "MANUAL").upper()[:14]
+            name = str(s.get("strategy") or "MANUAL").upper()[:13]
             swr = float(s.get("win_rate") or 0.0)
             spips = float(s.get("pips") or 0.0)
+            sr = float(s.get("net_r") or 0.0)
             stotal = int(s.get("total") or 0)
             draw.text((lx0 + 24, ry), f"{idx + 1}. {name}", font=f_row, fill=TEXT_MAIN)
-            draw.text((lx0 + 470, ry), f"{swr:.0f}%  ({'+' if spips >= 0 else ''}{spips:.0f}p · {stotal})", font=f_mono, fill=EMERALD if spips >= 0 else CRIMSON)
+            draw.text(
+                (lx0 + 360, ry),
+                f"{sr:+.1f}R · {swr:.0f}% · {spips:+.0f}p ({stotal})",
+                font=f_mono,
+                fill=EMERALD if sr >= 0 else CRIMSON,
+            )
             # Progress track
             bx0, bx1, by0, by1 = lx0 + 24, lx1 - 24, ry + 30, ry + 40
             draw.rounded_rectangle([bx0, by0, bx1, by1], radius=5, fill=(28, 37, 54, 255))
             fw = max(8, int((bx1 - bx0) * min(100.0, max(0.0, swr)) / 100.0))
-            draw.rounded_rectangle([bx0, by0, bx0 + fw, by1], radius=5, fill=EMERALD if swr >= 55 else GOLD)
+            draw.rounded_rectangle([bx0, by0, bx0 + fw, by1], radius=5, fill=EMERALD if sr >= 0 else CRIMSON)
 
     # Right panel: Top Symbols + Breakdown
     rx0, ry0, rx1, ry1 = 762, 302, W - 54, 650
     draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=20, fill=CARD_BG, outline=LINE_SUB, width=1)
-    draw.text((rx0 + 24, ry0 + 20), "TOP PERFORMING ASSETS", font=f_sec, fill=CYAN)
+    draw.text((rx0 + 24, ry0 + 20), "TOP ASSETS (BY R)", font=f_sec, fill=CYAN)
 
     syms = list(digest.get("top_symbols") or [])[:4]
     if not syms:
-        draw.text((rx0 + 24, ry0 + 90), "Awaiting active symbol data.", font=f_row, fill=TEXT_MUTED)
+        draw.text((rx0 + 24, ry0 + 90), "Awaiting closed symbol data.", font=f_row, fill=TEXT_MUTED)
     else:
         for idx, sym_row in enumerate(syms):
             sy = ry0 + 68 + idx * 64
             sname = str(sym_row.get("symbol") or "XAUUSD").upper()
             sp = float(sym_row.get("pips") or 0.0)
+            sr = float(sym_row.get("net_r") or 0.0)
             scnt = int(sym_row.get("total") or 0)
             draw.rounded_rectangle([rx0 + 20, sy, rx1 - 20, sy + 52], radius=12, fill=CARD_ALT, outline=LINE_SUB, width=1)
-            draw.text((rx0 + 36, sy + 14), f"{sname}", font=f_row, fill=TEXT_MAIN)
-            draw.text((rx0 + 195, sy + 15), f"{'+' if sp >= 0 else ''}{sp:.1f}p  ({scnt})", font=f_mono, fill=EMERALD if sp >= 0 else CRIMSON)
+            draw.text((rx0 + 34, sy + 14), f"{sname}", font=f_row, fill=TEXT_MAIN)
+            draw.text((rx0 + 165, sy + 15), f"{sr:+.1f}R · {sp:+.0f}p ({scnt})", font=f_mono, fill=EMERALD if sr >= 0 else CRIMSON)
 
     # Bottom footer
     draw.rounded_rectangle([54, 672, W - 54, H - 36], radius=16, fill=(12, 17, 28, 240), outline=(212, 175, 55, 110), width=1)
     wins = int(digest.get("wins") or 0)
     losses = int(digest.get("losses") or 0)
     open_c = int(digest.get("open") or 0)
-    draw.text((78, 690), f"WINS: {wins}   •   LOSSES: {losses}   •   RUNNING: {open_c}   •   100% VERIFIED DATABASE AUDIT", font=f_mono, fill=GOLD_BRIGHT)
+    tp3 = int(digest.get("tp3_hits") or 0)
+    tp2 = int(digest.get("tp2_hits") or 0)
+    tp1 = int(digest.get("tp1_hits") or 0)
+    draw.text(
+        (74, 690),
+        f"OFFICIAL: {total} (CLOSED {decided})  •  TP3:{tp3} TP2:{tp2} TP1:{tp1} SL:{losses} OPEN:{open_c}  •  0.01 LOT: {usd_001:+,.2f}$",
+        font=f_mono,
+        fill=GOLD_BRIGHT,
+    )
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG", optimize=True)

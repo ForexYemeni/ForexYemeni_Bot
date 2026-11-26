@@ -363,6 +363,24 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
             skipped_notes.append(f"{cand.code}:geo({geo_reason[:36]})")
             continue
 
+        # 11.45: v8.8.0 Institutional Strategy Auto-Quarantine Guard (AUTO signals)
+        # Automatically blocks strategies proven to be bleeding in the trailing 14 days
+        # (WR < 35% & R-PF < 0.85 across >= 6 closed trades) so candidate fallback
+        # promotes healthy winning strategies instead.
+        if not force and sig_source == "AUTO":
+            try:
+                from fysb.engines import intelligence as _intel_q
+                q_st = _intel_q.strategy_quarantine_status(cand.code, symbol)
+                if q_st.get("quarantined"):
+                    if not first_reject_reason:
+                        first_reject_tag = "STRATEGY_QUARANTINED"
+                        first_reject_reason = q_st["reason"]
+                        first_reject_score = cand.score
+                    skipped_notes.append(f"{cand.code}:quarantined")
+                    continue
+            except Exception:
+                pass
+
         # 11.5: Institutional Quality + HTF Bias + Chop + Session Gate (v6.20.6)
         # Matches backtest.py 100% identically. Admin manual force=True bypasses
         # only the soft regime filter if explicitly forced.
@@ -378,6 +396,29 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                     first_reject_score = cand.score
                 skipped_notes.append(f"{cand.code}:quality({q_reason[:36]})")
                 continue
+
+        # 11.6: v8.8.0 Solo Neutral-HTF Sniper Filter (AUTO signals)
+        # A lone single-strategy AUTO candidate without HTF trend alignment must
+        # meet an elevated conviction floor (min_score + 6) to prevent low-edge noise.
+        if not force and sig_source == "AUTO" and len(results) == 1:
+            try:
+                from fysb.engines.quality_gate import htf_bias_direction
+                htf_d, _ = htf_bias_direction(bias_candles)
+                c_dir = (cand.direction or "").upper()
+                htf_aligned = (c_dir == "BUY" and htf_d == "UP") or (c_dir == "SELL" and htf_d == "DOWN")
+                if not htf_aligned:
+                    req_solo = min(90, max(min_sig_score + 6, 80))
+                    if float(cand.score or 0) < req_solo:
+                        if not first_reject_reason:
+                            first_reject_tag = "QUALITY_REJECTED"
+                            first_reject_reason = (
+                                f"إشارة منفردة بدون توافق اتجاه HTF — مطلوب جودة ≥ {req_solo} (الحالي {cand.score:.0f})"
+                            )
+                            first_reject_score = cand.score
+                        skipped_notes.append(f"{cand.code}:solo_neutral({cand.score:.0f}<{req_solo})")
+                        continue
+            except Exception:
+                pass
 
         # 12-13: RR + risk gate (per-symbol, global cap, correlation, daily loss, ADMIN_SIGNAL_NOW exemption)
         risk_gate = risk.check_signal(symbol, cand.rr, vol, source=sig_source,

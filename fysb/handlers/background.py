@@ -925,13 +925,17 @@ async def auto_digest_loop(app):
                 if now_dt.weekday() == 6 and now_dt.hour >= 22:
                     last_w = await afn.run(db.get_setting, "last_weekly_digest_day", "")
                     if last_w != today:
-                        await _digest.publish_digest(app.bot, days=7, include_channels=True, notify_admin=True)
+                        await _digest.publish_digest(
+                            app.bot, days=7, include_channels=True, notify_admin=True, auto_scheduled=True
+                        )
                         log.info("auto weekly performance digest published (%s)", today)
                 # 1st of month at/after 11:00am Mecca -> Monthly 30d Digest
                 if now_dt.day == 1 and now_dt.hour >= 11:
                     last_m = await afn.run(db.get_setting, "last_monthly_digest_day", "")
                     if last_m != today:
-                        await _digest.publish_digest(app.bot, days=30, include_channels=True, notify_admin=True)
+                        await _digest.publish_digest(
+                            app.bot, days=30, include_channels=True, notify_admin=True, auto_scheduled=True
+                        )
                         log.info("auto monthly performance digest published (%s)", today)
         except asyncio.CancelledError:
             raise

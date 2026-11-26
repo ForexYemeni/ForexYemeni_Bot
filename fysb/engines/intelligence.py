@@ -65,12 +65,133 @@ def reset_caches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #3 Adaptive Strategy Weighting (30-day closed performance)
+# #3 Adaptive Strategy Weighting & Auto-Quarantine (v8.8.0 — R-Multiple Exact)
 # ---------------------------------------------------------------------------
 
-def adaptive_strategy_weight(strategy_code: str, symbol: str = "", lookback_days: int = 30) -> dict:
-    """Compute bounded [-6.0 .. +6.0] score adjustment from real 30-day results.
+def _signal_r_multiple(row) -> float:
+    """Compute real R-Multiple for a closed signal row (immune to cross-asset pip scale!)."""
+    from fysb import instruments
+    pips = float(row["pips_result"] or 0.0)
+    st = str(row["status"] or "").upper()
+    try:
+        entry = float(row["entry"] or 0.0)
+        stop = float(row["stop"] or 0.0)
+        sym = str(row["symbol"] or "XAUUSD")
+        sl_pips = abs(instruments.pips(sym, entry, stop)) if (entry > 0 and stop > 0 and entry != stop) else 0.0
+    except Exception:
+        sl_pips = 0.0
+    if sl_pips > 1e-6 and pips != 0.0:
+        return max(-2.0, min(10.0, pips / sl_pips))
+    if st == "TP3_HIT":
+        return 4.5
+    if st in ("TP2_HIT", "TP2_BE"):
+        return 3.0
+    if st in ("TP1_HIT", "TP1_BE"):
+        return 2.0
+    if st in ("SL_HIT", "LOSS"):
+        return -1.0
+    return 0.0
 
+
+def strategy_quarantine_status(
+    strategy_code: str,
+    symbol: str = "",
+    lookback_days: int = 14,
+) -> dict:
+    """v8.8.0 Institutional Auto-Quarantine Guard.
+
+    Audits real closed official signals over the trailing `lookback_days`.
+    If a strategy has >= 6 closed trades AND Win Rate < 35% AND R-Profit-Factor < 0.85,
+    it is automatically quarantined from AUTO publishing until performance recovers
+    or the window ages out — stopping bleeding strategies from wrecking live results.
+    """
+    code = (strategy_code or "").upper().strip()
+    if not code:
+        return {"quarantined": False, "trades": 0, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
+    if (db.get_setting("strategy_auto_quarantine", "1") or "1") != "1":
+        return {"quarantined": False, "trades": 0, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(7, int(lookback_days)))).isoformat()
+    try:
+        with db.conn() as c:
+            rows = c.execute(
+                """SELECT symbol, entry, stop, status, pips_result FROM signals
+                   WHERE UPPER(strategy)=?
+                     AND (source IS NULL OR UPPER(source) != 'SIGNAL_NOW')
+                     AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE','SL_HIT')
+                     AND closed_at!='' AND closed_at>=?""",
+                (code, cutoff),
+            ).fetchall()
+    except Exception:
+        return {"quarantined": False, "trades": 0, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
+
+    n = len(rows)
+    if n < 6:
+        return {"quarantined": False, "trades": n, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
+
+    wins = 0
+    gross_win_r = 0.0
+    gross_loss_r = 0.0
+    for r in rows:
+        r_mult = _signal_r_multiple(r)
+        st = str(r["status"] or "").upper()
+        if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE") and r_mult >= 0:
+            wins += 1
+            gross_win_r += max(r_mult, 0.5)
+        else:
+            gross_loss_r += max(abs(r_mult), 1.0)
+
+    wr = (wins / n) * 100.0
+    pf = (gross_win_r / gross_loss_r) if gross_loss_r > 0 else 3.0
+    net_r = round(gross_win_r - gross_loss_r, 2)
+    quarantined = (wr < 35.0 and pf < 0.85)
+    reason = (
+        f"حماية ذكية (Auto-Quarantine): استراتيجية {code} موقوفة مؤقتاً "
+        f"(نجاح {wr:.0f}% · PF {pf:.2f} · صافي {net_r:+.1f}R من {n} صفقات)"
+        if quarantined else ""
+    )
+    return {
+        "quarantined": quarantined,
+        "strategy": code,
+        "trades": n,
+        "win_rate": round(wr, 1),
+        "pf": round(pf, 2),
+        "net_r": net_r,
+        "reason": reason,
+    }
+
+
+def list_quarantined_strategies(lookback_days: int = 14) -> list[dict]:
+    """Return all currently auto-quarantined strategies in the trailing window."""
+    if (db.get_setting("strategy_auto_quarantine", "1") or "1") != "1":
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(7, int(lookback_days)))).isoformat()
+    try:
+        with db.conn() as c:
+            codes = [
+                str(r["s"]).upper()
+                for r in c.execute(
+                    """SELECT DISTINCT UPPER(strategy) AS s FROM signals
+                       WHERE (source IS NULL OR UPPER(source) != 'SIGNAL_NOW')
+                         AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE','SL_HIT')
+                         AND closed_at!='' AND closed_at>=?""",
+                    (cutoff,),
+                ).fetchall()
+                if r["s"]
+            ]
+    except Exception:
+        return []
+    out = []
+    for code in sorted(codes):
+        st = strategy_quarantine_status(code, lookback_days=lookback_days)
+        if st.get("quarantined"):
+            out.append(st)
+    return out
+
+
+def adaptive_strategy_weight(strategy_code: str, symbol: str = "", lookback_days: int = 30) -> dict:
+    """Compute bounded [-8.0 .. +7.0] score adjustment from real 30-day R-Multiple results.
+
+    Uses true R-Multiples (so BTCUSD pip scale can never distort Forex/Gold evaluation).
     Requires >= 5 closed trades for statistical relevance; otherwise neutral (0.0).
     """
     code = (strategy_code or "").upper().strip()
@@ -81,9 +202,10 @@ def adaptive_strategy_weight(strategy_code: str, symbol: str = "", lookback_days
         with db.conn() as c:
             if symbol:
                 rows = c.execute(
-                    """SELECT status, pips_result FROM signals
+                    """SELECT symbol, entry, stop, status, pips_result FROM signals
                        WHERE UPPER(strategy)=? AND REPLACE(UPPER(symbol),'/','')=?
-                         AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                         AND (source IS NULL OR UPPER(source) != 'SIGNAL_NOW')
+                         AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE','SL_HIT')
                          AND closed_at!='' AND closed_at>=?""",
                     (code, symbol.upper().replace("/", ""), cutoff),
                 ).fetchall()
@@ -91,9 +213,10 @@ def adaptive_strategy_weight(strategy_code: str, symbol: str = "", lookback_days
                 rows = []
             if len(rows) < 5:
                 rows = c.execute(
-                    """SELECT status, pips_result FROM signals
+                    """SELECT symbol, entry, stop, status, pips_result FROM signals
                        WHERE UPPER(strategy)=?
-                         AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                         AND (source IS NULL OR UPPER(source) != 'SIGNAL_NOW')
+                         AND status IN ('TP1_HIT','TP2_HIT','TP3_HIT','TP1_BE','TP2_BE','SL_HIT')
                          AND closed_at!='' AND closed_at>=?""",
                     (code, cutoff),
                 ).fetchall()
@@ -108,19 +231,19 @@ def adaptive_strategy_weight(strategy_code: str, symbol: str = "", lookback_days
     gross_win = 0.0
     gross_loss = 0.0
     for r in rows:
-        p = float(r["pips_result"] or 0.0)
-        if r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT") and p >= 0:
+        rm = _signal_r_multiple(r)
+        st = str(r["status"] or "").upper()
+        if st in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE") and rm >= 0:
             wins += 1
-            gross_win += max(p, 1.0)
+            gross_win += max(rm, 0.5)
         else:
-            gross_loss += max(abs(p), 1.0)
+            gross_loss += max(abs(rm), 1.0)
 
     wr = wins / n
     pf = gross_win / gross_loss if gross_loss > 0 else (3.0 if gross_win > 0 else 1.0)
-    # Centered around 50% WR and PF 1.25; bounded cleanly in [-6.0, +6.0]
-    raw_delta = (wr - 0.50) * 14.0 + max(-2.5, min(2.5, (pf - 1.25) * 2.0))
-    delta = round(max(-6.0, min(6.0, raw_delta)), 1)
-    note = f"adaptive({code}: WR {wr*100:.0f}%, PF {pf:.2f}, n={n} => {delta:+.1f})"
+    raw_delta = (wr - 0.50) * 14.0 + max(-3.5, min(3.5, (pf - 1.25) * 2.2))
+    delta = round(max(-8.0, min(7.0, raw_delta)), 1)
+    note = f"adaptive({code}: WR {wr*100:.0f}%, PF {pf:.2f}R, n={n} => {delta:+.1f})"
     return {"delta": delta, "trades": n, "win_rate": round(wr * 100, 1), "pf": round(pf, 2), "note": note}
 
 

@@ -17,6 +17,29 @@ from fysb.theme import esc, human_dt
 from fysb.ui import keyboards as kb
 
 
+def _is_active_partner_sync(uid: int) -> bool:
+    if uid == config.ADMIN_ID:
+        return False
+    try:
+        from fysb.services import partners as _partners
+        p = _partners.get_partner_by_user(uid)
+        return bool(p and p.get("enabled"))
+    except Exception:
+        return False
+
+
+async def _nav_for(uid: int, extra_rows: list | None = None):
+    """Role-aware luxury navigation: Admin -> admin_nav, Partner -> partner_nav (p:home), User -> user_nav."""
+    if uid == config.ADMIN_ID:
+        return kb.admin_nav(extra_rows)
+    if await afn.run(_is_active_partner_sync, uid):
+        from telegram import InlineKeyboardMarkup
+        rows = list(extra_rows or [])
+        rows.append([kb.btn("👑 لوحة الشريك الرئيسية", "p:home", style="primary")])
+        return InlineKeyboardMarkup(rows)
+    return kb.user_nav(extra_rows)
+
+
 # ===========================================================================
 # USER SIDE — Ultra-Luxury Showcase, Free Trial, Checkout & Live Radar Center
 # ===========================================================================
@@ -72,7 +95,7 @@ async def render_user_true_analysis(q, uid: int, context, bot, notice: str = "")
         rows_kb.append([kb.btn("👑 ابدأ تحليل ForexYemeni الحقيقي الآن", "u:ta_anl", style="success")])
         if st["mode"] == "TRIAL":
             rows_kb.append([kb.btn(f"👑 الترقية للاشتراك الكامل ({price:g}$ / {days} يوم)", "u:tabuy", style="primary")])
-        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        await render(q, "\n".join(lines), await _nav_for(uid, rows_kb), bot)
         return
 
     # Non-subscriber Ultra-Luxury Royal Pitch Card
@@ -275,7 +298,7 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
                 except Exception:
                     live_px = 0.0
             c_body, c_rows = await afn.run(ta_svc.render_continuity_card, cont, live_px)
-            await render(q, c_body, kb.user_nav(c_rows), bot)
+            await render(q, c_body, await _nav_for(uid, c_rows), bot)
             return True
 
         context.user_data["ta_draft"] = {"symbol": symbol}
@@ -297,7 +320,7 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
         rows = [[kb.btn(lbl, f"u:ta_tf:{code}", style="success" if code == "H1" else "primary")]
                 for code, lbl in tf_pairs]
         rows.append([kb.btn("↩️ تغيير السوق", "u:ta_anl")])
-        await render(q, body, kb.user_nav(rows), bot)
+        await render(q, body, await _nav_for(uid, rows), bot)
         return True
 
     if action.startswith("ta_tf:"):
@@ -324,7 +347,7 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
         for i in range(0, len(universe), 2):
             rows.append([kb.btn(strategy_name(s), f"u:ta_run:{s}") for s in universe[i:i + 2]])
         rows.append([kb.btn("↩️ تغيير الإطار", f"u:ta_sym:{draft['symbol']}")])
-        await render(q, body, kb.user_nav(rows), bot)
+        await render(q, body, await _nav_for(uid, rows), bot)
         return True
 
     if action.startswith("ta_run:"):
@@ -360,7 +383,7 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
             await render(
                 q,
                 f"⛔ {esc(res.get('error') or 'تعذر قراءة السوق حالياً')}",
-                kb.user_nav([[kb.btn("↩️ المحاولة مرة أخرى", "u:ta_anl", style="primary")]]),
+                await _nav_for(uid, [[kb.btn("↩️ المحاولة مرة أخرى", "u:ta_anl", style="primary")]]),
                 bot,
             )
             return True
@@ -392,7 +415,7 @@ async def handle_user_true_analysis(q, uid: int, action: str, context, bot) -> b
                 "<blockquote>▎السوق حيادي/عرضي حالياً بلا اتجاه مؤسسي حاسم — لم يُفعّل رادار وهمي حفاظاً على رأس مالك.</blockquote>"
             )
 
-        await render(q, card_text, kb.user_nav(rows_out), bot)
+        await render(q, card_text, await _nav_for(uid, rows_out), bot)
 
         if ta_mode == "INSTANT_SIGNAL" and bot is not None:
             try:
@@ -470,7 +493,7 @@ async def _render_ta_market_hub(q, uid: int, bot, *, category: str = "", page: i
             if nav:
                 kb_rows.append(nav)
         kb_rows.append([kb.btn("↩️ جميع الأقسام", "u:ta_anl")])
-        await render(q, body, kb.user_nav(kb_rows), bot)
+        await render(q, body, await _nav_for(uid, kb_rows), bot)
         return
 
     body = (
@@ -493,7 +516,7 @@ async def _render_ta_market_hub(q, uid: int, bot, *, category: str = "", page: i
     for i in range(0, len(cat_btns), 2):
         kb_rows.append(cat_btns[i:i + 2])
     kb_rows.append([kb.btn("👁‍🗨 لوحة رادار تحليلاتي", "u:true_analysis")])
-    await render(q, body, kb.user_nav(kb_rows), bot)
+    await render(q, body, await _nav_for(uid, kb_rows), bot)
 
 
 # ===========================================================================

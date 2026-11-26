@@ -157,6 +157,75 @@ def is_private_user_update(update: object) -> bool:
     return True
 
 
+def _admin_home_snapshot() -> dict:
+    """Single lightweight DB checkout for the Super Admin live executive header."""
+    admin_id = config.ADMIN_ID
+    try:
+        with db.conn() as c:
+            users_n = int(c.execute("SELECT COUNT(*) n FROM users WHERE user_id!=?", (admin_id,)).fetchone()["n"] or 0)
+            paid_n = int(c.execute(
+                "SELECT COUNT(*) n FROM subscriptions WHERE status='ACTIVE' AND plan_code!='FREE' AND user_id!=?",
+                (admin_id,),
+            ).fetchone()["n"] or 0)
+            pending_pay = int(c.execute("SELECT COUNT(*) n FROM payments WHERE status='PENDING'").fetchone()["n"] or 0)
+            open_sigs = int(c.execute(
+                "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT') AND (closed_at IS NULL OR closed_at='')"
+            ).fetchone()["n"] or 0)
+            ch_on = int(c.execute("SELECT COUNT(*) n FROM broadcast_channels WHERE enabled=1").fetchone()["n"] or 0)
+            tickets = int(c.execute("SELECT COUNT(*) n FROM tickets WHERE status='OPEN'").fetchone()["n"] or 0)
+            try:
+                ta_radars = int(c.execute(
+                    "SELECT COUNT(*) n FROM analysis_monitors WHERE status IN ('WATCHING_STABILITY','WATCHING_CONFIRM','SIGNAL_ACTIVE')"
+                ).fetchone()["n"] or 0)
+            except Exception:
+                ta_radars = 0
+            engine_on = db.get_setting("engine_enabled", "0") == "1"
+            news_on = db.get_setting("news_guard_enabled", "1") == "1"
+            kill_on = db.get_setting("global_kill_switch", "0") == "1"
+        return {
+            "users": users_n, "paid": paid_n, "pending_pay": pending_pay,
+            "open_sigs": open_sigs, "ch_on": ch_on, "tickets": tickets,
+            "ta_radars": ta_radars, "engine_on": engine_on,
+            "news_on": news_on, "kill_on": kill_on,
+        }
+    except Exception:
+        return {}
+
+
+async def build_admin_home_card() -> str:
+    """v8.6.0: Sovereign Ultra-Luxury Super Admin Command Center header."""
+    snap = await afn.run(_admin_home_snapshot)
+    now_ksa = config.mecca_time_12h()
+    brand_e = html.escape(str(config.BRAND or "FOREXYEMENI"))
+    ver_e = html.escape(str(config.VERSION or ""))
+    if not snap:
+        return (
+            f"👑 <b><u>{brand_e} | SUPER ADMIN COMMAND CENTER</u></b>\n"
+            f"🕒 <code>{html.escape(now_ksa)}</code> · <code>v{ver_e}</code>\n"
+            "اختر القسم من لوحة التحكم الرئيسية:"
+        )
+    eng = "🟢 يعمل" if snap["engine_on"] else "⚪ متوقف"
+    ng = "🟢 مفعّل" if snap["news_on"] else "⚪ متوقف"
+    ks = "⛔ مفعّل" if snap["kill_on"] else "🟢 آمن"
+    pay_badge = f"🔔 <b>{snap['pending_pay']}</b>" if snap["pending_pay"] else "<b>0</b>"
+    tkt_badge = f"🔔 <b>{snap['tickets']}</b>" if snap["tickets"] else "<b>0</b>"
+    return (
+        f"👑 <b><u>{brand_e} | SUPER ADMIN COMMAND CENTER</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 <code>{html.escape(now_ksa)}</code>  ·  🏷 <code>v{ver_e}</code>\n\n"
+        "<blockquote>"
+        f"▎🧠 المحرك الآلي: <b>{eng}</b>  ·  📰 درع الأخبار: <b>{ng}</b>\n"
+        f"▎🛡 Kill Switch: <b>{ks}</b>  ·  📺 قنوات نشطة: <b>{snap['ch_on']}</b>\n"
+        f"▎📡 إشارات مفتوحة: <b>{snap['open_sigs']}</b>  ·  👁‍🗨 رادارات حقيقية: <b>{snap['ta_radars']}</b>"
+        "</blockquote>\n"
+        "<blockquote>"
+        f"▎👥 المستخدمون: <b>{snap['users']}</b>  ·  💎 المدفوعون: <b>{snap['paid']}</b>\n"
+        f"▎💳 مدفوعات معلقة: {pay_badge}  ·  🎫 تذاكر مفتوحة: {tkt_badge}"
+        "</blockquote>\n"
+        "✨ <i>غرفة القيادة المؤسسية جاهزة — اختر الوحدة المطلوبة من الأزرار بالأسفل:</i>"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private_user_update(update):
         return
@@ -190,11 +259,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("referral capture failed")
     if uid == config.ADMIN_ID:
+        admin_home_txt = await build_admin_home_card()
         await _send_guarded(
             update.effective_message.reply_text,
-            f"👑 <b>{config.BRAND}</b>\n"
-            f"<b>SUPER ADMIN COMMAND CENTER</b>\n\n"
-            f"مرحباً بك في مركز التحكم الرئيسي — جميع الوحدات متاحة عبر الأزرار.",
+            admin_home_txt,
             kb.admin_menu(),
         )
         await afn.run(audit_log.log, uid, "admin_panel_open")
@@ -424,9 +492,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await afn.run(audit_log.log, uid, "security:admin_command_denied")
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
+    admin_home_txt = await build_admin_home_card()
     sent = await _send_guarded(
         update.effective_message.reply_text,
-        f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:",
+        admin_home_txt,
         kb.admin_menu(),
     )
     if sent is not None:

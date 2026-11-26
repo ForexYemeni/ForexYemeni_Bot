@@ -91,12 +91,15 @@ def dashboard_view() -> str:
     ])
     engine = "🟢 يعمل" if sysd["engine_enabled"] else "⚪ متوقف"
     sys_card = "\n".join([
-        f"🖥 <b>النظام</b>",
-        f"▎{engine}  ·  🛡 Kill Switch: <b>{'مفعل' if sysd['kill_switch'] else 'غير مفعل'}</b>  ·  🔧 صيانة: <b>{'نعم' if sysd['maintenance'] else 'لا'}</b>",
+        f"🖥 <b>النظام والحماية</b>",
+        f"▎🧠 المحرك: <b>{engine}</b>  ·  🛡 Kill Switch: <b>{'مفعل' if sysd['kill_switch'] else 'آمن'}</b>  ·  🔧 صيانة: <b>{'نعم' if sysd['maintenance'] else 'لا'}</b>",
         f"▎🔒 LIVE: <b>{'مفعل ⚠️' if sysd['live_enabled'] else 'مغلق (آمن)'}</b>  ·  🎫 تذاكر مفتوحة: <b>{d['tickets_open']}</b>  ·  📣 حملات نشطة: <b>{d['broadcasts_active']}</b>",
     ])
-    head = (f"{ICON['crown']} <b>لوحة المعلومات الملكية المباشرة</b>\n"
-            f"🕐 محدثة لحظياً من قاعدة البيانات الحقيقية")
+    head = (
+        f"{ICON['crown']} <b><u>لوحة المعلومات الملكية المباشرة — {esc(config.BRAND)}</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 <code>{esc(config.mecca_dt_12h())}</code> · محدثة لحظياً من قاعدة البيانات"
+    )
     out = [head, card(users_card), card(subs_card), card(pay_card), card(sig_card), card(anl_card), card(sys_card)]
     le = d["last_engine"]
     if le:

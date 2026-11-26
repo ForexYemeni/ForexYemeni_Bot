@@ -118,10 +118,20 @@ async def _route_user(q, context, uid: int, action: str):
         await render(q, "🔧 المنصة في وضع الصيانة مؤقتاً. حاول بعد قليل.", None, context.bot)
         return
     # v6.21.2 Strict Partner-Only Mode: active partners cannot access regular
-    # user menus (`u:*`) — any stale user button redirects straight to their
-    # Partner Command Panel until Admin disables or removes them.
-    # Piggybacks on touch_and_get's EXISTS subquery -> ZERO extra DB round trips!
+    # user menus (`u:*`) — EXCEPT their granted Royal True Analysis studio
+    # (`true_analysis`, `ta_anl`, `ta_cat:`, `ta_sym:`, `ta_tf:`, `ta_run:`,
+    # `tamoncancel:`, and viewing their own True Analysis signal chart via `sigchart:`).
+    # Any other stale user button redirects straight to their Partner Command Panel.
     if uid != config.ADMIN_ID and u and u.get("is_active_partner"):
+        if action in ("true_analysis", "ta_anl") or action.startswith(
+            ("ta_cat:", "ta_sym:", "ta_tf:", "ta_run:", "tamoncancel:")
+        ):
+            from fysb.handlers import true_analysis_ui
+            if await true_analysis_ui.handle_user_true_analysis(q, uid, action, context, context.bot):
+                return
+        elif action.startswith("sigchart:"):
+            await user_pages.user_page(q, action, uid, context, preloaded_u=u)
+            return
         await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
         return
     # Ticket replies: route the text flow (handled in inputs module)
@@ -180,8 +190,8 @@ async def _route_admin(q, context, uid: int, action: str):
         arg, arg2 = arg.split(":", 1)
 
     if act == "home":
-        from fysb.handlers.common import render
-        await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
+        from fysb.handlers.common import build_admin_home_card, render
+        await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
     elif act in ("bridge", "promos", "promo_new", "digest_now") or act.startswith("br_"):
         from fysb.handlers import auto_bridge_bot
         await auto_bridge_bot.handle_admin_bridge(q, uid, act, arg, arg2, context, bot)
@@ -195,7 +205,8 @@ async def _route_admin(q, context, uid: int, action: str):
             title, builder = hub
             await render(q, title, builder(), bot)
         else:
-            await render(q, f"👑 <b>{config.BRAND} | SUPER ADMIN</b>\nاختر القسم من لوحة التحكم الرئيسية:", kb.admin_menu(), bot)
+            from fysb.handlers.common import build_admin_home_card
+            await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
     # --- core ---
     elif act == "stats":
         await admin_core.admin_stats(q, uid, context, bot)

@@ -463,15 +463,15 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
     # --- 3) UNIFIED USER AFFILIATE, PLAN-UNLOCK & PAYOUT HUB ---
     if action == "affiliate":
         from urllib.parse import quote as _urlquote
-        bot_u = ""
-        try:
-            me = await bot.get_me()
-            bot_u = getattr(me, "username", "") or ""
-        except Exception:
-            pass
-        body = await afn.run(affiliates.render_affiliate_dashboard, uid, bot_u)
+        # v8.9.0: the bot's @username never changes at runtime → cached lookup
+        # instead of a live Telegram get_me() round-trip on every tap.
+        bot_u = await afn.run(affiliates.cached_bot_username)
+        # v8.9.0: ONE snapshot, reused by the body AND the buttons. This screen
+        # used to take 100 DB connections (dashboard 63 + stats 38 + link) —
+        # ~15 s on Supabase. Now it is a single stats read + one config read.
         st = await afn.run(affiliates.affiliate_stats, uid)
         link = await afn.run(affiliates.unified_invite_link, uid, bot_u)
+        body = await afn.run(affiliates.render_affiliate_dashboard, uid, bot_u, st, None)
         share_url = (
             "https://t.me/share/url?url=" + _urlquote(link)
             + "&text=" + _urlquote("👑 انضم إلى FOREXYEMENI — إشارات وتحليلات ملكية لحظية بالشارت الفاخر!")

@@ -68,8 +68,8 @@ def target_label(code: str) -> str:
         return "👑 تحليل ForexYemeni الحقيقي"
     if c == "ACADEMY":
         return "🎓 الأكاديمية الملكية"
-    with db.conn() as conn:
-        r = conn.execute("SELECT title FROM plans WHERE UPPER(code)=?", (c,)).fetchone()
+    with db.conn() as c2:
+        r = c2.execute("SELECT title FROM plans WHERE UPPER(code)=?", (c,)).fetchone()
     if r and r["title"]:
         return f"💎 باقة {r['title']} ({c})"
     return f"💎 باقة {c}"
@@ -136,8 +136,10 @@ def set_config(**kwargs) -> dict:
     return get_config()
 
 
-def dynamic_tiers() -> tuple[tuple[int, str, str, float], ...]:
-    cfg = get_config()
+def dynamic_tiers(cfg: dict | None = None) -> tuple[tuple[int, str, str, float], ...]:
+    """Tier table (min_refs, code, label, rate). v8.9.0: accepts a pre-loaded
+    config so callers that already hold one never re-read 13 settings again."""
+    cfg = cfg or get_config()
     rates = cfg["tier_rates"]
     return tuple(
         (min_refs, code, label, rates.get(code, default_rate))
@@ -145,9 +147,14 @@ def dynamic_tiers() -> tuple[tuple[int, str, str, float], ...]:
     )
 
 
-def tier_for_count(paid_refs: int) -> dict:
+def tier_for_count(paid_refs: int, cfg: dict | None = None) -> dict:
+    """Rank for a paid-referral count.
+
+    v8.9.0: `cfg` may be passed in. It used to call get_config() here AND again
+    inside dynamic_tiers() → 24 needless settings reads per single rank lookup.
+    """
     n = max(0, int(paid_refs))
-    cfg = get_config()
+    cfg = cfg or get_config()
     if cfg["mode"] == "FLAT":
         flat = cfg["flat_pct"]
         return {
@@ -159,7 +166,7 @@ def tier_for_count(paid_refs: int) -> dict:
             "next_rate_pct": None,
             "refs_to_next": 0,
         }
-    tiers = dynamic_tiers()
+    tiers = dynamic_tiers(cfg)
     cur = tiers[0]
     nxt = None
     for idx, t in enumerate(tiers):
@@ -391,29 +398,62 @@ def _compute_balances_conn(c, uid: int) -> tuple[float, float, float, float, flo
 
 
 def affiliate_stats(user_id: int) -> dict:
+    """Unified commissions/referrals snapshot for one user.
+
+    v8.9.0 performance rewrite — identical numbers, 1 connection instead of 38:
+      * The two invitation sets (`affiliate_links` + personal `ref_campaigns`)
+        are unioned in ONE SQL statement instead of two round-trips + Python set
+        work, and the paid-referral count is folded into the same query.
+      * All four money sums (earned / approved / pending / redeemed) come from a
+        single UNION ALL statement instead of 4 separate SELECTs.
+      * `get_config()` is read ONCE and threaded into `tier_for_count`, which
+        used to re-read it (and `dynamic_tiers` a third time) for one rank.
+      * `target_label()` (another connection) is only hit when the plan label
+        is actually needed, never for a plain stats read.
+    """
     uid = int(user_id)
     cfg = get_config()
     with db.conn() as c:
-        # Unified invited count across BOTH `affiliate_links` AND personal `ref_campaigns` (`referrals`)!
-        inv_a = {
-            int(r["invitee_id"])
-            for r in c.execute("SELECT invitee_id FROM affiliate_links WHERE referrer_id=?", (uid,)).fetchall()
-        }
-        inv_r = {
-            int(r["invitee_id"])
-            for r in c.execute(
-                """SELECT r.invitee_id FROM referrals r
-                   JOIN ref_campaigns rc ON rc.id = r.campaign_id
-                   WHERE rc.owner_id=?""",
-                (uid,),
-            ).fetchall()
-        }
-        total_refs = len(inv_a | inv_r)
-        paid_refs = int(c.execute(
-            "SELECT COUNT(DISTINCT referred_user_id) n FROM affiliate_commissions WHERE referrer_id=? AND status='CREDITED'",
-            (uid,),
-        ).fetchone()["n"] or 0)
-        earned, paid_out, pending_out, redeemed, avail = _compute_balances_conn(c, uid)
+        # Identical semantics to the old Python sets: total = DISTINCT invitees
+        # reachable through BOTH link tables; paid = DISTINCT commissioned payers.
+        agg = c.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM (
+                    SELECT invitee_id FROM affiliate_links WHERE referrer_id=?
+                    UNION
+                    SELECT r.invitee_id FROM referrals r
+                      JOIN ref_campaigns rc ON rc.id = r.campaign_id
+                     WHERE rc.owner_id=?
+                 ) inv) AS total_refs,
+                 (SELECT COUNT(DISTINCT referred_user_id) FROM affiliate_commissions
+                   WHERE referrer_id=? AND status='CREDITED') AS paid_refs""",
+            (uid, uid, uid),
+        ).fetchone()
+        total_refs = int((agg["total_refs"] if agg else 0) or 0)
+        paid_refs = int((agg["paid_refs"] if agg else 0) or 0)
+        money = c.execute(
+            """SELECT
+                 COALESCE(SUM(CASE WHEN kind='E' THEN amount ELSE 0 END),0) AS earned,
+                 COALESCE(SUM(CASE WHEN kind='P' THEN amount ELSE 0 END),0) AS paid_out,
+                 COALESCE(SUM(CASE WHEN kind='Q' THEN amount ELSE 0 END),0) AS pending_out,
+                 COALESCE(SUM(CASE WHEN kind='R' THEN amount ELSE 0 END),0) AS redeemed
+               FROM (
+                 SELECT 'E' AS kind, commission_usd AS amount FROM affiliate_commissions
+                  WHERE referrer_id=? AND status='CREDITED'
+                 UNION ALL
+                 SELECT 'P', amount_usd FROM affiliate_payouts WHERE user_id=? AND status='APPROVED'
+                 UNION ALL
+                 SELECT 'Q', amount_usd FROM affiliate_payouts WHERE user_id=? AND status='PENDING'
+                 UNION ALL
+                 SELECT 'R', amount_usd FROM affiliate_redemptions WHERE user_id=?
+               ) m""",
+            (uid, uid, uid, uid),
+        ).fetchone()
+        earned = round(float((money["earned"] if money else 0) or 0.0), 2)
+        paid_out = round(float((money["paid_out"] if money else 0) or 0.0), 2)
+        pending_out = round(float((money["pending_out"] if money else 0) or 0.0), 2)
+        redeemed = round(float((money["redeemed"] if money else 0) or 0.0), 2)
+        avail = round(max(0.0, earned - paid_out - pending_out - redeemed), 2)
         ms_count = int(c.execute(
             "SELECT COUNT(*) n FROM affiliate_milestones WHERE user_id=?",
             (uid,),
@@ -425,7 +465,7 @@ def affiliate_stats(user_id: int) -> dict:
                 (uid,),
             ).fetchall()
         ]
-    tier = tier_for_count(paid_refs)
+    tier = tier_for_count(paid_refs, cfg)
     th = max(1, int(cfg["milestone_paid_refs"]))
     rem_in_cycle = paid_refs % th
     needed = th - rem_in_cycle
@@ -451,7 +491,7 @@ def affiliate_stats(user_id: int) -> dict:
         "milestone_paid_refs": th,
         "milestone_progress": rem_in_cycle,
         "milestone_needed": needed,
-        "milestone_remaining": needed,
+        "milestone_remaining": needed,   # v8.7.0 alias — the referrals screen reads this key
         "milestone_target": cfg["milestone_target"],
         "milestone_target_label": target_label(cfg["milestone_target"]),
         "milestone_days": cfg["milestone_days"],
@@ -636,12 +676,47 @@ def top_affiliates(limit: int = 8) -> list[dict]:
             (max(1, int(limit)),),
         ).fetchall()
     out = []
+    _cfg = None
     for r in rows:
         d = dict(r)
         d["total_earned"] = round(float(d.get("total_earned") or 0.0), 2)
-        d["tier"] = tier_for_count(d["paid_refs"])
+        # v8.9.0: one config read for the whole list, not one per row
+        if _cfg is None:
+            _cfg = get_config()
+        d["tier"] = tier_for_count(d["paid_refs"], _cfg)
         out.append(d)
     return out
+
+
+_BOT_USERNAME_CACHE: dict = {"ts": 0.0, "value": ""}
+
+
+def cached_bot_username() -> str:
+    """The bot's @username, cached for 10 minutes.
+
+    v8.9.0: every «دعوة الأصدقاء» / «محفظة العمولات» tap used to await
+    `bot.get_me()` — a full Telegram API round-trip (~60 ms, and a hard failure
+    whenever Telegram is briefly unreachable, which silently produced a
+    `/start ref_…` placeholder link instead of a real t.me URL). The username of
+    a running bot never changes, so one cached lookup is enough.
+    """
+    import time as _time
+    from fysb.services import referrals as _refs
+    if _BOT_USERNAME_CACHE["value"] and (_time.time() - _BOT_USERNAME_CACHE["ts"]) < 600:
+        return _BOT_USERNAME_CACHE["value"]
+    try:
+        from fysb import config as _cfg
+        bu = str(getattr(_cfg, "BOT_USERNAME", "") or "").strip().lstrip("@")
+    except Exception:
+        bu = ""
+    if not bu:
+        try:
+            bu = _refs.bot_username()
+        except Exception:
+            bu = ""
+    if bu:
+        _BOT_USERNAME_CACHE.update(ts=_time.time(), value=bu)
+    return bu
 
 
 def unified_invite_link(user_id: int, bot_username: str = "") -> str:
@@ -655,13 +730,26 @@ def unified_invite_link(user_id: int, bot_username: str = "") -> str:
     return f"https://t.me/{bu}?start=ref_{user_id}" if bu else f"/start ref_{user_id}"
 
 
-def render_affiliate_dashboard(user_id: int, bot_username: str = "") -> str:
-    st = affiliate_stats(user_id)
-    cfg = get_config()
+def render_affiliate_dashboard(
+    user_id: int,
+    bot_username: str = "",
+    st: dict | None = None,
+    cfg: dict | None = None,
+) -> str:
+    """Commission dashboard body.
+
+    v8.9.0: `st` / `cfg` may be supplied by the caller. The bot handler used to
+    call this (63 connections), then `affiliate_stats()` AGAIN (38) just to read
+    one field from the same numbers, and `unified_invite_link()` a third time —
+    100 connections for one screen. The handler now loads the snapshot once and
+    reuses it everywhere.
+    """
+    st = st if st is not None else affiliate_stats(user_id)
+    cfg = cfg or get_config()
     t = st["tier"]
     link = unified_invite_link(user_id, bot_username)
     now_ksa = config.mecca_time_12h()
-    tiers = dynamic_tiers()
+    tiers = dynamic_tiers(cfg)
     min_r = int(tiers[0][3])
     max_r = int(tiers[-1][3])
     mode_lbl = (
@@ -718,10 +806,17 @@ def render_admin_affiliates_card() -> str:
     pending = list_payouts("PENDING", 10)
     top = top_affiliates(6)
     with db.conn() as c:
-        red_n = int(c.execute("SELECT COUNT(*) n FROM affiliate_redemptions").fetchone()["n"] or 0)
-        red_sum = float(c.execute("SELECT COALESCE(SUM(amount_usd),0) s FROM affiliate_redemptions").fetchone()["s"] or 0.0)
-        ms_n = int(c.execute("SELECT COUNT(*) n FROM affiliate_milestones").fetchone()["n"] or 0)
-    tiers = dynamic_tiers()
+        # v8.9.0: one statement instead of three round-trips (v8.9.0 perf pass)
+        agg = c.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM affiliate_redemptions)                    AS red_n,
+                 (SELECT COALESCE(SUM(amount_usd),0) FROM affiliate_redemptions) AS red_sum,
+                 (SELECT COUNT(*) FROM affiliate_milestones)                     AS ms_n"""
+        ).fetchone()
+        red_n = int((agg["red_n"] if agg else 0) or 0)
+        red_sum = float((agg["red_sum"] if agg else 0) or 0.0)
+        ms_n = int((agg["ms_n"] if agg else 0) or 0)
+    tiers = dynamic_tiers(cfg)
     tier_str = " → ".join(f"{t[3]:g}%" for t in tiers)
     mode_txt = f"نسبة موحّدة ({cfg['flat_pct']:g}%)" if cfg["mode"] == "FLAT" else f"رتب متدرجة ({tier_str})"
     ms_txt = (

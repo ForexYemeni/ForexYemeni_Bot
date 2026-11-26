@@ -70,6 +70,7 @@ class TestV6240Phase1EngineSpeedAndStability(unittest.TestCase):
         config.DB_FILE = os.path.join(self._tmp.name, "v6240.db")
         config.ADMIN_ID = ADMIN
         db.init_db()
+        db.set_setting("news_guard_enabled", "0")
         provider_health.reset()
         crypto_ws.reset()
         market_data._cache.clear()

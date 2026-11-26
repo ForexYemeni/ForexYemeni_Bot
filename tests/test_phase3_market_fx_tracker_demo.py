@@ -30,6 +30,8 @@ def _fake_user(uid: int):
 
 class TestPhase3MarketData(unittest.TestCase):
     def setUp(self):
+        from fysb.engines import provider_health
+        provider_health.reset()
         md._cache.clear()
         md._fail_streak.clear()
 

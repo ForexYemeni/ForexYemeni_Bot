@@ -101,6 +101,7 @@ def render_signal_card(sig, user_view: bool = False, row=None) -> str:
             emoji = "📈" if sig["pips_result"] > 0 else "📉"
             data_lines.append(f"{emoji} <b>النتيجة المسجلة:</b> {sig['pips_result']:+.1f} pips")
         out.append(card("\n".join(data_lines)))
+        out.append("<i>الحالة تفعيل سعري ونتيجة تتبع نموذجية؛ ليست إيصال تنفيذ أو رصيد وسيط.</i>")
         out.append(footer(""))
     return "\n".join(out)
 

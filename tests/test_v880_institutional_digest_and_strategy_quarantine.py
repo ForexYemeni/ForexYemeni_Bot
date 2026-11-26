@@ -115,9 +115,9 @@ def test_auto_scheduled_channel_broadcast_quality_guard(tmp_path, monkeypatch):
         digest_svc.publish_digest(bot, days=7, include_channels=True, notify_admin=True, auto_scheduled=True)
     )
     assert res["ok"] is True
-    assert res["channels_held"] is True
-    assert res["channels_sent"] == 0
-    assert res["sent"] == 1  # Admin received full diagnostic report!
+    assert res["channels_held"] is False
+    assert res["channels_sent"] == 1
+    assert res["sent"] == 2  # Admin AND channel receive the losing period honestly!
 
     # Now add 4 big winners -> Net R becomes strongly positive -> scheduled broadcast succeeds!
     for _ in range(4):

@@ -10,6 +10,7 @@ Modular platform:
                 (ICT/SMC/PA), signal pipeline, lifecycle tracker, risk engine,
                 demo simulator
 
-No broker order execution exists in this build. LIVE mode stays closed by default.
+Broker adapters exist and require explicit policy/credentials. No release or
+software test is approval to enable LIVE execution.
 """
-__version__ = "8.9.3"
+__version__ = "8.10.0"

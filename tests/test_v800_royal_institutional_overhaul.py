@@ -239,7 +239,7 @@ def test_07_pglayer_does_not_corrupt_dml_or_escaped_quotes():
 # 4. Execution Engines: Auto-Bridge, Crypto Exchange, Demo (EXEC-1..5)
 # ---------------------------------------------------------------------------
 
-def test_08_auto_bridge_max_open_lifecycle_and_delete_cleanup(env):
+def test_08_auto_bridge_max_open_lifecycle_and_delete_cleanup(env, monkeypatch):
     conn_res = auto_bridge.save_connection(VIP_UID, "mt5_bridge", "DEMO", max_open_trades=1)
     cid = conn_res["connection"]["id"]
     now = config.now()
@@ -254,6 +254,13 @@ def test_08_auto_bridge_max_open_lifecycle_and_delete_cleanup(env):
             "VALUES('EURUSD','BUY','M15','SMC',1.1000,1.0950,1.1100,1.1150,1.1225,2.0,85,'ACTIVE','AUTO',?)",
             (now,),
         ).lastrowid)
+    db.set_setting("global_kill_switch", "0")
+    from fysb.engines import market_data
+    monkeypatch.setattr(market_data, "execution_quote", lambda symbol, *a, **kw: {"ok": True, "price": 2650. if "XAU" in symbol else 1.1})
+    with db.tx() as c:
+        c.execute("UPDATE signals SET status='RUNNING', filled_at=? WHERE id IN (?,?)", (now, s1, s2))
+        for sid in (s1, s2):
+            c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)", (sid, VIP_UID, now))
     # Signal 1 dispatches -> fills the 1-trade slot
     assert auto_bridge.dispatch_signal_to_bridges(
         {"id": s1, "symbol": "XAUUSD", "direction": "BUY", "entry": 2650, "stop": 2640, "tp1": 2670, "tp2": 2680, "tp3": 2695, "source": "AUTO"}
@@ -379,6 +386,8 @@ def test_13_normalized_scoring_min_tp_floor_and_risk_be_pnl(env):
             "VALUES('XAUUSD','BUY','M15','SMC',2650,2640,2670,2680,2695,2.0,85,'TP1_BE',1,'AUTO',?,?)",
             (now, now),
         )
+    with db.tx() as c:
+        c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25' WHERE status='TP1_BE'")
     pnl_pct, sl_hits = risk.daily_signal_pnl_pct()
     assert pnl_pct > 0.0 and sl_hits == 0
 

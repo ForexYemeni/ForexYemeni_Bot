@@ -248,7 +248,7 @@ class TestLifecycleDiscipline(unittest.TestCase):
     def test_prefill_tp_visit_never_banked_after_late_fill(self):
         """Price visited TP1 BEFORE the retrace filled → RUNNING (not TP1_HIT);
         only post-fill candles may bank targets."""
-        sid = _insert_signal(minutes_ago=60)
+        sid = _insert_signal(minutes_ago=54)
         start = datetime.now(timezone.utc) - timedelta(minutes=55)
         vals = _candles(start, 1, 3650.0, 3600.0, open_px=3620.0)      # TP visit, no entry touch
         vals += _candles(start + timedelta(minutes=5), 3, 3605.0, 3595.0, open_px=3600.0)
@@ -274,7 +274,7 @@ class TestLifecycleDiscipline(unittest.TestCase):
     def test_halfway_never_fires_before_fill_but_after(self):
         """Pre-fill visit to the half level is silence; the SAME visit after the
         fill fires the advisory exactly once."""
-        sid = _insert_signal(minutes_ago=40)   # half = 3615.14
+        sid = _insert_signal(minutes_ago=34)   # half = 3615.14
         start = datetime.now(timezone.utc) - timedelta(minutes=35)
         vals = _candles(start, 1, 3620.0, 3600.0, open_px=3610.0)      # half visit, no fill
         vals += _candles(start + timedelta(minutes=5), 2, 3605.0, 3595.0, open_px=3600.0)
@@ -312,7 +312,7 @@ class TestLegacySalvage(unittest.TestCase):
 
     def test_legacy_at_market_sell_activated(self):
         sid = _insert_signal(direction="SELL", entry=3581.60, stop=3592.91,
-                             tp1=3558.97, tp2=3547.66, tp3=3530.69, minutes_ago=120)
+                             tp1=3558.97, tp2=3547.66, tp3=3530.69, minutes_ago=55)
         with db.conn() as c:
             c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at,chat_id,message_id)"
                       " VALUES(?,?,?,?,?)", (sid, 555123, config.now(), "555000", 888))
@@ -325,7 +325,7 @@ class TestLegacySalvage(unittest.TestCase):
         with db.conn() as c:
             row = c.execute("SELECT status,filled_at FROM signals WHERE id=?", (sid,)).fetchone()
         self.assertEqual(row["status"], "RUNNING")
-        self.assertEqual(row["filled_at"], vals[0]["datetime"])
+        self.assertEqual(row["filled_at"], vals[1]["datetime"])
         admin_notes = [t for uid, t in result["notifications"] if uid == ADMIN]
         self.assertTrue(any("قيد التنفيذ" in t for t in admin_notes))
 
@@ -333,7 +333,7 @@ class TestLegacySalvage(unittest.TestCase):
         """A genuine pre-protocol pending row (open far on the waiting side)
         must NOT be branded RUNNING by the salvage heuristic."""
         sid = _insert_signal(direction="SELL", entry=3581.60, stop=3592.91,
-                             tp1=3558.97, tp2=3547.66, tp3=3530.69, minutes_ago=120)
+                             tp1=3558.97, tp2=3547.66, tp3=3530.69, minutes_ago=55)
         vals = _candles(datetime.now(timezone.utc) - timedelta(minutes=60), 4,
                         3580.0, 3576.0, open_px=3578.0)   # 36 pips below entry
         with patch.object(tracker.market_data, "fetch_candles", return_value=_payload(vals)):

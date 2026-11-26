@@ -238,7 +238,10 @@ def check_news_block(symbol: str, now_utc: datetime | None = None) -> tuple[bool
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     buf = timedelta(minutes=window_minutes())
-    for ev in fetch_events():
+    events = fetch_events()
+    if last_feed_error():
+        return True, {"currency": "/".join(sorted(ccys)), "title": "حالة الأخبار غير معروفة — تعذر تحديث التقويم", "health": "UNKNOWN", "minutes_delta": 0}
+    for ev in events:
         if ev.get("impact") != "High":
             continue
         if ev.get("currency") not in ccys:

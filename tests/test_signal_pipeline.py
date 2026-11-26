@@ -28,6 +28,7 @@ class TestPipeline(unittest.TestCase):
 
     def setUp(self):
         db.init_db()
+        db.set_setting("news_guard_enabled", "0")
         try:
             users_service.ensure_user(FakeUser(self.uid))
         except Exception:

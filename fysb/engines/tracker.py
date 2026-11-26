@@ -104,6 +104,10 @@ def _tracking_payload(provider_symbol: str, api_key: str, since_iso: str = "") -
         if market_data.is_stale(payload):
             last_err = RuntimeError(f"stale {interval} payload")
             continue
+        bars = payload.get("values") or []
+        if since_iso and (not bars or _utc_cutoff(bars[0]["datetime"]) > _utc_cutoff(since_iso)):
+            last_err = RuntimeError(f"incomplete {interval} tracking history since {since_iso}")
+            continue
         return payload
     raise last_err or RuntimeError("تعذر جلب شموع التتبع — كل المزودين فشلوا")
 
@@ -425,7 +429,9 @@ def _alert_targets(sig: dict, text: str) -> list[tuple]:
             seen.add(key)
             notes.append((target, text))
     sig_src = (sig.get("source") or "AUTO").upper()
-    if (sig_src != "SIGNAL_NOW" and config.ADMIN_ID
+    private = bool(sig.get("private_user_id")) or sig_src in (
+        "SIGNAL_NOW", "TRUE_ANALYSIS_INSTANT", "TRUE_ANALYSIS_CONFIRMED")
+    if (not private and config.ADMIN_ID
             and str(config.ADMIN_ID) not in seen
             and admin_accepts_market(sig["symbol"])):
         notes.append((config.ADMIN_ID, text))
@@ -725,7 +731,7 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     hit_tp = int(sig["hit_tp"] or 0)
 
     cut = _utc_cutoff(cutoff or sig.get("filled_at") or sig.get("created_at") or "")
-    walked = [c for c in candles if c["datetime"] >= cut]
+    walked = [c for c in candles if _utc_cutoff(c["datetime"]) >= cut]
     if not walked:
         return None
     # v8.0.0 (SIG-5): Per-asset TP confirmation buffer + realistic Bid/Ask spread
@@ -769,23 +775,21 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
                 new_tp = max(new_tp, 2)
             if progress_tp <= 2 and lo <= tp3 - tp_eff_buf:
                 new_tp = max(new_tp, 3)
+        # BE becomes effective on the bar AFTER a target was reached. Check
+        # it BEFORE any new target on that bar (conservative intrabar order).
+        # Crucially this applies to progress earned in THIS walk, not just the
+        # persisted hit_tp from the previous polling cycle.
+        if progress_tp in (1, 2) and be_now:
+            known_after = banked_bar_idx >= 0 and idx > banked_bar_idx
+            legacy_after = banked_bar_idx < 0 and _utc_cutoff(c["datetime"]) > cut
+            if known_after or legacy_after:
+                return f"TP{progress_tp}_BE"
         if sl_now and progress_tp == 0:
-            # Conservative SL-first rule: if a candle hits SL before any target
-            # was banked (including gap candles spanning both SL and TP), record
-            # SL_HIT — never optimistically credit a target on a gap candle.
             return "SL_HIT"
         if new_tp > progress_tp:
-            progress_tp = new_tp                  # target banked; keep running
+            progress_tp = new_tp
+            banked_bar_idx = idx
             if progress_tp == 3:
-                break
-        # v6.20.0 Breakeven stop-out for already-banked TP1_HIT / TP2_HIT runners:
-        # only triggers strictly AFTER the banked target candle (or on post-fill
-        # bars if the TP candle predates the current candle window).
-        if hit_tp in (1, 2) and progress_tp == hit_tp and be_now:
-            if (banked_bar_idx >= 0 and idx > banked_bar_idx) or (
-                banked_bar_idx < 0 and c["datetime"] > cut
-            ):
-                be_stopped = True
                 break
     if progress_tp > hit_tp:
         if progress_tp == 3:
@@ -944,6 +948,11 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     elif status.startswith("TP"):
         tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
         pips_result = instruments.pips(sig["symbol"], sig["entry"], tp_map[hit_tp])
+    from fysb.engines.accounting import PARTIAL_MODEL, modeled_r
+    if sig.get("accounting_model") == PARTIAL_MODEL and (status.startswith("TP") or status == "SL_HIT"):
+        banked_r = modeled_r(sig, hit_tp=hit_tp, status=status)
+        if banked_r is not None:
+            pips_result = banked_r * instruments.pips(sig["symbol"], sig["entry"], sig["stop"])
     if status == "RUNNING":
         filled_at = filled_at or sig.get("filled_at") or config.now()
     closed_at = config.now() if (status in TERMINAL or is_be_close) else ""
@@ -952,11 +961,13 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         r = c.execute("SELECT status, closed_at FROM signals WHERE id=?", (sig["id"],)).fetchone()
         if not r or r["status"] in TERMINAL or (r["closed_at"] or ""):
             return [], 0.0, []  # already closed/terminal — never double-update
-        c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
+        updated = c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
                      data_time=?, live_px=?, filled_at=?, half_notified=?
                      WHERE id=? AND status=? AND (closed_at IS NULL OR closed_at='')""",
                   (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
                    live_px, filled_at or sig.get("filled_at") or "", half_done, sig["id"], sig["status"]))
+        if updated.rowcount != 1:
+            return [], 0.0, []
     _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{new_status}",
          f"signal #{sig['id']} pips={pips_result:.1f} filled_at={filled_at or sig.get('filled_at') or '-'}")
     if status in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
@@ -989,7 +1000,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
 
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
     detail = ""
-    result_line = f"▎📈 النتيجة حتى الآن: <b>{pips_result:+.1f} pips</b>"
+    result_line = f"▎📈 النتيجة النموذجية حتى الآن: <b>{pips_result:+.1f} pips</b>"
     ext_px, ext_pips = _documented_extreme(sig, payload)
     if ext_px:
         result_line += (f" · أعلى تلامس موثق: <code>{instruments.fmt_price(sig['symbol'], ext_px)}</code> "

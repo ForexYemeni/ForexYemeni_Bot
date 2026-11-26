@@ -198,6 +198,8 @@ class TestPhase4RiskAndAdvisoryAndTracker(unittest.TestCase):
         now = config.now()
         for _ in range(3):
             self._insert_signal(symbol="XAUUSD", status="SL_HIT", hit_tp=0, closed_at=now)
+        with db.conn() as c:
+            c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25' WHERE status='SL_HIT'")
         d_auto = risk.check_signal("EURUSD", 2.5, 0.5, source="AUTO", direction="BUY")
         self.assertFalse(d_auto.allowed)
         self.assertIn("قاطع الخسارة اليومية", d_auto.reason)

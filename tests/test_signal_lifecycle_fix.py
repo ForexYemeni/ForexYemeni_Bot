@@ -89,7 +89,7 @@ class TestTrackerEvaluationRegression(unittest.TestCase):
                          VALUES('XAUUSD','SELL','M15',3581.60,3592.91,3558.97,3547.66,3530.69,
                          '3558.97,3547.66,3530.69',2.0,95,'SMC','ctx test','ACTIVE','AUTO',0,?,
                          'LIVE','2026-11-22 20:00:00','{}',?,'',0.0)""",
-                      ((datetime.now(timezone.utc) - timedelta(hours=20)).isoformat(),
+                      ((datetime.now(timezone.utc) - timedelta(hours=18, minutes=55)).isoformat(),
                        (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
 
     def _payload(self):
@@ -166,7 +166,7 @@ class TestTrackerEvaluationRegression(unittest.TestCase):
                "rr": 2.0, "score": 95, "status": "ACTIVE", "hit_tp": 0}
         c1 = {"datetime": "2026-11-22 12:00:00", "open": 3555.0, "high": 3560.0, "low": 3540.0, "close": 3542.0}  # TP1+TP2
         c2 = {"datetime": "2026-11-22 12:05:00", "open": 3570.0, "high": 3595.0, "low": 3568.0, "close": 3590.0}  # SL later
-        self.assertEqual(tracker._evaluate_signal(sig, [c1, c2]), "TP2_HIT")
+        self.assertEqual(tracker._evaluate_signal(sig, [c1, c2]), "TP2_BE")
 
 
 class TestLegacyExpirySweep(unittest.TestCase):
@@ -286,7 +286,7 @@ class TestEntryFillActivation(unittest.TestCase):
                          VALUES('XAUUSD','SELL','M15',3581.60,3592.91,3558.97,3547.66,3530.69,
                          '3558.97,3547.66,3530.69',2.0,95,'SMC','ctx','ACTIVE','AUTO',0,?,
                          'LIVE','2026-11-22 20:00:00','{}',?,'',0.0)""",
-                      ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                      ((datetime.now(timezone.utc) - timedelta(minutes=55)).isoformat(),
                        (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
             self.sid = cur.lastrowid
 

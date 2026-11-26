@@ -1,8 +1,9 @@
 """Offline characterization probes for AUDIT_2026-11-26_AR.md.
 
 Run from the repo root: .venv/bin/python docs/audits/reproduce_2026_11_26.py
-Updated after the strategy fixes: FIXED probes assert desired behavior;
-remaining CONFIRMED probes characterize unresolved defects/limitations.
+The function historical_strategy_probes below preserves the pre-layer probes
+for audit comparison ONLY; its old assertions are not current acceptance.
+Default execution now runs the maintained post-remediation acceptance suites.
 The original baseline output is preserved in reproduction_output_2026_11_26.txt.
 No Telegram, price-provider or broker requests; tests.helpers isolates config/DB.
 """
@@ -28,7 +29,7 @@ def bar(ts, high, low, close, open_=101):
     return dict(datetime=f"2026-11-26 {ts}", open=open_, high=high, low=low, close=close)
 
 
-def main():
+def historical_strategy_probes():
     db.init_db()
     sig = dict(symbol="XAUUSD", direction="BUY", entry=100., stop=90.,
                tp1=120., tp2=130., tp3=145., hit_tp=0,
@@ -146,4 +147,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import subprocess
+    raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q",
+        "tests/test_strategy_audit_contracts.py", "tests/test_v8100_audit_layers.py"],
+        cwd=Path(__file__).resolve().parents[2]))

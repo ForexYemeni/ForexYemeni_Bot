@@ -35,6 +35,7 @@ class TestV619CandidateFallbackAndIntactZones(unittest.TestCase):
         self._orig_db = config.DB_FILE
         config.DB_FILE = Path(self._tmp.name) / "v619.db"
         db.init_db()
+        db.set_setting("news_guard_enabled", "0")
         with db.conn() as c:
             c.execute("UPDATE market_catalog SET enabled=1, verified=1 WHERE symbol='XAUUSD'")
             for st in ("ICT", "SMC", "PRICE_ACTION", "CRT", "SILVER_BULLET"):

@@ -57,7 +57,7 @@ class LiveCardBase(unittest.TestCase):
                          VALUES('XAUUSD','SELL','M15',3581.60,3592.91,3558.97,3547.66,3530.69,
                          '3558.97,3547.66,3530.69',2.0,95,'SMC','ctx','ACTIVE','AUTO',0,?,
                          'LIVE','2026-11-22 20:00:00','{}',?,'',0.0)""",
-                      ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                      ((datetime.now(timezone.utc) - timedelta(minutes=55)).isoformat(),
                        (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
             self.sid = cur.lastrowid
             # delivery WITH editable refs — the card the user actually holds

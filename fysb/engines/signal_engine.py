@@ -54,7 +54,7 @@ def _allowed_strategies(symbol: str, timeframe: str) -> list[str]:
     with db.conn() as c:
         rows = c.execute("SELECT code FROM strategy_catalog WHERE enabled=1 AND verified=1").fetchall()
     codes = [r["code"] for r in rows if REGISTRY.get(r["code"]) is not None]
-    return codes or ["PRICE_ACTION"]
+    return codes
 
 
 _MAX_STOP_PCT_BY_TF = {
@@ -184,7 +184,8 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 _log_run(symbol, entry_tf, "NEWS_BLOCKED", n_reason)
                 return {"status": "REJECTED", "signal_id": None, "reason": n_reason, "score": None}
         except Exception as exc:
-            log.debug("news_guard check skipped: %s", exc)
+            log.exception("news_guard unavailable")
+            return {"status": "REJECTED", "signal_id": None, "reason": "news status unknown", "score": None}
 
     # 1-2: entry data + validation
     try:
@@ -197,23 +198,31 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         return {"status": "REJECTED", "signal_id": None,
                 "reason": f"data stale (age {int(payload['age_seconds'])//60}min)", "score": None}
 
+    if payload.get("is_proxy"):
+        return {"status": "REJECTED", "signal_id": None, "reason": "proxy candles are indicative only, not execution evidence", "score": None}
+    actual_bias_tf = bias_tf
     # 3-4: bias data (non-fatal if unavailable — fall back to entry TF)
     try:
         bias_payload = market_data.fetch_candles(provider_symbol, market_data.parse_interval(bias_tf), api_key, outputsize=150)
         if market_data.is_stale(bias_payload):
             bias_candles = payload["values"]
+            actual_bias_tf = entry_tf
             bias_note = "bias TF stale, used entry TF"
         else:
             bias_candles = bias_payload["values"]
             bias_note = f"bias {bias_tf}"
     except RuntimeError:
         bias_candles = payload["values"]
+        actual_bias_tf = entry_tf
         bias_note = "bias TF unavailable, used entry TF"
 
     # 4.5: Non-repainting closed-candle guard (v6.20.0) — strip any still-forming
     # bar so signals & indicators are computed strictly on confirmed candle closes.
     candles = confirmed_candles(payload["values"], entry_tf)
-    bias_candles = confirmed_candles(bias_candles, bias_tf)
+    bias_candles = confirmed_candles(bias_candles, actual_bias_tf)
+    from fysb.engines.strategies.base import candle_input_error
+    if candle_input_error(candles) or candle_input_error(bias_candles):
+        return {"status": "REJECTED", "signal_id": None, "reason": "invalid candle history", "score": None}
     if len(candles) < 40:
         _log_run(symbol, entry_tf, "INSUFFICIENT_DATA", f"{len(candles)} candles")
         return {"status": "REJECTED", "signal_id": None, "reason": f"insufficient candles ({len(candles)})", "score": None}
@@ -382,7 +391,7 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 pass
 
         # 11.5: Institutional Quality + HTF Bias + Chop + Session Gate (v6.20.6)
-        # Matches backtest.py 100% identically. Admin manual force=True bypasses
+        # Shares rule primitives with backtest; execution models are not identical. Admin manual force=True bypasses
         # only the soft regime filter if explicitly forced.
         if not force:
             ok_q, q_reason = evaluate_quality_gate(
@@ -474,7 +483,15 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     hours = max(1, min(db.get_setting_int("signal_expiry_hours", 72) // 2, 36))
     open_cutoff = (config_now() - timedelta(hours=hours)).isoformat()
     closed_cutoff = (config_now() - timedelta(minutes=15)).isoformat()
-    with db.conn() as c:
+    from fysb.engines import issuance
+    with issuance.serialized() as c:
+        # Recheck mutable caps under the same DB lock as dedup + INSERT.
+        if db.kill_switch_on():
+            return {"status": "REJECTED", "signal_id": None, "reason": "kill switch engaged", "score": best.score}
+        final_risk = risk.check_signal(symbol, best.rr, vol, source=sig_source,
+                                       created_by=created_by, direction=best.direction)
+        if not final_risk.allowed:
+            return {"status": "REJECTED", "signal_id": None, "reason": final_risk.reason, "score": best.score}
         if sig_source == "SIGNAL_NOW" and int(created_by or 0) > 0:
             dup = c.execute(
                 """SELECT id FROM signals WHERE source='SIGNAL_NOW' AND created_by=? AND symbol=?
@@ -501,7 +518,6 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 (symbol, best.direction, entry_tf, open_cutoff, closed_cutoff),
             ).fetchone()
         if dup and not force:
-            _log_run(symbol, entry_tf, "DUPLICATE_SKIPPED", f"recent signal #{dup['id']}")
             return {"status": "DUPLICATE", "signal_id": dup["id"], "reason": "recent duplicate", "score": best.score}
 
         # 15: store (full precision floats; formatting happens only at display).
@@ -516,10 +532,11 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                         (symbol, best.direction, entry_tf, best.entry, best.stop, best.tp1, best.tp2, best.tp3,
                          f"{best.tp1},{best.tp2},{best.tp3}", best.rr, best.score, best.code,
                          " | ".join(best.reasons), birth_status_now, sig_source, int(created_by or 0),
-                         config.now(), "LIVE", payload["last_candle_iso"],
+                         config.now(), payload.get("provider") or payload.get("source") or "UNKNOWN", payload["last_candle_iso"],
                          json.dumps({r.code: r.score for r in results}), _expiry_iso(),
                          0.0, 0.0, filled_at_birth, live_px))
         sid = cur.lastrowid
+        c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25' WHERE id=?", (sid,))
     _log_run(symbol, entry_tf, "SIGNAL_CREATED",
              f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}")
 
@@ -567,7 +584,11 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                             f_birth = "ACTIVE"
                         if fcand.rr < float(db.get_setting("min_rr", "1.5") or 1.5):
                             continue
-                        with db.conn() as c:
+                        with issuance.serialized() as c:
+                            ok_free, _ = issuance.policy(symbol, fcand.code, fcand.direction,
+                                                        fcand.rr, vol, source="AUTO_FREE")
+                            if not ok_free:
+                                continue
                             dup_f = c.execute(
                                 """SELECT id FROM signals WHERE source='AUTO_FREE' AND symbol=?
                                    AND direction=? AND timeframe=?
@@ -590,10 +611,11 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                                 (symbol, fcand.direction, entry_tf, fcand.entry, fcand.stop, fcand.tp1, fcand.tp2, fcand.tp3,
                                  f"{fcand.tp1},{fcand.tp2},{fcand.tp3}", fcand.rr, fcand.score, fcand.code,
                                  " | ".join(fcand.reasons), f_birth, "AUTO_FREE", 0,
-                                 config.now(), "LIVE", payload["last_candle_iso"],
+                                 config.now(), payload.get("provider") or payload.get("source") or "UNKNOWN", payload["last_candle_iso"],
                                  json.dumps({r.code: r.score for r in results}), _expiry_iso(),
                                  0.0, 0.0, f_filled, live_px),
                             ).lastrowid
+                            c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25' WHERE id=?", (free_sid,))
                         _log_run(symbol, entry_tf, "FREE_TIER_PICK",
                                  f"id={free_sid} {fcand.summary()} (companion to #{sid} {best.code})")
                         break

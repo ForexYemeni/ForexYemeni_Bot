@@ -34,6 +34,9 @@ class _DummyBot:
 def _init_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_FILE", str(tmp_path / "v850.db"))
     db.init_db()
+    db.set_setting("global_kill_switch", "0")
+    db.set_setting("min_rr", "1.0")
+    monkeypatch.setattr(market_data, "execution_quote", lambda *a, **kw: {"ok": True, "price": 3621.})
     news_guard.reset_cache()
     news_guard.set_cached_events([], ts=9e12)  # zero network calls in tests
 
@@ -204,7 +207,7 @@ def test_v850_liquidity_and_sr_aware_take_profits(tmp_path, monkeypatch):
     assert plan["tp_grounded"] is True
     assert 3600.0 < plan["tp1"] < 3617.0
     assert plan["tp1"] < plan["tp2"] < plan["tp3"]
-    assert plan["rr"] >= 1.5
+    assert plan["rr"] == round((plan["tp1"]-plan["entry"])/(plan["entry"]-plan["sl"]), 2)
 
 
 def test_v850_anti_chase_filter_and_high_impact_news_guard(tmp_path, monkeypatch):

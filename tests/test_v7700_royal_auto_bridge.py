@@ -108,7 +108,7 @@ def test_granular_admin_bridge_policy_off_all_plans_selected_and_per_user_overri
     assert ab.user_can_copy(FREE_UID, "DEMO")[0] is False
 
 
-def test_encrypted_multiplatform_connect_mt5_ea_poll_ack_tp1_partial_be_and_dd_shield(env):
+def test_encrypted_multiplatform_connect_mt5_ea_poll_ack_tp1_partial_be_and_dd_shield(env, monkeypatch):
     # 1) VIP connects TradeLocker DEMO (encrypted at rest) + MT5 Bridge DEMO
     st_tl, _, b_tl = wa_server.dispatch_request(
         "POST", "/api/bridge/connect", _hdr(VIP_UID),
@@ -155,8 +155,18 @@ def test_encrypted_multiplatform_connect_mt5_ea_poll_ack_tp1_partial_be_and_dd_s
         }).encode(),
     )
     j_pub = json.loads(b_pub)
-    assert st_pub == 200 and j_pub["ok"] is True and j_pub["bridge_queued_count"] == 2
+    assert st_pub == 200 and j_pub["ok"] is True and j_pub["bridge_queued_count"] == 0
     sig = j_pub["signal"]
+    # Pending, non-delivered manual plans are NOT market orders. Explicitly
+    # activate and deliver before testing the broker adapters.
+    db.set_setting("global_kill_switch", "0")
+    with db.tx() as c:
+        c.execute("UPDATE signals SET status='RUNNING', filled_at=? WHERE id=?", (config.now(), sig["id"]))
+        c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)", (sig["id"], VIP_UID, config.now()))
+    from fysb.engines import market_data
+    monkeypatch.setattr(market_data, "execution_quote", lambda *a, **kw: {"ok": True, "price": 2650.})
+    monkeypatch.setattr(ab, "_tradelocker_place_order", lambda *a, **kw: {"order_id": "fixture-tl"})
+    assert ab.dispatch_signal_to_bridges(sig)["queued"] == 2
 
     # 4) MT5 EA polls /api/bridge/poll -> gets order, updates live balance & heartbeat
     st_poll, _, b_poll = wa_server.dispatch_request("GET", f"/api/bridge/poll?key={bkey}&balance=20000&equity=20125", {})
@@ -266,6 +276,13 @@ def test_ctrader_openapi_v2_full_lifecycle_test_trade_signal_and_tp1_partial_be(
         }).encode(),
     )
     sig = json.loads(b_p)["signal"]
+    db.set_setting("global_kill_switch", "0")
+    with db.tx() as c:
+        c.execute("UPDATE signals SET status='RUNNING', filled_at=? WHERE id=?", (config.now(), sig["id"]))
+        c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)", (sig["id"], VIP_UID, config.now()))
+    from fysb.engines import market_data
+    monkeypatch.setattr(market_data, "execution_quote", lambda *a, **kw: {"ok": True, "price": 2650.})
+    assert ab.dispatch_signal_to_bridges(sig)["queued"] == 1
     n_be = ab.dispatch_tp1_partial_be(sig)
     assert n_be == 1
     assert any(c[0] == "partial_be" and c[2] == 555001 and c[3] == 2650.0 for c in sent_calls)

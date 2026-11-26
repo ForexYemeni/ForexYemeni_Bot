@@ -98,6 +98,9 @@ def auto_copy_signal_for_subscribers(sig: dict, api_key: str = "") -> list[dict]
     who enabled `auto_trade = 1` and doesn't already hold this signal."""
     if not sig or not sig.get("id"):
         return []
+    from fysb.engines.accounting import is_private, is_closed
+    if is_private(sig) or is_closed(sig) or sig.get("status") != "RUNNING" or db.kill_switch_on():
+        return []
     sid = int(sig["id"])
     opened: list[dict] = []
     with db.conn() as c:
@@ -110,6 +113,10 @@ def auto_copy_signal_for_subscribers(sig: dict, api_key: str = "") -> list[dict]
         ).fetchall()
     for r in rows:
         uid = int(r["user_id"])
+        with db.conn() as c:
+            delivered = c.execute("SELECT 1 FROM signal_deliveries WHERE signal_id=? AND user_id=?", (sid, uid)).fetchone()
+        if not delivered:
+            continue
         try:
             with db.conn() as c:
                 dup = c.execute(
@@ -325,6 +332,9 @@ def open_signal_interactive(user_id: int, signal_id: int, api_key: str = "",
         if not sig_row:
             return {"ok": False, "error": "الإشارة غير موجودة"}
         sig = dict(sig_row)
+        from fysb.engines.accounting import is_private
+        if is_private(sig) and int(sig.get("private_user_id") or sig.get("created_by") or 0) != int(user_id):
+            return {"ok": False, "error": "هذه إشارة خاصة بمستخدم آخر"}
         existing = c.execute(
             "SELECT * FROM demo_positions WHERE account_id=? AND signal_id=? AND status='OPEN' ORDER BY id DESC LIMIT 1",
             (acc["id"], sid),

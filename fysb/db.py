@@ -678,6 +678,7 @@ ADD_COLUMNS = {
         "live_px": "REAL DEFAULT 0",
         "filled_at": "TEXT DEFAULT ''",
         "private_user_id": "INTEGER DEFAULT 0",
+        "accounting_model": "TEXT DEFAULT 'LEGACY_LEVEL'",
     },
     "signal_deliveries": {
         "chat_id": "TEXT DEFAULT ''",

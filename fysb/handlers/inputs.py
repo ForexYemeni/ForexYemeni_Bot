@@ -382,10 +382,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         if kind == "clear":
             await afn.run(db.set_setting, "webapp_custom_url", "")
             await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
-            await afn.run(db.set_setting, "ngrok_authtoken", "")
-            await afn.run(db.set_setting, "ngrok_domain", "")
-            await afn.run(db.set_setting, "cf_tunnel_token", "")
-            await afn.run(db.set_setting, "pinggy_token", "")
+            await afn.run(_tun.clear_tunnel_tokens)
             await _tun.stop_tunnel()
             config.WEBAPP_GH_PAGES_ENABLED = False
             config.set_runtime_webapp_url("", source="")
@@ -435,20 +432,20 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
 
         if kind in ("cloudflare_token", "ngrok_token", "pinggy_token"):
             if kind == "cloudflare_token":
-                await afn.run(db.set_setting, "cf_tunnel_token", parsed_in["token"])
+                await afn.run(_tun.save_tunnel_token, "cf_tunnel_token", parsed_in["token"])
                 if parsed_in.get("url"):
                     await afn.run(db.set_setting, "webapp_custom_url", parsed_in["url"])
                     config.set_runtime_webapp_url(parsed_in["url"], source="worker_proxy")
                 lbl = "☁️ Cloudflare Zero Trust Tunnel"
                 await afn.run(audit_log.log, uid, "cf_tunnel_token_set")
             elif kind == "ngrok_token":
-                await afn.run(db.set_setting, "ngrok_authtoken", parsed_in["token"])
+                await afn.run(_tun.save_tunnel_token, "ngrok_authtoken", parsed_in["token"])
                 if parsed_in.get("domain"):
-                    await afn.run(db.set_setting, "ngrok_domain", parsed_in["domain"])
+                    await afn.run(_tun.save_tunnel_token, "ngrok_domain", parsed_in["domain"])
                 lbl = "🔑 Ngrok-443" + (f" ({parsed_in['domain']})" if parsed_in.get("domain") else "")
                 await afn.run(audit_log.log, uid, f"ngrok_authtoken_set:dom={parsed_in.get('domain') or 'auto'}")
             else:
-                await afn.run(db.set_setting, "pinggy_token", parsed_in["token"])
+                await afn.run(_tun.save_tunnel_token, "pinggy_token", parsed_in["token"])
                 lbl = "⚡ Pinggy-443 Token"
                 await afn.run(audit_log.log, uid, "pinggy_token_set")
 
@@ -457,7 +454,7 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
             await afn.run(db.set_setting, "webapp_gh_pages_enabled", "0")
             config.WEBAPP_GH_PAGES_ENABLED = False
             await update.effective_message.reply_text(
-                f"⏳ تم حفظ توكن <b>{esc(lbl)}</b> — جاري التشغيل والتحقق الحي (10-20 ثانية)...",
+                f"⏳ تم حفظ توكن <b>{esc(lbl)}</b> بشكل دائم (قاعدة البيانات + <code>.env</code> — سيبقى محفوظاً تلقائياً بعد كل تحديث) — جاري التشغيل والتحقق الحي (10-20 ثانية)...",
                 parse_mode="HTML",
             )
             if getattr(_bg.post_init, "_webapp_srv", None) is None:

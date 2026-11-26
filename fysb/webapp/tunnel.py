@@ -20,8 +20,10 @@ import os
 import platform
 import re
 import shutil
+import signal
 import stat
 import tarfile
+import time
 import urllib.error
 import urllib.request
 from collections import deque
@@ -87,48 +89,284 @@ def tunnel_status() -> dict:
     return out
 
 
-def get_ngrok_token() -> str:
-    env_tok = os.getenv("NGROK_AUTHTOKEN", "").strip()
-    if env_tok:
-        return env_tok
+_TOKEN_MAP = {
+    "ngrok_authtoken": "NGROK_AUTHTOKEN",
+    "ngrok_domain": "NGROK_DOMAIN",
+    "cf_tunnel_token": "CLOUDFLARE_TUNNEL_TOKEN",
+    "pinggy_token": "PINGGY_TOKEN",
+}
+
+
+def _tokens_file_path() -> Path:
+    """Path to local JSON backup for tunnel tokens (survives DB resets & /update).
+
+    Isolated automatically to the DB parent directory when running inside
+    temporary test folders (`tmp_path`) so tests never pollute the repo root.
+    """
     try:
-        return (db.get_setting("ngrok_authtoken", "") or "").strip()
+        base = Path(config.BASE_DIR).resolve()
+        dbf = Path(getattr(config, "DB_FILE", base / "database" / "forexyemeni.db")).resolve()
+        if not dbf.is_relative_to(base):
+            return dbf.parent / "tunnel_tokens.json"
     except Exception:
-        return ""
+        pass
+    return Path(config.BASE_DIR) / "tunnel_tokens.json"
+
+
+def _pid_file_path() -> Path:
+    return _tokens_file_path().parent / ".tunnel.pid"
+
+
+def _read_tokens_file() -> dict[str, str]:
+    p = _tokens_file_path()
+    try:
+        if p.is_file():
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return {str(k): str(v).strip() for k, v in raw.items() if v is not None}
+    except Exception:
+        pass
+    return {}
+
+
+def _write_tokens_file(data: dict[str, str]) -> None:
+    p = _tokens_file_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        clean = {k: str(v).strip() for k, v in data.items() if str(v or "").strip()}
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(p)
+    except Exception as exc:
+        log.debug("tunnel_tokens.json write skipped: %s", exc)
+
+
+def _sync_dotenv_key(env_key: str, value: str) -> None:
+    """Safely upsert/clear `env_key` in `.env` so tokens survive /update & restarts 100%."""
+    if not env_key or not re.fullmatch(r"[A-Z0-9_]+", env_key):
+        return
+    try:
+        dotenv_p = Path(getattr(config, "_DOTENV_FILE", Path(config.BASE_DIR) / ".env")).resolve()
+        base = Path(config.BASE_DIR).resolve()
+        dbf = Path(getattr(config, "DB_FILE", base / "database" / "forexyemeni.db")).resolve()
+        # Never mutate the repo's real .env when running isolated pytest fixtures in /tmp
+        explicit_dotenv = bool(os.getenv("DOTENV_PATH", "").strip())
+        if not explicit_dotenv and not getattr(config, "USE_PG", False) and not dbf.is_relative_to(base):
+            return
+        if not dotenv_p.is_file() and not explicit_dotenv:
+            return
+        lines = dotenv_p.read_text(encoding="utf-8").splitlines() if dotenv_p.is_file() else []
+        clean_val = str(value or "").replace("\r", "").replace("\n", "").strip()
+        prefix = f"{env_key}="
+        out_lines: list[str] = []
+        found = False
+        for ln in lines:
+            stripped = ln.lstrip()
+            if stripped.startswith(prefix) or stripped.startswith(f"export {prefix}"):
+                found = True
+                if clean_val:
+                    out_lines.append(f"{env_key}={clean_val}")
+                continue
+            out_lines.append(ln)
+        if not found and clean_val:
+            out_lines.append(f"{env_key}={clean_val}")
+        dotenv_p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dotenv_p.with_suffix(".env.tmp")
+        tmp.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(dotenv_p)
+    except Exception as exc:
+        log.debug(".env sync skipped for %s: %s", env_key, exc)
+
+
+def save_tunnel_token(db_key: str, value: str) -> None:
+    """v8.0.2: Persist tunnel token/domain in ALL 3 layers (DB + tunnel_tokens.json + .env + env).
+
+    Guarantees Ngrok/Cloudflare/Pinggy tokens NEVER vanish across `/update`,
+    container restarts, DB restores, or SQLite <-> PostgreSQL switches.
+    """
+    val = str(value or "").strip()
+    try:
+        db.set_setting(db_key, val)
+    except Exception as exc:
+        log.warning("save_tunnel_token DB write failed (%s): %s", db_key, exc)
+    data = _read_tokens_file()
+    if val:
+        data[db_key] = val
+    else:
+        data.pop(db_key, None)
+    _write_tokens_file(data)
+    env_key = _TOKEN_MAP.get(db_key, "")
+    if env_key:
+        if val:
+            os.environ[env_key] = val
+        else:
+            os.environ.pop(env_key, None)
+        _sync_dotenv_key(env_key, val)
+
+
+def clear_tunnel_tokens() -> None:
+    """Clear all saved tunnel tokens from DB, tunnel_tokens.json, os.environ, and .env."""
+    for db_key in _TOKEN_MAP:
+        save_tunnel_token(db_key, "")
+
+
+def _read_persisted_token(db_key: str, *env_keys: str) -> str:
+    """Read token with 3-tier fallback & self-heal: DB -> env -> tunnel_tokens.json."""
+    # 1) Active environment (.env / host env)
+    for ek in env_keys:
+        v = (os.getenv(ek, "") or "").strip()
+        if v:
+            # Self-heal DB if empty so Admin panel & backups stay synchronized
+            try:
+                if not (db.get_setting(db_key, "") or "").strip():
+                    db.set_setting(db_key, v)
+            except Exception:
+                pass
+            return v
+    # 2) Database settings
+    try:
+        dv = (db.get_setting(db_key, "") or "").strip()
+        if dv:
+            # Mirror into local backup file once if missing (upgrades old DB-only tokens automatically!)
+            local_map = _read_tokens_file()
+            if local_map.get(db_key) != dv:
+                local_map[db_key] = dv
+                _write_tokens_file(local_map)
+                ek0 = _TOKEN_MAP.get(db_key, "")
+                if ek0:
+                    _sync_dotenv_key(ek0, dv)
+            return dv
+    except Exception:
+        pass
+    # 3) Preserved local tunnel_tokens.json fallback (survives DB resets / migrations)
+    fv = (_read_tokens_file().get(db_key) or "").strip()
+    if fv:
+        try:
+            db.set_setting(db_key, fv)
+        except Exception:
+            pass
+        ek0 = _TOKEN_MAP.get(db_key, "")
+        if ek0:
+            os.environ[ek0] = fv
+    return fv
+
+
+def _record_tunnel_pid(pid: int) -> None:
+    p = _pid_file_path()
+    try:
+        if pid and pid > 0:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(str(int(pid)), encoding="utf-8")
+        else:
+            p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _kill_pid_if_tunnel(pid: int, wait_sec: float = 2.5) -> None:
+    """Safely terminate an old ngrok/cloudflared/ssh child PID and wait for it to release its session."""
+    if not pid or pid <= 1 or pid == os.getpid():
+        return
+    # On Linux, confirm the PID actually belongs to a tunnel binary before signaling
+    cmdline_p = Path(f"/proc/{pid}/cmdline")
+    if Path("/proc").is_dir():
+        try:
+            if not cmdline_p.exists():
+                return
+            cmd_txt = cmdline_p.read_bytes().decode("utf-8", "replace").lower()
+            if not any(k in cmd_txt for k in ("ngrok", "cloudflared", "ssh")):
+                return
+        except Exception:
+            return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        return
+    deadline = time.monotonic() + max(0.2, float(wait_sec))
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _cleanup_stale_tunnel_pid() -> None:
+    p = _pid_file_path()
+    try:
+        if p.is_file():
+            raw = p.read_text(encoding="utf-8").strip()
+            if raw.isdigit():
+                _kill_pid_if_tunnel(int(raw), wait_sec=2.5)
+            p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def terminate_tunnel_sync(wait_sec: float = 2.5) -> None:
+    """v8.0.2: Synchronous clean shutdown for updater.restart() BEFORE os.execve().
+
+    Fixes the v7 bug where updater looked for non-existent `_STATE['proc']`,
+    leaving orphan `ngrok` agents holding the free 1-session slot (ERR_NGROK_108).
+    """
+    global _PROC
+    pids: list[int] = []
+    proc = _PROC
+    _PROC = None
+    if proc is not None:
+        if getattr(proc, "pid", None):
+            pids.append(int(proc.pid))
+        if getattr(proc, "returncode", None) is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    st_pid = int(_STATE.get("pid") or 0)
+    if st_pid and st_pid not in pids:
+        pids.append(st_pid)
+    _STATE["active"] = False
+    _STATE["verified"] = False
+    _STATE["pid"] = 0
+    for pid in pids:
+        _kill_pid_if_tunnel(pid, wait_sec=wait_sec)
+    _cleanup_stale_tunnel_pid()
+
+
+def get_ngrok_token() -> str:
+    return _read_persisted_token("ngrok_authtoken", "NGROK_AUTHTOKEN")
 
 
 def get_ngrok_domain() -> str:
     """Optional Ngrok free static domain (e.g. `my-bot.ngrok-free.app`)."""
-    raw = os.getenv("NGROK_DOMAIN", "").strip()
-    if not raw:
-        try:
-            raw = (db.get_setting("ngrok_domain", "") or "").strip()
-        except Exception:
-            raw = ""
+    raw = _read_persisted_token("ngrok_domain", "NGROK_DOMAIN")
     raw = raw.replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
     return raw
 
 
 def get_cf_tunnel_token() -> str:
     """Cloudflare Zero Trust Named Tunnel token (`eyJhIjo...`)."""
-    env_tok = os.getenv("CLOUDFLARE_TUNNEL_TOKEN", "").strip() or os.getenv("CF_TUNNEL_TOKEN", "").strip()
-    if env_tok:
-        return env_tok
-    try:
-        return (db.get_setting("cf_tunnel_token", "") or "").strip()
-    except Exception:
-        return ""
+    return _read_persisted_token("cf_tunnel_token", "CLOUDFLARE_TUNNEL_TOKEN", "CF_TUNNEL_TOKEN")
 
 
 def get_pinggy_token() -> str:
     """Optional Pinggy token (`<token>@a.pinggy.io`)."""
-    env_tok = os.getenv("PINGGY_TOKEN", "").strip()
-    if env_tok:
-        return env_tok
-    try:
-        return (db.get_setting("pinggy_token", "") or "").strip()
-    except Exception:
-        return ""
+    return _read_persisted_token("pinggy_token", "PINGGY_TOKEN")
 
 
 _URL_EXTRACT_RE = re.compile(r"https://[^\s\)\]\>\"'<>]+", re.IGNORECASE)
@@ -409,6 +647,7 @@ async def stop_tunnel() -> None:
                 await proc.wait()
         except Exception:
             pass
+    await asyncio.to_thread(_cleanup_stale_tunnel_pid)
     for t in readers:
         if not t.done():
             t.cancel()
@@ -477,6 +716,7 @@ async def _try_spawn_provider(
     _STATE["pid"] = proc.pid or 0
     _STATE["port"] = target_port
     _STATE["provider"] = provider_name
+    _record_tunnel_pid(proc.pid or 0)
 
     loop = asyncio.get_running_loop()
     url_future: asyncio.Future = loop.create_future()
@@ -567,6 +807,7 @@ async def _try_spawn_cf_named_tunnel(
     _STATE["pid"] = proc.pid or 0
     _STATE["port"] = target_port
     _STATE["provider"] = "Cloudflare-Token"
+    _record_tunnel_pid(proc.pid or 0)
 
     loop = asyncio.get_running_loop()
     dummy_url_fut: asyncio.Future = loop.create_future()

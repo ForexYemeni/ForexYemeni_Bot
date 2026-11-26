@@ -108,7 +108,7 @@ def main() -> int:
                .post_init(post_init)
                .post_shutdown(post_shutdown)
                .build())
-        _PRIV = filters.ChatType.PRIVATE
+        _PRIV = filters.ChatType.PRIVATE & ~filters.UpdateType.EDITED_MESSAGE
         app.add_handler(CommandHandler("start", start, filters=_PRIV))
         app.add_handler(CommandHandler("menu", menu_command, filters=_PRIV))
         app.add_handler(CommandHandler("ping", ping_command, filters=_PRIV))

@@ -10,3 +10,5 @@ database/*.db
 database/spot_calibration.json
 .venv/
 .last_boot_update.json
+tunnel_tokens.json
+.tunnel.pid

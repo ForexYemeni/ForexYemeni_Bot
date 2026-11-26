@@ -746,6 +746,41 @@ async def admin_payment_approve(q, uid, context, bot, pid: int):
         await partners_svc.notify_commission_and_vip(bot, p["user_id"], p["plan_code"], res.get("commission"))
     except Exception:
         pass
+    # v8.7.0: Notify user referrer on credited commission + auto-unlocked milestone reward!
+    aff_c = res.get("affiliate_commission")
+    if isinstance(aff_c, dict) and aff_c.get("referrer_id"):
+        try:
+            ref_uid = int(aff_c["referrer_id"])
+            await bot.send_message(
+                ref_uid,
+                f"💰 <b><u>عمولة إحالة جديدة أُضيفت لمحفظتك!</u></b>\n"
+                "<blockquote>"
+                f"▎💵 المبلغ المضاف: <b>+{aff_c['commission_usd']:,.2f} $</b> (بنسبة <b>{aff_c['rate_pct']:g}%</b>)\n"
+                "▎💎 يمكنك استخدام رصيدك لفتح أي باقة فوراً أو طلب السحب!"
+                "</blockquote>",
+                reply_markup=kb.user_nav([
+                    [kb.btn("💎 فتح باقة من رصيدي", "u:affunlock", style="success"),
+                     kb.btn("💸 محفظة العمولات", "u:affiliate", style="primary")],
+                ]),
+                parse_mode="HTML",
+            )
+            ms = aff_c.get("milestone_unlocked")
+            if isinstance(ms, dict):
+                days_txt = f" لمدة <b>{ms['duration_days']} يوم</b>" if ms.get("duration_days", 0) > 0 else " <b>مدى الحياة</b>"
+                await bot.send_message(
+                    ref_uid,
+                    "🎉👑 <b><u>مبارك! تم فتح باقة هدية لك تلقائياً!</u></b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "<blockquote>"
+                    f"▎🏆 لقد بلغت <b>{ms['paid_refs']} مشترك مدفوع</b> عبر رابطك!\n"
+                    f"▎🎁 الجائزة المفعّلة تلقائياً: <b>{esc(ms['target_label'])}</b>{days_txt}\n"
+                    "▎✨ صلاحياتك الجديدة مفتوحة الآن مجاناً بالكامل — استمر بالمشاركة لمكافآت أكثر!"
+                    "</blockquote>",
+                    reply_markup=kb.user_nav([[kb.btn("🧭 لوحة التحكم", "u:dashboard", style="success")]]),
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
     await admin_payment_detail(q, uid, context, bot, pid)
 
 

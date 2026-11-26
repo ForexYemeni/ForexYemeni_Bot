@@ -1295,55 +1295,75 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         await render(q, f"🔔 الإشعارات الآن <b>{'مفعلة' if new else 'متوقفة'}</b>.",
                      kb.user_nav([[kb.btn("↩️ التفضيلات", "u:preferences")]]), bot)
 
-    # ---------- Royal referrals (invite → open → subscribe) ----------
+    # ---------- Royal Unified Referrals, Commissions & Plan-Unlock (v8.7.0) ----------
     elif action == "referrals":
         from urllib.parse import quote as _urlquote
-        from fysb.services import referrals as ref
-        st = await afn.run(ref.user_stats, uid)
-        # v6.8.1 — LUXURY SHARE TEXT: the message a friend receives when the
-        # user taps «شارك رابط الدعوة». No bot-handle duplication, no raw
-        # tech-talk — a clean royal invitation, then the clickable link.
+        from fysb.services import affiliates as aff_svc
+        bot_u = ""
+        try:
+            me = await bot.get_me()
+            bot_u = getattr(me, "username", "") or ""
+        except Exception:
+            pass
+        link = await afn.run(aff_svc.unified_invite_link, uid, bot_u)
+        ast = await afn.run(aff_svc.affiliate_stats, uid)
         share_text = (
             "👑 دعوة خاصة إليك من FOREXYEMENI\n\n"
-            "✨ تحليلات وإشارات تداول ملكية لحظية\n"
+            "✨ تحليلات وإشارات تداول ملكية لحظية بالشارت الفاخر\n"
             "🥇 الذهب مفعّل الآن — متابعة لحظية حتى الأهداف\n"
-            "🧪 تنفيذ تجريبي آلي + إدارة صفقات ملكية\n"
             "💎 باقات لكل مستوى ودعم فاخر\n\n"
             "⬇️ اضغط الرابط وابدأ الآن"
         )
-        share_link = ("https://t.me/share/url?url=" + _urlquote(st["link"])
+        share_link = ("https://t.me/share/url?url=" + _urlquote(link)
                       + "&text=" + _urlquote(share_text))
+        t_lbl = ast["tier_label"]
+        rate_str = f"{ast['rate_pct']:g}%" if ast["enabled"] else "متوقف مؤقتاً"
+        ms_line = ""
+        if ast["milestone_enabled"]:
+            ms_line = (
+                f"\n▎🎁 <b>الفتح التلقائي للباقة:</b> كل <b>{ast['milestone_paid_refs']}</b> مشترك مدفوع → "
+                f"<b>{esc(ast['milestone_target_label'])}</b> مجاناً! "
+                f"(<b>{ast['milestone_progress']}/{ast['milestone_paid_refs']}</b> · متبقي <b>{ast['milestone_remaining']}</b>)"
+            )
+        bal_line = (
+            f"\n▎💎 <b>فتح باقة من رصيدك:</b> متاح فوراً من رصيد أرباحك (<b>{ast['available_usd']:,.2f} $</b>)"
+            if ast["balance_unlock_enabled"] else ""
+        )
         body = [
-            "🤝 <b><u>دعوة الأصدقاء — بطاقة إحالات ملكية</u></b>",
-            "",
+            "🤝👑 <b><u>دعوة الأصدقاء ومحفظة العمولات الموحدة</u></b>",
+            "━━━━━━━━━━━━━━━━━━",
             "<blockquote>"
-            "▎🔗 رابط الدعوة الخاص بك — رابط أزرق حقيقي قابل للنقر، والمحال يدخل عبره تلقائياً فيُحسب لك:\n"
-            f"▎<a href=\"{esc(st['link'])}\"><b>اضغط هنا لفتح رابط الدعوة</b></a>\n"
-            f"▎🧾 الرابط الكامل للنسخ اليدوي:\n"
-            f"▎<code>{esc(st['link'])}</code>\n"
-            "▎<i>اضغط الرابط الأزرق ليفتح مباشرة — أو استخدم زر المشاركة الفاخر بالأسفل.</i>\n"
+            "▎🔗 <b>رابطك الموحد</b> (يحتسب الدعوات والعمولات وفتح الباقات تلقائياً):\n"
+            f"▎<a href=\"{esc(link)}\"><b>اضغط هنا لفتح رابط الدعوة</b></a>\n"
+            f"▎<code>{esc(link)}</code>"
             "</blockquote>",
             "",
-            "📊 <b>تقدمك نحو الأهداف الملكية:</b>",
+            "📊 <b>إحصائياتك وأرباحك الحقيقية:</b>",
             "<blockquote>"
-            f"▎👥 انضموا عبر رابطك: <b>{st['invited']}</b> من <b>{st['target_invited']}</b> {bar(st['invited'], st['target_invited'])}\n"
-            f"▎💎 اشتركوا فعلاً بالباقات: <b>{st['converted']}</b> من <b>{st['target_converted']}</b> {bar(st['converted'], st['target_converted'])}\n"
-            f"▎📈 نسبة التحويل الحقيقية: <b>{st['rate']:.1f}%</b>"
+            f"▎🏅 رتبتك الحالية: <b>{t_lbl}</b> · نسبتك: <b>{rate_str}</b>\n"
+            f"▎👥 انضموا عبر رابطك: <b>{ast['referred']}</b> · 💎 اشتركوا فعلياً: <b>{ast['paid_refs']}</b>\n"
+            f"▎💵 إجمالي عمولاتك: <b>{ast['earned_usd']:,.2f} $</b> · ✅ المتاح الآن: <b>{ast['available_usd']:,.2f} $</b>"
+            f"{bal_line}"
+            f"{ms_line}"
             "</blockquote>",
-            "",
-            "🎁 <b>مكافآت الإحالة الملكية:</b>",
-            "▎🥉 أول مشترك عبر رابطك — تُفتح لك ميزة خاصة من الإدارة.",
-            "▎🥈 3 مشتركين فعلاً — يوم ممتد على باقتك.",
-            "▎🥇 5 مشتركين فعلاً — مكافأة الإحالة الكبرى.",
-            "<i>العدّ آلي وموثوق 100% (لا يحتسب إلا الاشتراك الفعلي)، وتُمنح المكافآت يدوياً من الإدارة عند تحقيق كل مستوى.</i>",
+            "✨ <i>كل مشترك يدفع عبر رابطك يضيف عمولتك فوراً لمحفظتك — اسحبها أو افتح بها باقة خلال ثانية واحدة!</i>",
         ]
         rows_kb = [
-            [kb.copy_btn("📋 نسخ رابط الدعوة بضغطة واحدة", st["link"], style="primary")],
+            [kb.copy_btn("📋 نسخ رابط الدعوة بضغطة واحدة", link, style="primary")],
             [kb.url_btn("📤 شارك رابط الدعوة (نص فاخر جاهز)", share_link, style="success")],
-            [kb.url_btn("🔗 فتح رابط الدعوة", st["link"])],
-            [kb.btn("💸 لوحة عمولات الشركاء (15%–35%)", "u:affiliate", style="success"),
-             kb.btn("💎 الباقات", "u:plans", style="primary")],
         ]
+        if ast["balance_unlock_enabled"]:
+            rows_kb.append([
+                kb.btn(
+                    f"💎 فتح باقة من رصيد أرباحي ({ast['available_usd']:,.2f}$)",
+                    "u:affunlock",
+                    style="success",
+                )
+            ])
+        rows_kb.append([
+            kb.btn("💸 محفظة العمولات والسحب", "u:affiliate", style="success"),
+            kb.btn("💎 الباقات", "u:plans", style="primary"),
+        ])
         await render(q, "\n".join(body), kb.user_nav(rows_kb), bot)
 
     # ---------- Plans & payments ----------

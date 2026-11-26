@@ -140,9 +140,9 @@ async def _route_user(q, context, uid: int, action: str):
         from fysb.handlers.common import render
         await render(q, "💬 أرسل رسالتك الآن — ستُسجل في التذكرة.", None, context.bot)
         return
-    # Phase 4 (v6.27.0) & v7.1.0 Royal Academy: Independent Academy, Gift Code Redeem, Tiered Affiliates
-    if action in ("academy", "acadbuy", "redeem", "affiliate", "affpayout") or action.startswith(
-        ("acadtrack:", "acadles:", "acadquiz:", "acadcert:", "acadmedia:", "acadusdt:", "acadpay:")
+    # Phase 4 (v6.27.0) & v7.1.0 Royal Academy + v8.7.0 Unified Affiliates & Plan-Unlock
+    if action in ("academy", "acadbuy", "redeem", "affiliate", "affpayout", "affunlock") or action.startswith(
+        ("acadtrack:", "acadles:", "acadquiz:", "acadcert:", "acadmedia:", "acadusdt:", "acadpay:", "affunlockgo:")
     ):
         from fysb.handlers import academy_growth
         if await academy_growth.handle_user_growth(q, uid, action, context, context.bot):
@@ -737,7 +737,7 @@ async def _route_admin(q, context, uid: int, action: str):
                  "acadles_quiz", "acadles_track", "acadles_tog", "acadles_del", "acadles_delgo",
                  "acadnew", "acadnew_tr", "acadnew_mt", "acadnew_save", "acadgrant",
                  "gifts", "giftgen", "giftcustom", "giftdirect",
-                 "affiliates", "affapprove", "affreject"):
+                 "affiliates", "affcfg", "affset", "affapprove", "affreject"):
         from fysb.handlers import academy_growth
         await academy_growth.handle_admin_growth(q, uid, act, arg, arg2, context, bot)
     elif act in ("cryptoapi", "cryptoapitoggle"):

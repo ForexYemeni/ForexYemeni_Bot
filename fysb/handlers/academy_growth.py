@@ -460,8 +460,9 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
         await render(q, body, kb.user_nav([[kb.btn("❌ إلغاء", "u:home", style="danger")]]), bot)
         return True
 
-    # --- 3) TIERED AFFILIATE DASHBOARD ---
+    # --- 3) UNIFIED USER AFFILIATE, PLAN-UNLOCK & PAYOUT HUB ---
     if action == "affiliate":
+        from urllib.parse import quote as _urlquote
         bot_u = ""
         try:
             me = await bot.get_me()
@@ -470,13 +471,132 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
             pass
         body = await afn.run(affiliates.render_affiliate_dashboard, uid, bot_u)
         st = await afn.run(affiliates.affiliate_stats, uid)
-        rows_kb = []
+        link = await afn.run(affiliates.unified_invite_link, uid, bot_u)
+        share_url = (
+            "https://t.me/share/url?url=" + _urlquote(link)
+            + "&text=" + _urlquote("👑 انضم إلى FOREXYEMENI — إشارات وتحليلات ملكية لحظية بالشارت الفاخر!")
+        )
+        rows_kb = [
+            [
+                kb.copy_btn("📋 نسخ رابط الدعوة", link, style="success"),
+                kb.url_btn("📤 مشاركة الرابط", share_url, style="primary"),
+            ]
+        ]
+        if st["balance_unlock_enabled"]:
+            rows_kb.append([
+                kb.btn(
+                    f"💎 فتح باقة من رصيد أرباحي ({st['available_usd']:,.2f}$)",
+                    "u:affunlock",
+                    style="success" if st["available_usd"] > 0 else "primary",
+                )
+            ])
         if st["available_usd"] >= st["min_payout_usd"]:
             rows_kb.append([kb.btn(f"💸 طلب سحب أرباحي ({st['available_usd']:,.2f}$)", "u:affpayout", style="success")])
         else:
             rows_kb.append([kb.btn(f"💸 طلب السحب (الحد الأدنى {st['min_payout_usd']:g}$)", "u:affpayout", style="primary")])
-        rows_kb.append([kb.btn("🔄 تحديث رصيدي", "u:affiliate", style="primary"), kb.btn("🎁 كود هدية", "u:redeem")])
+        rows_kb.append([
+            kb.btn("🔄 تحديث رصيدي", "u:affiliate", style="primary"),
+            kb.btn("🎁 كود هدية", "u:redeem", style="success"),
+        ])
         await render(q, body, kb.user_nav(rows_kb), bot)
+        return True
+
+    if action == "affunlock":
+        st = await afn.run(affiliates.affiliate_stats, uid)
+        if not st["balance_unlock_enabled"]:
+            await render(
+                q,
+                "🔒 <b>ميزة فتح الباقات من رصيد العمولات متوقفة حالياً من الإدارة.</b>",
+                kb.user_nav([[kb.btn("↩️ عمولاتي", "u:affiliate", style="primary")]]),
+                bot,
+            )
+            return True
+        products = await afn.run(affiliates.list_unlockable_products)
+        avail = float(st["available_usd"] or 0.0)
+        lines = [
+            "💎 <b><u>فتح باقة فوري من رصيد أرباحك</u></b>",
+            "━━━━━━━━━━━━━━━━━━",
+            "<blockquote>"
+            f"▎✅ <b>رصيدك المتاح الآن:</b> <b>{avail:,.2f} $</b>\n"
+            "▎⚡ اختر أي باقة بالأسفل لفتحها وتفعيلها <b>فوراً خلال ثانية واحدة</b> خصماً من رصيدك بدون أي تحويل خارجي!"
+            "</blockquote>",
+        ]
+        rows_kb = []
+        for pr in products:
+            price = float(pr["price_usd"])
+            days_txt = f" · {pr['duration_days']} يوم" if pr["duration_days"] > 0 else " · مدى الحياة"
+            can = avail >= price
+            if can:
+                lines.append(f"▎🟢 <b>{esc(pr['title'])}</b> — <b>{price:g}$</b>{days_txt} <i>(متاح للفتح الآن!)</i>")
+                rows_kb.append([kb.btn(
+                    f"✅ فتح {pr['title'][:26]} ({price:g}$)",
+                    f"u:affunlockgo:{pr['code']}",
+                    style="success",
+                )])
+            else:
+                need = round(price - avail, 2)
+                lines.append(f"▎⚪ <b>{esc(pr['title'])}</b> — <b>{price:g}$</b>{days_txt} <i>(متبقي لك {need:g}$)</i>")
+                rows_kb.append([kb.btn(
+                    f"🔒 {pr['title'][:24]} ({price:g}$ · ينقصك {need:g}$)",
+                    f"u:affunlockgo:{pr['code']}",
+                    style="primary",
+                )])
+        rows_kb.append([kb.btn("↩️ العودة لمحفظة العمولات", "u:affiliate", style="primary")])
+        await render(q, "\n".join(lines), kb.user_nav(rows_kb), bot)
+        return True
+
+    if action.startswith("affunlockgo:"):
+        code = action.split(":", 1)[1].strip().upper()
+        res = await afn.run(affiliates.redeem_balance_for_plan, uid, code)
+        if not res.get("ok"):
+            await render(
+                q,
+                f"⏳ <b>تعذر الفتح حالياً</b>\n<blockquote>▎{esc(res.get('error', 'رصيد غير كافٍ'))}</blockquote>",
+                kb.user_nav([
+                    [kb.btn("💎 عرض كل الباقات المتاحة", "u:affunlock", style="primary")],
+                    [kb.btn("↩️ محفظة العمولات", "u:affiliate", style="primary")],
+                ]),
+                bot,
+            )
+            return True
+        await afn.run(audit_log.log, uid, f"affiliate_balance_unlock:{code}:{res['price_usd']}")
+        days_line = (
+            f"▎⏱ المدة المفعّلة: <b>{res['duration_days']} يوم</b>\n"
+            if res.get("duration_days", 0) > 0 else
+            "▎⏱ الصلاحية: <b>مدى الحياة 👑</b>\n"
+        )
+        await render(
+            q,
+            f"🎉 <b><u>تم فتح وتفعيل {esc(res['target_title'])} بنجاح!</u></b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "<blockquote>"
+            f"▎💎 المنتج المفعّل: <b>{esc(res['target_title'])}</b>\n"
+            f"{days_line}"
+            f"▎💵 المبلغ المخصوم من رصيدك: <b>{res['price_usd']:,.2f} $</b>\n"
+            f"▎✅ رصيدك المتبقي: <b>{res['remaining_usd']:,.2f} $</b>"
+            "</blockquote>\n"
+            "✨ <i>مبارك لك! صلاحياتك الجديدة مفعّلة بالكامل الآن.</i>",
+            kb.user_nav([
+                [kb.btn("👑 لوحة التحكم", "u:dashboard", style="success"),
+                 kb.btn("💸 محفظة العمولات", "u:affiliate", style="primary")],
+            ]),
+            bot,
+        )
+        if config.ADMIN_ID and uid != config.ADMIN_ID:
+            try:
+                await bot.send_message(
+                    config.ADMIN_ID,
+                    "💎 <b><u>فتح باقة فوري من رصيد العمولات!</u></b>\n"
+                    "<blockquote>"
+                    f"▎👤 المستخدم: <code>{uid}</code>\n"
+                    f"▎🏆 المنتج: <b>{esc(res['target_title'])}</b>\n"
+                    f"▎💵 المبلغ المستبدل من الرصيد: <b>{res['price_usd']:,.2f} $</b>\n"
+                    f"▎✅ المتبقي في محفظته: <b>{res['remaining_usd']:,.2f} $</b>"
+                    "</blockquote>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return True
 
     if action == "affpayout":
@@ -940,20 +1060,125 @@ async def handle_admin_growth(q, uid: int, act: str, arg: str, arg2: str, contex
         )
         return True
 
-    # --- 3) ADMIN AFFILIATES & 1-TAP PAYOUTS ---
+    # --- 3) ADMIN AFFILIATES, COMMISSION CONFIG & PLAN-UNLOCK CONTROLS ---
     if act == "affiliates":
         body = await afn.run(affiliates.render_admin_affiliates_card)
         pending = await afn.run(affiliates.list_payouts, "PENDING", 8)
         rows_kb = [
-            [
+            [kb.btn("⚙️ ضبط نسب العمولة وميزة فتح الباقات", "a:affcfg", style="success")],
+        ]
+        for p in pending:
+            rows_kb.append([
                 kb.btn(f"✅ اعتماد #{p['id']} ({p['amount_usd']:g}$)", f"a:affapprove:{p['id']}", style="success"),
                 kb.btn(f"❌ رفض #{p['id']}", f"a:affreject:{p['id']}", style="danger"),
-            ]
-            for p in pending
-        ]
-        rows_kb.append([kb.btn("🔄 تحديث", "a:affiliates", style="primary"), kb.btn("↩️ المالية", "a:hub:finance")])
+            ])
+        rows_kb.append([
+            kb.btn("🔄 تحديث", "a:affiliates", style="primary"),
+            kb.btn("↩️ المالية", "a:hub:finance", style="primary"),
+        ])
         await render(q, body, kb.admin_nav(rows_kb), bot)
         return True
+
+    if act == "affcfg":
+        cfg = await afn.run(affiliates.get_config)
+        body = await afn.run(affiliates.render_admin_config_card)
+        r = cfg["tier_rates"]
+        rows_kb = [
+            [
+                kb.btn(
+                    "⏹ إيقاف نظام العمولات" if cfg["enabled"] else "▶️ تفعيل نظام العمولات",
+                    "a:affset:toggle_en",
+                    style="danger" if cfg["enabled"] else "success",
+                ),
+                kb.btn(
+                    "🔀 تبديل لنسبة موحّدة" if cfg["mode"] == "TIERED" else "🔀 تبديل لرتب متدرجة",
+                    "a:affset:toggle_mode",
+                    style="primary",
+                ),
+            ],
+        ]
+        if cfg["mode"] == "FLAT":
+            rows_kb.append([
+                kb.btn("➖ 1%", "a:affset:flat:-1", style="primary"),
+                kb.btn(f"💰 النسبة الموحدة: {cfg['flat_pct']:g}%", "a:affcfg", style="success"),
+                kb.btn("➕ 1%", "a:affset:flat:1", style="primary"),
+            ])
+        else:
+            for tcode, tlbl in (("bronze", "🥉 برونزي"), ("silver", "🥈 فضي"), ("gold", "🥇 ذهبي"), ("royal", "👑 ملكي")):
+                val = r[tcode.upper()]
+                rows_kb.append([
+                    kb.btn("➖", f"a:affset:tier_{tcode}:-1", style="primary"),
+                    kb.btn(f"{tlbl}: {val:g}%", "a:affcfg", style="primary"),
+                    kb.btn("➕", f"a:affset:tier_{tcode}:1", style="primary"),
+                ])
+        rows_kb.append([
+            kb.btn("➖ 5$", "a:affset:minpay:-5", style="primary"),
+            kb.btn(f"💳 حد السحب: {cfg['min_payout_usd']:g}$", "a:affcfg", style="primary"),
+            kb.btn("➕ 5$", "a:affset:minpay:5", style="primary"),
+        ])
+        rows_kb.append([
+            kb.btn(
+                f"💎 فتح من الرصيد: {'🟢 مفعّل' if cfg['balance_unlock_enabled'] else '⚪ متوقف'}",
+                "a:affset:toggle_bal",
+                style="success" if cfg["balance_unlock_enabled"] else "danger",
+            ),
+            kb.btn(
+                f"🎁 فتح تلقائي: {'🟢 مفعّل' if cfg['milestone_enabled'] else '⚪ متوقف'}",
+                "a:affset:toggle_ms",
+                style="success" if cfg["milestone_enabled"] else "danger",
+            ),
+        ])
+        rows_kb.append([
+            kb.btn("➖", "a:affset:ms_refs:-1", style="primary"),
+            kb.btn(f"👥 كل {cfg['milestone_paid_refs']} مشترك مدفوع", "a:affcfg", style="success"),
+            kb.btn("➕", "a:affset:ms_refs:1", style="primary"),
+        ])
+        rows_kb.append([
+            kb.btn(f"🏆 الجائزة: {cfg['milestone_target']} (تبديل)", "a:affset:ms_target", style="primary"),
+            kb.btn(f"⏱ المدة: {cfg['milestone_days']} يوم (تبديل)", "a:affset:ms_days", style="primary"),
+        ])
+        rows_kb.append([kb.btn("↩️ لوحة العمولات", "a:affiliates", style="primary")])
+        await render(q, body, kb.admin_nav(rows_kb), bot)
+        return True
+
+    if act == "affset":
+        cfg = await afn.run(affiliates.get_config)
+        sub = (arg or "").strip().lower()
+        delta = 0.0
+        try:
+            delta = float(arg2) if arg2 else 0.0
+        except ValueError:
+            delta = 0.0
+        if sub == "toggle_en":
+            await afn.run(affiliates.set_config, enabled=not cfg["enabled"])
+        elif sub == "toggle_mode":
+            await afn.run(affiliates.set_config, mode="FLAT" if cfg["mode"] == "TIERED" else "TIERED")
+        elif sub == "flat":
+            await afn.run(affiliates.set_config, flat_pct=cfg["flat_pct"] + delta)
+        elif sub in ("tier_bronze", "tier_silver", "tier_gold", "tier_royal"):
+            tkey = sub.split("_", 1)[1].upper()
+            cur_v = float(cfg["tier_rates"].get(tkey, 15.0))
+            await afn.run(affiliates.set_config, **{sub: cur_v + delta})
+        elif sub == "minpay":
+            await afn.run(affiliates.set_config, min_payout_usd=cfg["min_payout_usd"] + delta)
+        elif sub == "toggle_bal":
+            await afn.run(affiliates.set_config, balance_unlock_enabled=not cfg["balance_unlock_enabled"])
+        elif sub == "toggle_ms":
+            await afn.run(affiliates.set_config, milestone_enabled=not cfg["milestone_enabled"])
+        elif sub == "ms_refs":
+            await afn.run(affiliates.set_config, milestone_paid_refs=int(cfg["milestone_paid_refs"] + delta))
+        elif sub == "ms_target":
+            targets = list(affiliates.MILESTONE_TARGETS)
+            cur_i = targets.index(cfg["milestone_target"]) if cfg["milestone_target"] in targets else 0
+            nxt_t = targets[(cur_i + 1) % len(targets)]
+            await afn.run(affiliates.set_config, milestone_target=nxt_t)
+        elif sub == "ms_days":
+            dlist = list(affiliates.MILESTONE_DAYS_CHOICES)
+            cur_i = dlist.index(cfg["milestone_days"]) if cfg["milestone_days"] in dlist else 2
+            nxt_d = dlist[(cur_i + 1) % len(dlist)]
+            await afn.run(affiliates.set_config, milestone_days=nxt_d)
+        await afn.run(audit_log.log, uid, f"affiliate_cfg:{sub}:{arg2}")
+        return await handle_admin_growth(q, uid, "affcfg", "", "", context, bot)
 
     if act in ("affapprove", "affreject"):
         pid = int(arg or 0)

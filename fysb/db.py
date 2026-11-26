@@ -450,6 +450,25 @@ CREATE TABLE IF NOT EXISTS affiliate_payouts(
   created_at TEXT NOT NULL,
   processed_at TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS affiliate_redemptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_code TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  amount_usd REAL NOT NULL DEFAULT 0.0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affiliate_milestones(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  milestone_step INTEGER NOT NULL,
+  paid_refs INTEGER NOT NULL DEFAULT 0,
+  target_code TEXT NOT NULL,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, milestone_step)
+);
 CREATE TABLE IF NOT EXISTS user_exchange_keys(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -730,6 +749,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_aff_comm_ref ON affiliate_commissions(referrer_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_aff_links_ref ON affiliate_links(referrer_id)",
     "CREATE INDEX IF NOT EXISTS idx_aff_payout_status ON affiliate_payouts(status, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_redemp_user ON affiliate_redemptions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_aff_ms_user ON affiliate_milestones(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_exch_keys_user ON user_exchange_keys(user_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_exch_orders_user ON exchange_orders(user_id, created_at)",
 ]

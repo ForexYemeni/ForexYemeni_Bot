@@ -26,7 +26,10 @@ def _bootstrap_self_update() -> None:
         except Exception:
             pass
         import updater
-        updater.boot_check()
+        def _announce_verified_update(info):
+            from fysb.services.update_notices import boot_notice
+            boot_notice(info)
+        updater.boot_check(before_install=_announce_verified_update)
     except SystemExit:
         raise
     except Exception as exc:      # فحص التحديث لا يحجب الإقلاع أبداً

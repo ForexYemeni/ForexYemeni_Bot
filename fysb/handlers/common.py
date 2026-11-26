@@ -359,6 +359,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ هذا الأمر للإدارة المخولة فقط.")
         return
     import updater
+    from fysb.services import update_notices
+    update_bot = getattr(context, "bot", None)
     args = list(getattr(context, "args", None) or [])
     arg = (args[0].strip() if args else "")
     arg_l = arg.lower()
@@ -391,6 +393,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"a:updver:{tag}",
                     style="success" if updater.is_newer(tag, config.VERSION) else ("primary" if not is_cur else ""),
                 )])
+                rows_kb.append([kb.btn(f"📋 إصلاحات وتحسينات {ver}", f"a:updnotes:{tag}", style="primary")])
         else:
             lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك كتابة <code>/update v6.14.1</code> مباشرة أو استخدام التراجع المحلي.")
         if snaps:
@@ -399,6 +402,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "a:updrollback",
                 style="danger",
             )])
+        rows_kb.append([kb.btn("📚 أرشيف جميع الإصدارات", "a:updates", style="primary")])
         lines.append("\n<i>مثال سريع للرجوع لأي إصدار: <code>/update v6.14.1</code></i>")
         await _send_guarded(msg.edit_text, "\n".join(lines), kb.InlineKeyboardMarkup(rows_kb) if rows_kb else None)
         return
@@ -447,14 +451,14 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"◆ الإصدار الحالي: v{config.VERSION}\n"
             "<i>سيتم حفظ نسخة تراجع تلقائية قبل التثبيت دون المساس بـ .env أو قاعدة البيانات.</i>",
             parse_mode=ParseMode.HTML)
-        res = await asyncio.to_thread(updater.self_update, None, norm, True)
+        res = await update_notices.install(update_bot, norm, True)
     else:
         # --- 4) Default: upgrade to latest GitHub release --------------------
         msg = await update.effective_message.reply_text(
             "🔎 <b>جارٍ فحص الإصدار الأحدث على GitHub...</b>\n"
             f"◆ الإصدار الحالي: v{config.VERSION}",
             parse_mode=ParseMode.HTML)
-        res = await asyncio.to_thread(updater.self_update)
+        res = await update_notices.install(update_bot)
 
     status = res.get("status")
     if status == "updated":
@@ -463,7 +467,8 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "downgrade": "⬇️ تم الرجوع وتثبيت الإصدار",
             "reinstall": "🔄 تمت إعادة تثبيت الإصدار",
         }.get(direction, "✅ تم تنزيل وتثبيت الإصدار")
-        sha_line = "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
+        sha_line = update_notices.summary(res)
+        sha_line += "◆ بصمة SHA-256: ✅ موثّقة\n" if res.get("sha256_verified") else ""
         bak_line = (f"◆ نسخة تراجع محفوظة: <code>{safe(res.get('rollback_backup'))}</code>\n"
                     if res.get("rollback_backup") else "")
         await afn.run(audit_log.log, uid,

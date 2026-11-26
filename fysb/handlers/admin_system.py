@@ -571,56 +571,130 @@ async def admin_health(q, uid, context, bot):
 
 
 # --- Updates & Version Rollback Manager (v6.16.0) ---------------------------------------------
-async def admin_updates(q, uid, context, bot):
+async def admin_updates(q, uid, context, bot, page: int = 1):
     import updater
-    releases = await asyncio.to_thread(updater.list_releases, 6)
+    if uid != config.ADMIN_ID:
+        await render(q, "⛔ هذا القسم للإدارة فقط.", kb.user_nav(), bot)
+        return
+    page = max(1, min(10000, int(page)))
+    releases = await asyncio.to_thread(updater.list_releases, 6, page=page, include_uninstallable=True)
     snaps = await asyncio.to_thread(updater.list_rollback_snapshots)
     lines = [
-        "🔄 <b><u>إدارة التحديثات والإصدارات</u></b>",
-        f"<blockquote>◆ الإصدار العامل حالياً: <b>v{esc(config.VERSION)}</b>",
+        "👑 <b><u>إدارة التحديثات والإصدارات</u></b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"<blockquote>◆ الإصدار العامل: <b>v{esc(config.VERSION)}</b>\n"
+        f"◆ أرشيف الإصدارات · الصفحة <b>{page}</b>\n"
+        "◆ افتح بطاقة الإصلاحات والتحسينات لكل إصدار.</blockquote>",
     ]
-    if snaps:
-        lines.append(f"◆ آخر نسخة تراجع محلية: <b>v{esc(updater.snapshot_version(snaps[0]))}</b> ({len(snaps)} محفوظة)")
-    else:
-        lines.append("◆ نسخ التراجع المحلية: تُنشأ تلقائياً قبل كل تحديث")
-    lines.append("</blockquote>")
     rows_kb = [[kb.btn("⬆️ فحص وتثبيت أحدث إصدار", "a:updlatest", style="success")]]
-    if releases:
-        lines.append("<b>اختر أي إصدار للتثبيت أو الرجوع الفوري:</b>")
-        for rel in releases[:6]:
-            tag = rel["tag"]
-            ver = updater.display_tag(tag)
-            is_cur = updater.parse_version(tag) == updater.parse_version(config.VERSION)
-            is_new = updater.is_newer(tag, config.VERSION)
-            badge = "✅ الحالي" if is_cur else ("⬆️ أحدث" if is_new else "⬇️ سابق")
-            lines.append(f"  • <code>{esc(tag)}</code> — {badge}")
+    context.user_data["release_catalog"] = {r["tag"]: r for r in releases}
+    for rel in releases:
+        tag = rel["tag"]
+        ver = updater.display_tag(tag)
+        current = updater.parse_version(tag) == updater.parse_version(config.VERSION)
+        newer = updater.is_newer(tag, config.VERSION)
+        badge = "✅ الحالي" if current else ("⬆️ أحدث" if newer else "📦 سابق")
+        lines.append(f"\n<b>{esc(tag)}</b> — {badge}\n{esc(str(rel.get('title') or tag)[:60])}")
+        rows_kb.append([kb.btn(f"📋 الإصلاحات والتحسينات · {ver}", f"a:updnotes:{tag}", style="primary")])
+        if rel.get("url"):
             rows_kb.append([kb.btn(
-                f"{'🔄 إعادة تثبيت' if is_cur else ('⬆️ ترقية إلى' if is_new else '⬇️ رجوع إلى')} v{ver}",
-                f"a:updver:{tag}",
-                style="success" if is_new else ("primary" if not is_cur else ""),
+                f"{'🔄 إعادة تثبيت' if current else ('⬆️ ترقية إلى' if newer else '⬇️ رجوع إلى')} {tag}",
+                f"a:updver:{tag}", style="success" if newer else "primary",
             )])
-    else:
-        lines.append("⚠️ تعذّر جلب قائمة GitHub حالياً — يمكنك إرسال <code>/update v6.14.1</code> مباشرة.")
+    if not releases:
+        lines.append("\n📭 لا توجد إصدارات في هذه الصفحة، أو تعذّر جلبها حاليًا. أعد المحاولة أو ارجع للصفحة السابقة.")
+    nav = []
+    if page > 1:
+        nav.append(kb.btn("⬅️ الأحدث", f"a:updates:{page - 1}"))
+    if len(releases) == 6:
+        nav.append(kb.btn("الأقدم ➡️", f"a:updates:{page + 1}"))
+    if nav:
+        rows_kb.append(nav)
     if snaps:
         rows_kb.append([kb.btn(
-            f"↩️ تراجع فوري للنسخة السابقة (v{updater.snapshot_version(snaps[0])})",
-            "a:updrollback",
-            style="danger",
+            f"↩️ تراجع محلي · v{updater.snapshot_version(snaps[0])}", "a:updrollback", style="danger"
         )])
-    lines.append("\n<i>الأوامر المباشرة: <code>/update</code> · <code>/update v6.14.1</code> · <code>/update list</code> · <code>/update rollback</code></i>")
+    lines.append("\n<i>التنبيه العام يُرسل بعد فحص الحزمة وقبل استبدال الملفات. التوصيل بأفضل جهد.</i>")
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+def _release_note_pages(notes):
+    """Escape untrusted Markdown without splitting HTML entities or losing text."""
+    import html
+    import re
+    text = re.sub(r"(?m)^#{1,6} +", "", str(notes or ""))
+    text = text.replace("**", "").replace("`", "")
+    if not text.strip():
+        text = "لا توجد ملاحظات منشورة لهذا الإصدار؛ لم تُضف تفاصيل تخمينية."
+    pages, part, size = [], [], 0
+    for char in text:
+        escaped = html.escape(char)
+        units = len(escaped.encode("utf-16-le")) // 2
+        if size + units > 2200 and part:
+            pages.append("".join(part))
+            part, size = [], 0
+        part.append(escaped)
+        size += units
+    if part:
+        pages.append("".join(part))
+    return pages
+
+
+async def admin_release_notes(q, uid, context, bot, tag: str, page: int = 1):
+    import updater
+    if uid != config.ADMIN_ID:
+        await render(q, "⛔ هذا القسم للإدارة فقط.", kb.user_nav(), bot)
+        return
+    norm = updater.normalize_tag(tag)
+    if not norm:
+        await render(q, "⚠️ رقم الإصدار غير صالح.", kb.admin_nav(), bot)
+        return
+    rel = (context.user_data.get("release_catalog") or {}).get(norm)
+    cached = context.user_data.get("release_detail") or {}
+    if not rel and cached.get("tag") == norm:
+        rel = cached
+    if rel is None:
+        rel = await asyncio.to_thread(updater.release_details, norm)
+    if not rel:
+        await render(q, "⚠️ تعذّر جلب تفاصيل الإصدار حاليًا. أعد المحاولة.",
+                     kb.admin_nav([[kb.btn("📚 جميع الإصدارات", "a:updates")]]), bot)
+        return
+    context.user_data["release_detail"] = rel
+    pages = _release_note_pages(rel.get("notes"))
+    page = max(1, min(int(page), len(pages)))
+    text = (
+        "👑 <b><u>سجل الإصلاحات والتحسينات</u></b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{esc(norm)}</b> · {esc(str(rel.get('title') or norm)[:120])}\n"
+        f"<i>تفاصيل منشورة · الجزء {page}/{len(pages)}</i>\n\n"
+        f"<blockquote>{pages[page - 1]}</blockquote>"
+    )
+    rows = []
+    nav = []
+    if page > 1:
+        nav.append(kb.btn("⬅️ السابق", f"a:updnotes:{norm}:{page - 1}"))
+    if page < len(pages):
+        nav.append(kb.btn("التالي ➡️", f"a:updnotes:{norm}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    if rel.get("url"):
+        rows.append([kb.btn(f"⚙️ خيارات تثبيت {norm}", f"a:updver:{norm}", style="success")])
+    rows.append([kb.btn("📚 جميع الإصدارات", "a:updates", style="primary")])
+    await render(q, text, kb.admin_nav(rows), bot)
 
 
 async def admin_update_latest(q, uid, context, bot):
     import updater
     await render(q, f"🔎 <b>جارٍ فحص وتثبيت أحدث إصدار...</b>\n◆ الحالي: v{esc(config.VERSION)}", None, bot)
-    res = await asyncio.to_thread(updater.self_update)
+    from fysb.services import update_notices
+    res = await update_notices.install(bot)
     if res.get("status") == "updated":
         await afn.run(audit_log.log, uid, f"self_update:{res.get('local')}->{res.get('remote')}")
         await render(
             q,
             f"✅ <b>تم تثبيت v{esc(updater.display_tag(res.get('remote')))} بنجاح</b> ({res.get('files', 0)} ملف).\n"
-            "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
+            + update_notices.summary(res)
+            + "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
             None, bot,
         )
         await asyncio.sleep(1.5)
@@ -669,14 +743,16 @@ async def admin_update_ver_go(q, uid, context, bot, tag: str):
         await render(q, "⚠️ رقم الإصدار غير صالح.", kb.admin_nav(), bot)
         return
     await render(q, f"⏳ <b>جارٍ تنزيل وتثبيت {esc(norm)}...</b>", None, bot)
-    res = await asyncio.to_thread(updater.self_update, None, norm, True)
+    from fysb.services import update_notices
+    res = await update_notices.install(bot, norm, True)
     if res.get("status") == "updated":
         await afn.run(audit_log.log, uid,
                       f"self_update:{res.get('direction')}:{res.get('local')}->{res.get('remote')}")
         await render(
             q,
             f"✅ <b>تم تثبيت {esc(norm)} بنجاح</b> ({res.get('files', 0)} ملف).\n"
-            "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
+            + update_notices.summary(res)
+            + "♻️ جارٍ إعادة تشغيل البوت الآن — أرسل /ping بعد لحظات.",
             None, bot,
         )
         await asyncio.sleep(1.5)

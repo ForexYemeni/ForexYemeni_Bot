@@ -746,6 +746,13 @@ def render_analysis_caption(an: dict, market_row=None) -> str:
             f"\n▎🎯 خطة <b>{_esc(setup.get('code') or an.get('strategy') or 'PRO')}</b>: "
             f"دخول <code>{e_s}</code> · وقف <code>{sl_s}</code> · هدف1 <code>{tp1_s}</code> (<b>1:{rr_v:.1f}</b>)"
         )
+    conf = an.get("confirmation") or {}
+    conf_line = ""
+    if isinstance(conf, dict) and conf.get("stability_tf"):
+        st_tf = _esc(str(conf["stability_tf"]))
+        cf_tf = _esc(str(conf.get("confirm_tf") or st_tf))
+        st_ico = "🟢 مؤكّد فعلياً الآن" if conf.get("activated") else "⏳ بانتظار إغلاق جسم حقيقي"
+        conf_line = f"\n▎🔐 الثبات والتأكيد: إغلاق <b>{st_tf}</b> + تأكيد <b>{cf_tf}</b> ({st_ico})"
     cap = (
         f"👑 <b>{config.BRAND} · الشارت التحليلي المؤسسي الفاخر</b>\n"
         f"<blockquote>"
@@ -754,6 +761,7 @@ def render_analysis_caption(an: dict, market_row=None) -> str:
         f"▎🧭 الاتجاه: <b>{dir_badge}</b>\n"
         f"▎⭐ جودة السياق: <b>{quality}/100</b> {qbar}\n"
         f"▎📈 مؤشر RSI(14): <b>{rsi_v:.1f}</b> · المنهجية: <b>{_esc(an.get('strategy_name') or 'مؤسسي شامل')}</b>"
+        f"{conf_line}"
         f"{setup_line}"
         f"</blockquote>\n"
         f"<i>⬇️ التقرير التفصيلي الكامل بالمناطق والأرقام أسفل الشارت مباشرة · {config.BOT_SIGNATURE}</i>"

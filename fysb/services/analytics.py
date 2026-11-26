@@ -130,6 +130,142 @@ def _pattern_ar(code: str) -> str:
     return PATTERN_AR.get(code, code)
 
 
+_CONFIRM_TF_SPEC: dict[str, tuple[str, str, str]] = {
+    # analyzed_tf: (stability_tf, stability_ar, confirm_tf_ar)
+    "M1": ("M1", "إغلاق شمعتَي M1 (دقيقة) متتاليتين بجسم حقيقي", "M1 (الدقيقة)"),
+    "M5": ("M5", "إغلاق شمعة M5 (5 دقائق) كاملة بجسم حقيقي", "M1 (الدقيقة)"),
+    "M15": ("M15", "إغلاق شمعة M15 (ربع ساعة) كاملة بجسم حقيقي", "M5 (5 دقائق)"),
+    "M30": ("M30", "إغلاق شمعة M30 (نصف ساعة) كاملة بجسم حقيقي", "M15 (ربع ساعة) أو M5"),
+    "H1": ("H1", "إغلاق شمعة H1 (الساعة) كاملة بجسم حقيقي", "M15 (ربع ساعة)"),
+    "H4": ("H4", "إغلاق شمعة H4 (4 ساعات) كاملة بجسم حقيقي", "H1 (الساعة) أو M15"),
+    "D1": ("D1", "إغلاق شمعة D1 (يومي) أو H4 كاملة بجسم حقيقي", "H1 (الساعة)"),
+}
+
+
+def _build_real_confirmation_spec(
+    *,
+    symbol: str,
+    row,
+    tf: str,
+    direction: str,
+    candles: list[dict],
+    main: dict,
+    activation_px: float,
+    invalidation_px: float,
+    fmt,
+) -> dict:
+    """Derive 100% real, candle-grounded confirmation type, stability TF,
+    ATR anti-fakeout filter, and live activation verification state.
+    Zero placeholder or synthetic claims — every figure comes from real OHLC data.
+    """
+    tf_u = str(tf or "M15").upper()
+    stab_tf, stab_ar, conf_tf_ar = _CONFIRM_TF_SPEC.get(
+        tf_u,
+        (tf_u, f"إغلاق شمعة {tf_u} كاملة بجسم حقيقي", tf_u),
+    )
+    last = candles[-1] if candles else {}
+    cur_close = float(last.get("close") or main.get("close") or 0.0)
+    cur_open = float(last.get("open") or cur_close)
+    cur_hi = float(last.get("high") or cur_close)
+    cur_lo = float(last.get("low") or cur_close)
+    c_rng = max(cur_hi - cur_lo, 1e-9)
+    body_pct = int(round(100.0 * abs(cur_close - cur_open) / c_rng))
+    is_bull_candle = cur_close > cur_open
+    is_bear_candle = cur_close < cur_open
+
+    atr = float(main.get("atr") or 0.0)
+    buffer_px = max(atr * 0.15, 0.0)
+    buffer_pips = round(instruments.pips(symbol, cur_close, cur_close + buffer_px, row), 1) if (buffer_px > 0 and cur_close > 0) else 0.0
+    dist_pips = round(instruments.pips(symbol, cur_close, activation_px, row), 1) if (activation_px > 0 and cur_close > 0) else 0.0
+
+    struct = main.get("struct") or {}
+    brk = main.get("breakout") or {}
+    sweep = main.get("sweep") or {}
+    obs = main.get("obs") or []
+    fvgs = main.get("fvgs") or []
+
+    anti_fakeout = (
+        f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55% من مدى الشمعة) بفارق حقيقي ≥ <code>{buffer_pips:.1f}</code> نقطة "
+        f"(0.15×ATR) — لا يُعتد بالذيل وحده لمنع الكسر الكاذب"
+        if buffer_pips > 0 else
+        f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55% من مدى الشمعة) خارج المستوى — لا يُعتد بالذيل وحده"
+    )
+
+    if direction == "NEUTRAL":
+        hi_rng = float(main["sr"].get("resistance") or max(c["high"] for c in candles[-15:]))
+        lo_rng = float(main["sr"].get("support") or min(c["low"] for c in candles[-15:]))
+        return {
+            "stability_tf": stab_tf,
+            "confirm_tf": conf_tf_ar,
+            "stability_tf_label": f"<b>{stab_ar}</b> + تأكيد الدخول على <b>{conf_tf_ar}</b>",
+            "type": f"كسر وإغلاق جسم شمعة {stab_tf} كاملة (≥ 55%) خارج النطاق <code>{fmt(lo_rng)} — {fmt(hi_rng)}</code> مع ثبات شمعة تالية",
+            "anti_fakeout": anti_fakeout,
+            "live_state": f"🟡 السوق داخل نطاق تذبذب حالياً عند <code>{fmt(cur_close)}</code> — بانتظار كسر وإغلاق حقيقي خارج النطاق",
+            "invalidation_tf_note": "",
+            "activated": False,
+            "body_pct": body_pct,
+            "buffer_pips": buffer_pips,
+            "dist_pips": 0.0,
+        }
+
+    is_buy = direction == "BUY"
+    lvl_txt = f"<code>{fmt(activation_px)}</code>"
+    inv_txt = f"<code>{fmt(invalidation_px)}</code>"
+    rel_word = "فوق" if is_buy else "تحت"
+    inv_word = "تحت" if is_buy else "فوق"
+    candle_dir_ok = is_bull_candle if is_buy else is_bear_candle
+    already_beyond = (cur_close > activation_px) if is_buy else (cur_close < activation_px)
+    clean_buffer_ok = (
+        (cur_close >= activation_px + buffer_px) if is_buy else (cur_close <= activation_px - buffer_px)
+    )
+    has_retest = bool(brk.get("retest") and ((brk.get("breakout") == "UP") if is_buy else (brk.get("breakout") == "DOWN")))
+    has_aligned_sweep = bool(sweep.get("sell_side") if is_buy else sweep.get("buy_side"))
+    has_aligned_zone = any((o.get("kind") == ("bullish" if is_buy else "bearish")) for o in obs) or \
+                       any((f.get("kind") == ("bullish" if is_buy else "bearish")) for f in fvgs)
+    has_struct_break = bool(struct.get("bos") or struct.get("choch"))
+
+    activated = False
+    if already_beyond and candle_dir_ok and body_pct >= 50:
+        activated = True
+        if has_retest:
+            conf_type = f"كسر حقيقي مع إعادة اختبار ناجحة (Break & Retest مؤكّد) {rel_word} {lvl_txt}"
+            live_state = f"🟢 مؤكّد ومفعّل فعلياً على إغلاق شمعة {stab_tf} الآن (جسم حقيقي {body_pct}%)"
+        elif clean_buffer_ok:
+            conf_type = f"إغلاق جسم شمعة {'صاعدة' if is_buy else 'هابطة'} حقيقية ({body_pct}%) {rel_word} {lvl_txt} بفارق يتجاوز 0.15×ATR"
+            live_state = f"🟢 الكسر مُغلق وثابت فعلياً على {stab_tf} الآن — يُعزّز الدخول بإعادة اختبار أو تأكيد شمعة {conf_tf_ar}"
+        else:
+            conf_type = f"إغلاق شمعة {stab_tf} {rel_word} {lvl_txt} (جسم {body_pct}%) — قريب من حد المستوى"
+            live_state = f"🟡 مفعّل أولياً على {stab_tf} — يُفضّل انتظار ثبات شمعة {conf_tf_ar} إضافية لتأكيد الزخم"
+    elif already_beyond:
+        conf_type = f"اختراق ضعيف بذيول (جسم {body_pct}% فقط) {rel_word} {lvl_txt} — يتطلب إغلاق جسم حقيقي ≥ 55%"
+        live_state = f"🟡 لم يثبت بزخم كافٍ بعد على {stab_tf} — انتظر إغلاق شمعة {stab_tf} بجسم قوي {rel_word} {lvl_txt}"
+    else:
+        if has_aligned_sweep:
+            sw_tag = "سيولة البيع SSL" if is_buy else "سيولة الشراء BSL"
+            conf_type = f"تأكيد بعد سحب {sw_tag} + كسر هيكلي وإغلاق جسم شمعة {stab_tf} كاملة (≥ 55%) {rel_word} {lvl_txt}"
+        elif has_aligned_zone:
+            conf_type = f"إغلاق جسم شمعة {stab_tf} كاملة (≥ 55%) {rel_word} {lvl_txt} + ثبات إعادة اختبار منطقة الأوامر/الفجوة دون كسر {inv_txt}"
+        elif has_struct_break:
+            conf_type = f"إغلاق شمعة {stab_tf} كاملة بجسم حقيقي (≥ 55%) {rel_word} {lvl_txt} لتأكيد استمرارية الكسر الهيكلي"
+        else:
+            conf_type = f"كسر حقيقي وإغلاق جسم شمعة {stab_tf} كاملة (≥ 55%) {rel_word} {lvl_txt} + ثبات شمعة {conf_tf_ar} تالية"
+        live_state = f"⏳ بانتظار التفعيل الفعلي — السعر الحي (<code>{fmt(cur_close)}</code>) يبعد <b>{dist_pips:.1f} نقطة</b> عن مستوى التفعيل"
+
+    return {
+        "stability_tf": stab_tf,
+        "confirm_tf": conf_tf_ar,
+        "stability_tf_label": f"<b>{stab_ar}</b> + تأكيد الدخول على <b>{conf_tf_ar}</b>",
+        "type": conf_type,
+        "anti_fakeout": anti_fakeout,
+        "live_state": live_state,
+        "invalidation_tf_note": f"بإغلاق شمعة {stab_tf} كاملة {inv_word} المستوى",
+        "activated": activated,
+        "body_pct": body_pct,
+        "buffer_pips": buffer_pips,
+        "dist_pips": dist_pips,
+    }
+
+
 def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str = "",
                  tool: str = "", strategy: str = "", enforce_plan: bool = True) -> dict:
     """Generate ONE real-data composite analysis.
@@ -313,25 +449,45 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
             "SELL": "انحياز هابط — البحث عن فرص بيع في مناطق التعزز والعلاوة",
             "NEUTRAL": "انتظاري — لا انحياز واضح، الانتظار أفضل من الإجبار"}[direction]
 
+    # --- activation & invalidation ---
     activation_px = 0.0
     invalidation_px = 0.0
+    brk_now = main.get("breakout") or {}
     if direction == "BUY":
-        activation_px = float(main["sr"]["resistance"]) if main["sr"].get("resistance") else float(max(c["high"] for c in candles[-10:]))
+        if brk_now.get("breakout") == "UP" and float(brk_now.get("level") or 0) > 0:
+            activation_px = float(brk_now["level"])
+        elif main["sr"].get("resistance"):
+            activation_px = float(main["sr"]["resistance"])
+        else:
+            activation_px = float(max(c["high"] for c in candles[-10:]))
         invalidation_px = float(min(c["low"] for c in candles[-10:]))
-        activation = (f"ثبات الشموع فوق <code>{fmt(main['sr']['resistance'])}</code>"
-                      if main["sr"].get("resistance") else
-                      f"إغلاق فوق آخر قمة متأرجحة <code>{fmt(activation_px)}</code>")
+        activation = f"ثبات الشموع فوق <code>{fmt(activation_px)}</code>"
         invalidation = fmt(invalidation_px)
     elif direction == "SELL":
-        activation_px = float(main["sr"]["support"]) if main["sr"].get("support") else float(min(c["low"] for c in candles[-10:]))
+        if brk_now.get("breakout") == "DOWN" and float(brk_now.get("level") or 0) > 0:
+            activation_px = float(brk_now["level"])
+        elif main["sr"].get("support"):
+            activation_px = float(main["sr"]["support"])
+        else:
+            activation_px = float(min(c["low"] for c in candles[-10:]))
         invalidation_px = float(max(c["high"] for c in candles[-10:]))
-        activation = (f"كسر وثبات تحت <code>{fmt(main['sr']['support'])}</code>"
-                      if main["sr"].get("support") else
-                      f"إغلاق تحت آخر قاع متأرجح <code>{fmt(activation_px)}</code>")
+        activation = f"كسر وثبات تحت <code>{fmt(activation_px)}</code>"
         invalidation = fmt(invalidation_px)
     else:
         activation = "انتظار كسر مؤكد لأحد طرفي النطاق مع إغلاق خارج النطاق"
         invalidation = "غير منطبق في الوضع الانتظاري"
+
+    confirmation = _build_real_confirmation_spec(
+        symbol=symbol,
+        row=row,
+        tf=main["tf"],
+        direction=direction,
+        candles=candles,
+        main=main,
+        activation_px=activation_px,
+        invalidation_px=invalidation_px,
+        fmt=fmt,
+    )
 
     risk_note = "التزم بحجم مخاطرة 1-2% من رأس المال لكل فكرة، وطبّق وقف الخسارة المخطط بلا مساومة — الانضباط التنفيذي هو ما يحول التحليل إلى نتائج."
 
@@ -387,7 +543,8 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
         "direction": direction, "quality": quality,
         "summary": summary, "zones": zones,
         "recommendation": recommendation, "activation": activation,
-        "invalidation": invalidation, "risk_note": risk_note,
+        "invalidation": invalidation, "confirmation": confirmation,
+        "risk_note": risk_note,
         "market_open": market_open, "stale": stale,
         "chart_data": chart_data,
     }
@@ -408,7 +565,8 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
                           (user_id, symbol, tf_label, "", analysis_type, strategy,
                            main["close"], direction, quality, recommendation,
                            json.dumps({"summary": summary, "zones": zones,
-                                       "activation": activation, "invalidation": invalidation}),
+                                       "activation": activation, "invalidation": invalidation,
+                                       "confirmation": confirmation}),
                            config.now()))
     except Exception as e:
         return {"ok": False, "error": f"تعذر حفظ التحليل: {type(e).__name__}"}

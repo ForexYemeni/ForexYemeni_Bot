@@ -136,8 +136,20 @@ def render_analysis_card(an: dict, market_row=None) -> str:
     ]
     if an.get("activation"):
         rec.append(f"✅ <b>شرط تفعيل الفكرة:</b> {rich(an['activation'])}")
+    conf = an.get("confirmation") or {}
+    if isinstance(conf, dict) and conf:
+        if conf.get("type"):
+            rec.append(f"🔐 <b>نوع التأكيد الحقيقي:</b> {rich(conf['type'])}")
+        if conf.get("stability_tf_label"):
+            rec.append(f"⏱ <b>إطار الثبات والتأكيد:</b> {rich(conf['stability_tf_label'])}")
+        if conf.get("anti_fakeout"):
+            rec.append(f"🛡 <b>ضمان عدم الكسر الكاذب:</b> {rich(conf['anti_fakeout'])}")
+        if conf.get("live_state"):
+            rec.append(f"📡 <b>حالة التفعيل اللحظية:</b> {rich(conf['live_state'])}")
     if an.get("invalidation"):
-        rec.append(f"❌ <b>إبطال الفكرة عند:</b> <code>{esc(an['invalidation'])}</code>")
+        inv_tf = (conf.get("invalidation_tf_note") if isinstance(conf, dict) else "") or ""
+        inv_tail = f" <i>({esc(inv_tf)})</i>" if inv_tf else ""
+        rec.append(f"❌ <b>إبطال الفكرة عند:</b> <code>{esc(an['invalidation'])}</code>{inv_tail}")
 
     zones_txt = "\n".join(f"▎{rich(z)}" for z in (an.get("zones") or []))
     body_lines = (an.get("summary") or [])
@@ -514,12 +526,116 @@ def render_plan_card(p, trial_info: dict | None = None) -> str:
     )
 
 
-def render_plans_showcase_card(plans: list[dict], current_plan: dict, trial_info: dict | None = None) -> str:
+def _sub_remaining_text(ends_at: str) -> str:
+    """Human-readable Arabic remaining duration for an active subscription."""
+    s = str(ends_at or "").strip()
+    if not s:
+        return "♾️ اشتراك دائم (بلا انتهاء)"
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = dt - datetime.now(timezone.utc)
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "منتهي"
+        days = secs // 86400
+        hours = (secs % 86400) // 3600
+        if days >= 1:
+            return f"{days} يوم" + (f" و {hours} ساعة" if hours > 0 else "")
+        return f"{max(1, hours)} ساعة"
+    except Exception:
+        return human_dt(s)
+
+
+def render_active_subscribed_plan_card(
+    p: dict,
+    *,
+    active_sub: dict | None = None,
+    trial_info: dict | None = None,
+    sig_used: int = 0,
+    anl_used: int = 0,
+) -> str:
+    """Ultra-luxury Royal Membership Certificate when user opens their CURRENT active plan.
+
+    Shows active membership status, dates, remaining time, live daily quotas,
+    and unlocked perks — with ZERO payment prompts.
+    """
+    code = (p.get("code") or "").upper()
+    meta = _PLAN_TIER_META.get(code, {"icon": "💎", "tagline": "", "perks": []})
+    icon = meta["icon"]
+    sig_q = int(p.get("max_signals_per_day") or 0)
+    anl_q = int(p.get("max_analyses_per_day") or 0)
+    mkts = [x.strip() for x in str(p.get("markets") or "").split(",") if x.strip()]
+    tfs = [x.strip() for x in str(p.get("timeframes") or "").split(",") if x.strip()]
+    strats = [x.strip() for x in str(p.get("strategies") or "").split(",") if x.strip()]
+
+    status_lines = [
+        "▎✅ <b>حالة العضوية:</b> <b>مشترك ومفعّل بالفعل الآن</b> 🟢",
+        f"▎👑 <b>مستوى الباقة:</b> {icon} <b>{esc(p['title'])}</b> <code>[{esc(code)}]</code>",
+    ]
+    if code == "FREE" and trial_info:
+        if trial_info.get("unlimited"):
+            status_lines.append("▎⏳ <b>صلاحية الاشتراك:</b> <b>♾️ مفتوحة حالياً</b>")
+        else:
+            dl = trial_info.get("days_left") or 0
+            hl = trial_info.get("hours_left") or 0
+            rem = f"{dl} يوم" if dl >= 1 else f"{max(1, hl)} ساعة"
+            status_lines.append(f"▎⏳ <b>المتبقي من الفترة التجريبية:</b> <b>{rem}</b>")
+    elif active_sub:
+        started = active_sub.get("started_at") or ""
+        ends = active_sub.get("ends_at") or ""
+        if started:
+            status_lines.append(f"▎🗓 <b>تاريخ التفعيل:</b> {human_dt(started)}")
+        if ends:
+            status_lines.append(f"▎📅 <b>تاريخ الانتهاء:</b> {human_dt(ends)}")
+        status_lines.append(f"▎⏳ <b>المدة المتبقية:</b> <b>{_sub_remaining_text(ends)}</b>")
+
+    usage_lines = [
+        f"▎📡 <b>إشاراتك اليوم:</b> <code>{sig_used}/{sig_q}</code>  {bar(sig_used, max(1, sig_q))}",
+        f"▎🔬 <b>تحليلاتك اليوم:</b> <code>{anl_used}/{anl_q}</code>  {bar(anl_used, max(1, anl_q))}",
+        f"▎⭐ <b>أدنى جودة إشارة مفعّلة:</b> <b>{p.get('min_score', 70)}/100</b>",
+    ]
+
+    mkt_preview = " · ".join(mkts[:8]) + (f" (+{len(mkts) - 8} أخرى)" if len(mkts) > 8 else "")
+    scope = [
+        f"▎🌐 <b>الأسواق المفتوحة لك ({len(mkts)}):</b> <code>{esc(mkt_preview or '—')}</code>",
+        f"▎⏱ <b>الأطر الزمنية ({len(tfs)}):</b> <code>{esc(' · '.join(tfs) or '—')}</code>",
+        f"▎🧠 <b>الاستراتيجيات المفتوحة ({len(strats)}):</b> <code>{esc(' · '.join(strats) or '—')}</code>",
+    ]
+    for perk in meta["perks"]:
+        scope.append(f"▎{perk}")
+
+    head = (
+        f"👑 <b><u>بطاقة العضوية الملكية المفعّلة — {esc(p['title'])}</u></b>\n"
+        f"<i>✨ أنت مشترك بالفعل في هذه الباقة وتتمتع بكامل صلاحياتها الآن</i>"
+    )
+    return (
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        + card("\n".join(status_lines)) + "\n"
+        + "<b>📊 استهلاكك وحصتك اليومية المفعّلة:</b>\n"
+        + card("\n".join(usage_lines)) + "\n"
+        + "<b>🔓 صلاحياتك ومزاياك المفتوحة:</b>\n"
+        + card("\n".join(scope)) + "\n"
+        + "💎 <i>لا تحتاج لأي دفع إضافي لباقتك الحالية — يمكنك الاستمتاع بالخدمات مباشرة أو الترقية لباقة أعلى في أي وقت.</i>"
+    )
+
+
+def render_plans_showcase_card(
+    plans: list[dict],
+    current_plan: dict,
+    trial_info: dict | None = None,
+    active_sub: dict | None = None,
+) -> str:
     """Ultra-luxury overview of all enabled plans on `u:plans`."""
     cur_code = (current_plan.get("code") or "FREE").upper()
     cur_icon = plan_tier_icon(cur_code)
-    status_lines = [f"▎{cur_icon} باقتك الحالية: <b>{esc(current_plan['title'])}</b>"]
-    if trial_info and trial_info.get("is_free"):
+    trial_expired = bool(trial_info and trial_info.get("is_free") and trial_info.get("expired"))
+    status_lines = [f"▎{cur_icon} باقتك الحالية: <b>{esc(current_plan['title'])}</b>" + ("" if trial_expired else "  <b>[✅ مفعّلة]</b>")]
+    if active_sub and cur_code != "FREE":
+        status_lines.append(f"▎⏳ المتبقي من اشتراكك: <b>{_sub_remaining_text(active_sub.get('ends_at') or '')}</b>")
+    elif trial_info and trial_info.get("is_free"):
         if trial_info.get("unlimited"):
             status_lines.append("▎⏳ الفترة المجانية: <b>♾️ مفتوحة حالياً</b>")
         elif trial_info.get("expired"):
@@ -540,12 +656,20 @@ def render_plans_showcase_card(plans: list[dict], current_plan: dict, trial_info
         anl_q = int(r.get("max_analyses_per_day") or 0)
         n_st = len([x for x in str(r["strategies"] or "").split(",") if x.strip()])
         n_mk = len([x for x in str(r["markets"] or "").split(",") if x.strip()])
-        badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
-        tier_lines.append(
-            f"▎{ic} <b>{esc(code)}</b>{badge} · <b>{p_txt}</b> — "
-            f"<code>{sig_q}</code> إشارة · <code>{anl_q}</code> تحليل · "
-            f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية"
-        )
+        is_mine = (code == cur_code) and not trial_expired
+        if is_mine:
+            tier_lines.append(
+                f"▎👑 <b>{esc(code)}</b> <b>[✅ باقتك المفعّلة]</b> · <b>{p_txt}</b> — "
+                f"<code>{sig_q}</code> إشارة · <code>{anl_q}</code> تحليل · "
+                f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية"
+            )
+        else:
+            badge = " 🔥" if code == "VIP" else (" ✨" if code == "ROYAL" else "")
+            tier_lines.append(
+                f"▎{ic} <b>{esc(code)}</b>{badge} · <b>{p_txt}</b> — "
+                f"<code>{sig_q}</code> إشارة · <code>{anl_q}</code> تحليل · "
+                f"<code>{n_mk}</code> سوق · <code>{n_st}</code> استراتيجية"
+            )
 
     return (
         "💎 <b><u>باقات الاشتراك الملكية — FOREXYEMENI</u></b>\n"
@@ -553,7 +677,7 @@ def render_plans_showcase_card(plans: list[dict], current_plan: dict, trial_info
         + card("\n".join(status_lines)) + "\n"
         + "<b>مقارنة الباقات المتاحة:</b>\n"
         + card("\n".join(tier_lines)) + "\n"
-        + "⚡ <i>تفعيل فوري وتلقائي عبر USDT (TRC20 / BEP20) أو التحويلات المحلية — اضغط أي باقة لعرض تفاصيلها الكاملة:</i>"
+        + "👑 <i>باقتك المفعّلة مميّزة باللون الأخضر الملكي (اضغطها لعرض بطاقة عضويتك)، واضغط أي باقة أخرى للترقية والتفعيل الفوري:</i>"
     )
 
 

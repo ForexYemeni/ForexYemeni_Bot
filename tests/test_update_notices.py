@@ -214,3 +214,72 @@ def test_install_cancellation_waits_for_worker():
                 await asyncio.wait_for(task, 2)
         assert not notices._INSTALL_LOCK.locked()
     run(exercise())
+
+
+def test_notice_artwork_is_the_exact_owner_supplied_png():
+    import hashlib
+    data = notices.LOGO_PATH.read_bytes()
+    assert notices.LOGO_PATH.suffix == '.png'
+    assert data.startswith(b'\x89PNG\r\n\x1a\n')
+    # Hash of the original attachment, not an exported/recompressed derivative.
+    assert hashlib.sha256(data).hexdigest() == '19b837fc40d3f646c8dee1f6ce4ac62f7a2652f39d0c9b8b7e9538d384d656ca'
+
+
+def test_original_artwork_is_sent_without_transforming_and_without_avatar_lookup():
+    bot = SimpleNamespace(send_photo=AsyncMock(return_value=SimpleNamespace(photo=[])),
+                          send_message=AsyncMock(), get_me=AsyncMock(),
+                          get_user_profile_photos=AsyncMock())
+    with patch.object(notices.asyncio, 'sleep', new_callable=AsyncMock):
+        result = run(notices.announce(bot, {'local': '8.10.0', 'remote': '8.10.1'}, targets=[42]))
+    assert result['sent'] == 1
+    photo = bot.send_photo.await_args.kwargs['photo']
+    assert photo.getvalue() == notices.LOGO_PATH.read_bytes()
+    bot.get_me.assert_not_awaited()
+    bot.get_user_profile_photos.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+    text = bot.send_photo.await_args.kwargs['caption']
+    assert '@ForexYemeni1_BOT' in text and r'\_' not in text
+
+
+def test_missing_artwork_uses_current_bot_avatar_once_for_whole_announcement(tmp_path, monkeypatch):
+    monkeypatch.setattr(notices, 'LOGO_PATH', tmp_path / 'missing.png')
+    bot = SimpleNamespace(
+        get_me=AsyncMock(return_value=SimpleNamespace(id=1234)),
+        get_user_profile_photos=AsyncMock(return_value=SimpleNamespace(photos=[[
+            SimpleNamespace(file_id='small-avatar'), SimpleNamespace(file_id='full-avatar')]])),
+        send_photo=AsyncMock(return_value=SimpleNamespace(photo=[])), send_message=AsyncMock())
+    with patch.object(notices.asyncio, 'sleep', new_callable=AsyncMock):
+        result = run(notices.announce(bot, {}, targets=[42, 43]))
+    assert result['sent'] == 2
+    bot.get_me.assert_awaited_once()
+    bot.get_user_profile_photos.assert_awaited_once_with(user_id=1234, limit=1)
+    assert [call.kwargs['photo'] for call in bot.send_photo.await_args_list] == ['full-avatar', 'full-avatar']
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize('failure', ['no-photo', 'network', 'timeout'])
+def test_missing_artwork_and_unavailable_avatar_fall_back_to_text(tmp_path, monkeypatch, failure):
+    monkeypatch.setattr(notices, 'LOGO_PATH', tmp_path / 'missing.png')
+    profile = AsyncMock(return_value=SimpleNamespace(photos=[]))
+    if failure == 'network':
+        profile.side_effect = NetworkError('avatar unavailable')
+    elif failure == 'timeout':
+        profile.side_effect = asyncio.TimeoutError()
+    bot = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(id=1234)),
+                          get_user_profile_photos=profile, send_photo=AsyncMock(), send_message=AsyncMock())
+    with patch.object(notices.asyncio, 'sleep', new_callable=AsyncMock):
+        assert run(notices.announce(bot, {}, targets=[42]))['sent'] == 1
+    bot.send_photo.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
+
+
+def test_cancelled_notice_stays_text_only_and_empty_audience_does_not_fetch_avatar(tmp_path, monkeypatch):
+    monkeypatch.setattr(notices, 'LOGO_PATH', tmp_path / 'missing.png')
+    bot = SimpleNamespace(get_me=AsyncMock(), get_user_profile_photos=AsyncMock(),
+                          send_photo=AsyncMock(), send_message=AsyncMock())
+    with patch.object(notices.asyncio, 'sleep', new_callable=AsyncMock):
+        run(notices.announce(bot, {}, targets=[42], cancelled=True))
+        assert run(notices.announce(bot, {}, targets=[]))['sent'] == 0
+    bot.get_me.assert_not_awaited()
+    bot.send_photo.assert_not_awaited()
+    bot.send_message.assert_awaited_once()

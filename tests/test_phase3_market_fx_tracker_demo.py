@@ -78,10 +78,15 @@ class TestPhase3MarketData(unittest.TestCase):
              "open": 3550.0, "high": 3555.0, "low": 3545.0, "close": 3552.0}
             for i in range(45)
         ]
+        # v8.14.2: mock the live-spot crosscheck consistently with the fixture
+        # (3552 − 12 = 3540) — in CI the REAL gold-api answers and would
+        # (rightly) refuse an inconsistent venue payload as diverged.
+        md._spot_crosscheck_cache.clear()
         with patch.object(md, "_fetch_yahoo_candles", side_effect=RuntimeError("offline")), \
              patch.object(md, "_fetch_binance_candles", side_effect=RuntimeError("geo-blocked")), \
              patch.object(md, "_fetch_bybit_candles", return_value=bybit_candles), \
-             patch.object(md, "_gold_offset_now", return_value=-12.0):
+             patch.object(md, "_gold_offset_now", return_value=-12.0), \
+             patch.object(md, "_fetch_goldapi_price", return_value={"price": 3540.0}):
             res = md.fetch_candles("XAUUSD", "15min", "", 45, use_cache=False)
         self.assertEqual(res["source"], "LIVE")
         self.assertAlmostEqual(res["values"][-1]["close"], 3540.0, places=4)

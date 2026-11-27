@@ -17,6 +17,7 @@ from fysb.engines.analysis import (
     premium_discount, structure_labels, swings,
 )
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -295,6 +296,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     score = normalized_score(earned, max_pts)
     if score < 58:
+        diagnosis_record("ICT", checks, earned, max_pts)
         return None
 
     reasons = [

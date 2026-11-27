@@ -18,6 +18,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, breakout_retest, candle_patterns, ema, rsi, support_resistance
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -207,6 +208,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         return None
     score = normalized_score(earned, max_pts)
     if score < 64:
+        diagnosis_record("PRICE_ACTION", checks, earned, max_pts)
         return None
 
     reasons = [

@@ -22,6 +22,7 @@ v8.12.0 full-school extensions (all mechanical, none subjective):
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -335,6 +336,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     score = normalized_score(earned, max_pts)
     if score < MIN_SCORE:
+        diagnosis_record("WYCKOFF", checks, earned, max_pts)
         return None
 
     reasons.append(f"HTF bias={bias['trend']} · stop beyond event wick = {stop:.5g}")

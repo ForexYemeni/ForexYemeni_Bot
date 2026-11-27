@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from fysb.engines.analysis import atr, atr_pct, structure_labels
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -114,6 +115,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     score = normalized_score(earned, max_pts)
     if score < MIN_SCORE:
+        diagnosis_record("LONDON_BREAKOUT", checks, earned, max_pts)
         return None
 
     reasons = [

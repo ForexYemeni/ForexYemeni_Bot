@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fysb.engines.analysis import atr_pct, fair_value_gaps, ny_hour, structure_labels
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -178,6 +179,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     score = normalized_score(earned, max_pts)
     if score < 58:
+        diagnosis_record("SILVER_BULLET", checks, earned, max_pts)
         return None
 
     reasons = [

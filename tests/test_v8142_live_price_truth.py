@@ -42,6 +42,7 @@ def clean_gold_chain():
     md._cache.clear()
     md._fail_streak.clear()
     md._spot_crosscheck_cache.clear()
+    md._fxref_gold_fail.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
@@ -54,19 +55,20 @@ def clean_gold_chain():
 # ① broken pairing (the ±$120 hole) — never learned, never applied
 # ---------------------------------------------------------------------------
 
-def test_broken_pairing_refused_and_true_spot_served(clean_gold_chain):
-    # gold-api says 3636, futures last close 3580 → gap 56 > 0.25% (~9.1):
-    # the pairing MUST be refused (v8.13.x would have applied a −56 offset!)
-    # and the chain falls through to fx-ref true spot.
+def test_premium_corridor_violation_refused_true_spot_serves(clean_gold_chain):
+    # v8.14.3 contract: quote↔quote calibration — spot 3636 vs futures quote
+    # 3740 → offset −104 > 1.5% corridor (~56) = impossible premium → refused,
+    # never learned, chain falls through to fx-ref true spot.
     with patch.object(md, "_ordered_chain", return_value=["venue-gold", "fx-ref"]), \
          patch.object(md, "_fetch_yahoo_candles",
-                      side_effect=[_candles(base=3580.0), _spot_candles()]), \
+                      side_effect=[_candles(base=3740.0), _spot_candles()]), \
+         patch.object(md, "_fetch_yahoo_quote", return_value={"price": 3740.0}), \
          patch.object(md, "_fetch_goldapi_price", return_value={"price": 3636.0}), \
          patch.object(md.provider_health, "is_open", return_value=False):
         p = md.fetch_candles("XAUUSD", "15min", "", 60, use_cache=False)
     assert float(p["values"][-1]["close"]) == pytest.approx(3636.0)
     assert not p.get("is_proxy")
-    # the broken pairing must NOT have been persisted
+    # the impossible premium must NOT have been persisted
     assert not clean_gold_chain.exists() or "XAUUSD" not in json.loads(clean_gold_chain.read_text())
 
 
@@ -75,17 +77,19 @@ def test_broken_pairing_refused_and_true_spot_served(clean_gold_chain):
 # ---------------------------------------------------------------------------
 
 def test_drifted_persisted_offset_refused_true_spot_serves(clean_gold_chain):
-    # the EXACT incident: offset −53 learned ≤48h ago (old contract applied it,
-    # 53/3680 = 1.44% < old 2% cap) → chart showed 3583 vs real 3636.
+    # v8.14.3: a persisted offset OUTSIDE the physical premium corridor
+    # (−70 ≈ 1.9% > 1.5%) is refused at application — the chain falls to
+    # fx-ref true spot. (A −53 offset is now LEGIT quote↔quote premium —
+    # see test_v8143 — so the corridor, not a tight clamp, is the guard.)
     clean_gold_chain.write_text(json.dumps(
-        {"XAUUSD": {"offset": -53.0, "ts": time.time() - 2 * 3600}}))
+        {"XAUUSD": {"offset": -70.0, "ts": time.time() - 2 * 3600}}))
     with patch.object(md, "_ordered_chain", return_value=["venue-gold", "fx-ref"]), \
          patch.object(md, "_fetch_yahoo_candles",
                       side_effect=[_candles(), _spot_candles()]), \
          patch.object(md, "_fetch_goldapi_price", side_effect=RuntimeError("net")), \
          patch.object(md.provider_health, "is_open", return_value=False):
         p = md.fetch_candles("XAUUSD", "15min", "", 60, use_cache=False)
-    # venue refused (53 > 0.5% cap) → fx-ref true spot, close 3636 — no lie
+    # venue refused (70 > 1.5% corridor) → fx-ref true spot, close 3636 — no lie
     assert float(p["values"][-1]["close"]) == pytest.approx(3636.0)
 
 

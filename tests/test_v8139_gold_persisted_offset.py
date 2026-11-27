@@ -37,6 +37,7 @@ def clean_gold_chain():
     md._cache.clear()
     md._fail_streak.clear()
     md._spot_crosscheck_cache.clear()
+    md._fxref_gold_fail.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
@@ -79,9 +80,10 @@ def test_no_persisted_offset_never_serves_raw_futures(clean_gold_chain):
 
 
 def test_successful_calibration_persists_for_future_fallbacks(clean_gold_chain):
-    # v8.14.2 honest pairing: 3676 spot vs 3680 futures → −4.0 must persist
-    # (a $15 gap is >0.25% = broken pairing, refused to learn/apply)
-    with patch.object(md, "_fetch_goldapi_price", return_value={"price": 3676.0}):
+    # v8.14.3 quote↔quote calibration: spot 3676 vs futures-NOW 3680 → −4.0
+    # learned & applied (the legit premium corridor makes this live path work)
+    with patch.object(md, "_fetch_goldapi_price", return_value={"price": 3676.0}), \
+         patch.object(md, "_fetch_yahoo_quote", return_value={"price": 3680.0}):
         p = _fetch()
     assert float(p["values"][-1]["close"]) == pytest.approx(3676.0)
     data = json.loads(clean_gold_chain.read_text())

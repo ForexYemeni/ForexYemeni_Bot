@@ -91,8 +91,10 @@ def test_xauusd_maps_to_real_spot_yahoo():
     assert md._yahoo_symbol_for("XAUUSD") == "XAUUSD=X"
 
 
-def test_gold_chain_includes_fx_ref_before_keyed():
-    assert md._CANDLE_CHAINS["gold"] == ["venue-gold", "fx-ref", "twelvedata"]
+def test_gold_chain_spot_first():
+    # v8.14.1: fx-ref (XAUUSD=X true spot) FIRST — the traded instrument is
+    # spot; offset futures are the fallback (PROXY/للعرض فقط), keyed last
+    assert md._CANDLE_CHAINS["gold"] == ["fx-ref", "venue-gold", "twelvedata"]
 
 
 def _spot_gold_candles(n=60, base=3665.0):
@@ -104,22 +106,20 @@ def _spot_gold_candles(n=60, base=3665.0):
 
 
 def test_gold_survives_via_fx_ref_when_venue_and_keyed_fail():
-    # venue-gold: raw futures with NO calibration at all → honest refusal;
-    # fx-ref (XAUUSD=X): true spot candles → the chain SURVIVES at spot level
+    # fx-ref is FIRST now: true spot candles served directly — no offset, no
+    # proxy marking; venue-gold (offset futures) is only a fallback
     md._cache.clear()
     md._fail_streak.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
-    with patch.object(md, "_ordered_chain", return_value=["venue-gold", "fx-ref", "twelvedata"]), \
-         patch.object(md, "_fetch_yahoo_candles",
-                      side_effect=[RuntimeError("yahoo GC=F down"), _spot_gold_candles()]), \
-         patch.object(md, "_fetch_goldapi_price", side_effect=RuntimeError("net")), \
-         patch.object(md, "_fetch_td_candles", side_effect=RuntimeError("td down")), \
+    with patch.object(md, "_ordered_chain", return_value=["fx-ref", "venue-gold", "twelvedata"]), \
+         patch.object(md, "_fetch_yahoo_candles", return_value=_spot_gold_candles()), \
          patch.object(md.provider_health, "is_open", return_value=False):
         p = md.fetch_candles("XAUUSD", "15min", "", 60, use_cache=False)
     # fx-ref IS spot — the close is the spot level itself, no offset fiction
     assert float(p["values"][-1]["close"]) == pytest.approx(3665.0)
     assert p["source"] == "LIVE"
+    assert not p.get("is_proxy")          # execution-grade, signal-eligible
     if calib.exists():
         calib.unlink()

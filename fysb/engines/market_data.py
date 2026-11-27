@@ -163,10 +163,11 @@ def _provider_key(internal: str) -> str | None:
 # "goldapi" serves QUOTES only (no candles anywhere); it never enters a candle
 # chain. "twelvedata" enters a chain only when TWELVEDATA_API_KEY is set.
 _CANDLE_CHAINS = {
-    # v8.14.0 — fx-ref joins the gold candle chain: with XAUUSD mapped to
-    # XAUUSD=X, fx-ref serves REAL SPOT candles (zero offset needed) as a
-    # third source between the futures venue and the keyed provider.
-    "gold":   ["venue-gold", "fx-ref", "twelvedata"],
+    # v8.14.1 — fx-ref (XAUUSD=X TRUE SPOT) FIRST: the traded instrument IS
+    # spot gold, so spot candles need zero offset fiction and are execution-
+    # grade by construction. The offset-futures venue becomes the FALLBACK
+    # (its payloads stay PROXY/«للعرض فقط» — signal-grade never), keyed last.
+    "gold":   ["fx-ref", "venue-gold", "twelvedata"],
     "metal":  ["fx-ref", "twelvedata"],
     "fx":     ["fx-ref", "twelvedata"],
     "equity": ["fx-ref", "twelvedata"],

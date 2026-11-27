@@ -40,9 +40,9 @@ class ConfigSurfaceTests(unittest.TestCase):
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "", False),
             ["binance", "bybit"])
-        # v8.14.0: fx-ref (XAUUSD=X real spot) joined the gold candle chain
+        # v8.14.1: fx-ref (XAUUSD=X true spot) FIRST in the gold candle chain
         self.assertEqual(md._ordered_chain(md._CANDLE_CHAINS["gold"], "", False),
-                         ["venue-gold", "fx-ref"])
+                         ["fx-ref", "venue-gold"])
         self.assertEqual(md._ordered_chain(md._QUOTE_CHAINS["gold"], "", False),
                          ["spot-ref", "venue-gold"])
         self.assertEqual(md._ordered_chain(md._QUOTE_CHAINS["metal"], "", False),
@@ -76,10 +76,10 @@ class PreferredProviderTests(unittest.TestCase):
 
     def test_goldapi_never_serves_candles(self):
         # Honest rule: the spot reference has no candles anywhere.
-        # v8.14.0: fx-ref (XAUUSD=X real spot) joined the gold candle chain
+        # v8.14.1: fx-ref (XAUUSD=X true spot) FIRST in the gold candle chain
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["gold"], "GOLDAPI", True),
-            ["venue-gold", "fx-ref", "twelvedata"])
+            ["fx-ref", "venue-gold", "twelvedata"])
 
 
 class _U(dict):

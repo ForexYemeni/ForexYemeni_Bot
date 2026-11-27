@@ -116,10 +116,24 @@ def validate_signal_geometry(
 
     spec = instruments.spec(symbol, row)
     base_pct = _MAX_STOP_PCT_BY_TF.get((timeframe or "H1").upper(), 0.0200)
-    max_pct = base_pct * 2.5 if spec.category == "crypto" else base_pct
+    # v8.13.4 — volatility-anchored structural cap. The fixed % ceilings were
+    # calibrated for calm regimes; on Gold at record prices with wide M15
+    # ranges, genuinely structural sweep-based stops got rejected as "freak".
+    # The ceiling now stretches with REAL ATR% (4x ATR in % space) between a
+    # floor of the base cap (calm regime == exact legacy behaviour) and a hard
+    # ceiling of 2x base (extreme regime, disclosed in the reason). Money risk
+    # is UNCHANGED: position_sizing derives the lot from the actual stop
+    # distance, so account risk stays at risk_per_trade_pct regardless of cap.
+    atr_pct_val = (float(atr_val) / entry) if (atr_val and float(atr_val) > 0) else 0.0
+    adapt_mult = 1.0
+    if atr_pct_val > 0:
+        adapt_mult = min(max(4.0 * atr_pct_val / base_pct, 1.0), 2.0)
+    max_pct = base_pct * (2.5 if spec.category == "crypto" else 1.0) * adapt_mult
     if (risk / entry) > max_pct:
         pips_sl = instruments.pips(symbol, entry, stop, row)
-        return False, f"stop exceeds {timeframe} max ({pips_sl:.1f} pips, {risk / entry * 100:.2f}% > {max_pct * 100:.2f}%)"
+        return False, (f"الستوب يتجاوز سقف {timeframe} البنيوي ({pips_sl:.1f} نقطة، "
+                       f"{risk / entry * 100:.2f}% > {max_pct * 100:.2f}% "
+                       f"[الأساس {base_pct * 100:.2f}% × تكيف التقلب {adapt_mult:.2f}x]")
 
     # Cap freak spike stops relative to real ATR (skip artificially flat synthetic test bars < 0.1% ATR)
     if atr_val and float(atr_val) > 0 and (float(atr_val) / entry) >= 0.0010 and risk > 4.0 * float(atr_val):

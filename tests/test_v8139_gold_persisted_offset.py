@@ -36,6 +36,7 @@ def _fut_candles(n=60, base=3680.0):
 def clean_gold_chain():
     md._cache.clear()
     md._fail_streak.clear()
+    md._spot_crosscheck_cache.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
@@ -78,12 +79,13 @@ def test_no_persisted_offset_never_serves_raw_futures(clean_gold_chain):
 
 
 def test_successful_calibration_persists_for_future_fallbacks(clean_gold_chain):
-    # live calibration works: 3665 spot vs 3680 futures → −15.0 must persist
-    with patch.object(md, "_fetch_goldapi_price", return_value={"price": 3665.0}):
+    # v8.14.2 honest pairing: 3676 spot vs 3680 futures → −4.0 must persist
+    # (a $15 gap is >0.25% = broken pairing, refused to learn/apply)
+    with patch.object(md, "_fetch_goldapi_price", return_value={"price": 3676.0}):
         p = _fetch()
-    assert float(p["values"][-1]["close"]) == pytest.approx(3665.0)
+    assert float(p["values"][-1]["close"]) == pytest.approx(3676.0)
     data = json.loads(clean_gold_chain.read_text())
-    assert data["XAUUSD"]["offset"] == pytest.approx(-15.0)
+    assert data["XAUUSD"]["offset"] == pytest.approx(-4.0)
     assert time.time() - data["XAUUSD"]["ts"] < 60
 
 

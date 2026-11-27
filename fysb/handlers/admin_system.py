@@ -518,6 +518,21 @@ async def admin_settings(q, uid, context, bot):
         val = await afn.run(db.get_setting, key, "—")
         lines.append(f"{title}: <b>{esc(val)}</b>")
     lines.append(f"🖼 وضع التنقل بالواجهة: <b>{'تعديل مكاني سلس (edit_text)' if ui_edit else 'رسالة جديدة مع كل ضغطة'}</b>")
+    # v8.14.9 — «مفتاحا الصدق الملكيان» (owner-controlled institutional laws)
+    st_gate = (await afn.run(db.get_setting, "honesty_stale_gate", "1")) == "1"
+    no_re = (await afn.run(db.get_setting, "no_repaint_closed_only", "1")) == "1"
+    lines.append("⚖️ بوابة حد الصدق (القِدم): " + (
+        "<b>مفعّلة</b> — أي لقطة أقدم من حد الفريم تُرفض بصدق (عقد المؤسسة)"
+        if st_gate else
+        "<b>معطّلة</b> — وضع المؤجل الصادق: الإشارات تُولَّد على أحدث لقطة ويُختَم عليها التأكيد الحي"))
+    lines.append("🧊 قانون عدم إعادة الرسم: " + (
+        "<b>مفعّل</b> — الحساب على الشموع المغلقة حصراً (عقد المؤسسة)"
+        if no_re else
+        "<b>معطّل</b> — الشمعة الحية تدخل الحساب والإشارة قابلة للتحديث حتى الإغلاق (غير موصى به)"))
+    rows_kb.append([kb.btn("⚖️ بوابة الصدق: " + ("إيقاف" if st_gate else "تفعيل"), "a:togglestalegate",
+                           style="danger" if st_gate else "success"),
+                    kb.btn("🧊 عدم إعادة الرسم: " + ("إيقاف" if no_re else "تفعيل"), "a:togglerepaint",
+                           style="danger" if no_re else "success")])
     rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance", style="danger"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
     rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
@@ -535,6 +550,31 @@ async def admin_toggle_ui_mode(q, uid, context, bot):
     new_val = "0" if cur else "1"
     await afn.run(db.set_setting, "ui_edit_in_place", new_val)
     await afn.run(audit_log.log, uid, f"ui_edit_in_place:{new_val}")
+    await admin_settings(q, uid, context, bot)
+
+
+async def admin_toggle_stale_gate(q, uid, context, bot):
+    """v8.14.9 — ⚖️ the age honesty gate: ON = the institutional contract
+    (archaeological provider failures are never served). OFF = the royal
+    deferred-honesty mode: signals are born on the freshest available
+    snapshot, stamped with the live-confirmation requirement, and logged
+    STALE_BYPASS for the owner alone. Every change is audit-logged."""
+    cur = (await afn.run(db.get_setting, "honesty_stale_gate", "1")) == "1"
+    new_val = "0" if cur else "1"
+    await afn.run(db.set_setting, "honesty_stale_gate", new_val)
+    await afn.run(audit_log.log, uid, f"honesty_stale_gate:{new_val}")
+    await admin_settings(q, uid, context, bot)
+
+
+async def admin_toggle_repaint(q, uid, context, bot):
+    """v8.14.9 — 🧊 the closed-candles-only (no-repaint) law: ON = signals
+    never repaint (computed strictly on confirmed closes). OFF = the forming
+    bar enters the computation and the run is traced with repaint_off.
+    Every change is audit-logged."""
+    cur = (await afn.run(db.get_setting, "no_repaint_closed_only", "1")) == "1"
+    new_val = "0" if cur else "1"
+    await afn.run(db.set_setting, "no_repaint_closed_only", new_val)
+    await afn.run(audit_log.log, uid, f"no_repaint_closed_only:{new_val}")
     await admin_settings(q, uid, context, bot)
 
 

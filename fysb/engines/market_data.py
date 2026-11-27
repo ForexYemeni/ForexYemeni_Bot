@@ -1193,8 +1193,84 @@ def staleness_limit(interval: str) -> int:
     return limit
 
 
-def is_stale(payload: dict) -> bool:
-    return payload.get("age_seconds", 1e9) > staleness_limit(payload.get("interval", "15min"))
+# --- v8.14.5 — SETTLEMENT FAIRNESS (the 78-minute daily lie) ------------------
+def _us_dst_active(now: datetime) -> bool:
+    """US Eastern DST, law-fixed rule (2nd Sun Mar 02:00 → 1st Sun Nov 02:00),
+    date granularity — the only fuzzy minute is the transition hour itself."""
+    y = now.year
+    def _nth_sun(month: int, n: int) -> datetime:
+        first = datetime(y, month, 1, tzinfo=timezone.utc)
+        return datetime(y, month, 1 + ((6 - first.weekday()) % 7) + 7 * (n - 1), tzinfo=timezone.utc)
+    return _nth_sun(3, 2).date() <= now.date() < _nth_sun(11, 1).date()
+
+
+def settlement_pause_utc(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Daily settlement pause 17:00–18:00 America/New_York, DST-aware → UTC bounds.
+    Winter: 22:00–23:00 UTC · Summer: 21:00–22:00 UTC."""
+    now = now or datetime.now(timezone.utc)
+    off = 4 if _us_dst_active(now) else 5
+    start = now.replace(hour=17 + off, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(hours=1)
+
+
+def in_settlement_pause(now: datetime | None = None) -> bool:
+    s, e = settlement_pause_utc(now)
+    return s <= (now or datetime.now(timezone.utc)) < e
+
+
+def settlement_frozen_seconds(raw_symbol: str, from_epoch: float, to_epoch: float,
+                              max_days: int = 4) -> float:
+    """Overlap of [from,to] with the daily settlement pause — metals/commodity
+    ONLY (spot FX ticks through the pause; a frozen FX feed is REALLY frozen).
+    Real pauses are ≤1h/day and payload ages are ≤ a few hours → 4 windows cap."""
+    try:
+        cat = (instruments.spec(raw_symbol).category or "").lower()
+        if cat not in ("metal", "commodity"):
+            return 0.0
+        start_dt = datetime.fromtimestamp(min(from_epoch, to_epoch), tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(max(from_epoch, to_epoch), tz=timezone.utc)
+        total = 0.0
+        day = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(max_days):
+            s, e = settlement_pause_utc(day)
+            if s > end_dt:
+                break
+            ov = (min(e, end_dt) - max(s, start_dt)).total_seconds()
+            if ov > 0:
+                total += ov
+            day += timedelta(days=1)
+        return total
+    except Exception:
+        return 0.0
+
+
+def fair_age_seconds(payload: dict, now: float | None = None) -> float:
+    """v8.14.5 — candle age MINUS the settlement-pause time inside it.
+
+    The owner's 78-minute mystery: the last M15 gold candle closes 22:00 UTC
+    (17:00 NY); the old calendar said «open» again at 23:00 while the feed was
+    still paused → age 78 min > the 45-min M15 limit → a DAILY rejection that
+    looked like a freeze. The silence was the MARKET's, not the feed's — it
+    must never count against the data. Raw age stays on the payload; only the
+    VERDICT uses the fair age (guard contract unchanged: really-frozen feeds
+    still die, weekends still widen)."""
+    raw = float(payload.get("age_seconds", 1e9) or 1e9)
+    try:
+        dt = datetime.fromisoformat(str(payload.get("last_candle_iso") or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        span = _interval_seconds((payload.get("interval") or "15min"))
+        candle_end = dt + timedelta(seconds=span)
+        to = float(now if now is not None else time.time())
+        frozen = settlement_frozen_seconds(str(payload.get("symbol") or ""),
+                                           candle_end.timestamp(), to)
+        return max(0.0, raw - frozen)
+    except Exception:
+        return raw
+
+
+def is_stale(payload: dict, now: float | None = None) -> bool:
+    return fair_age_seconds(payload, now) > staleness_limit(payload.get("interval", "15min"))
 
 
 def market_state(category: str) -> bool | None:
@@ -1204,20 +1280,30 @@ def market_state(category: str) -> bool | None:
     Crypto venues trade 24/7 — always open. Gold/silver spot quotes come from
     a 24/7 reference, but the classic session calendar still gates SIGNAL
     issuance for forex/metals categories.
+
+    v8.14.5 — DST-aware NY anchors (the 78-minute fix):
+      * Friday close = NY 17:00 (21:00 UTC EDT / 22:00 UTC EST — was fixed 22)
+      * Sunday reopen = NY 18:00 (22:00 UTC EDT / 23:00 UTC EST — was fixed 22)
+      * daily settlement pause = NY 17:00→18:00 exactly (was the single hour
+        h==22, which declared «open» one hour early in summer and mid-pause
+        minute-level in winter) — the platform now says «الاستراحة» honestly
+        instead of «open with frozen candles».
     """
     cat = (category or "").lower()
     if cat == "crypto":
         return True
     if cat in ("forex", "metal", "index", "commodity"):
         now = datetime.now(timezone.utc)
-        wd, h = now.weekday(), now.hour
+        wd = now.weekday()
+        off = 4 if _us_dst_active(now) else 5
         if wd == 5:                       # Saturday
             return False
-        if wd == 6 and h < 22:            # Sunday before reopen
-            return False
-        if wd == 4 and h >= 22:           # Friday after close
-            return False
-        if h == 22 and wd != 6:           # daily settlement pause
+        if wd == 6 and now < now.replace(hour=18 + off, minute=0, second=0, microsecond=0):
+            return False                  # Sunday before NY 18:00 reopen
+        if wd == 4 and now >= now.replace(hour=17 + off, minute=0, second=0, microsecond=0):
+            return False                  # Friday after NY 17:00 close
+        s, e = settlement_pause_utc(now)
+        if s <= now < e:                  # daily settlement pause
             return False
         return True
     return None

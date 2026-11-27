@@ -11,6 +11,7 @@ all fixed here.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,8 @@ def _clean_gold_calibration():
     v8.14.2: the live-spot crosscheck cache must be cleared too."""
     md._spot_crosscheck_cache.clear()
     md._fxref_gold_fail.clear()
+    md._cache.clear()
+    md._fail_streak.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
@@ -43,7 +46,12 @@ def _clean_gold_calibration():
 # ---------------------------------------------------------------------------
 
 def _fut_candles(n=60, base=3680.0):
-    return [{"datetime": f"2026-11-27 {i // 4:02d}:{(i % 4) * 15:02d}:00",
+    # v8.14.5 — timestamps RELATIVE to utcnow: fixed wall-clock stamps made this
+    # suite time-fragile (green only when run before 15:00 UTC — the ancient
+    # guard rightly refused them later). Fresh-at-run-time = deterministic verdict.
+    from datetime import datetime as _dt, timedelta, timezone
+    end = _dt.now(timezone.utc)
+    return [{"datetime": (end - timedelta(minutes=15 * (n - i))).strftime("%Y-%m-%d %H:%M:%S"),
              "open": base, "high": base + 1.0, "low": base - 1.0, "close": base,
              "volume": 100} for i in range(n)]
 
@@ -60,7 +68,11 @@ def test_futures_without_spot_calibration_fail_honestly():
 
 def test_chain_falls_through_when_futures_unoffsettable():
     # the NEXT provider (twelvedata) answers instead — no contamination
-    td_vals = [{"datetime": f"2026-11-27 {i // 4:02d}:{(i % 4) * 15:02d}:00",
+    # (v8.14.5: stamps RELATIVE to utcnow — fixed wall-clock stamps aged 3h+
+    # and the ancient guard rightly refused them after 15:00 UTC)
+    from datetime import timedelta, timezone
+    _end = datetime.now(timezone.utc)
+    td_vals = [{"datetime": (_end - timedelta(minutes=15 * (59 - i))).strftime("%Y-%m-%d %H:%M:%S"),
                 "open": 3650.0, "high": 3651.0, "low": 3649.0, "close": 3650.0,
                 "volume": 100} for i in range(60)]
     with patch.object(md, "_fetch_yahoo_candles", return_value=_fut_candles()), \

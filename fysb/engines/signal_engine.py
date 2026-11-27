@@ -176,8 +176,15 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     mrow = _market_row(symbol)
     state = market_data.market_state((mrow or {}).get("category") or instruments.spec(symbol).category)
     if state is False and not force:
-        _log_run(symbol, entry_tf, "MARKET_CLOSED", "session calendar says market is closed; no signal manufactured")
-        return {"status": "REJECTED", "signal_id": None, "reason": "market closed", "score": None}
+        # v8.14.5 — name the pause honestly: a closed-market rejection DURING
+        # the daily settlement pause is the market breathing, not a data fault.
+        if market_data.in_settlement_pause():
+            _ps, _pe = market_data.settlement_pause_utc()
+            _reason = f"settlement pause {_ps:%H:%M}-{_pe:%H:%M} UTC"
+        else:
+            _reason = "market closed"
+        _log_run(symbol, entry_tf, "MARKET_CLOSED", _reason + "; no signal manufactured")
+        return {"status": "REJECTED", "signal_id": None, "reason": _reason, "score": None}
 
     if db.kill_switch_on():
         _log_run(symbol, entry_tf, "KILL_SWITCH", "global kill switch is engaged")

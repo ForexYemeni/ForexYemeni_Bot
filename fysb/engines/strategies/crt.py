@@ -164,6 +164,32 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["confirm_ladder"] = ladder
     earned += ladder * 3
 
+    # 3) v8.13.3 — weekly reference (the final declared gap): the sweep reaching
+    # a WEEKLY extreme is the school's highest CRT. Coverage-honest: the prior
+    # completed week counts only when the series truly samples it (>=12 bars);
+    # the current running week only when it spans >=20h — else honest None.
+    week_ref = None
+    try:
+        from fysb.engines.analysis import weekly_reference as _wr
+        wr = _wr(candles)
+        if wr:
+            checks["week_ref_span"] = (wr.get("cur_bars"), wr.get("cur_span_hours"),
+                                       wr.get("prev_bars"))
+            if wr.get("prev_high") is not None and wr.get("prev_bars", 0) >= 12:
+                if direction == "SELL" and sweep_side == "high" and float(last["high"]) >= float(wr["prev_high"]):
+                    week_ref = ("PWH", float(wr["prev_high"]))
+                elif direction == "BUY" and sweep_side == "low" and float(last["low"]) <= float(wr["prev_low"]):
+                    week_ref = ("PWL", float(wr["prev_low"]))
+            if week_ref is None and wr.get("cur_span_hours", 0.0) >= 20.0:
+                if direction == "SELL" and sweep_side == "high" and float(last["high"]) >= float(wr["cur_high"]):
+                    week_ref = ("week-high", float(wr["cur_high"]))
+                elif direction == "BUY" and sweep_side == "low" and float(last["low"]) <= float(wr["cur_low"]):
+                    week_ref = ("week-low", float(wr["cur_low"]))
+    except Exception:
+        week_ref = None
+    checks["week_ref_swept"] = week_ref
+    earned += 5 if week_ref else 0
+
     if not bias_ok:
         return None
     score = normalized_score(earned, max_pts)
@@ -183,6 +209,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         reasons.append(f"sweep reached the prior-day extreme {day_extreme[0]} {day_extreme[1]:.5g} (higher CRT)")
     if ladder:
         reasons.append(f"confirmation ladder: {ladder} extra closed candle(s) in the reversal direction")
+    if week_ref:
+        reasons.append(f"sweep reached the weekly reference {week_ref[0]} {week_ref[1]:.5g} (weekly CRT)")
     return StrategyResult(
         code="CRT", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

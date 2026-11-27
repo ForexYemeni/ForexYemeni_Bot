@@ -131,7 +131,8 @@ class TestV6230SignalHonestySlAndIsolation(unittest.TestCase):
             atr_val=15.0,
         )
         self.assertFalse(ok)
-        self.assertTrue("ATR" in reason or "max" in reason)
+        # v8.13.4: the reason is the Arabic disclosure («سقف البنيوي» + تكيف التقلب)
+        self.assertTrue("ATR" in reason or "max" in reason or "سقف" in reason)
 
         # Even if ATR wasn't passed (0), H1 % cap (1.50% = $53.48) STILL blocks the $88.87 stop!
         ok2, reason2 = signal_engine.validate_signal_geometry(
@@ -141,7 +142,8 @@ class TestV6230SignalHonestySlAndIsolation(unittest.TestCase):
             atr_val=0.0,
         )
         self.assertFalse(ok2)
-        self.assertIn("max", reason2)
+        # v8.13.4: Arabic disclosure instead of the English "max" text
+        self.assertIn("سقف H1 البنيوي", reason2)
 
         # Inverted BUY stop (SL above entry) -> REJECTED
         ok_inv_b, _ = signal_engine.validate_signal_geometry(

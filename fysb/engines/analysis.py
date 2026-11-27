@@ -397,3 +397,134 @@ def kill_zone(dt_iso: str) -> Optional[str]:
         return "NEW_YORK"
     return None
 
+
+
+# --- v8.13.0 gap-fill helpers (pure OHLC arithmetic, school-standard) --------
+
+def adx(candles: list[dict], period: int = 14) -> float:
+    """Wilder ADX — true trend-strength arithmetic (TR / +DM / -DM smoothed by
+    Wilder RMA, then DX smoothed to ADX). Returns 0..100; 0.0 when the series
+    is too short. Not a direction: pair it with the EMA stack."""
+    n = len(candles)
+    if n < 2 * period + 2:
+        return 0.0
+    trs, plus_dm, minus_dm = [], [], []
+    for i in range(1, n):
+        h, l = float(candles[i]["high"]), float(candles[i]["low"])
+        ph, pl = float(candles[i - 1]["high"]), float(candles[i - 1]["low"])
+        pc = float(candles[i - 1]["close"])
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        up, dn = h - ph, pl - l
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+    tr = sum(trs[:period])
+    pdm = sum(plus_dm[:period])
+    mdm = sum(minus_dm[:period])
+    dxs = []
+
+    def _rma(cur: float, val: float, i: int) -> float:
+        return cur - cur / period + val if i >= period else cur + val
+
+    for i in range(period, len(trs)):
+        tr = _rma(tr, trs[i], i)
+        pdm = _rma(pdm, plus_dm[i], i)
+        mdm = _rma(mdm, minus_dm[i], i)
+        if tr > 0:
+            pdi, mdi = 100.0 * pdm / tr, 100.0 * mdm / tr
+            denom = pdi + mdi
+            dxs.append(100.0 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+    if len(dxs) < period:
+        return 0.0
+    adx_val = sum(dxs[:period]) / period
+    for i in range(period, len(dxs)):
+        adx_val = (adx_val * (period - 1) + dxs[i]) / period
+    return max(0.0, min(100.0, adx_val))
+
+
+def equal_extremes(candles: list[dict], a: float, tol_mult: float = 0.15,
+                   lookback: int = 60) -> dict:
+    """EQH/EQL liquidity pools: two or more swing highs (or lows) within
+    tol_mult*ATR of each other form an unmitigated resting-liquidity pool.
+    Returns {'eqh': [levels...], 'eql': [levels...]} with each level the mean
+    of the clustered extremes (pure geometry — no order-book claims)."""
+    from fysb.engines.analysis import swings as _swings
+    tol = max(tol_mult * a, 1e-12)
+    win = candles[-lookback:] if lookback and len(candles) > lookback else candles
+    highs, lows = _swings(win, 3)
+    out: dict[str, list[float]] = {"eqh": [], "eql": []}
+    for key, pts in (("eqh", highs), ("eql", lows)):
+        prices = sorted(float(p["price"]) for p in pts)
+        cluster: list[float] = []
+        for p in prices:
+            if cluster and p - cluster[-1] <= tol:
+                cluster.append(p)
+            else:
+                if len(cluster) >= 2:
+                    out[key].append(sum(cluster) / len(cluster))
+                cluster = [p]
+        if len(cluster) >= 2:
+            out[key].append(sum(cluster) / len(cluster))
+    return out
+
+
+def psych_level(price: float, a: float) -> float | None:
+    """Nearest zero-ending psychological big figure on the densest grid at
+    least 5 ATR wide (so every price is not trivially 'near' a level)."""
+    best = None
+    g = 0.0001
+    while g <= 1e7:
+        if g >= 5.0 * a:
+            lvl = round(price / g) * g
+            d = abs(price - lvl)
+            if best is None or d < best[1]:
+                best = (lvl, d)
+        g *= 10.0
+    return None if best is None else best[0]
+
+
+def role_flip(candles: list[dict], level: float, a: float, direction: str,
+              window: int = 60) -> bool:
+    """Historical resistance→support (BUY) / support→resistance (SELL) proof.
+
+    BUY: in the window BEFORE the reference level formed, price traded strictly
+    below `level` for at least 3 bars and then CLOSED above it (the old ceiling
+    broke) before the current pullback touched it. SELL: mirrored. Pure
+    candle-history arithmetic — the classic role-reversal proof."""
+    tol = 0.2 * a
+    win = candles[-window:] if len(candles) > window else candles
+    n = len(win)
+    above_streak = 0
+    if direction == "BUY":
+        # phase 1: persistent trading below the level, phase 2: a close above
+        flipped = False
+        for i in range(n):
+            c = win[i]
+            closes_above = float(c["close"]) > level + tol
+            if not closes_above:
+                if flipped:
+                    return True            # pullback touching the flipped level
+                above_streak = 0
+            else:
+                above_streak += 1
+                if above_streak >= 1 and flipped is False:
+                    # confirm a genuine break: prior bars were below the level
+                    prior = [float(x["close"]) for x in win[max(0, i - 4):i]]
+                    if len(prior) >= 3 and all(p < level - tol for p in prior):
+                        flipped = True
+        return False
+    below_streak = 0
+    flipped = False
+    for i in range(n):
+        c = win[i]
+        closes_below = float(c["close"]) < level - tol
+        if not closes_below:
+            if flipped:
+                return True
+            below_streak = 0
+        else:
+            below_streak += 1
+            if below_streak >= 1 and flipped is False:
+                prior = [float(x["close"]) for x in win[max(0, i - 4):i]]
+                if len(prior) >= 3 and all(p > level + tol for p in prior):
+                    flipped = True
+    return False

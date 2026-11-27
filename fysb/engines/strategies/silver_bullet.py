@@ -141,6 +141,41 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 8 if checks["rr_ok"] else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) formal 1-2-3 protocol: after the FVG completed, price made a minor
+    # pullback (2) and the latest close broke its extreme (3) — the classic
+    # entry trigger on top of the bias(1)+FVG(2) core.
+    trigger_123 = False
+    try:
+        gap_idx = int(fvg.get("index") or 0)
+        post = candles[len(candles) - len(recent) + gap_idx + 1:]
+        if len(post) >= 2:
+            from fysb.engines.analysis import swings as _sw
+            ph, pl = _sw(post, 1)
+            if direction == "BUY" and ph:
+                trigger_123 = close > float(ph[-1]["price"])
+            elif direction == "SELL" and pl:
+                trigger_123 = close < float(pl[-1]["price"])
+    except Exception:
+        trigger_123 = False
+    checks["protocol_123"] = trigger_123
+    earned += 5 if trigger_123 else 0
+
+    # 2) NWOG/NDOG alignment: an opening gap in the bias direction adds
+    # institutional fuel. Honest skip when the timeline has no gap.
+    from fysb.engines.anchors import opening_gaps as _og
+    gaps = _og(candles, a_abs)
+    gap_align = None
+    for key in ("nwog", "ndog"):
+        g = gaps.get(key)
+        if g and g["dir"] == direction:
+            gap_align = key
+            break
+    checks["gap_align"] = gap_align
+    earned += 4 if gap_align else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -153,6 +188,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"invalidation beyond {stop:.5g}",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if trigger_123:
+        reasons.append("1-2-3 protocol confirmed: minor pullback broken by the latest close")
+    else:
+        reasons.append("1-2-3 trigger not yet broken (scored, not mandatory)")
+    if gap_align:
+        reasons.append(f"{gap_align.upper()} opening gap aligned with the bias")
     return StrategyResult(
         code="SILVER_BULLET", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

@@ -132,6 +132,38 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 6 if rr >= 2.0 else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) higher reference: the sweep reaching the PRIOR UTC DAY's extreme is
+    # the school's higher-timeframe CRT. Coverage-honest: the day ref only
+    # counts when the series actually holds enough bars of that day.
+    day_extreme = None
+    try:
+        from fysb.engines.analysis import session_levels as _sl
+        sl = _sl(candles)
+        if sl.get("pdh") is not None and sl.get("pdl") is not None:
+            if direction == "BUY" and sweep_side == "low" and float(last["low"]) <= float(sl["pdl"]):
+                day_extreme = ("PDL", float(sl["pdl"]))
+            elif direction == "SELL" and sweep_side == "high" and float(last["high"]) >= float(sl["pdh"]):
+                day_extreme = ("PDH", float(sl["pdh"]))
+    except Exception:
+        day_extreme = None
+    checks["day_ref_swept"] = day_extreme
+    earned += 5 if day_extreme else 0
+
+    # 2) confirmation ladder: additional closed candles beyond the sweep bar
+    # continuing in the reversal direction (ladder depth 0..2, disclosed).
+    ladder = 0
+    for c in candles[-3:-1]:
+        if direction == "BUY" and float(c["close"]) > float(c["open"]):
+            ladder += 1
+        elif direction == "SELL" and float(c["close"]) < float(c["open"]):
+            ladder += 1
+    ladder = min(ladder, 2)
+    checks["confirm_ladder"] = ladder
+    earned += ladder * 3
+
     if not bias_ok:
         return None
     score = normalized_score(earned, max_pts)
@@ -147,6 +179,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if day_extreme:
+        reasons.append(f"sweep reached the prior-day extreme {day_extreme[0]} {day_extreme[1]:.5g} (higher CRT)")
+    if ladder:
+        reasons.append(f"confirmation ladder: {ladder} extra closed candle(s) in the reversal direction")
     return StrategyResult(
         code="CRT", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

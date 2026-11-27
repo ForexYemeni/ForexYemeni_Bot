@@ -11,7 +11,7 @@ kill-zone6, volatility4, RR5 (total81). Minimum score58; minimum55 bars.
 Checklist merit is normalized to42..95, NOT a win probability. Callers must
 supply correctly labelled completed candles and enforce issuance/risk policy.
 """
-from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, structure_labels, support_resistance
+from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, psych_level, role_flip, structure_labels, support_resistance
 from fysb.engines.strategies.base import (
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
@@ -119,6 +119,22 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 5 if checks["rr_ok"] else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) historical role-flip proof: the level provably flipped sides in the
+    # candle history (old resistance broken then retested as support, mirror
+    # for supply). Pure arithmetic — no "it looks like it held".
+    flipped = role_flip(candles, level, a, direction) if level else False
+    checks["role_flip_proof"] = flipped
+    earned += 6 if flipped else 0
+
+    # 2) psychological big-figure proximity as an independent location layer.
+    psy = psych_level(close, a)
+    psych = psy is not None and abs(close - psy) <= 0.25 * a
+    checks["psych_level"] = psy if psych else None
+    earned += 3 if psych else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -133,6 +149,10 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if flipped:
+        reasons.append("role-flip PROVEN in history: the level previously traded/broke on the other side")
+    if psych:
+        reasons.append(f"psychological big figure {psy:.5g} at the location")
     return StrategyResult(
         code="CLASSIC", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,

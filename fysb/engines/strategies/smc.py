@@ -10,7 +10,7 @@ Weights: labels14, BOS12, CHOCH10, zone14, HTF12, volatility4, RR6
 Checklist merit is normalized to42..95, NOT a win probability. Callers must
 supply correctly labelled completed candles and enforce issuance/risk policy.
 """
-from fysb.engines.analysis import atr, atr_pct, structure_labels, swings, support_resistance
+from fysb.engines.analysis import atr, atr_pct, equal_extremes, structure_labels, swings, support_resistance
 from fysb.engines.strategies.base import (
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
@@ -127,6 +127,113 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     except Exception:
         checks["anchor_confluence"] = None
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (ALL bonus-only: earned rises, max_pts fixed)
+    # ------------------------------------------------------------------
+    base_candle = None
+    zone_origin_pool = None
+    zone_mitigated = None
+    intact_layers = 0
+    fixed_zone_touch = False
+    inducement = False
+    pool_swept = False
+    if zone is not None:
+        # locate the base swing candle for fixed-width/freshness reads
+        base_pts = lows if direction == "BUY" else highs
+        for base in reversed(base_pts):
+            bpx = float(base["price"])
+            within = (abs(bpx - zone[0]) <= 1.3 * a) if direction == "BUY" else (abs(bpx - zone[1]) <= 1.3 * a)
+            if within and base.get("index") is not None:
+                base_candle = candles[int(base["index"])]
+                break
+
+        # 1) school-standard FIXED-WIDTH zone: the base candle's wick-to-body.
+        if base_candle is not None:
+            o0, c0, h0, l0 = (float(base_candle["open"]), float(base_candle["close"]),
+                              float(base_candle["high"]), float(base_candle["low"]))
+            if direction == "BUY":
+                fixed = (l0, c0 if c0 < o0 else o0)      # wick-to-body demand
+            else:
+                fixed = (c0 if c0 > o0 else o0, h0)      # wick-to-body supply
+            if fixed[1] > fixed[0]:
+                fixed_zone_touch = fixed[0] - 0.25 * a <= entry <= fixed[1] + 0.25 * a
+
+        # 2) freshness: price revisited the zone since its base candle formed?
+        bidx = int(base_candle["index"]) if (base_candle is not None and base_candle.get("index") is not None) else 0
+        post = candles[bidx + 1:-1] if bidx + 1 < len(candles) - 1 else []
+        if post:
+            if direction == "BUY":
+                zone_mitigated = any(float(c["low"]) <= zone[1] for c in post)
+            else:
+                zone_mitigated = any(float(c["high"]) >= zone[0] for c in post)
+        else:
+            zone_mitigated = False
+
+        # 3) progression: how many INTACT same-side zones stack behind this one
+        chosen_base = zone[0] if direction == "BUY" else zone[1]
+        pts = lows if direction == "BUY" else highs
+        for base in pts:
+            bpx = float(base["price"])
+            bidx2 = int(base.get("index") or 0)
+            tail = candles[bidx2 + 1:]
+            if not tail:
+                continue
+            violated = any((float(c["close"]) < bpx) for c in tail) if direction == "BUY" \
+                else any((float(c["close"]) > bpx) for c in tail)
+            if not violated and abs(bpx - chosen_base) > 1e-12:
+                intact_layers += 1
+
+        # 4) inducement: an UNSWEPT minor pivot sits between price and the zone
+        minor_h, minor_l = swings(candles, 1)
+        if direction == "BUY" and close > zone[1]:
+            for m in minor_h:
+                mp = float(m["price"])
+                if close > mp > zone[1]:
+                    post_m = candles[int(m["index"]) + 1:]
+                    if post_m and not any(float(c["high"]) > mp for c in post_m):
+                        inducement = True
+                        break
+        elif direction == "SELL" and close < zone[0]:
+            for m in minor_l:
+                mp = float(m["price"])
+                if close < mp < zone[0]:
+                    post_m = candles[int(m["index"]) + 1:]
+                    if post_m and not any(float(c["low"]) < mp for c in post_m):
+                        inducement = True
+                        break
+
+    # 5) EQH/EQL pools: zone origin at a pool, or a recent sweep of a pool
+    # in the trade direction (smart money filled the draw).
+    pools = equal_extremes(candles, a)
+    if zone is not None:
+        for lvl in (pools["eql"] if direction == "BUY" else pools["eqh"]):
+            if abs(lvl - (zone[0] if direction == "BUY" else zone[1])) <= 0.25 * a:
+                zone_origin_pool = lvl
+                break
+    if direction == "BUY":
+        for lvl in pools["eql"]:
+            if any(float(c["low"]) <= lvl <= float(c["high"]) + 0.3 * a for c in candles[-8:-1]):
+                pool_swept = True
+                break
+    else:
+        for lvl in pools["eqh"]:
+            if any(float(c["high"]) >= lvl >= float(c["low"]) - 0.3 * a for c in candles[-8:-1]):
+                pool_swept = True
+                break
+
+    checks["fixed_zone_touch"] = fixed_zone_touch
+    checks["zone_mitigated"] = zone_mitigated
+    checks["intact_zone_layers"] = intact_layers
+    checks["inducement_unswept"] = inducement
+    checks["pool_origin"] = zone_origin_pool
+    checks["pool_swept"] = pool_swept
+    earned += 4 if fixed_zone_touch else 0
+    earned -= 3 if zone_mitigated else 0
+    earned += min(intact_layers, 2) * 2
+    earned -= 4 if inducement else 0
+    earned += 3 if zone_origin_pool else 0
+    earned += 3 if pool_swept else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -140,6 +247,19 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"S/R: support={sr['support'] if sr['support'] is None else format(sr['support'], '.5g')}, resistance={sr['resistance'] if sr['resistance'] is None else format(sr['resistance'], '.5g')}",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    # v8.13.0 — gap-fill disclosures (only what actually fired)
+    if fixed_zone_touch:
+        reasons.append("entry inside the school-standard fixed wick-to-body zone")
+    if zone_mitigated:
+        reasons.append("zone mitigated since formation — downgraded honestly")
+    if intact_layers:
+        reasons.append(f"{intact_layers} intact same-side zone layers behind (progression)")
+    if inducement:
+        reasons.append("unswept minor inducement between price and zone — downgraded")
+    if zone_origin_pool:
+        reasons.append(f"zone origin on an equal-extreme pool {zone_origin_pool:.5g}")
+    if pool_swept:
+        reasons.append(f"{'EQL' if direction == 'BUY' else 'EQH'} liquidity pool swept before entry")
     return StrategyResult(
         code="SMC", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

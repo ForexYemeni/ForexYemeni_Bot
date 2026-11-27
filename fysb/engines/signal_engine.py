@@ -231,6 +231,21 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     ctx = Ctx(symbol=symbol, timeframe=entry_tf, candles=candles,
               bias_candles=bias_candles, market_row=_market_row(symbol))
 
+    # v8.13.0 — SMT fuel: supply the correlated symbol's series when one is
+    # mapped. Best-effort and guarded: on any fetch failure the ctx field
+    # stays None and SMT is skipped honestly (never fabricated).
+    try:
+        _corr_sym = _CORRELATED.get(str(symbol).upper())
+        if _corr_sym:
+            _corr_provider = _provider_symbol(_corr_sym)
+            _corr = market_data.fetch_candles(_corr_provider, market_data.parse_interval(entry_tf), api_key)
+            if isinstance(_corr, dict) and _corr.get("values"):
+                _corr_series = confirmed_candles(_corr["values"], entry_tf)
+                if not candle_input_error(_corr_series):
+                    ctx.correlated_candles = _corr_series
+    except Exception as exc:
+        log.debug("correlated SMT series unavailable: %s", exc)
+
     # 8: strategies (v6.10.0: «إشارة الآن» pins the chosen methodology)
     allowed = _allowed_strategies(symbol, entry_tf)
     if only_strategies:
@@ -822,6 +837,17 @@ def _expiry_iso() -> str:
     from datetime import datetime, timezone, timedelta
     hours = db.get_setting_int("signal_expiry_hours", 72)
     return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+
+# v8.13.0 — correlated-pair map for SMT divergence (smart-money split read).
+# Each pair trades the same macro driver; a divergence between the two swing
+# structures is the ICT SMT signal. Symbols absent from the map simply skip.
+_CORRELATED = {
+    "EURUSD": "GBPUSD", "GBPUSD": "EURUSD",
+    "XAUUSD": "XAGUSD", "XAGUSD": "XAUUSD",
+    "USDJPY": "USDCHF", "USDCHF": "USDJPY",
+    "AUDUSD": "NZDUSD", "NZDUSD": "AUDUSD",
+}
 
 
 def _provider_symbol(symbol: str) -> str:

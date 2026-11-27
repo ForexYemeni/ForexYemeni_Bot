@@ -17,6 +17,7 @@ from fysb.engines.strategies.base import (
 )
 
 LOOKBACK = 20
+LONG_LOOKBACK = 55          # v8.13.0 — the classical alternative reference window
 
 
 @checked_strategy
@@ -97,6 +98,44 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 8 if rr >= 2.0 else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) long-window context: the 55-bar reference. Sweep of the 55 extreme
+    # (or proximity to it) marks a MAJOR liquidity grab, not just noise.
+    major = False
+    if len(candles) >= LONG_LOOKBACK + 2:
+        long_prior = candles[-(LONG_LOOKBACK + 1):-1]
+        l_hi = max(float(c["high"]) for c in long_prior)
+        l_lo = min(float(c["low"]) for c in long_prior)
+        if direction == "SELL" and float(last["high"]) >= l_hi - 0.1 * a:
+            major = True
+        elif direction == "BUY" and float(last["low"]) <= l_lo + 0.1 * a:
+            major = True
+    checks["long_window_55"] = major
+    earned += 4 if major else 0
+
+    # 2) second failed attempt: another sweep of the SAME side within the
+    # last 10 bars (soup + soup) — the classical double-trap fuel.
+    second_trap = False
+    if len(candles) >= LOOKBACK + 11:
+        for j in range(2, 11):
+            b = candles[-j]
+            if direction == "SELL" and float(b["high"]) > hi and float(b["close"]) < hi:
+                second_trap = True
+                break
+            if direction == "BUY" and float(b["low"]) < lo and float(b["close"]) > lo:
+                second_trap = True
+                break
+    checks["second_trap"] = second_trap
+    earned += 4 if second_trap else 0
+
+    # 3) session context: named killzone quality (LONDON/NY are the trap
+    # sessions; ASIA/OFF get no extra weight).
+    trap_session = kz in ("LONDON", "NEW_YORK")
+    checks["trap_session"] = trap_session
+    earned += 3 if trap_session else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -110,6 +149,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if major:
+        reasons.append("sweep at the 55-bar reference extreme — major liquidity grab")
+    if second_trap:
+        reasons.append("second failed attempt of the same side within 10 bars (double trap)")
+    if trap_session:
+        reasons.append(f"trap during the {kz} trap session")
     return StrategyResult(
         code="TURTLE_SOUP", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

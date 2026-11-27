@@ -647,6 +647,18 @@ async def stop_tunnel() -> None:
                 await proc.wait()
         except Exception:
             pass
+    # v8.14.2 — close the subprocess transport INSIDE the loop lifetime:
+    # reaping (proc.wait) does NOT close the transport's pipes, and a transport
+    # left to GC after asyncio.run has closed its loop fires
+    # BaseSubprocessTransport.__del__ → «Event loop is closed» (pytest
+    # unraisable → CI red). Deterministic close = no leaked transports ever.
+    if proc is not None:
+        try:
+            transport = getattr(proc, "_transport", None) or getattr(proc, "transport", None)
+            if transport is not None and not transport.is_closing():
+                transport.close()
+        except Exception:
+            pass
     await asyncio.to_thread(_cleanup_stale_tunnel_pid)
     for t in readers:
         if not t.done():

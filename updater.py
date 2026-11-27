@@ -545,6 +545,29 @@ def rollback_update(dest_root=None, snapshot_path=None) -> dict:
 
 # --- الدورة الكاملة ----------------------------------------------------------
 
+def _latest_release_blocker() -> str:
+    """v8.13.3 — لماذا لم يجد فحص «أحدث إصدار» شيئاً قابلاً للتثبيت؟
+
+    يميّز حالة مستودع بلا إصدارات أصلاً عن حالة إصدار موجود لكن حزمته مرفوعة
+    باسم خاطئ أو ناقصة (حادثة v8.13.3 اليدوي الفعلية: حزمة «التنزيل الخامس»
+    باسم غير معتمد). رسالة عربية دقيقة للإدارة فقط، وسلسلة فارغة = السبب غير محسوم
+    فتبقى الرسالة العامة الصادقة."""
+    try:
+        owner, repo, asset = _config()
+        data = _get_json(f"https://api.github.com/repos/{owner}/{repo}/releases/latest")
+        tag = data.get("tag_name") if isinstance(data, dict) else None
+        if not tag:
+            return ""
+        names = [a.get("name", "") for a in (data.get("assets") or []) if isinstance(a, dict)]
+        if not names:
+            return (f"الإصدار {tag} موجود لكن بلا حزم مرفقة — المحدّث يقبل فقط ملفاً باسم "
+                    f"{asset}؛ انشر عبر إجراء CI الرسمي لا يدوياً")
+        return (f"الإصدار {tag} موجود لكن حزمته باسم غير مقبول: «{names[0]}» — "
+                f"المحدّث يقبل فقط {asset}؛ احذف الإصدار اليدوي وانشر عبر إجراء CI الرسمي")
+    except Exception:
+        return ""
+
+
 def self_update(dest_root=None, target_tag: str = "", force: bool = False, *, before_install=None) -> dict:
     """فحص ← تنزيل ← نسخة أمان ← تثبيت. يعيد تقريراً بلا أي استثناءات.
 
@@ -582,7 +605,7 @@ def self_update(dest_root=None, target_tag: str = "", force: bool = False, *, be
         else:
             rel = latest_release()
             if not rel:
-                result["detail"] = "لا يوجد إصدار منشور على GitHub Releases"
+                result["detail"] = _latest_release_blocker() or "لا يوجد إصدار منشور على GitHub Releases"
                 return result
             result["remote"] = rel["tag"]
             if not force and not is_newer(rel["tag"], result["local"] or "0"):

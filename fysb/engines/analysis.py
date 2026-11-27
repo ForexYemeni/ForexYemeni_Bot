@@ -4,7 +4,7 @@ All functions are pure and testable: they take plain candle lists and return
 measurable values. Every strategy rule later references these primitives, so a
 confidence score can be traced to concrete computed checks (no random scores).
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 
@@ -379,6 +379,46 @@ def session_levels(candles: list[dict]) -> dict:
         "pdl": min(float(c["low"]) for c in prev_day_bars) if prev_day_bars else None,
         "asian_high": max(float(c["high"]) for c in asian_bars) if len(asian_bars) >= 2 else None,
         "asian_low": min(float(c["low"]) for c in asian_bars) if len(asian_bars) >= 2 else None,
+    }
+
+
+def weekly_reference(candles: list[dict]) -> dict | None:
+    """v8.13.3: weekly CRT reference — the current ISO-week running high/low
+    plus the PRIOR completed week's high/low, derived ONLY from the provided
+    series (pure OHLC arithmetic, no extra fetch). Coverage-honest: each level
+    is populated only when the series actually spans that window, and bar
+    counts + span hours are disclosed so callers judge trust themselves."""
+    if not candles or len(candles) < 5:
+        return None
+    last_dt = _parse_utc_dt(candles[-1].get("datetime", ""))
+    if last_dt is None:
+        return None
+    monday = (last_dt - timedelta(days=last_dt.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    prev_monday = monday - timedelta(days=7)
+    cur: list[dict] = []
+    prev: list[dict] = []
+    for c in candles:
+        dt = _parse_utc_dt(c.get("datetime", ""))
+        if dt is None:
+            continue
+        if dt >= monday:
+            cur.append(c)
+        elif dt >= prev_monday:
+            prev.append(c)
+    cur_high = max((float(c["high"]) for c in cur), default=None)
+    cur_low = min((float(c["low"]) for c in cur), default=None)
+    prev_high = max((float(c["high"]) for c in prev), default=None)
+    prev_low = min((float(c["low"]) for c in prev), default=None)
+    span_h = 0.0
+    if cur:
+        first_dt = _parse_utc_dt(cur[0].get("datetime", ""))
+        if first_dt is not None:
+            span_h = (last_dt - first_dt).total_seconds() / 3600.0
+    return {
+        "cur_high": cur_high, "cur_low": cur_low, "cur_bars": len(cur),
+        "cur_span_hours": round(span_h, 1),
+        "prev_high": prev_high, "prev_low": prev_low, "prev_bars": len(prev),
     }
 
 

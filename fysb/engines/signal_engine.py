@@ -194,7 +194,12 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         _log_run(symbol, entry_tf, "DATA_ERROR", str(e))
         return {"status": "ERROR", "signal_id": None, "reason": str(e), "score": None}
     if market_data.is_stale(payload) and not force:
-        _log_run(symbol, entry_tf, "STALE_DATA", f"last candle {payload['last_candle_iso']} age={int(payload['age_seconds'])}s")
+        # v8.13.1 — the admin-facing engine_runs detail now carries the whole
+        # failover chain verdict (providers tried / stale / cooldown / mismatch)
+        # so a frozen feed is traceable from the diagnostics center.
+        _chain = ",".join(payload.get("chain_errors") or []) or "chain-clean"
+        _log_run(symbol, entry_tf, "STALE_DATA",
+                 f"last candle {payload['last_candle_iso']} age={int(payload['age_seconds'])}s chain=[{_chain}]")
         return {"status": "REJECTED", "signal_id": None,
                 "reason": f"data stale (age {int(payload['age_seconds'])//60}min)", "score": None}
 
@@ -231,18 +236,30 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     ctx = Ctx(symbol=symbol, timeframe=entry_tf, candles=candles,
               bias_candles=bias_candles, market_row=_market_row(symbol))
 
-    # v8.13.0 — SMT fuel: supply the correlated symbol's series when one is
-    # mapped. Best-effort and guarded: on any fetch failure the ctx field
-    # stays None and SMT is skipped honestly (never fabricated).
+    # v8.13.0/8.13.1 — SMT fuel: supply the correlated symbol's series when one
+    # is mapped. Best-effort and guarded: on any fetch failure the ctx field
+    # stays None and SMT is skipped honestly (never fabricated). v8.13.1 adds a
+    # short-lived cache so auto-search cycles do not spend an extra API call on
+    # every run (quota safety) — a 3-minute-old correlated series is plenty for
+    # a swing-structure read.
     try:
         _corr_sym = _CORRELATED.get(str(symbol).upper())
         if _corr_sym:
-            _corr_provider = _provider_symbol(_corr_sym)
-            _corr = market_data.fetch_candles(_corr_provider, market_data.parse_interval(entry_tf), api_key)
-            if isinstance(_corr, dict) and _corr.get("values"):
-                _corr_series = confirmed_candles(_corr["values"], entry_tf)
-                if not candle_input_error(_corr_series):
-                    ctx.correlated_candles = _corr_series
+            _corr_key = (_corr_sym, entry_tf)
+            _hit = _SMT_CACHE.get(_corr_key)
+            if _hit and time.time() - _hit[0] < _SMT_CACHE_TTL:
+                ctx.correlated_candles = _hit[1]
+            else:
+                _corr_provider = _provider_symbol(_corr_sym)
+                _corr = market_data.fetch_candles(_corr_provider, market_data.parse_interval(entry_tf), api_key)
+                if isinstance(_corr, dict) and _corr.get("values") and not market_data.is_stale(_corr):
+                    _corr_series = confirmed_candles(_corr["values"], entry_tf)
+                    if not candle_input_error(_corr_series):
+                        ctx.correlated_candles = _corr_series
+                        _SMT_CACHE[_corr_key] = (time.time(), _corr_series)
+                        if len(_SMT_CACHE) > 40:
+                            for k, _v in sorted(_SMT_CACHE.items(), key=lambda kv: kv[1][0])[:10]:
+                                _SMT_CACHE.pop(k, None)
     except Exception as exc:
         log.debug("correlated SMT series unavailable: %s", exc)
 
@@ -842,6 +859,9 @@ def _expiry_iso() -> str:
 # v8.13.0 — correlated-pair map for SMT divergence (smart-money split read).
 # Each pair trades the same macro driver; a divergence between the two swing
 # structures is the ICT SMT signal. Symbols absent from the map simply skip.
+_SMT_CACHE: dict = {}
+_SMT_CACHE_TTL = 180.0        # seconds — correlated series rarely changes faster
+
 _CORRELATED = {
     "EURUSD": "GBPUSD", "GBPUSD": "EURUSD",
     "XAUUSD": "XAGUSD", "XAGUSD": "XAUUSD",

@@ -233,14 +233,17 @@ def ar_reason(reason: str) -> str:
                 "السوق يلتفت أنفاسه دقائق محدودة كل يوم؛ التدفق والإشارات يعودان فور انتهائها بأول شمعة صالحة")
     m = _re.search(r"data stale \(age (\d+)min\)", low)
     if m:
-        return f"بيانات أقدم من الحد المسموح ({m.group(1)} دقيقة) — رفض صادق، لا إشارة من شموع جامدة"
+        # v8.14.6 — user surface carries the REAL story, no counters (the raw
+        # age stays in engine_runs for admin diagnostics only)
+        return ("📡 مصدر البيانات يعيد لقطة أقدم من السوق الحي — رفض حماية صادق: "
+                "لا نولّد إشارة على أسعار غير حية؛ أعد المحاولة بعد لحظات")
     m = _re.search(r"data frozen \(repeats (\d+), age (\d+)min\)", low)
     if m:
-        return (f"🧊 التغذية مجمّدة — نفس اللقطة تتكرر ({m.group(1)}) والسوق مفتوح؛ "
-                f"مصدر الأسعار متجمّد مؤقتاً: راجع اتصال السيرفر ومفتاح السوق ثم أعد المحاولة")
+        return ("🧊 مصدر البيانات متجمّد — يعيد نفس اللقطة رغم تحرك السوق؛ "
+                "لا إشارة من شموع جامدة أبداً: أعد المحاولة بعد لحظات")
     m = _re.search(r"insufficient candles \((\d+)\)", low)
     if m:
-        return f"شموع غير كافية للتحقق المؤسسي ({m.group(1)} شمعة فقط)"
+        return "📉 تاريخ الشموع المتاح أقصر من الحد الأدنى للتحليل المؤسسي — لا إشارة من عينة ناقصة"
     if "stale entry" in low:
         return s  # already mixed Arabic — keep as authored
     return s

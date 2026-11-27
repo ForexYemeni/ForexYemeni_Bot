@@ -212,7 +212,7 @@ def _blocked_results(n=4):
 def test_silence_card_contains_real_reasons_and_gates(isolated):
     from fysb.handlers import background
     card = background._silence_card(_blocked_results())
-    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in card  # Arabic, never raw English
+    assert "أسعار غير حية" in card  # v8.14.6: honest story, no counters
     assert "الماسح الآلي" in card
     assert "KEYED" in card  # codename only — vendor names never in cards
     assert "data stale" not in card and "session calendar" not in card
@@ -222,7 +222,7 @@ def test_arabic_translation_layer():
     from fysb.theme import ar_result, ar_reason, ar_run_line
     assert "السوق مغلق الآن" in ar_result("MARKET_CLOSED")
     assert "السوق مغلق" in ar_reason("market closed")
-    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in ar_reason("data stale (age 942min)")
+    assert "أسعار غير حية" in ar_reason("data stale (age 942min)")  # v8.14.6: no counters
     assert "لا فرصة مؤهلة" in ar_reason("no qualifying setup")
     # Arabic institutional reasons pass through untouched:
     assert ar_reason("جودة أقل من الحد المؤسسي (68 < 72)") == "جودة أقل من الحد المؤسسي (68 < 72)"
@@ -230,7 +230,7 @@ def test_arabic_translation_layer():
     line = ar_run_line("MARKET_CLOSED", "session calendar says market is closed; no signal manufactured")
     assert "session calendar" not in line and "السوق مغلق الآن" in line
     line2 = ar_run_line("STALE_DATA", "last candle 2026-11-27T01:00:00 age=942s")
-    assert "last candle" not in line2 and "بيانات أقدم من الحد" in line2
+    assert "last candle" not in line2 and "بيانات أقدم من الحد المسموح" in line2
 
 
 def test_diagnostics_main_card_compact_with_totals(isolated):
@@ -272,7 +272,7 @@ def test_diagnostics_subpages_paged_and_arabic(isolated, monkeypatch):
     asyncio.run(admin_trading.admin_engine_diag_markets(q, 9001, None, None, 0))
     body = q.message.sent[-1]
     assert "XAUUSD" in body and "GBPUSD" in body
-    assert "السوق مغلق الآن" in body and "بيانات أقدم من الحد" in body
+    assert "السوق مغلق الآن" in body and "بيانات أقدم من الحد المسموح" in body
     assert "session calendar" not in body and "last candle" not in body
     # engine_runs journal page:
     from fysb.engines.signal_engine import _log_run
@@ -318,7 +318,7 @@ def test_no_signal_card_translates_reason(isolated):
     body = render_no_signal_card(
         symbol="XAUUSD", timeframe="H1", strategy_label="جميع المنهجيات",
         style_label="يومي", status="REJECTED", reason="data stale (age 942min)")
-    assert "بيانات أقدم من الحد المسموح (942 دقيقة)" in body
+    assert "أسعار غير حية" in body  # v8.14.6: no counters
     assert "data stale" not in body
 
 

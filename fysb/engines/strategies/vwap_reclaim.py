@@ -15,6 +15,7 @@ from fysb import instruments  # noqa: F401 (kept for spec-aware callers)
 from fysb.engines.anchors import session_vwap
 from fysb.engines.analysis import atr, atr_pct, structure_labels
 from fysb.engines.strategies.base import (
+    diagnosis_record,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -97,6 +98,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     score = normalized_score(earned, max_pts)
     if score < MIN_SCORE:
+        diagnosis_record("VWAP_RECLAIM", checks, earned, max_pts)
         return None
 
     reasons = [

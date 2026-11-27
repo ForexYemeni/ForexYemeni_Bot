@@ -141,8 +141,11 @@ def test_crosscheck_still_refuses_true_poison(clean_gold_chain):
 def test_fxref_gold_degrades_after_repeated_failures_and_recovers(clean_gold_chain):
     boom = patch.object(md, "_fetch_yahoo_candles",
                         side_effect=[RuntimeError("net")] * 4, autospec=True)
+    # the degrade streak is deliberately frozen while gold is CLOSED (v8.14.4
+    # fairness) — this test exercises the guard, so pin the market open
     with boom as ymock, \
          patch.object(md, "_ordered_chain", return_value=["fx-ref"]), \
+         patch.object(md, "_gold_market_closed", return_value=False), \
          patch.object(md.provider_health, "is_open", return_value=False):
         for _ in range(4):
             with pytest.raises(RuntimeError):

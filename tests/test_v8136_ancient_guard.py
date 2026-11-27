@@ -95,10 +95,10 @@ def test_ancient_provider_does_not_shadow_fresher_stale():
 
 def test_theme_maps_frozen_reason_without_provider_names():
     s = theme.ar_reason("data frozen (repeats 2, age 31min)")
-    assert "التغذية مجمّدة" in s and "تتكرر (2)" in s
+    assert "متجمّد" in s  # v8.14.6: honest story, no counters
     assert "سقف" not in s and "twelvedata" not in s and "venue" not in s
 
 
 def test_theme_keeps_plain_stale_mapping():
     s = theme.ar_reason("data stale (age 1898min)")
-    assert "1898" in s and "رفض صادق" in s
+    assert "أسعار غير حية" in s  # v8.14.6: no counters on the user surface

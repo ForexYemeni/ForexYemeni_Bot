@@ -23,7 +23,7 @@ from fysb.config import log
 from fysb.engines import market_data
 from fysb.engines.analysis import atr, atr_pct, confirmed_candles, structure_labels
 from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
-from fysb.engines.strategies import consensus_filter, evaluate_all
+from fysb.engines.strategies import consensus_filter, diagnosis_snapshot, evaluate_all
 from fysb.engines.strategies.base import Ctx
 from fysb.engines import risk
 from fysb import instruments
@@ -155,6 +155,22 @@ def _parse_iso_utc(ts: str):
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _no_setup_reason_ar(allowed: list[str], diag: list[dict]) -> str:
+    """v8.14.6 — the royal honest refusal: the examined methodologies by name,
+    the closest-to-complete model with its REAL missing conditions (from the
+    strategies' own check ledgers) — real words, zero counters."""
+    names = "، ".join(list(dict.fromkeys(allowed))[:8]) or "المنهجيات المفعّلة"
+    if not diag:
+        return (f"🔍 فحصنا المنهجيات المفعّلة ({names}) — لم يكتمل أي نموذج مؤسسي 100% حالياً؛ "
+                "فور اكتمال شروط أي منهجية تُولَّد الإشارة فوراً وبكل حقيقة")
+    d = diag[0]
+    missing = "، ".join(d["missing"][:3]) or "شرط اعتماد نهائي من شروط المنهجية"
+    others = f" · و{len(diag) - 1} منهجيات أخرى أُخذت في الحسبان" if len(diag) > 1 else ""
+    return (f"🔍 فحصنا المنهجيات المفعّلة ({names}) — الأقرب للاكتمال: {d['code']} "
+            f"(اكتمال شروط {d['proximity']}%) — الناقص: {missing}{others}؛ "
+            "فور اكتمال الشروط تُولَّد الإشارة فوراً وبكل حقيقة")
 
 
 def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
@@ -305,8 +321,15 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                     "reason": "المنهجية المطلوبة غير مفعلة/موثقة حالياً", "score": None}
     results = evaluate_all(ctx, allowed)
     if not results:
+        # v8.14.6 — «السبب الاستراتيجي الحقيقي»: the refusal card carries the
+        # REAL story from the strategies themselves: which methodologies were
+        # examined, which came closest, and which exact conditions stayed
+        # incomplete. No minute/candle counters on the user surface — those
+        # live in the engine_runs log for admin diagnostics only.
+        diag = diagnosis_snapshot()
+        _reason = _no_setup_reason_ar(allowed, diag)
         _log_run(symbol, entry_tf, "NO_SETUP", "no strategy conditions met; no signal manufactured")
-        return {"status": "NO_SETUP", "signal_id": None, "reason": "no qualifying setup", "score": None}
+        return {"status": "NO_SETUP", "signal_id": None, "reason": _reason, "score": None}
 
     # 8.5: Directional consensus guard (v6.20.0) — resolve or reject BUY vs SELL
     # internal strategy conflicts instead of blindly picking top-1 score.

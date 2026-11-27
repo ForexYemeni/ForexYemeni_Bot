@@ -7,7 +7,8 @@ package authorization belong to callers; this registry enforces rule contracts.
 """
 import logging
 
-from fysb.engines.strategies.base import Ctx, StrategyResult, result_error
+from fysb.engines.strategies.base import (Ctx, StrategyResult, result_error,
+                                          diagnosis_begin, diagnosis_snapshot)
 
 log = logging.getLogger(__name__)
 from fysb.engines.strategies import amd, classic, crt, divergence, fibonacci, harmonic, ichimoku, ict, london_breakout, price_action, silver_bullet, sk, smc, squeeze, trend, turtle_soup, vwap_reclaim, wyckoff
@@ -45,6 +46,7 @@ def get(code: str):
 def evaluate_all(ctx: Ctx, allowed_codes: list[str]) -> list[StrategyResult]:
     """Run every allowed, implemented strategy; return valid results sorted by score."""
     results: list[StrategyResult] = []
+    diagnosis_begin()
     for code in dict.fromkeys(c.upper() for c in allowed_codes):
         module = REGISTRY.get((code or "").upper())
         if module is None:

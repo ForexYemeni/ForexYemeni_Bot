@@ -540,6 +540,21 @@ async def tracker_loop(app):
     only. A paused engine must never leave issued signals unattended.
     """
     from fysb.engines import tracker
+    # v8.14.0 — flush the royal fresh-page mandatory notice (queued at boot by
+    # the one-time wipe) now that Telegram is actually up.
+    try:
+        import json as _json
+        if db.get_setting("fresh_page_notice_pending", "") == "1":
+            holders = _json.loads(db.get_setting("fresh_page_notice_holders", "[]") or "[]")
+            for t_uid in sorted({int(u) for u in holders} | {config.ADMIN_ID}):
+                try:
+                    await _safe_send(app.bot, t_uid, tracker.EOD_MANDATORY_TEXT)
+                except Exception:
+                    pass
+            db.set_setting("fresh_page_notice_pending", "0")
+            log.info("fresh-page mandatory notice delivered to %s holders", len(holders))
+    except Exception:
+        log.exception("fresh-page notice flush failed")
     while True:
         try:
             result = await asyncio.to_thread(tracker.check_open_signals, config.market_api_key())

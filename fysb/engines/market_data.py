@@ -61,6 +61,11 @@ YAHOO_FX_MAP = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
     "NZDUSD": "NZDUSD=X",
+    # v8.14.0 — REAL SPOT gold candles (no futures premium, no offset needed):
+    # Yahoo serves XAUUSD=X intraday series. This gives the gold candle chain a
+    # true-spot third source when the venue chain (futures+offset) and the keyed
+    # provider both fail — the Friday 13:47 «تعذر جلب» incident's final fix.
+    "XAUUSD": "XAUUSD=X",
     # All 21 G8 Crosses
     "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "AUDJPY": "AUDJPY=X",
     "CADJPY": "CADJPY=X", "CHFJPY": "CHFJPY=X", "NZDJPY": "NZDJPY=X",
@@ -158,7 +163,10 @@ def _provider_key(internal: str) -> str | None:
 # "goldapi" serves QUOTES only (no candles anywhere); it never enters a candle
 # chain. "twelvedata" enters a chain only when TWELVEDATA_API_KEY is set.
 _CANDLE_CHAINS = {
-    "gold":   ["venue-gold", "twelvedata"],
+    # v8.14.0 — fx-ref joins the gold candle chain: with XAUUSD mapped to
+    # XAUUSD=X, fx-ref serves REAL SPOT candles (zero offset needed) as a
+    # third source between the futures venue and the keyed provider.
+    "gold":   ["venue-gold", "fx-ref", "twelvedata"],
     "metal":  ["fx-ref", "twelvedata"],
     "fx":     ["fx-ref", "twelvedata"],
     "equity": ["fx-ref", "twelvedata"],

@@ -26,7 +26,9 @@ from fysb.engines.tracker import _documented_extreme, _evaluate_signal, _sl_touc
 def _clean_gold_calibration():
     """v8.13.9 hygiene: other tests may legitimately persist a fresh spot
     calibration (the live path now persists it) — the unoffsettable-futures
-    tests here need a calibration-free start to assert the honest refusal."""
+    tests here need a calibration-free start to assert the honest refusal.
+    v8.14.2: the live-spot crosscheck cache must be cleared too."""
+    md._spot_crosscheck_cache.clear()
     calib = config.DB_FILE.parent / "spot_calibration.json"
     if calib.exists():
         calib.unlink()
@@ -71,12 +73,12 @@ def test_chain_falls_through_when_futures_unoffsettable():
 
 def test_futures_with_valid_spot_calibration_still_offset():
     with patch.object(md, "_fetch_yahoo_candles", return_value=_fut_candles()), \
-         patch.object(md, "_fetch_goldapi_price", return_value={"price": 3665.0}), \
+         patch.object(md, "_fetch_goldapi_price", return_value={"price": 3676.0}), \
          patch.object(md, "_ordered_chain", return_value=["venue-gold"]), \
          patch.object(md.provider_health, "is_open", return_value=False):
         p = md.fetch_candles("XAUUSD", "15min", "", 60, use_cache=False)
-        # 3680 futures + (3665-3680) offset = spot-level 3665
-        assert float(p["values"][-1]["close"]) == pytest.approx(3665.0)
+        # v8.14.2 honest pairing: 3680 futures + (3676-3680) = spot-level 3676
+        assert float(p["values"][-1]["close"]) == pytest.approx(3676.0)
 
 
 # ---------------------------------------------------------------------------

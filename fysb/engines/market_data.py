@@ -54,6 +54,17 @@ PROVIDER_COOLDOWN_SECONDS = 45   # after a failure, pause that provider
 MIN_CANDLES = 35
 CALIB_MAX_RATIO = 0.02           # reject absurd calibration offsets (>2%)
 CALIB_MAX_AGE = 48 * 3600        # persisted offset older than this is ignored
+# v8.14.2 — «عقد السعر الحي الصادق»: the $53 chart lie (displayed 3583 vs real
+# 3636) came from three chained holes; each now has a hard clamp:
+PAIR_TOL_RATIO = 0.0025          # spot↔venue pairing: >0.25% (≈$9 gold) is a
+                                 # BROKEN pairing, never learn/apply from it
+                                 # (was ±$120 — anything passed!)
+CALIB_APPLY_MAX_AGE = 6 * 3600   # a persisted offset may be APPLIED only ≤6h old
+CALIB_APPLY_MAX_RATIO = 0.005    # …and only ≤0.5% of price (≈$18 gold cap)
+CROSSCHECK_TOL_RATIO = 0.0015    # venue payload vs LIVE spot quote divergence
+                                 # cap (≈$5.5 gold) — beyond it the payload is
+                                 # POISONED and never reaches charts/signals
+_SPOT_CROSSCHECK_TTL = 120.0     # live-spot crosscheck quote cache (quota-safe)
 
 # Symbol maps (internal normalized symbol -> venue/reference symbol).
 YAHOO_FX_MAP = {
@@ -143,6 +154,7 @@ def _yahoo_symbol_for(internal: str) -> str | None:
 _cache: dict[tuple, dict] = {}
 _fail_streak: dict[str, tuple[float, int]] = {}
 _last_provider: dict[str, str] = {}
+_spot_crosscheck_cache: dict[str, dict] = {}
 
 
 def _norm(symbol: str) -> str:
@@ -413,14 +425,33 @@ def _learn_gold_offset(internal: str, spot_price: float, venue_price: float) -> 
     return offset
 
 
-def _persisted_offset(internal: str) -> float | None:
+def _persisted_offset(internal: str, max_age: float = CALIB_MAX_AGE) -> float | None:
     data = _load_calib().get(internal)
     if not data:
         return None
-    if time.time() - float(data.get("ts") or 0) > CALIB_MAX_AGE:
+    if time.time() - float(data.get("ts") or 0) > max_age:
         return None
     off = float(data.get("offset") or 0)
     return off if math.isfinite(off) else None
+
+
+def _live_spot_price(internal: str) -> float | None:
+    """Cached REAL spot reference price (gold-api) for crosschecking venue
+    payloads. Best-effort: on any failure returns None (caller decides)."""
+    tick = _spot_crosscheck_cache.get(internal)
+    if tick and time.time() - tick["t"] < _SPOT_CROSSCHECK_TTL:
+        return tick["px"]
+    spot_ticker = GOLD_API_MAP.get(internal)
+    if not spot_ticker:
+        return None
+    try:
+        px = float(_fetch_goldapi_price(spot_ticker)["price"])
+        if math.isfinite(px) and px > 0:
+            _spot_crosscheck_cache[internal] = {"t": time.time(), "px": px}
+            return px
+    except Exception:
+        pass
+    return None
 
 
 def _apply_offset(values: list[dict], offset: float) -> list[dict]:
@@ -457,11 +488,12 @@ def _fetch_venue_gold_candles(venue_symbol: str, interval: str, outputsize: int)
 
 def _gold_offset_now(internal: str, venue_symbol: str) -> float | None:
     """Live offset from the real spot reference vs the venue gold token."""
-    spot_ticker = GOLD_API_MAP.get(internal)
-    if not spot_ticker:
+    if not GOLD_API_MAP.get(internal):
+        return None
+    spot = _live_spot_price(internal)
+    if spot is None:
         return None
     try:
-        spot = _fetch_goldapi_price(spot_ticker)["price"]
         venue = _fetch_venue_gold_price(venue_symbol)
         return _learn_gold_offset(internal, spot, venue)
     except Exception:
@@ -671,40 +703,65 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                         values = _fetch_venue_gold_candles(v, interval, outputsize)
                         offset = _gold_offset_now(internal, v)
                         if offset is None:
-                            offset = _persisted_offset(internal) or 0.0
-                        values = _apply_offset(values, offset)
+                            # v8.14.2: the persisted rescue is strict here too
+                            # (≤6h old, ≤0.5%) — a drifted offset never applies
+                            offset = _persisted_offset(internal, max_age=CALIB_APPLY_MAX_AGE)
+                            if (offset is not None and values
+                                    and abs(offset) > CALIB_APPLY_MAX_RATIO * abs(float(values[-1]["close"]))):
+                                offset = None
+                        values = _apply_offset(values, offset or 0.0)
                     else:
+                        # v8.14.2 — three hard clamps (the $53 chart lie is dead):
+                        # ① pairing tolerance 0.25% (was ±$120 — anything passed)
+                        # ② persisted offset applies only ≤6h old and ≤0.5%
+                        # ③ final crosscheck vs the LIVE spot quote (≤0.15%)
+                        #    — a poisoned venue payload never leaves this chain;
+                        #    fx-ref (true spot, first in the chain) serves instead.
                         offset_applied = False
                         last_c = float(values[-1]["close"]) if values else 0.0
+                        spot_px = None
                         try:
                             spot_t = GOLD_API_MAP.get(internal)
                             if spot_t and values:
-                                spot_px = _fetch_goldapi_price(spot_t)["price"]
-                                if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
-                                    values = _apply_offset(values, spot_px - last_c)
-                                    offset_applied = True
-                                    try:
-                                        _learn_gold_offset(internal, spot_px, last_c)
-                                    except Exception:
-                                        pass
+                                spot_px = float(_fetch_goldapi_price(spot_t)["price"])
                         except Exception as s_exc:
                             log.debug("gold futures spot calibration skipped: %s", s_exc)
+                        if (spot_px and spot_px > 0 and last_c > 0
+                                and abs(spot_px - last_c) <= max(5.0, PAIR_TOL_RATIO * spot_px)):
+                            values = _apply_offset(values, spot_px - last_c)
+                            offset_applied = True
+                            _spot_crosscheck_cache[internal] = {"t": time.time(), "px": float(spot_px)}
+                            try:
+                                _learn_gold_offset(internal, spot_px, last_c)
+                            except Exception:
+                                pass
                         if not offset_applied:
-                            # v8.13.9 — fall back to the FRESH PERSISTED offset
-                            # (learned ≤48h ago from live spot-vs-venue
-                            # calibration, magnitude-capped ≤2% of the venue
-                            # price, age-checked) before failing: a momentary
-                            # gold-api hiccup must not wipe the whole gold chain
-                            # into «تعذر جلب» while the market is OPEN (the
-                            # Friday 13:47 incident). RAW futures (no documented
-                            # offset at all) are STILL never served — the #46
-                            # guarantee holds.
-                            off = _persisted_offset(internal)
-                            if off and last_c and abs(off) <= CALIB_MAX_RATIO * abs(last_c):
+                            # v8.13.9 fallback, v8.14.2-tightened: the persisted
+                            # offset may rescue the venue path only while FRESH
+                            # (≤6h) and SMALL (≤0.5%) — a drifted offset can no
+                            # longer move the chart tens of dollars. RAW futures
+                            # (no documented offset) are STILL never served (#46).
+                            off = _persisted_offset(internal, max_age=CALIB_APPLY_MAX_AGE)
+                            if off and last_c and abs(off) <= CALIB_APPLY_MAX_RATIO * abs(last_c):
                                 values = _apply_offset(values, off)
                                 offset_applied = True
                             else:
                                 raise RuntimeError("unoffsetted-futures")
+                    # v8.14.2 LIVE CROSSCHECK (kill switch, both sub-paths): the
+                    # assembled venue payload's last close must sit within
+                    # tolerance of the REAL live spot quote, or the whole payload
+                    # is refused and the chain falls through to true spot.
+                    spot_now = None
+                    try:
+                        spot_now = _live_spot_price(internal)
+                    except Exception:
+                        spot_now = None
+                    if spot_now and values:
+                        tol = max(5.0, CROSSCHECK_TOL_RATIO * float(spot_now))
+                        if abs(float(values[-1]["close"]) - float(spot_now)) > tol:
+                            log.warning("venue-gold payload refused: close %s diverges from live spot %s (tol %.2f)",
+                                        values[-1]["close"], spot_now, tol)
+                            raise RuntimeError("venue-spot divergence (live crosscheck)")
                 elif provider == "fx-ref":
                     ysym = _yahoo_symbol_for(internal)
                     if not ysym:

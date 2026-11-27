@@ -61,6 +61,23 @@ def _market_row(symbol: str):
     return dict(r) if r else None
 
 
+def _headline_price(symbol: str, fallback_close: float) -> tuple[float, bool]:
+    """v8.14.2 — «السعر الحي» = REAL LIVE SPOT QUOTE, never a candle close.
+
+    The owner caught the chart showing 3,583 while the market was 3,636: the
+    headline was the last candle's close from an offset-drifted venue series.
+    The headline price now comes from the execution-grade quote (spot-ref =
+    real gold spot first); the candle close is only the honest fallback."""
+    live_px = 0.0
+    try:
+        _q = market_data.execution_quote(symbol, config.market_api_key())
+        if _q.get("ok"):
+            live_px = float(_q.get("price") or 0.0)
+    except Exception:
+        live_px = 0.0
+    return (live_px if live_px > 0 else fallback_close), bool(live_px > 0)
+
+
 def _fetch(symbol: str, tf_code: str, size: int = 150):
     row = _market_row(symbol)
     provider = row["provider_symbol"] if row else symbol
@@ -675,11 +692,14 @@ def run_analysis(user_id: int, symbol: str, timeframe: str, analysis_type: str =
     }
 
     tf_label = "متعدد الأطباق (من الأدنى للأعلى)" if multi_tf else main["tf"]
+    headline_px, headline_is_live = _headline_price(symbol, float(main["close"]))
     analysis = {
         "symbol": symbol, "timeframe": tf_label, "tool": "", "tool_name": "منظومة مؤسسية مركبة",
         "analysis_type": analysis_type, "strategy": strategy,
         "strategy_name": lens_name or "قراءة مؤسسية شاملة",
-        "price": main["close"], "price_time": candles[-1]["datetime"],
+        "price": headline_px,
+        "price_time": config.now() if headline_is_live else candles[-1]["datetime"],
+        "live_quote": headline_is_live,
         "data_provider": payload.get("provider") or payload.get("source") or "UNKNOWN",
         "is_proxy": bool(payload.get("is_proxy")),
         "direction": direction, "quality": quality,

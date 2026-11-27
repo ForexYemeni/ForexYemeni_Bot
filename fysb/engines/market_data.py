@@ -634,82 +634,100 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
     # gates) — it is NEVER cached, so the next attempt re-tries the chain live.
     stale_fallback: dict | None = None
 
-    for provider in chain:
-        if in_cooldown(provider, internal, interval):
-            errors.append(f"{provider}:cooldown")
-            continue
-        try:
-            if provider == "venue-gold":
-                v = BINANCE_MAP[internal]
-                # v8.0.0 (SIG-3): Prefer real CME Gold Futures (`GC=F`) via Yahoo first
-                # (zero crypto PAXG depeg!), then fail over to PAXG + GoldAPI spot offset.
-                used_futures = False
-                values = []
-                try:
-                    yvals = _fetch_yahoo_candles("GC=F", interval, outputsize)
-                    if len(yvals) >= MIN_CANDLES:
-                        values = yvals
-                        used_futures = True
-                except Exception as y_exc:
-                    log.debug("yahoo GC=F gold candles unavailable, failing over to PAXG: %s", y_exc)
-                if not used_futures:
-                    values = _fetch_venue_gold_candles(v, interval, outputsize)
-                    offset = _gold_offset_now(internal, v)
-                    if offset is None:
-                        offset = _persisted_offset(internal) or 0.0
-                    values = _apply_offset(values, offset)
-                else:
-                    try:
-                        spot_t = GOLD_API_MAP.get(internal)
-                        if spot_t and values:
-                            spot_px = _fetch_goldapi_price(spot_t)["price"]
-                            last_c = float(values[-1]["close"])
-                            if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
-                                values = _apply_offset(values, spot_px - last_c)
-                    except Exception as s_exc:
-                        log.debug("gold futures spot calibration skipped: %s", s_exc)
-            elif provider == "fx-ref":
-                ysym = _yahoo_symbol_for(internal)
-                if not ysym:
-                    continue
-                values = _fetch_yahoo_candles(ysym, interval, outputsize)
-            elif provider == "binance":
-                if not venue:
-                    continue
-                values = _fetch_binance_candles(venue, interval, outputsize)
-            elif provider == "bybit":
-                bybit_sym = BYBIT_MAP.get(internal) or venue
-                if not bybit_sym:
-                    continue
-                values = _fetch_bybit_candles(bybit_sym, interval, outputsize)
-            elif provider == "twelvedata":
-                values = _fetch_td_candles(_td_symbol(internal, symbol), interval,
-                                           config.market_api_key(), outputsize)
-            else:
+    # v8.13.1 — TWO-PASS chain: pass 1 respects cooldowns; if nothing fresh
+    # came back, pass 2 retries EVERY provider ignoring cooldowns (a provider
+    # that recovered seconds ago must never lose to a 24h-old stale snapshot).
+    fresh_payload: dict | None = None
+    for attempt in (0, 1):
+        bypass_cooldown = attempt == 1
+        for provider in chain:
+            if not bypass_cooldown and in_cooldown(provider, internal, interval):
+                errors.append(f"{provider}:cooldown")
                 continue
-            # v8.11.0 (P2): freshness-aware chain traversal — fresh data wins
-            # immediately; stale data never blocks the remaining alternatives.
-            payload = _assemble(internal, interval, values, "LIVE", False, cache_key, symbol,
-                                provider_name=provider)
-            if not is_stale(payload):
-                if use_cache:
-                    _cache[cache_key] = {"t": time.time(), "payload": payload}
-                    if len(_cache) > 200:
-                        for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
-                            _cache.pop(k, None)
-                return payload
-            if stale_fallback is None or payload["age_seconds"] < stale_fallback["age_seconds"]:
-                stale_fallback = payload
-            errors.append(f"{provider}:stale(age={int(payload['age_seconds']) // 60}min)")
-        except Exception as exc:
-            _mark_failure(provider, internal, interval)
-            errors.append(f"{provider}:" + type(exc).__name__)
+            try:
+                if provider == "venue-gold":
+                    v = BINANCE_MAP[internal]
+                    # v8.0.0 (SIG-3): Prefer real CME Gold Futures (`GC=F`) via Yahoo first
+                    # (zero crypto PAXG depeg!), then fail over to PAXG + GoldAPI spot offset.
+                    used_futures = False
+                    values = []
+                    try:
+                        yvals = _fetch_yahoo_candles("GC=F", interval, outputsize)
+                        if len(yvals) >= MIN_CANDLES:
+                            values = yvals
+                            used_futures = True
+                    except Exception as y_exc:
+                        log.debug("yahoo GC=F gold candles unavailable, failing over to PAXG: %s", y_exc)
+                    if not used_futures:
+                        values = _fetch_venue_gold_candles(v, interval, outputsize)
+                        offset = _gold_offset_now(internal, v)
+                        if offset is None:
+                            offset = _persisted_offset(internal) or 0.0
+                        values = _apply_offset(values, offset)
+                    else:
+                        try:
+                            spot_t = GOLD_API_MAP.get(internal)
+                            if spot_t and values:
+                                spot_px = _fetch_goldapi_price(spot_t)["price"]
+                                last_c = float(values[-1]["close"])
+                                if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
+                                    values = _apply_offset(values, spot_px - last_c)
+                        except Exception as s_exc:
+                            log.debug("gold futures spot calibration skipped: %s", s_exc)
+                elif provider == "fx-ref":
+                    ysym = _yahoo_symbol_for(internal)
+                    if not ysym:
+                        continue
+                    values = _fetch_yahoo_candles(ysym, interval, outputsize)
+                elif provider == "binance":
+                    if not venue:
+                        continue
+                    values = _fetch_binance_candles(venue, interval, outputsize)
+                elif provider == "bybit":
+                    bybit_sym = BYBIT_MAP.get(internal) or venue
+                    if not bybit_sym:
+                        continue
+                    values = _fetch_bybit_candles(bybit_sym, interval, outputsize)
+                elif provider == "twelvedata":
+                    values = _fetch_td_candles(_td_symbol(internal, symbol), interval,
+                                               config.market_api_key(), outputsize)
+                else:
+                    continue
+                # v8.13.1 — wrong-series guard BEFORE assembly: a provider serving
+                # the wrong timestep (daily bars for a 15min request) is treated as
+                # a provider failure so the chain keeps looking for the real series.
+                if _series_interval_mismatch(values, interval):
+                    _mark_failure(provider, internal, interval, "interval-mismatch")
+                    errors.append(f"{provider}:interval-mismatch")
+                    continue
+                # v8.11.0 (P2): freshness-aware chain traversal — fresh data wins
+                # immediately; stale data never blocks the remaining alternatives.
+                payload = _assemble(internal, interval, values, "LIVE", False, cache_key, symbol,
+                                    provider_name=provider)
+                if not is_stale(payload):
+                    if use_cache:
+                        _cache[cache_key] = {"t": time.time(), "payload": payload}
+                        if len(_cache) > 200:
+                            for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
+                                _cache.pop(k, None)
+                    return payload
+                if stale_fallback is None or payload["age_seconds"] < stale_fallback["age_seconds"]:
+                    stale_fallback = payload
+                errors.append(f"{provider}:stale(age={int(payload['age_seconds']) // 60}min)")
+            except Exception as exc:
+                _mark_failure(provider, internal, interval)
+                errors.append(f"{provider}:" + type(exc).__name__)
+        # pass 1 returning nothing fresh falls through to pass 2 (cooldown
+        # bypass); a fresh return inside the loop exits the function directly.
 
     # v8.11.0 (P2): every live alternative failed or was stale — the freshest
     # stale payload is returned HONESTLY as a last resort (never cached, never
     # presented as fresh). Callers apply their own staleness gates and speak
     # the sanitized Arabic reason — no fabricated freshness, no silent halt.
+    # v8.13.1: the per-provider failure chain is attached for ADMIN surfaces
+    # (engine_runs) so a frozen feed is traceable without exposing names to users.
     if stale_fallback is not None:
+        stale_fallback["chain_errors"] = errors[:]
         return stale_fallback
 
     if internal in FOREX_ONLY and not config.has_market_api():
@@ -857,6 +875,34 @@ def _candle_age_seconds(last_iso: str, interval: str) -> float:
         return max(0.0, (datetime.now(timezone.utc) - (dt + timedelta(seconds=span))).total_seconds())
     except Exception:
         return 1e9
+
+
+def _series_interval_mismatch(values: list[dict], wanted_interval: str) -> bool:
+    """v8.13.1 — wrong-series guard: a provider answering a 15min request with
+    daily/1h bars poisons freshness math (a single 1-day candle reads ~24h
+    stale and the whole analysis dies on honest-but-misleading data). The
+    median timestep must match the requested interval within 2x; weekend holes
+    are fine because the MEDIAN ignores isolated gaps."""
+    try:
+        if len(values) < 3:
+            return False          # too few to judge — downstream gates handle it
+        want = _interval_seconds(wanted_interval)
+        deltas: list[float] = []
+        prev = None
+        for c in values:
+            t = datetime.fromisoformat(str(c["datetime"]).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            if prev is not None:
+                deltas.append(abs((t - prev).total_seconds()))
+            prev = t
+        if not deltas:
+            return False
+        deltas.sort()
+        median = deltas[len(deltas) // 2]
+        return median > 2.0 * want
+    except Exception:
+        return False
 
 
 def _interval_seconds(interval: str) -> int:

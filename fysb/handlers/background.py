@@ -650,6 +650,23 @@ async def tracker_loop(app):
                 await _safe_send(app.bot, uid, text)
             if expired:
                 log.info("expired %s stale signals", expired)
+            # v8.13.7 — royal end-of-day close: once per UTC day at the configured
+            # time (default 21:30 UTC = 30min before the market close): every open
+            # signal ends with the day, holders get the MANDATORY notice, and the
+            # admin receives the RENEWED risk board («نظام جديد»). The engine keeps
+            # hunting new opportunities 24h — only issued signals end.
+            triggered, eod_n, eod_edits, eod_notes = await afn.run(tracker.maybe_daily_close)
+            if triggered:
+                for uid, chat_id, message_id, text in eod_edits:
+                    await _safe_edit(app.bot, chat_id, message_id, text)
+                for uid, text in eod_notes:
+                    await _safe_send(app.bot, uid, text)
+                try:
+                    from fysb.handlers.admin_trading import risk_board_text
+                    await _safe_send(app.bot, config.ADMIN_ID, await afn.run(risk_board_text))
+                except Exception:
+                    pass
+                log.info("EOD royal close: %s open signals ended with the day", eod_n)
         except asyncio.CancelledError:
             raise
         except Exception:

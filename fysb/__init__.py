@@ -13,4 +13,4 @@ Modular platform:
 Broker adapters exist and require explicit policy/credentials. No release or
 software test is approval to enable LIVE execution.
 """
-__version__ = "8.13.1"
+__version__ = "8.13.2"

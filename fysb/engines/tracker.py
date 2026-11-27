@@ -1256,6 +1256,51 @@ def eod_close_all(reason_tag: str = "scheduled") -> tuple[int, list, list]:
     return len(rows), edits, notifications
 
 
+# --- v8.13.8 — صفحة جديدة (royal fresh page) ---------------------------------
+FRESH_PAGE_ORDER = ("signal_deliveries", "trade_journal", "exchange_orders",
+                    "bridge_orders", "signals")
+
+
+def fresh_page_counts() -> dict:
+    """Pre-wipe warning numbers: total signals + still open + dependents."""
+    out: dict = {}
+    with db.conn() as c:
+        out["signals_total"] = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
+        out["signals_open"] = c.execute(
+            "SELECT COUNT(*) n FROM signals WHERE status IN ('ACTIVE','RUNNING')").fetchone()["n"]
+        for t in ("signal_deliveries", "trade_journal", "exchange_orders", "bridge_orders"):
+            out[t] = c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
+    return out
+
+
+def fresh_page_holders() -> list[int]:
+    """Distinct users who EVER received a signal + admin — the mandatory
+    «يوم جديد إشارات جديدة ونظام جديد» notice audience."""
+    with db.conn() as c:
+        rows = c.execute("SELECT DISTINCT user_id FROM signal_deliveries").fetchall()
+    return sorted({int(r["user_id"]) for r in rows} | {config.ADMIN_ID})
+
+
+def fresh_page_wipe() -> dict:
+    """v8.13.8 — royal fresh page: TOTAL wipe of the signals book and its
+    dependents (owner's explicit decision: NO archive, signals-only scope).
+    Order is FK-safe (dependents first). demo_positions / demo_trades /
+    engine_runs / analysis_monitors are OUT of scope and untouched. The school
+    race (leaderboard) reads from `signals`, so it restarts from a real zero;
+    seq numbering is ROW_NUMBER-based, so the next signal is literally #1."""
+    from fysb.services import strategy_stats
+    counts: dict = {}
+    with db.tx(immediate=True) as c:
+        for t in FRESH_PAGE_ORDER:
+            counts[t] = c.execute(f"DELETE FROM {t}").rowcount
+    try:
+        strategy_stats.invalidate_leaderboard_cache()
+    except Exception:
+        pass
+    _log("SYSTEM", "-", "FRESH_PAGE", " ".join(f"{k}={v}" for k, v in counts.items()))
+    return counts
+
+
 def maybe_daily_close() -> tuple[bool, int, list, list]:
     """Scheduled end-of-day check, called every tracker tick (60s). Fires ONCE
     per UTC day at/after the configured `eod_close_utc` (default 21:30 — half

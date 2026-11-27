@@ -197,9 +197,14 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         # v8.13.1 — the admin-facing engine_runs detail now carries the whole
         # failover chain verdict (providers tried / stale / cooldown / mismatch)
         # so a frozen feed is traceable from the diagnostics center.
+        # v8.13.2 — when the SAME snapshot repeats ≥10 minutes apart on an open
+        # market, the run is logged as FEED_FROZEN (a distinct, actionable
+        # admin verdict: check server egress + market key, then restart).
         _chain = ",".join(payload.get("chain_errors") or []) or "chain-clean"
-        _log_run(symbol, entry_tf, "STALE_DATA",
-                 f"last candle {payload['last_candle_iso']} age={int(payload['age_seconds'])}s chain=[{_chain}]")
+        _run_code = "FEED_FROZEN" if payload.get("feed_frozen") else "STALE_DATA"
+        _log_run(symbol, entry_tf, _run_code,
+                 f"last candle {payload['last_candle_iso']} age={int(payload['age_seconds'])}s "
+                 f"repeats={payload.get('frozen_repeats', 0)} chain=[{_chain}]")
         return {"status": "REJECTED", "signal_id": None,
                 "reason": f"data stale (age {int(payload['age_seconds'])//60}min)", "score": None}
 

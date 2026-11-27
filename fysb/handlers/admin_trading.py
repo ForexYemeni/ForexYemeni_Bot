@@ -769,6 +769,13 @@ def _probe_market_data_sync() -> str:
         out.append(f"▎🕯 آخر شمعة ساعة مغلقة: <code>{esc(p['last_candle_iso'])}</code> UTC")
         out.append(f"▎⏱ عمرها: <b>{age_min} دقيقة</b> · الحد المسموح لهذا الفريم: <b>{limit_min} دقيقة</b>")
         out.append(f"▎🧪 الحكم: <b>{verdict}</b> · الشموع المتاحة: <b>{len(p['values'])}</b>")
+        # v8.13.2 — freeze verdict + the failover chain verdicts (admin-only)
+        if p.get("feed_frozen"):
+            out.append(f"▎🧊 <b>التغذية مجمّدة!</b> نفس اللقطة تكررت {p.get('frozen_repeats', 1)} مرة "
+                       "والسوق مفتوح — راجع اتصال السيرفر الصادر وصلاحية مفتاح السوق ثم أعد التشغيل")
+        _chain = p.get("chain_errors") or []
+        if _chain:
+            out.append(f"▎🧾 حكم السلسلة: <code>{esc(', '.join(_chain))[:140]}</code>")
     except RuntimeError as e:
         out.append(f"▎🕯 شموع الساعة: ⚠️ تعذر — {esc(str(e))[:90]}")
     return "\n".join(out)

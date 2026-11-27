@@ -35,7 +35,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fysb import config
+from fysb import config, instruments
 from fysb.config import log
 from fysb.engines import crypto_ws, provider_health
 
@@ -705,6 +705,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                 payload = _assemble(internal, interval, values, "LIVE", False, cache_key, symbol,
                                     provider_name=provider)
                 if not is_stale(payload):
+                    _FEED_SNAPSHOTS.pop(cache_key, None)   # fresh again — reset freeze tracking
                     if use_cache:
                         _cache[cache_key] = {"t": time.time(), "payload": payload}
                         if len(_cache) > 200:
@@ -728,6 +729,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
     # (engine_runs) so a frozen feed is traceable without exposing names to users.
     if stale_fallback is not None:
         stale_fallback["chain_errors"] = errors[:]
+        _feed_freeze_note(cache_key, stale_fallback)
         return stale_fallback
 
     if internal in FOREX_ONLY and not config.has_market_api():
@@ -875,6 +877,37 @@ def _candle_age_seconds(last_iso: str, interval: str) -> float:
         return max(0.0, (datetime.now(timezone.utc) - (dt + timedelta(seconds=span))).total_seconds())
     except Exception:
         return 1e9
+
+
+# v8.13.2 — feed-freeze detection bookkeeping: when the SAME last-candle
+# snapshot is served again ≥10 minutes later while the session calendar says
+# the market is OPEN, the feed is not merely stale — it is FROZEN. Marked on
+# the payload for admin surfaces (engine_runs + live probe); never user-facing.
+_FEED_SNAPSHOTS: dict = {}
+FEED_FROZEN_MIN_GAP_SECONDS = 600.0
+
+
+def _feed_freeze_note(cache_key: tuple, payload: dict) -> None:
+    """Attach feed_frozen/frozen_repeats to a stale payload when the snapshot
+    is byte-identical to a previous stale answer ≥10 minutes apart on an OPEN
+    market. Honest detection — a changed iso (real data moving) resets it, a
+    closed market never marks it."""
+    iso = str(payload.get("last_candle_iso") or "")
+    now_t = time.time()
+    snap = _FEED_SNAPSHOTS.get(cache_key)
+    try:
+        open_now = market_state(instruments.spec(cache_key[0]).category)
+    except Exception:
+        open_now = None
+    if open_now is True and snap and snap["iso"] == iso:
+        if (now_t - snap["t"]) >= FEED_FROZEN_MIN_GAP_SECONDS:
+            repeats = int(snap["repeats"]) + 1
+            _FEED_SNAPSHOTS[cache_key] = {"iso": iso, "t": now_t, "repeats": repeats}
+            payload["feed_frozen"] = True
+            payload["frozen_repeats"] = repeats
+        # else: same frozen snapshot within the window — keep the original timer
+        return
+    _FEED_SNAPSHOTS[cache_key] = {"iso": iso, "t": now_t, "repeats": 0}
 
 
 def _series_interval_mismatch(values: list[dict], wanted_interval: str) -> bool:

@@ -665,6 +665,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                             offset = _persisted_offset(internal) or 0.0
                         values = _apply_offset(values, offset)
                     else:
+                        offset_applied = False
                         try:
                             spot_t = GOLD_API_MAP.get(internal)
                             if spot_t and values:
@@ -672,8 +673,15 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                                 last_c = float(values[-1]["close"])
                                 if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
                                     values = _apply_offset(values, spot_px - last_c)
+                                    offset_applied = True
                         except Exception as s_exc:
                             log.debug("gold futures spot calibration skipped: %s", s_exc)
+                        if not offset_applied:
+                            # v8.13.5 — NEVER serve raw CME futures as spot: the GC=F
+                            # premium (+13..18$) fabricates false RUNNING/SL_HIT states
+                            # against spot-anchored signals (the #46 incident). The
+                            # provider fails honestly and the chain moves on.
+                            raise RuntimeError("unoffsetted-futures")
                 elif provider == "fx-ref":
                     ysym = _yahoo_symbol_for(internal)
                     if not ysym:

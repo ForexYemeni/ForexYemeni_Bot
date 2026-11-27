@@ -137,6 +137,44 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["fvg_confluence"] = any(f["kind"] == kind for f in fvgs)
     earned += 8 if checks["fvg_confluence"] else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) post-manipulation POI: an FVG/OB created BY the displacement leg
+    # that followed the manipulation wick — the school's re-entry point.
+    poi = None
+    try:
+        m_idx = next(i for i, c in enumerate(candles) if c is manip_candle)
+        from fysb.engines.analysis import order_blocks as _ob, fair_value_gaps as _fvg
+        disp = candles[m_idx:m_idx + 5]
+        if len(disp) >= 2:
+            for f in _fvg(disp, 2):
+                if f["kind"] == kind:
+                    poi = ("FVG", float(f["lo"]), float(f["hi"]))
+                    break
+            if poi is None:
+                for ob in _ob(disp, 2):
+                    if ob["kind"] == kind:
+                        poi = ("OB", float(ob["lo"]), float(ob["hi"]))
+                        break
+    except Exception:
+        poi = None
+    checks["post_manip_poi"] = poi
+    earned += 4 if poi else 0
+
+    # 2) manipulation during the LONDON killzone — the school's preferred
+    # manipulation session (scored, not mandatory).
+    manip_kz = kill_zone(manip_candle["datetime"]) or ""
+    london_manip = manip_kz == "LONDON"
+    checks["london_manip"] = london_manip
+    earned += 3 if london_manip else 0
+
+    # 3) D-distribution full-range equation: raw TPs are 0.5×/1.0×/1.5× of the
+    # accumulation range projected from the opposite boundary — the classic
+    # Power-of-Three measured distribution. Named + disclosed as such.
+    range_height = hi - lo
+    checks["d_distribution_eq"] = f"0.5x/1.0x/1.5x of {range_height:.5g}"
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -150,6 +188,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if poi:
+        reasons.append(f"post-manipulation POI: {poi[0]} {poi[1]:.5g}-{poi[2]:.5g}")
+    if london_manip:
+        reasons.append("manipulation during the London killzone (preferred session)")
+    reasons.append(f"D-distribution equation: targets 0.5×/1.0×/1.5× of range {range_height:.5g}")
     return StrategyResult(
         code="AMD", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

@@ -26,6 +26,10 @@ class Ctx:
     bias_candles: list[dict]  # higher timeframe for bias, may be same list
     market_row: dict = None   # market_catalog row (pip specs etc.)
     kill_zone: str = ""
+    # v8.13.0 — correlated-symbol series for SMT divergence (same timeframe,
+    # oldest -> newest). None = data not supplied: SMT is skipped honestly,
+    # never fabricated.
+    correlated_candles: list = None
 
 
 @dataclass

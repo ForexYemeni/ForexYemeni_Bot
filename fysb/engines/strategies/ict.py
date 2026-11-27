@@ -14,7 +14,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, liquidity_sweep, order_blocks,
-    premium_discount, structure_labels,
+    premium_discount, structure_labels, swings,
 )
 from fysb.engines.strategies.base import (
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
@@ -166,6 +166,133 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     except Exception:
         checks["anchor_confluence"] = None
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (ALL bonus-only: earned rises, max_pts fixed)
+    # ------------------------------------------------------------------
+
+    # 1) DOL — Draw on Liquidity: the nearest untested swing pool BEYOND entry
+    # in the trade direction. Room to the draw >= 2R earns the bonus; the
+    # level is disclosed as the plan's draw target (a swing pool, NOT a map
+    # of real orders).
+    highs_d, lows_d = swings(candles, 3)
+    dol = 0.0
+    if direction == "BUY":
+        for h in reversed(highs_d):
+            if float(h["price"]) > close + 0.5 * a:
+                dol = float(h["price"])
+                break
+    else:
+        for l in reversed(lows_d):
+            if float(l["price"]) < close - 0.5 * a:
+                dol = float(l["price"])
+                break
+    checks["dol"] = dol if dol else None
+    if dol:
+        room_ok = abs(dol - entry) >= 2.0 * risk
+        checks["dol_room"] = room_ok
+        earned += 5 if room_ok else 2
+
+    # 2) Breaker / Mitigation — a violated opposite block now retested from
+    # the other side acts as a breaker in trade direction (+bonus); a OWN-side
+    # block already revisited since formation is mitigated (weaker, -penalty).
+    breaker = False
+    mitigated = False
+    for ob in obs:
+        if ob["kind"] == ("bearish" if direction == "BUY" else "bullish"):
+            viol = (float(ob["hi"]) < close) if direction == "BUY" else (float(ob["lo"]) > close)
+            if viol:
+                breaker = True
+    if entry_zone:
+        z0, z1 = entry_zone
+        formed_idx = None
+        for f in fvgs:
+            if (f["lo"], f["hi"]) == entry_zone:
+                formed_idx = int(f["index"])
+                break
+        if formed_idx is not None and formed_idx < len(candles) - 2:
+            post = candles[formed_idx + 1:-1]
+            touched = any((float(c["low"]) <= z1 for c in post) if direction == "BUY"
+                          else (float(c["high"]) >= z0 for c in post))
+            mitigated = touched
+    checks["breaker_confluence"] = breaker
+    checks["zone_mitigated"] = mitigated
+    earned += 5 if breaker else 0
+    earned -= 4 if mitigated else 0
+
+    # 3) Formal OTE — the last impulse leg retraced into the 0.618–0.79 band
+    # with the 0.705 sweet spot graded higher.
+    ote = None
+    if direction == "BUY":
+        leg_lo, leg_hi = None, None
+        for l in reversed(lows_d):
+            leg_lo = float(l["price"])
+            break
+        for h in reversed(highs_d):
+            if float(h["price"]) > close:
+                leg_hi = float(h["price"])
+                break
+        if leg_lo is not None and leg_hi:
+            depth = (leg_hi - close) / (leg_hi - leg_lo)
+    else:
+        leg_hi, leg_lo = None, None
+        for h in reversed(highs_d):
+            leg_hi = float(h["price"])
+            break
+        for l in reversed(lows_d):
+            if float(l["price"]) < close:
+                leg_lo = float(l["price"])
+                break
+        if leg_hi is not None and leg_lo:
+            depth = (close - leg_lo) / (leg_hi - leg_lo)
+    try:
+        if 0.618 <= depth <= 0.79:
+            ote = round(depth, 3)
+    except NameError:
+        ote = None
+    checks["ote_depth"] = ote
+    if ote is not None:
+        earned += 4 + (2 if abs(ote - 0.705) <= 0.03 else 0)
+
+    # 4) PD-Array stack — distinct ICT arrays stacked at the entry price
+    # (FVG / OB / breaker / OTE band): depth of confluence, disclosed.
+    stack = 0
+    if entry_zone or ote is not None:
+        tol = 0.5 * a
+        near = (lambda zone: zone[0] - tol <= entry <= zone[1] + tol)
+        if entry_zone and near(entry_zone):
+            stack += 1
+        if any(o["kind"] == ("bullish" if direction == "BUY" else "bearish")
+               and o["lo"] - tol <= entry <= o["hi"] + tol for o in obs):
+            stack += 1
+        if breaker:
+            stack += 1
+        if ote is not None:
+            stack += 1
+    checks["pd_stack"] = stack
+    earned += min(stack, 3) * 2
+
+    # 5) SMT divergence — correlated symbol made the OPPOSITE swing structure
+    # (symbol lower low while correlated higher low = smart-money split).
+    # Skipped HONESTLY when no correlated series was supplied by the caller.
+    smt = None
+    if ctx.correlated_candles:
+        try:
+            ch, cl = swings(ctx.correlated_candles, 2)
+            if direction == "BUY" and len(lows_d) >= 2 and len(cl) >= 2:
+                sym_ll = float(lows_d[-1]["price"]) < float(lows_d[-2]["price"])
+                corr_hl = float(cl[-1]["price"]) > float(cl[-2]["price"])
+                if sym_ll and corr_hl:
+                    smt = "BUY"
+            elif direction == "SELL" and len(highs_d) >= 2 and len(ch) >= 2:
+                sym_hh = float(highs_d[-1]["price"]) > float(highs_d[-2]["price"])
+                corr_lh = float(ch[-1]["price"]) < float(ch[-2]["price"])
+                if sym_hh and corr_lh:
+                    smt = "SELL"
+        except Exception:
+            smt = None
+    checks["smt"] = smt
+    earned += 5 if smt == direction else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -179,6 +306,21 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    # v8.13.0 — gap-fill disclosures (only what actually fired)
+    if dol:
+        reasons.append(f"DOL draw target {dol:.5g} (untested swing pool, room {'ok' if checks.get('dol_room') else 'tight'})")
+    if breaker:
+        reasons.append("breaker block: violated opposite OB retested in trade direction")
+    if mitigated:
+        reasons.append("zone mitigated since formation — downgraded honestly")
+    if ote is not None:
+        reasons.append(f"formal OTE depth {ote} (0.618–0.79 band, sweet 0.705)")
+    if stack:
+        reasons.append(f"PD-array stack at entry: {stack} layers")
+    if smt:
+        reasons.append(f"SMT divergence confirmed on the correlated series ({smt})")
+    elif ctx.correlated_candles is None:
+        reasons.append("SMT skipped — no correlated series supplied (honest)")
     return StrategyResult(
         code="ICT", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

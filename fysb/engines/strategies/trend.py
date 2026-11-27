@@ -11,7 +11,7 @@ kill-zone6, volatility4, RR5 (total67). Minimum score58; minimum55 bars.
 Checklist merit is normalized to42..95, NOT a win probability. Callers must
 supply correctly labelled completed candles and enforce issuance/risk policy.
 """
-from fysb.engines.analysis import atr, atr_pct, ema, kill_zone
+from fysb.engines.analysis import adx, atr, atr_pct, ema, kill_zone
 from fysb.engines.strategies.base import (
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
@@ -115,6 +115,32 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 5 if checks["rr_ok"] else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) Wilder ADX(14): true trend-strength arithmetic — >=25 strong, >=20
+    # acceptable, below that the "trend" label earns no strength bonus.
+    adx_val = adx(candles)
+    checks["adx"] = round(adx_val, 1)
+    checks["adx_strong"] = adx_val >= 25.0
+    earned += 4 if adx_val >= 25.0 else (2 if adx_val >= 20.0 else 0)
+
+    # 2) expansion vs compression phase: rank of the current EMA9/21 spread
+    # within its own history — expanding spread = mature trend phase.
+    spread_now = abs(e9 - e21)
+    spreads = []
+    for end in range(30, len(candles) + 1):
+        w = [float(c["close"]) for c in candles[:end]]
+        spreads.append(abs(ema(w, 9) - ema(w, 21)))
+    if spreads:
+        below = sum(1 for s in spreads if s <= spread_now)
+        rank = below / len(spreads)
+        expanding = rank >= 0.6
+    else:
+        expanding = False
+    checks["phase_expanding"] = expanding
+    earned += 3 if expanding else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -129,6 +155,8 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    reasons.append(f"ADX(14)={adx_val:.1f} ({'strong' if adx_val >= 25 else 'acceptable' if adx_val >= 20 else 'weak'} trend strength)")
+    reasons.append("phase: expanding EMA spread" if expanding else "phase: compressed EMA spread")
     return StrategyResult(
         code="TREND", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=rr,

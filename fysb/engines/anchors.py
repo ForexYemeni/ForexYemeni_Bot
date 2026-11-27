@@ -145,3 +145,44 @@ def pivot_confluence(price: float, pivots: dict, tol_atr: float) -> str | None:
     if best_d is not None and best_d <= tol_atr:
         return best_name
     return None
+
+
+def opening_gaps(candles: list[dict], a: float) -> dict:
+    """NWOG / NDOG — opening gaps computed from the candle timeline itself.
+
+    NDOG (New Day Opening Gap): today's first open vs yesterday's last close
+    (UTC dates, requires both sessions present in the series).
+    NWOG (New Week Opening Gap): this ISO week's first open vs the last close
+    of the previous ISO week (requires both weeks present).
+    A gap exists when |open - close| >= 0.3 * ATR. Returns honest empties when
+    the timeline does not cover the boundaries. Pure arithmetic; a gap is a
+    price hole, not a known order cluster.
+    """
+    out = {"ndog": None, "nwog": None}
+    if len(candles) < 10 or a <= 0:
+        return out
+    by_date: dict[str, list[dict]] = {}
+    by_week: dict[str, list[dict]] = {}
+    for c in candles:
+        d = str(c["datetime"])[:10]
+        by_date.setdefault(d, []).append(c)
+        y, m, dd = int(d[:4]), int(d[5:7]), int(d[8:10])
+        iso = datetime(y, m, dd).isocalendar()
+        by_week.setdefault(f"{iso[0]}-W{iso[1]:02d}", []).append(c)
+    dates = sorted(by_date)
+    weeks = sorted(by_week)
+    if len(dates) >= 2:
+        prev_last = by_date[dates[-2]][-1]
+        cur_first = by_date[dates[-1]][0]
+        gap = float(cur_first["open"]) - float(prev_last["close"])
+        if abs(gap) >= 0.3 * a:
+            out["ndog"] = {"level": float(cur_first["open"]), "gap": gap,
+                           "dir": "BUY" if gap > 0 else "SELL", "date": dates[-1]}
+    if len(weeks) >= 2:
+        prev_last = by_week[weeks[-2]][-1]
+        cur_first = by_week[weeks[-1]][0]
+        gap = float(cur_first["open"]) - float(prev_last["close"])
+        if abs(gap) >= 0.3 * a:
+            out["nwog"] = {"level": float(cur_first["open"]), "gap": gap,
+                           "dir": "BUY" if gap > 0 else "SELL", "week": weeks[-1]}
+    return out

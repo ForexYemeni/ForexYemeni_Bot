@@ -129,6 +129,24 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 8 if checks["rr_ok"] else 0
 
+    # ------------------------------------------------------------------
+    # v8.13.0 — gap-fill suite (bonus-only)
+    # ------------------------------------------------------------------
+    # 1) formal OTE naming + sweet spot: the golden pocket IS the OTE band;
+    # the 0.705 center grades higher (graded, never mandatory — the pocket
+    # rule itself is unchanged).
+    ote_sweet = abs(depth - 0.705) <= 0.03
+    checks["ote_depth"] = round(depth, 3)
+    checks["ote_sweet"] = ote_sweet
+    earned += 3 if ote_sweet else 0
+
+    # 2) equilibrium (50%): named discount/premium side of the leg — entry
+    # depth beyond 0.5 is the discount (BUY) / premium (SELL) side, disclosed.
+    eq = 0.5
+    eq_side = "EQ+" if depth >= eq else "EQ-"
+    checks["eq_side"] = eq_side
+    earned += 2 if depth >= eq else 0
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None
@@ -143,6 +161,9 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         f"kill zone: {kz}" if kz else "outside kill zones",
         f"RR(TP1)=1:{rr:.2f}",
     ]
+    if ote_sweet:
+        reasons.append("formal OTE sweet spot 0.705 ±0.03")
+    reasons.append(f"equilibrium side: {eq_side} (depth {depth * 100:.1f}% of the leg)")
     return StrategyResult(
         code="FIBONACCI", direction=direction, entry=entry, stop=stop,
         tp1=tp1, tp2=tp2, tp3=tp3, rr=round(rr, 2),

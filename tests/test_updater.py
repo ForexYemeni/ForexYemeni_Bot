@@ -196,7 +196,12 @@ class TestSelfUpdate(unittest.TestCase):
             shutil.rmtree(dest, ignore_errors=True)
 
     def test_no_release_published(self):
-        with patch.object(updater, "latest_release", return_value=None):
+        # v8.13.4: hermetic — _get_json is patched so the precise-blocker probe
+        # cannot touch the real GitHub API (CI runners have network and share
+        # rate limits; local sandboxes often don't — the old unpatched call made
+        # this test environment-dependent and flaky).
+        with patch.object(updater, "latest_release", return_value=None), \
+             patch.object(updater, "_get_json", side_effect=RuntimeError("offline")):
             res = updater.self_update(dest_root=pathlib.Path("/tmp/_never"))
         self.assertEqual(res["status"], "error")
         self.assertIn("لا يوجد إصدار", res["detail"])

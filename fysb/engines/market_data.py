@@ -55,16 +55,22 @@ MIN_CANDLES = 35
 CALIB_MAX_RATIO = 0.02           # reject absurd calibration offsets (>2%)
 CALIB_MAX_AGE = 48 * 3600        # persisted offset older than this is ignored
 # v8.14.2 — «عقد السعر الحي الصادق»: the $53 chart lie (displayed 3583 vs real
-# 3636) came from three chained holes; each now has a hard clamp:
-PAIR_TOL_RATIO = 0.0025          # spot↔venue pairing: >0.25% (≈$9 gold) is a
-                                 # BROKEN pairing, never learn/apply from it
-                                 # (was ±$120 — anything passed!)
+# 3636) came from three chained holes; each now has a hard clamp.
+# v8.14.3 — ROYAL RECOVERY: the owner-approved redesign. The legit futures
+# premium (~0.3–1.5%) gets a physical corridor instead of the v8.14.2 pairing
+# clamp that made live calibration impossible on production:
+PREMIUM_TOL_RATIO = 0.015        # legit spot↔futures premium corridor (≤1.5%,
+                                 # ≈$55 gold) — learned QUOTE↔QUOTE only
 CALIB_APPLY_MAX_AGE = 6 * 3600   # a persisted offset may be APPLIED only ≤6h old
-CALIB_APPLY_MAX_RATIO = 0.005    # …and only ≤0.5% of price (≈$18 gold cap)
-CROSSCHECK_TOL_RATIO = 0.0015    # venue payload vs LIVE spot quote divergence
-                                 # cap (≈$5.5 gold) — beyond it the payload is
-                                 # POISONED and never reaches charts/signals
-_SPOT_CROSSCHECK_TTL = 120.0     # live-spot crosscheck quote cache (quota-safe)
+CALIB_APPLY_MAX_RATIO = 0.005    # PAXG path cap (token ≈ spot, premium tiny)
+CROSSCHECK_TOL_RATIO = 0.0025    # venue payload vs LIVE spot quote divergence
+                                 # cap component (≈$9 gold)
+CROSSCHECK_FLOOR_USD = 8.0       # …absolute floor component
+CROSSCHECK_ATR_MULT = 2.0        # …×ATR15 volatility component — strict against
+                                 # poisons, fair to real gold motion
+SPOT_CROSSCHECK_TTL = 120.0      # live-spot crosscheck quote cache (quota-safe)
+FXREF_GOLD_DEGRADE_AFTER = 4     # XAUUSD=X repeated failures → skip the leg
+FXREF_GOLD_DEGRADE_SECS = 900.0  # …for 15 minutes (then it is retried)
 
 # Symbol maps (internal normalized symbol -> venue/reference symbol).
 YAHOO_FX_MAP = {
@@ -435,11 +441,72 @@ def _persisted_offset(internal: str, max_age: float = CALIB_MAX_AGE) -> float | 
     return off if math.isfinite(off) else None
 
 
+def _series_atr(values: list[dict], period: int = 14) -> float:
+    """Mean true range of the last `period` candles (simple, dependency-free)."""
+    tail = values[-(period + 1):] if len(values) > period else values
+    trs = []
+    for i, c in enumerate(tail):
+        try:
+            h, l = float(c["high"]), float(c["low"])
+            pc = float(tail[i - 1]["close"]) if i > 0 else float(c["open"])
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return (sum(trs) / len(trs)) if trs else 0.0
+
+
+_fxref_gold_fail: dict[str, tuple[float, int]] = {}
+
+
+def _fxref_gold_degraded(internal: str) -> bool:
+    """v8.14.3 — XAUUSD=X health: repeated yahoo-spot failures skip this leg
+    for a bounded window instead of burning the whole chain's latency on a
+    dead source. Auto-clears after the window (the source is retried)."""
+    rec = _fxref_gold_fail.get(internal)
+    if not rec:
+        return False
+    ts, streak = rec
+    if streak < FXREF_GOLD_DEGRADE_AFTER:
+        return False
+    if time.time() - ts > FXREF_GOLD_DEGRADE_SECS:
+        _fxref_gold_fail.pop(internal, None)
+        return False
+    return True
+
+
+def _fxref_gold_record(internal: str, ok: bool) -> None:
+    if ok:
+        _fxref_gold_fail.pop(internal, None)
+        return
+    ts, streak = _fxref_gold_fail.get(internal, (0.0, 0))
+    _fxref_gold_fail[internal] = (time.time(), streak + 1)
+
+
+def _gold_chain_diagnosis(internal: str) -> str:
+    """v8.14.3 — royal honest diagnosis: WHEN the gold chain dies, the error
+    names WHICH layer died and why — never a vague «تعذر جلب» again.
+    (No provider brand names — the owner's standing card rule.)"""
+    rec = _fxref_gold_fail.get(internal)
+    if rec and rec[1] >= 2:
+        parts = [f"السبوت اللحظي: فشل متكرر ({rec[1]} مرات)"]
+    else:
+        parts = ["السبوت اللحظي: غير متاح الآن"]
+    data = _load_calib().get(internal)
+    if data:
+        age_h = max(0.0, (time.time() - float(data.get("ts") or 0)) / 3600.0)
+        parts.append(f"العقود: آخر معايرة منذ {age_h:.0f} سا")
+    else:
+        parts.append("العقود: بلا معايرة محفوظة")
+    parts.append("المصدر المفتاحي: " + ("فشل أيضاً" if config.has_market_api() else "غير مفعّل"))
+    return ("تعذر جلب بيانات الذهب الآن — " + " · ".join(parts)
+            + " — أعد المحاولة بعد قليل")
+
+
 def _live_spot_price(internal: str) -> float | None:
     """Cached REAL spot reference price (gold-api) for crosschecking venue
     payloads. Best-effort: on any failure returns None (caller decides)."""
     tick = _spot_crosscheck_cache.get(internal)
-    if tick and time.time() - tick["t"] < _SPOT_CROSSCHECK_TTL:
+    if tick and time.time() - tick["t"] < SPOT_CROSSCHECK_TTL:
         return tick["px"]
     spot_ticker = GOLD_API_MAP.get(internal)
     if not spot_ticker:
@@ -711,53 +778,67 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                                 offset = None
                         values = _apply_offset(values, offset or 0.0)
                     else:
-                        # v8.14.2 — three hard clamps (the $53 chart lie is dead):
-                        # ① pairing tolerance 0.25% (was ±$120 — anything passed)
-                        # ② persisted offset applies only ≤6h old and ≤0.5%
-                        # ③ final crosscheck vs the LIVE spot quote (≤0.15%)
-                        #    — a poisoned venue payload never leaves this chain;
-                        #    fx-ref (true spot, first in the chain) serves instead.
+                        # v8.14.3 — QUOTE↔QUOTE calibration (the royal fix):
+                        # the offset is learned from TWO LIVE QUOTES (spot now
+                        # vs futures NOW via the yahoo live quote) — never
+                        # spot-now vs an old candle close. The legit futures
+                        # premium (~0.3–1.5%) lives inside a physical corridor
+                        # instead of the v8.14.2 pairing clamp that made live
+                        # calibration impossible on production ($53 gap).
                         offset_applied = False
                         last_c = float(values[-1]["close"]) if values else 0.0
                         spot_px = None
                         try:
-                            spot_t = GOLD_API_MAP.get(internal)
-                            if spot_t and values:
-                                spot_px = float(_fetch_goldapi_price(spot_t)["price"])
-                        except Exception as s_exc:
-                            log.debug("gold futures spot calibration skipped: %s", s_exc)
-                        if (spot_px and spot_px > 0 and last_c > 0
-                                and abs(spot_px - last_c) <= max(5.0, PAIR_TOL_RATIO * spot_px)):
-                            values = _apply_offset(values, spot_px - last_c)
-                            offset_applied = True
-                            _spot_crosscheck_cache[internal] = {"t": time.time(), "px": float(spot_px)}
+                            spot_px = _live_spot_price(internal)
+                        except Exception:
+                            spot_px = None
+                        if spot_px and spot_px > 0:
+                            fut_now = None
                             try:
-                                _learn_gold_offset(internal, spot_px, last_c)
-                            except Exception:
-                                pass
+                                fq = _fetch_yahoo_quote("GC=F")
+                                fut_now = float(fq.get("price") or 0) or None
+                            except Exception as f_exc:
+                                log.debug("gold futures live quote unavailable: %s", f_exc)
+                            if fut_now and fut_now > 0:
+                                off = float(spot_px) - float(fut_now)
+                                if abs(off) <= PREMIUM_TOL_RATIO * float(fut_now):
+                                    values = _apply_offset(values, off)
+                                    offset_applied = True
+                                    _spot_crosscheck_cache[internal] = {"t": time.time(), "px": float(spot_px)}
+                                    try:
+                                        _learn_gold_offset(internal, float(spot_px), float(fut_now))
+                                    except Exception:
+                                        pass
+                                else:
+                                    log.warning("gold premium corridor violated: spot %s vs futures %s (off %.2f > %.2f) — not learned",
+                                                spot_px, fut_now, off, PREMIUM_TOL_RATIO * float(fut_now))
                         if not offset_applied:
-                            # v8.13.9 fallback, v8.14.2-tightened: the persisted
-                            # offset may rescue the venue path only while FRESH
-                            # (≤6h) and SMALL (≤0.5%) — a drifted offset can no
-                            # longer move the chart tens of dollars. RAW futures
-                            # (no documented offset) are STILL never served (#46).
+                            # v8.13.9 fallback, v8.14.3-corridor: the persisted
+                            # (quote↔quote-learned) offset may rescue only while
+                            # FRESH (≤6h) and INSIDE the physical premium
+                            # corridor (≤1.5%). RAW futures (no documented
+                            # offset) are STILL never served (#46).
                             off = _persisted_offset(internal, max_age=CALIB_APPLY_MAX_AGE)
-                            if off and last_c and abs(off) <= CALIB_APPLY_MAX_RATIO * abs(last_c):
+                            if off and last_c and abs(off) <= PREMIUM_TOL_RATIO * abs(last_c):
                                 values = _apply_offset(values, off)
                                 offset_applied = True
                             else:
                                 raise RuntimeError("unoffsetted-futures")
-                    # v8.14.2 LIVE CROSSCHECK (kill switch, both sub-paths): the
-                    # assembled venue payload's last close must sit within
-                    # tolerance of the REAL live spot quote, or the whole payload
-                    # is refused and the chain falls through to true spot.
+                    # v8.14.3 VOLATILITY-AWARE LIVE CROSSCHECK (kill switch,
+                    # both sub-paths): the assembled payload's last close must
+                    # sit within max($8, 0.25% spot, 2×ATR15) of the REAL live
+                    # spot quote — strict against poisons, fair to real gold
+                    # motion; a diverged payload never leaves this chain and
+                    # fx-ref (true spot, first) serves instead.
                     spot_now = None
                     try:
                         spot_now = _live_spot_price(internal)
                     except Exception:
                         spot_now = None
                     if spot_now and values:
-                        tol = max(5.0, CROSSCHECK_TOL_RATIO * float(spot_now))
+                        tol = max(CROSSCHECK_FLOOR_USD,
+                                  CROSSCHECK_TOL_RATIO * float(spot_now),
+                                  CROSSCHECK_ATR_MULT * _series_atr(values))
                         if abs(float(values[-1]["close"]) - float(spot_now)) > tol:
                             log.warning("venue-gold payload refused: close %s diverges from live spot %s (tol %.2f)",
                                         values[-1]["close"], spot_now, tol)
@@ -766,7 +847,19 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     ysym = _yahoo_symbol_for(internal)
                     if not ysym:
                         continue
-                    values = _fetch_yahoo_candles(ysym, interval, outputsize)
+                    # v8.14.3 — XAUUSD=X degradation guard: repeated failures
+                    # skip this leg for 15 min instead of burning the chain's
+                    # latency on a dead source (auto-retried after the window).
+                    if internal == "XAUUSD" and _fxref_gold_degraded(internal):
+                        raise RuntimeError("fx-ref gold degraded (repeated failures)")
+                    try:
+                        values = _fetch_yahoo_candles(ysym, interval, outputsize)
+                    except Exception:
+                        if internal == "XAUUSD":
+                            _fxref_gold_record(internal, False)
+                        raise
+                    if internal == "XAUUSD":
+                        _fxref_gold_record(internal, True)
                 elif provider == "binance":
                     if not venue:
                         continue
@@ -830,9 +923,14 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
         _feed_freeze_note(cache_key, stale_fallback)
         return stale_fallback
 
+    if internal == "XAUUSD":
+        # v8.14.3 — the royal honest diagnosis: WHICH layer died, by name-less
+        # layer (spot / calibrated futures / keyed) — never a vague «تعذر جلب».
+        # MUST precede the FOREX_ONLY branch (XAUUSD joined YAHOO_FX_MAP in
+        # v8.14.0 and would otherwise swallow the diagnosis).
+        raise RuntimeError(_gold_chain_diagnosis(internal))
     if internal in FOREX_ONLY and not config.has_market_api():
         raise RuntimeError("تعذر جلب شموع الفوركس من المرجع اللحظي — أعد المحاولة بعد قليل")
-
     raise RuntimeError("تعذر جلب بيانات لحظية لهذه الأداة الآن — أعد المحاولة بعد قليل")
 
 

@@ -23,7 +23,9 @@ def test_diagnose_no_signal_covers_all_institutional_shields():
     assert ic4 == "⚖️"
 
     ic5, title5, *_ = diagnose_no_signal("ERROR", "السوق مغلق حالياً")
-    assert ic5 == "🌙"
+    # v8.14.7 — honest technical refusal: an ERROR with an unverifiable text
+    # shows the reason verbatim instead of the old possibilities template
+    assert ic5 == "⚙️" and "تعذر إتمام" in title5
 
     ic6, title6, *_ = diagnose_no_signal("NO_SETUP", "")
     assert ic6 == "👑"

@@ -220,7 +220,7 @@ def test_silence_card_contains_real_reasons_and_gates(isolated):
 
 def test_arabic_translation_layer():
     from fysb.theme import ar_result, ar_reason, ar_run_line
-    assert "السوق مغلق الآن" in ar_result("MARKET_CLOSED")
+    assert "مغلق فعلاً 100%" in ar_result("MARKET_CLOSED")  # v8.14.7 royal closure truth
     assert "السوق مغلق" in ar_reason("market closed")
     assert "أسعار غير حية" in ar_reason("data stale (age 942min)")  # v8.14.6: no counters
     assert "لا فرصة مؤهلة" in ar_reason("no qualifying setup")
@@ -228,7 +228,7 @@ def test_arabic_translation_layer():
     assert ar_reason("جودة أقل من الحد المؤسسي (68 < 72)") == "جودة أقل من الحد المؤسسي (68 < 72)"
     # engine_runs line: Arabic detail shows, raw English leftovers never appear:
     line = ar_run_line("MARKET_CLOSED", "session calendar says market is closed; no signal manufactured")
-    assert "session calendar" not in line and "السوق مغلق الآن" in line
+    assert "session calendar" not in line and "مغلق فعلاً 100%" in line
     line2 = ar_run_line("STALE_DATA", "last candle 2026-11-27T01:00:00 age=942s")
     assert "last candle" not in line2 and "بيانات أقدم من الحد المسموح" in line2
 
@@ -272,7 +272,7 @@ def test_diagnostics_subpages_paged_and_arabic(isolated, monkeypatch):
     asyncio.run(admin_trading.admin_engine_diag_markets(q, 9001, None, None, 0))
     body = q.message.sent[-1]
     assert "XAUUSD" in body and "GBPUSD" in body
-    assert "السوق مغلق الآن" in body and "بيانات أقدم من الحد المسموح" in body
+    assert "مغلق فعلاً 100%" in body and "بيانات أقدم من الحد المسموح" in body  # v8.14.7
     assert "session calendar" not in body and "last candle" not in body
     # engine_runs journal page:
     from fysb.engines.signal_engine import _log_run
@@ -280,7 +280,7 @@ def test_diagnostics_subpages_paged_and_arabic(isolated, monkeypatch):
     q2 = _FakeQuery()
     asyncio.run(admin_trading.admin_engine_diag_runs(q2, 9001, None, None, 0))
     body2 = q2.message.sent[-1]
-    assert "XAUUSD" in body2 and "السوق مغلق الآن" in body2
+    assert "XAUUSD" in body2 and "مغلق فعلاً 100%" in body2  # v8.14.7 royal truth
     assert "session calendar" not in body2
 
 

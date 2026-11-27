@@ -490,18 +490,39 @@ def _fxref_gold_record(internal: str, ok: bool) -> None:
 
 
 def _gold_market_closed() -> bool:
-    """v8.14.4 — XAU spot weekly closure (approx: Fri ≥21:00 … Sun <22:00 UTC).
-    Yahoo raising while the market is CLOSED is expected, not a provider
-    failure — it must never feed the degradation streak."""
+    """v8.14.7 — ONE clock only: the royal DST session calendar is the sole
+    truth. The degrade-streak fairness (v8.14.4) freezes exactly when the
+    calendar says the market is closed — a second fixed clock (Fri >=21h,
+    Sun <22h UTC) can drift an hour away from the NY-anchored gate in winter
+    and disagree with the very gate the user sees. Never again."""
+    return market_state("metal") is False
+
+
+def _pre_close_window() -> bool:
+    """v8.14.7 — the Friday provider-death hour BEFORE the official close:
+    the market is still technically open but liquidity is dying and the free
+    feeds die first. When the chain dies here, the card must name BOTH truths
+    — the feed stopped AND the official close is minutes away — never pretend
+    the market is already closed, never hide the coming closure."""
     now = datetime.now(timezone.utc)
-    wd = now.weekday()
-    return (wd == 4 and now.hour >= 21) or wd == 5 or (wd == 6 and now.hour < 22)
+    if now.weekday() != 4 or market_state("metal") is not True:
+        return False
+    off = 4 if _us_dst_active(now) else 5
+    close = now.replace(hour=17 + off, minute=0, second=0, microsecond=0)
+    return now >= close - timedelta(minutes=60)
 
 
 def _gold_chain_diagnosis(internal: str) -> str:
     """v8.14.3 — royal honest diagnosis: WHEN the gold chain dies, the error
     names WHICH layer died and why — never a vague «تعذر جلب» again.
-    (No provider brand names — the owner's standing card rule.)"""
+    (No provider brand names — the owner's standing card rule.)
+    v8.14.7 — in the Friday pre-close window the message names BOTH truths:
+    the feed stopped AND the official closure is minutes away — with the real
+    Sunday 18:00 New York reopen anchor, never «أعد المحاولة بعد قليل»."""
+    if _pre_close_window():
+        return ("تعذر جلب بيانات الذهب الآن — التغذية توقفت والسوق يقفل رسمياً بعد دقائق "
+                "(الإغلاق الرسمي 17:00 بتوقيت نيويورك) — لا إشارات حتى عودة الأحد "
+                "18:00 بتوقيت نيويورك")
     rec = _fxref_gold_fail.get(internal)
     if rec and rec[1] >= 2:
         parts = [f"السبوت اللحظي: فشل متكرر ({rec[1]} مرات)"]
@@ -1307,6 +1328,28 @@ def market_state(category: str) -> bool | None:
             return False
         return True
     return None
+
+
+def market_closed_reason() -> str:
+    """v8.14.7 — the royal 100% closure truth (owner decree): when the session
+    calendar says closed, the reason says CLOSED 100% with the REAL reopen
+    anchor (Sunday 18:00 New York, DST-correct at the reopen date — the
+    weekend can straddle a DST change), never «أعد المحاولة بعد قليل».
+    Arabic by construction — reasons are Arabic on every surface."""
+    now = datetime.now(timezone.utc)
+    days_to_sunday = (6 - now.weekday()) % 7
+    sun = (now + timedelta(days=days_to_sunday)).date()
+    probe = datetime(sun.year, sun.month, sun.day, 12, tzinfo=timezone.utc)
+    roff = 4 if _us_dst_active(probe) else 5
+    reopen_utc = datetime(sun.year, sun.month, sun.day, 18 + roff,
+                          tzinfo=timezone.utc)
+    if days_to_sunday == 0:
+        return ("🔒 السوق مغلق فعلاً 100% وفق تقويم الجلسات — يعود اليوم الأحد 18:00 "
+                f"بتوقيت نيويورك ({reopen_utc:%H:%M} UTC) — لا إشارات تُصنَّع على سوق مغلق؛ "
+                "السلامة أولاً دائماً")
+    return ("🔒 السوق مغلق فعلاً 100% وفق تقويم الجلسات — أُغلق الجمعة 17:00 بتوقيت نيويورك "
+            f"ويعود الأحد 18:00 بتوقيت نيويورك ({reopen_utc:%H:%M} UTC) — لا إشارات تُصنَّع "
+            "على سوق مغلق؛ السلامة أولاً دائماً")
 
 
 def provider_status() -> dict:

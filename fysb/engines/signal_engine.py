@@ -198,8 +198,10 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
             _ps, _pe = market_data.settlement_pause_utc()
             _reason = f"settlement pause {_ps:%H:%M}-{_pe:%H:%M} UTC"
         else:
-            _reason = "market closed"
-        _log_run(symbol, entry_tf, "MARKET_CLOSED", _reason + "; no signal manufactured")
+            # v8.14.7 — the royal 100% closure truth with the REAL reopen
+            # anchor (NY-anchored, DST-correct) — never a bare «market closed».
+            _reason = market_data.market_closed_reason()
+        _log_run(symbol, entry_tf, "MARKET_CLOSED", _reason + "؛ لا إشارة مصنوعة")
         return {"status": "REJECTED", "signal_id": None, "reason": _reason, "score": None}
 
     if db.kill_switch_on():

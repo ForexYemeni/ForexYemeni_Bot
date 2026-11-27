@@ -22,7 +22,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -38,9 +38,11 @@ def _mid(candles: list[dict], period: int) -> float:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < SENKOU_B_P + DISPLACEMENT + 5:
+        diagnosis_refuse("ICHIMOKU", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("ICHIMOKU", "التقلب غير قابل للقياس الآن")
         return None
     close = float(candles[-1]["close"])
 
@@ -49,6 +51,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     # the cloud the CURRENT candle trades in = values displaced 26 bars back
     past = candles[:-(DISPLACEMENT)]
     if len(past) < SENKOU_B_P:
+        diagnosis_refuse("ICHIMOKU", "تاريخ الشموع المزاح أقصر من حد السحابة المؤسسية")
         return None
     senkou_a = (_mid(past, TENKAN_P) + _mid(past, KIJUN_P)) / 2.0
     senkou_b = _mid(past, SENKOU_B_P)
@@ -66,6 +69,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     elif close < cloud_bot:
         direction = "SELL"
     else:
+        diagnosis_refuse("ICHIMOKU", "السعر داخل السحابة (منطقة لا قرار)")
         return None
     checks["cloud"] = True
     earned += 14
@@ -73,6 +77,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     tk_aligned = (tenkan > kijun) if direction == "BUY" else (tenkan < kijun)
     checks["tk"] = tk_aligned
     if not tk_aligned:
+        diagnosis_refuse("ICHIMOKU", "تقاطع Tenkan/Kijun عكس الاتجاه المطلوب")
         return None
     earned += 10
     fresh = False
@@ -135,6 +140,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     fut_bullish = fut_a > fut_b
     checks["future_cloud"] = (direction == "BUY" and fut_bullish) or (direction == "SELL" and not fut_bullish)
     if not checks["future_cloud"]:
+        diagnosis_refuse("ICHIMOKU", "السحابة المستقبلية عكس الاتجاه")
         return None
     earned += 8
 
@@ -142,6 +148,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     chikou_ok = (close > ref_26) if direction == "BUY" else (close < ref_26)
     checks["chikou"] = chikou_ok
     if not chikou_ok:
+        diagnosis_refuse("ICHIMOKU", "تأكيد Chikou غير متوفر")
         return None
     earned += 8
 
@@ -150,6 +157,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     bias_ok = (bias_close > bias_kijun) if direction == "BUY" else (bias_close < bias_kijun)
     checks["htf_bias"] = bias_ok
     if not bias_ok:
+        diagnosis_refuse("ICHIMOKU", "اتجاه الفريم الأعلى يعاكس النموذج")
         return None
     earned += 8
 
@@ -166,6 +174,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("ICHIMOKU", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

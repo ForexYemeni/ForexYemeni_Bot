@@ -89,7 +89,8 @@ def test_stale_fallback_carries_chain_verdict_for_admin_surfaces():
     stale = _candles_15min(120, end)
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
          patch.object(md, "_fetch_td_candles", return_value=stale), \
-         patch.object(md.provider_health, "is_open", return_value=False):
+         patch.object(md.provider_health, "is_open", return_value=False), \
+         patch.object(md, "settlement_frozen_seconds", return_value=0.0):  # v8.14.8: mechanics test — fairness has its own suite
         md._fail_streak.clear()
         payload = md.fetch_candles("XAUUSD", "15min", "k", use_cache=False)
         assert md.is_stale(payload)

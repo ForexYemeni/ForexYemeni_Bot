@@ -31,7 +31,11 @@ def _clean_state():
     md._FEED_SNAPSHOTS.clear()
     md._fail_streak.clear()
     md._cache.clear()
+    # v8.14.8: fairness layer pinned — mechanics tests (see v8145 suite)
+    _fair = patch.object(md, "settlement_frozen_seconds", return_value=0.0)
+    _fair.start()
     yield
+    _fair.stop()
     md._FEED_SNAPSHOTS.clear()
     md._fail_streak.clear()
 

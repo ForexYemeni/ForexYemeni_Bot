@@ -17,7 +17,7 @@ from fysb.engines.analysis import (
     atr, atr_pct, fair_value_gaps, kill_zone, session_levels, structure_labels,
 )
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -28,6 +28,7 @@ OPEN_WINDOW = 8          # fallback candles forming the accumulation range
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("AMD", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
 
     # v8.0.0 (SIG-6): Prefer true Asian Session Accumulation (00:00–06:00 UTC)
@@ -44,6 +45,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         lo = min(c["low"] for c in acc)
         scan_bars = window[OPEN_WINDOW:]
     if hi <= lo:
+        diagnosis_refuse("AMD", "النطاق المرجعي مسطح بلا مدى")
         return None
 
     manip_side, manip_level = "", 0.0
@@ -77,6 +79,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
                     manip_candle = c
                     break
     if not manip_side:
+        diagnosis_refuse("AMD", "لا جرف تلاعب واضح داخل النافذة")
         return None
 
     direction = "SELL" if manip_side == "high" else "BUY"
@@ -88,9 +91,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("AMD", "التقلب غير قابل للقياس الآن")
         return None
     if direction == "BUY":
         if close < manip_level:
+            diagnosis_refuse("AMD", "السعر لم يعد إلى جهة الجرف المطلوبة")
             return None
         raw_entry = close if close < hi else (hi - 0.25 * a)
         entry = min(raw_entry, close)
@@ -98,6 +103,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         raw_tp1, raw_tp2, raw_tp3 = hi + (hi - lo) * 0.5, hi + (hi - lo), hi + (hi - lo) * 1.5
     else:
         if close > manip_level:
+            diagnosis_refuse("AMD", "السعر لم يعد إلى جهة الجرف المطلوبة")
             return None
         raw_entry = close if close > lo else (lo + 0.25 * a)
         entry = max(raw_entry, close)
@@ -105,6 +111,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         raw_tp1, raw_tp2, raw_tp3 = lo - (hi - lo) * 0.5, lo - (hi - lo), lo - (hi - lo) * 1.5
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("AMD", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(entry, stop, raw_tp1, raw_tp2, raw_tp3, direction)
 

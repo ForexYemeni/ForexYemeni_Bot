@@ -18,7 +18,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, breakout_retest, candle_patterns, ema, rsi, support_resistance
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -104,6 +104,7 @@ def _nearest_psych_level(price: float, a: float) -> float | None:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("PRICE_ACTION", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     close = candles[-1]["close"]
     patterns = candle_patterns(candles)
@@ -117,6 +118,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("PRICE_ACTION", "التقلب غير قابل للقياس الآن")
         return None
 
     direction = ""
@@ -138,12 +140,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     elif (fb := _failed_breakout(candles)) and fb:
         direction, trigger = fb, "failed_breakout"
     if not direction:
+        diagnosis_refuse("PRICE_ACTION", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     # v6.20.6: require directional candle conviction (reject tiny indecision dojis)
     last_bar = candles[-1]
     body = abs(float(last_bar["close"]) - float(last_bar["open"]))
     if body < 0.25 * a:
+        diagnosis_refuse("PRICE_ACTION", "تأكيد الإغلاق ضعيف البنية")
         return None
     entry = close
     raw_stop = (min(c["low"] for c in candles[-6:]) - 0.85 * a) if direction == "BUY" else (max(c["high"] for c in candles[-6:]) + 0.85 * a)
@@ -151,6 +155,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("PRICE_ACTION", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,
@@ -205,6 +210,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     earned += 6 if psych_hit else 0
 
     if not checks["htf_bias"] and not (checks["sr_confluence"] or checks["breakout_retest"] or trigger == "failed_breakout"):
+        diagnosis_refuse("PRICE_ACTION", "لا توافق هيكلي (فريم أعلى/فجوة/إعادة اختبار)")
         return None
     score = normalized_score(earned, max_pts)
     if score < 64:

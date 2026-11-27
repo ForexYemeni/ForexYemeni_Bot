@@ -34,12 +34,14 @@ class ConfigSurfaceTests(unittest.TestCase):
         self.assertIsNone(md._class_of("UNKNOWNPAIR"))
 
     def test_default_chains_preserve_failover(self):
+        # v8.14.8: the venue-independent Yahoo rescue layer sits third —
+        # crypto candles survive even when BOTH venues are blocked/unreachable
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "", True),
-            ["binance", "bybit", "twelvedata"])
+            ["binance", "bybit", "yahoo-crypto", "twelvedata"])
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "", False),
-            ["binance", "bybit"])
+            ["binance", "bybit", "yahoo-crypto"])
         # v8.14.1: fx-ref (XAUUSD=X true spot) FIRST in the gold candle chain
         self.assertEqual(md._ordered_chain(md._CANDLE_CHAINS["gold"], "", False),
                          ["fx-ref", "venue-gold"])
@@ -53,10 +55,10 @@ class PreferredProviderTests(unittest.TestCase):
     def test_preference_moves_provider_first(self):
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "BYBIT", False),
-            ["bybit", "binance"])
+            ["bybit", "binance", "yahoo-crypto"])
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "BINANCE", True),
-            ["binance", "bybit", "twelvedata"])
+            ["binance", "bybit", "yahoo-crypto", "twelvedata"])
 
     def test_alias_resolution(self):
         self.assertEqual(
@@ -72,7 +74,7 @@ class PreferredProviderTests(unittest.TestCase):
     def test_unknown_value_is_ignored(self):
         self.assertEqual(
             md._ordered_chain(md._CANDLE_CHAINS["crypto"], "NOT_A_PROVIDER", False),
-            ["binance", "bybit"])
+            ["binance", "bybit", "yahoo-crypto"])
 
     def test_goldapi_never_serves_candles(self):
         # Honest rule: the spot reference has no candles anywhere.

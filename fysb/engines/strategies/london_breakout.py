@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from fysb.engines.analysis import atr, atr_pct, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -38,11 +38,13 @@ def _ldn_parts(dt_iso: str):
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 30:
+        diagnosis_refuse("LONDON_BREAKOUT", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     last = candles[-1]
     ldn_last = _ldn_parts(last["datetime"])
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("LONDON_BREAKOUT", "التقلب غير قابل للقياس الآن")
         return None
 
     # Opening range: 08:00–09:59 London of TODAY (at least 2 candles present).
@@ -50,15 +52,18 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
            if _ldn_parts(c["datetime"]).date() == ldn_last.date()
            and 8 <= _ldn_parts(c["datetime"]).hour < 10]
     if len(rng) < 2:
+        diagnosis_refuse("LONDON_BREAKOUT", "شموع نافذة لندن غير كافية للنموذج")
         return None
     hi = max(float(c["high"]) for c in rng)
     lo = min(float(c["low"]) for c in rng)
     width = hi - lo
     if width <= 0 or width > 3.0 * a:
+        diagnosis_refuse("LONDON_BREAKOUT", "نطاق لندن غير صالح للنموذج")
         return None            # degenerate or absurdly wide range — no trade
 
     hour = ldn_last.hour
     if not (10 <= hour < 15):
+        diagnosis_refuse("LONDON_BREAKOUT", "خارج نافذة كسر لندن الزمنية")
         return None            # signal window: after the range, before NY PM fade
 
     close = float(last["close"])
@@ -70,9 +75,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     elif close < lo - 0.1 * a and float(prev["close"]) >= lo and float(last["high"]) <= hi + 1e-9:
         direction, fresh = "SELL", True
     if not direction:
+        diagnosis_refuse("LONDON_BREAKOUT", "لا اتجاه مؤسسي واضح للنموذج")
         return None
     body = abs(close - float(last["open"]))
     if body < 0.25 * a:
+        diagnosis_refuse("LONDON_BREAKOUT", "تأكيد الإغلاق ضعيف البنية")
         return None            # no conviction — a wicky break is a trap, not a break
 
     entry = close
@@ -83,6 +90,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=1.0, fallback_atr=1.8, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("LONDON_BREAKOUT", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     # Measured projection of the opening range first, floors applied separately:
     if direction == "BUY":

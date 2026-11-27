@@ -22,7 +22,7 @@ v8.12.0 full-school extensions (all mechanical, none subjective):
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -158,9 +158,11 @@ def _real_volume(candles: list[dict]) -> bool:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < RANGE_WINDOW + 14:
+        diagnosis_refuse("WYCKOFF", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("WYCKOFF", "التقلب غير قابل للقياس الآن")
         return None
     event = candles[-1]
     window = candles[-(RANGE_WINDOW + 1):-1]
@@ -172,6 +174,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     mid = (range_high + range_low) / 2.0
     height = range_high - range_low
     if height <= 0:
+        diagnosis_refuse("WYCKOFF", "النطاق المرجعي مسطح بلا مدى")
         return None
 
     checks: dict = {}
@@ -182,6 +185,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     width_ok = (range_high - range_low) <= RANGE_MAX_ATR * a
     checks["range_ok"] = width_ok
     if not width_ok:
+        diagnosis_refuse("WYCKOFF", "النطاق أعرض من حد النموذج (تقلب مفرط)")
         return None
     earned += 10
     reasons.append(f"range {range_low:.5g}–{range_high:.5g} (width {(range_high - range_low) / a:.2f} ATR)")
@@ -189,21 +193,25 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     alts = _alternations([float(c["close"]) for c in window], mid)
     checks["alternations"] = alts
     if alts < MIN_ALTERNATIONS:
+        diagnosis_refuse("WYCKOFF", "تناوب المحاور أقل من حد النموذج")
         return None
     earned += 8
 
     inside_prev = range_low <= float(prev["close"]) <= range_high
     checks["range_intact_before"] = inside_prev
     if not inside_prev:
+        diagnosis_refuse("WYCKOFF", "النطاق السابق مكسور قبل الحدث")
         return None
 
     lo = float(event["low"])
     hi = float(event["high"])
     # A close outside the opposite boundary is a breakout, not a range reclaim.
     if not range_low < close < range_high:
+        diagnosis_refuse("WYCKOFF", "الإغلاق خارج النطاق المرجعي")
         return None
     # An outside bar sweeping BOTH boundaries has no unambiguous event side.
     if lo < range_low and hi > range_high:
+        diagnosis_refuse("WYCKOFF", "جرف من الطرفين — لا جهة مؤكدة")
         return None
     if lo < range_low and close > range_low:
         direction = "BUY"
@@ -226,6 +234,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         else:
             chosen = None
         if not chosen:
+            diagnosis_refuse("WYCKOFF", "لا حدث ربيع/اندفاع معاكس مؤكد")
             return None
         lps, direction = chosen
         # adopt the clean pre-event range for the remainder of the evaluation
@@ -234,6 +243,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         height = range_high - range_low
         mid = (range_high + range_low) / 2.0
         if height <= 0 or height > RANGE_MAX_ATR * a:
+            diagnosis_refuse("WYCKOFF", "نطاق الحدث غير صالح للنموذج")
             return None
         checks["range_ok"] = True
         reasons.append(f"clean pre-event range {range_low:.5g}–{range_high:.5g} (width {height / a:.2f} ATR)")
@@ -263,6 +273,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         surge = float(surge_bar.get("volume") or 0) >= VOLUME_SURGE * avg_v
         checks["volume_surge"] = surge
         if not surge:
+            diagnosis_refuse("WYCKOFF", "دفعة الحجم أضعف من حد النموذج")
             return None
         earned += 8
         reasons.append(f"event volume {float(surge_bar.get('volume') or 0):.0f} >= {VOLUME_SURGE:g}× window average {avg_v:.0f}")
@@ -319,6 +330,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("WYCKOFF", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     min_step = max(0.5 * risk, 1e-6)

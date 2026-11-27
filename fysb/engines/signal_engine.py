@@ -23,7 +23,8 @@ from fysb.config import log
 from fysb.engines import market_data
 from fysb.engines.analysis import atr, atr_pct, confirmed_candles, structure_labels
 from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
-from fysb.engines.strategies import consensus_filter, diagnosis_snapshot, evaluate_all
+from fysb.engines.strategies import (consensus_filter, diagnosis_begin,
+                                     diagnosis_snapshot, evaluate_all)
 from fysb.engines.strategies.base import Ctx
 from fysb.engines import risk
 from fysb import instruments
@@ -166,8 +167,15 @@ def _no_setup_reason_ar(allowed: list[str], diag: list[dict]) -> str:
         return (f"🔍 فحصنا المنهجيات المفعّلة ({names}) — لم يكتمل أي نموذج مؤسسي 100% حالياً؛ "
                 "فور اكتمال شروط أي منهجية تُولَّد الإشارة فوراً وبكل حقيقة")
     d = diag[0]
-    missing = "، ".join(d["missing"][:3]) or "شرط اعتماد نهائي من شروط المنهجية"
     others = f" · و{len(diag) - 1} منهجيات أخرى أُخذت في الحسبان" if len(diag) > 1 else ""
+    # v8.14.8 — pre-gate withdrawal: the strategy stopped at a structural
+    # precondition before its merit gate — name the gate exactly, show NO
+    # completion percent (there is no merit ledger to quote honestly)
+    if d.get("pre"):
+        return (f"🔍 فحصنا المنهجيات المفعّلة ({names}) — انسحبت {d['code']} عند شرطها "
+                f"التمهيدي: {d['missing'][0]}{others}؛ فور اكتمال الشروط تُولَّد الإشارة "
+                "فوراً وبكل حقيقة")
+    missing = "، ".join(d["missing"][:3]) or "شرط اعتماد نهائي من شروط المنهجية"
     return (f"🔍 فحصنا المنهجيات المفعّلة ({names}) — الأقرب للاكتمال: {d['code']} "
             f"(اكتمال شروط {d['proximity']}%) — الناقص: {missing}{others}؛ "
             "فور اكتمال الشروط تُولَّد الإشارة فوراً وبكل حقيقة")
@@ -227,6 +235,9 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
             return {"status": "REJECTED", "signal_id": None, "reason": "news status unknown", "score": None}
 
     # 1-2: entry data + validation
+    # v8.14.8 — a fresh refusal ledger per cycle: the previous cycle's (or
+    # another caller's) diagnoses must never leak into this verdict.
+    diagnosis_begin()
     try:
         payload = market_data.fetch_candles(provider_symbol, market_data.parse_interval(entry_tf), api_key)
     except RuntimeError as e:
@@ -249,6 +260,17 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                        f"age {int(payload['age_seconds'])//60}min)")
         else:
             _reason = f"data stale (age {int(payload['age_seconds'])//60}min)"
+        # v8.14.8 — the USER-facing reason is the royal 100% truth (Arabic by
+        # construction, zero counters): the feed did not meet the honesty
+        # limit, so by the no-repaint law NO institutional examination ever
+        # ran — the chosen methodology (named) was NOT examined. The admin
+        # English verdict above stays in engine_runs for the owner alone.
+        _chosen = "، ".join(list(dict.fromkeys(only_strategies or []))[:2])
+        _not_examined = (f"المنهجية المختارة ({_chosen}) لم تُفحص بعد — "
+                         if _chosen else "المنهجيات المفعّلة لم تُفحص بعد — ")
+        _reason = (f"📡 تغذية بيانات السوق لا تبلغ حد الصدق الآن — لا فحص مؤسسي ولا "
+                   f"إشارة من شموع جامدة (قانون عدم إعادة الرسم) — {_not_examined}"
+                   "فور عودة تغذية صالحة يبدأ الفحص تلقائياً ويعود بالسبب الحقيقي 100%")
         return {"status": "REJECTED", "signal_id": None,
                 "reason": _reason, "score": None}
 

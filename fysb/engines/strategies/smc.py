@@ -12,7 +12,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, equal_extremes, structure_labels, swings, support_resistance
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -21,6 +21,7 @@ from fysb.engines.strategies.base import (
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("SMC", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     close = candles[-1]["close"]
     struct = structure_labels(candles)
@@ -51,6 +52,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         else:
             direction = "BUY" if close >= float(candles[-1]["open"]) else "SELL"
     if not direction:
+        diagnosis_refuse("SMC", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     # --- Demand / Supply zone from the last INTACT opposite swing (v6.20.0) --
@@ -58,6 +60,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     highs, lows = swings(candles, 3)
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("SMC", "التقلب غير قابل للقياس الآن")
         return None
     zone = None
     if direction == "BUY" and lows:
@@ -66,6 +69,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
                 zone = (base["price"], base["price"] + 1.2 * a)
                 break
         if zone is None:
+            diagnosis_refuse("SMC", "لا منطقة عرض/طلب سليمة للنموذج")
             return None  # All demand zones violated — structure is broken
         entry = min(zone[1], close)
     elif direction == "SELL" and highs:
@@ -74,6 +78,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
                 zone = (base["price"] - 1.2 * a, base["price"])
                 break
         if zone is None:
+            diagnosis_refuse("SMC", "لا منطقة عرض/طلب سليمة للنموذج")
             return None  # All supply zones violated — structure is broken
         entry = max(zone[0], close)
     else:
@@ -88,6 +93,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("SMC", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

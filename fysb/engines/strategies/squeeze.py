@@ -21,7 +21,7 @@ Score is checklist merit normalized to 42..95 — NOT a win probability.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, rsi, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -104,9 +104,11 @@ def _at_historical_minimum(closes_at: list[float]) -> bool:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 60:
+        diagnosis_refuse("SQUEEZE", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles, 14)
     if a <= 0:
+        diagnosis_refuse("SQUEEZE", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
@@ -117,6 +119,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     base = candles[:-1]
     closes_base = [float(c["close"]) for c in base]
     if len(closes_base) < BB_N + 10:
+        diagnosis_refuse("SQUEEZE", "تاريخ الشموع أقصر من حد انضغاط النموذج")
         return None
     bw_rank = _bandwidth_rank(closes_base)
     at_min = _at_historical_minimum(closes_base)
@@ -125,6 +128,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     kc_up, kc_lo = _keltner(base, a)
     ttm_inside = bb_up <= kc_up and bb_lo >= kc_lo
     if not (sq_quiet and ttm_inside):
+        diagnosis_refuse("SQUEEZE", "لا انضغاط سكوينزي مؤكد قبل التمدد")
         return None                   # no squeeze — nothing to break out of
 
     direction = ""
@@ -133,9 +137,11 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     elif close < bb_lo and close < opens:
         direction = "SELL"
     if not direction:
+        diagnosis_refuse("SQUEEZE", "لا اتجاه مؤسسي واضح للنموذج")
         return None
     body = abs(close - opens)
     if body < 0.3 * a:
+        diagnosis_refuse("SQUEEZE", "تأكيد الانفجار ضعيف البنية")
         return None                   # a wicky exit is not a fire
 
     entry = close
@@ -143,6 +149,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=1.0, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("SQUEEZE", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

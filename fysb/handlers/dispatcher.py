@@ -607,6 +607,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_kill_switch(q, uid, context, bot)
     elif act == "volfilter":
         await admin_trading.admin_vol_filter(q, uid, context, bot)
+    elif act == "eodclosenow":
+        await admin_trading.admin_eod_close_now(q, uid, context, bot)
     elif act == "markets":
         await admin_trading.admin_markets(q, uid, context, bot)
     elif act == "mktcat":

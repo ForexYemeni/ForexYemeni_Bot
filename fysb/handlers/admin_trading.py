@@ -1931,6 +1931,42 @@ async def admin_mode_set(q, uid, context, bot, code: str):
 
 
 # --- Risk management -------------------------------------------------------------
+def risk_board_text() -> str:
+    """v8.13.7 — the risk engine board, rebuilt daily (sync — runs via afn.run
+    from both the admin callback and the EOD renewal in the tracker loop)."""
+    ks = db.kill_switch_on()
+    vf = db.get_setting("volatility_filter", "1")
+    eod_t = db.get_setting("eod_close_utc", "21:30")
+    eod_on = db.get_setting("eod_close_enabled", "1") == "1"
+    last = db.get_setting("eod_last_close_date", "—")
+    keys = [
+        ("risk_per_signal_pct", "المخاطرة لكل إشارة"),
+        ("max_daily_risk_pct", "أقصى مخاطرة يومية"),
+        ("max_daily_loss_pct", "أقصى خسارة يومية"),
+        ("max_open_per_symbol", "أقصى إشارات مفتوحة لكل سوق"),
+        ("max_open_signals", "أقصى إشارات مفتوحة (الكلي)"),
+        ("max_correlated_signals", "أقصى صفقات مترابطة بنفس الاتجاه"),
+        ("min_rr", "أدنى عائد/مخاطرة"),
+        ("atr_pct_max", "أقصى تقلب ATR%"),
+    ]
+    lines = ["🛡 <b>محرك إدارة المخاطر</b>",
+             f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
+             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>",
+             f"🌙 إغلاق يوم التداول اليومي: <b>{'مفعل ' + eod_t + ' UTC' if eod_on else 'متوقف'}</b>"
+             f" · آخر إغلاق: <b>{last}</b>",
+             "<blockquote>▎💡 <b>مفتاح القتل للطوارئ فقط</b>: يوقف إصدار كل الإشارات الجديدة فوراً "
+             "(الصادرة تُتابع) — لخطر بنيوي كارثي، لا للاستخدام اليومي؛ نهاية اليوم الصحيحة هي "
+             "زر «إغلاق يوم التداول».\n"
+             "▎✨ <b>سقف السوق</b> يمنع تكدّس الإشارات على سوق واحد دون خنق باقي الأسواق.\n"
+             "▎👑 <b>⚡ إشارة الآن للإدارة</b> مستثناة من سقف الإشارات الآلية ولا تستهلك حصتها.\n"
+             "▎🌙 <b>اللوحة تتجدد يومياً</b> مع إغلاق السوق: العدّادات تصفر ويبدأ يوم جديد بنظام جديد.</blockquote>",
+             "<b>الحدود (تطبق على السيرفر قبل أي إشارة):</b>"]
+    for key, title in keys:
+        val = db.get_setting_float(key, 0)
+        lines.append(f"  {title}: <b>{val:g}</b>")
+    return "\n".join(lines)
+
+
 async def admin_risk(q, uid, context, bot):
     keys = [
         ("risk_per_signal_pct", "المخاطرة لكل إشارة", 0.1, 0.1),
@@ -1942,22 +1978,15 @@ async def admin_risk(q, uid, context, bot):
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
     ]
-    ks = await afn.run(db.kill_switch_on)
-    vf = await afn.run(db.get_setting, "volatility_filter", "1")
-    lines = ["🛡 <b>محرك إدارة المخاطر</b>",
-             f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
-             f"🌊 فلتر التقلب: <b>{'مفعل' if vf == '1' else 'متوقف'}</b>",
-             "<blockquote>▎✨ <b>سقف السوق</b> يمنع تكدّس الإشارات على سوق واحد دون خنق باقي الأسواق.\n"
-             "▎👑 <b>⚡ إشارة الآن للإدارة</b> مستثناة من سقف الإشارات الآلية ولا تستهلك حصتها.</blockquote>",
-             "<b>الحدود (تطبق على السيرفر قبل أي إشارة):</b>"]
     rows_kb = []
     for key, title, step, _d in keys:
         val = await afn.run(db.get_setting_float, key, 0)
-        lines.append(f"  {title}: <b>{val:g}</b>")
         rows_kb.append([kb.btn("➖", f"a:riskadj:{key}:-{step}"), kb.btn(f"{title} {val:g}", "a:plannoop"), kb.btn("➕", f"a:riskadj:{key}:{step}")])
+    rows_kb.append([kb.btn("🌙 إغلاق يوم التداول الآن", "a:eodclosenow", style="success")])
     rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch", style="danger"),
                     kb.btn("🌊 فلتر التقلب", "a:volfilter", style="primary")])
-    await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+    text = await afn.run(risk_board_text)
+    await render(q, text, kb.admin_nav(rows_kb), bot)
 
 
 async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
@@ -1988,6 +2017,30 @@ async def admin_vol_filter(q, uid, context, bot):
     await afn.run(db.set_setting, "volatility_filter", val)
     await afn.run(audit_log.log, uid, f"volatility_filter:{val}")
     await admin_risk(q, uid, context, bot)
+
+
+async def admin_eod_close_now(q, uid, context, bot):
+    """v8.13.7 — manual royal day-close button: ALL open signals end with the
+    day immediately, every holder gets the mandatory notice, the day boundary
+    is stamped (renewed board next tracker tick), and the engine keeps hunting."""
+    from fysb.engines import tracker as _trk
+    count, edits, notes = await afn.run(_trk.eod_close_all, "manual")
+    sent = 0
+    for t_uid, text in notes:
+        try:
+            await bot.send_message(t_uid, text, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            pass
+    for _uid, chat_id, message_id, text in edits:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, parse_mode="HTML")
+        except Exception:
+            pass
+    await afn.run(audit_log.log, uid, f"eod_close_now:{count}")
+    await render(q, f"🌙 <b>أُغلق يوم التداول يدوياً</b> — أُنهيت متابعة <b>{count}</b> إشارة مفتوحة "
+                    f"وأُرسل التنبيه الإجباري إلى <b>{sent}</b> مستلم. البحث عن فرص جديدة يستأنف فوراً.",
+                 kb.admin_nav([[kb.btn("🛡 محرك إدارة المخاطر", "a:risk", style="primary")]]), bot)
 
 
 # --- Markets ---------------------------------------------------------------------

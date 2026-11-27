@@ -1191,3 +1191,88 @@ def _log(symbol, tf, result, detail):
     with db.conn() as c:
         c.execute("INSERT INTO engine_runs(symbol,timeframe,result,detail,created_at) VALUES(?,?,?,?,?)",
                   (symbol, tf, result[:40], detail[:400], config.now()))
+
+
+# --- v8.13.7 — إغلاق اليوم الملكي (royal end-of-day close) -------------------
+EOD_MANDATORY_TEXT = (
+    "🌙 <b>تنبيه إجباري — نهاية يوم التداول</b>\n"
+    "<blockquote>"
+    "▎🌙 <b>تُغلق جميع الصفقات قبل إغلاق السوق — يوم جديد، إشارات جديدة، ونظام جديد.</b>\n"
+    "▎🛡 <b>الإجراء:</b> أغلق أي صفقة حقيقية مفتوحة لديك عند السعر الحالي قبل إغلاق السوق — "
+    "لا تحمل مراكز عبر إغلاق السوق إلى اليوم التالي.\n"
+    "▎🔍 البحث عن الفرص الجديدة يستأنف فوراً مع اليوم الجديد دون توقف."
+    "</blockquote>"
+)
+
+
+def eod_close_all(reason_tag: str = "scheduled") -> tuple[int, list, list]:
+    """v8.13.7 — royal end-of-day close: EVERY open signal ends with the day.
+
+    Accounting mirrors the honest expiry sweep: ACTIVE/RUNNING -> EXPIRED with
+    closed_at (no fabricated model result — the holder closes the real position
+    at market); banked TP1_HIT/TP2_HIT winners KEEP their winning status, only
+    their tracking stops. Every holder + admin receives the MANDATORY
+    end-of-day notice (once per holder, board-wide — not per-signal spam).
+    reason_tag: "scheduled" (daily clock) or "manual" (admin button)."""
+    from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
+    now_iso = config.now()
+    today = now_iso[:10]
+    with db.conn() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT * FROM signals WHERE status IN ('ACTIVE','RUNNING')""").fetchall()]
+    edits: list = []
+    notifications: list[tuple] = []
+    for sig in rows:
+        prev_status = sig["status"]
+        sig["status"] = "EXPIRED"
+        sig["closed_at"] = now_iso
+        edits.extend(_card_refresh_edits(sig, 0.0, _delivery_refs(sig["id"])))
+        seq = seq_of(sig["id"])
+        why = ("لم تُفعّل بعد — تُغلق مع نهاية اليوم دون نتيجة."
+               if prev_status == "ACTIVE"
+               else "تُغلق مع نهاية اليوم دون بلوغ الأهداف أو الوقف.")
+        text = (
+            f"🌙 <b><u>إغلاق يوم التداول — الإشارة #{seq}</u></b> — {esc(sig['symbol'])} "
+            f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+            f"<blockquote>"
+            f"▎📌 الحالة النهائية: <b>{status_ar('EXPIRED')}</b>\n"
+            f"▎📋 {why}\n"
+            f"▎🧠 المنهجية: <b>{strategy_name(sig['strategy'])}</b>\n"
+            f"▎🌙 <b>يوم جديد، إشارات جديدة، ونظام جديد.</b>"
+            f"</blockquote>"
+        )
+        notifications.extend(_alert_targets(sig, text))
+    with db.tx(immediate=True) as c:
+        c.execute("""UPDATE signals SET status='EXPIRED', closed_at=?
+                     WHERE status IN ('ACTIVE','RUNNING')""", (now_iso,))
+        c.execute("""UPDATE signals SET closed_at=?
+                     WHERE status IN ('TP1_HIT','TP2_HIT')
+                     AND (closed_at IS NULL OR closed_at='')""", (now_iso,))
+    # the board-wide mandatory notice — deduplicated per holder + admin
+    holders = {t[0] for t in notifications if isinstance(t, tuple) and t} | {config.ADMIN_ID}
+    notifications = [(uid, EOD_MANDATORY_TEXT) for uid in sorted(holders)] + notifications
+    db.set_setting("eod_last_close_date", today)   # write-through: next read never stale
+    _log("SYSTEM", "-", f"EOD_CLOSE:{reason_tag}", f"signals closed={len(rows)} day={today}")
+    return len(rows), edits, notifications
+
+
+def maybe_daily_close() -> tuple[bool, int, list, list]:
+    """Scheduled end-of-day check, called every tracker tick (60s). Fires ONCE
+    per UTC day at/after the configured `eod_close_utc` (default 21:30 — half
+    an hour before the 22:00 UTC FX/metals close). Disabled by setting
+    eod_close_enabled=0. Returns (triggered, closed_count, edits, notifications)."""
+    if db.get_setting("eod_close_enabled", "1") != "1":
+        return False, 0, [], []
+    hhmm = (db.get_setting("eod_close_utc", "21:30") or "21:30").strip()
+    try:
+        h, m = (int(x) for x in hhmm.split(":")[:2])
+    except Exception:
+        h, m = 21, 30
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if db.get_setting("eod_last_close_date", "") == now.strftime("%Y-%m-%d"):
+        return False, 0, [], []
+    if (now.hour, now.minute) < (max(0, h % 24), max(0, min(m, 59))):
+        return False, 0, [], []
+    count, edits, notes = eod_close_all("scheduled")
+    return True, count, edits, notes

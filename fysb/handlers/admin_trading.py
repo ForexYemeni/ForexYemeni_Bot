@@ -1983,10 +1983,57 @@ async def admin_risk(q, uid, context, bot):
         val = await afn.run(db.get_setting_float, key, 0)
         rows_kb.append([kb.btn("➖", f"a:riskadj:{key}:-{step}"), kb.btn(f"{title} {val:g}", "a:plannoop"), kb.btn("➕", f"a:riskadj:{key}:{step}")])
     rows_kb.append([kb.btn("🌙 إغلاق يوم التداول الآن", "a:eodclosenow", style="success")])
+    rows_kb.append([kb.btn("🧹 صفحة جديدة — مسح تاريخ الإشارات", "a:freshpage", style="danger")])
     rows_kb.append([kb.btn("⛔ تبديل Kill Switch", "a:killswitch", style="danger"),
                     kb.btn("🌊 فلتر التقلب", "a:volfilter", style="primary")])
     text = await afn.run(risk_board_text)
     await render(q, text, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_fresh_page(q, uid, context, bot):
+    """v8.13.8 — royal fresh page CONFIRMATION (double-confirm, no undo)."""
+    counts = await afn.run(tracker.fresh_page_counts)
+    text = (
+        "🧹 <b><u>صفحة جديدة — مسح تاريخ الإشارات</u></b>\n"
+        "<blockquote>"
+        f"▎📊 الإشارات المحذوفة: <b>{counts['signals_total']}</b> "
+        f"(المفتوحة الآن: <b>{counts['signals_open']}</b>)\n"
+        f"▎📎 التسليمات: <b>{counts['signal_deliveries']}</b> · سجل الجورنال: <b>{counts['trade_journal']}</b>\n"
+        f"▎🏛 أوامر التنفيذ: <b>{counts['exchange_orders']}</b> · أوامر الجسر: <b>{counts['bridge_orders']}</b>\n"
+        "▎⚠️ <b>لا أرشفة ولا تراجع</b> — حذف كلي نهائي بقرار المالك\n"
+        "▎🔔 قبل المسح: يُرسل التنبيه الإجباري «يوم جديد إشارات جديدة ونظام جديد» لكل الحاملين\n"
+        "▎🏆 سباق المدارس يبدأ من صفر حقيقي · مراكز الدمو وسجلات التشخيص لا تُمسّ\n"
+        "▎🔍 البحث عن الفرص يستمر فوراً — أول إشارة جديدة تحمل الرقم #1"
+        "</blockquote>"
+    )
+    await render(q, text, kb.admin_nav([
+        [kb.btn("✅ تأكيد المسح النهائي", "a:freshpagego", style="danger")],
+        [kb.btn("↩️ رجوع بلا مسح", "a:risk", style="primary")],
+    ]), bot)
+
+
+async def admin_fresh_page_go(q, uid, context, bot):
+    """v8.13.8 — execute: mandatory notice first, then the FK-safe total wipe,
+    then the audit trail + the renewed risk board."""
+    from fysb.engines import tracker as _trk
+    holders = await afn.run(_trk.fresh_page_holders)
+    notified = 0
+    for t_uid in holders:
+        try:
+            await bot.send_message(t_uid, _trk.EOD_MANDATORY_TEXT, parse_mode="HTML")
+            notified += 1
+        except Exception:
+            pass
+    counts = await afn.run(_trk.fresh_page_wipe)
+    total = sum(counts.values())
+    await afn.run(audit_log.log, uid, f"fresh_page:wiped:{total}")
+    sig_n = counts.get("signals", 0)
+    await render(q, f"✅ <b>صفحة جديدة — تم المسح الكلي</b>\n"
+                    f"<blockquote>▎🗑 الإشارات المحذوفة: <b>{sig_n}</b> · المجموع الكلي: <b>{total}</b> صف\n"
+                    f"▎🔔 التنبيه الإجباري وصل إلى <b>{notified}</b> مستلم\n"
+                    f"▎🏆 سباق المدارس من صفر · الترقيم الجديد يبدأ من #1\n"
+                    f"▎🔍 المحرك يبحث عن أول فرصة جديدة الآن</blockquote>",
+                 kb.admin_nav([[kb.btn("🛡 محرك إدارة المخاطر", "a:risk", style="primary")]]), bot)
 
 
 async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):

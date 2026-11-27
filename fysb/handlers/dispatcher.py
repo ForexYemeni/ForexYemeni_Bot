@@ -609,6 +609,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_vol_filter(q, uid, context, bot)
     elif act == "eodclosenow":
         await admin_trading.admin_eod_close_now(q, uid, context, bot)
+    elif act == "freshpage":
+        await admin_trading.admin_fresh_page(q, uid, context, bot)
+    elif act == "freshpagego":
+        await admin_trading.admin_fresh_page_go(q, uid, context, bot)
     elif act == "markets":
         await admin_trading.admin_markets(q, uid, context, bot)
     elif act == "mktcat":

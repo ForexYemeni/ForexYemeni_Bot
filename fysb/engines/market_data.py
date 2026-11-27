@@ -666,22 +666,36 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                         values = _apply_offset(values, offset)
                     else:
                         offset_applied = False
+                        last_c = float(values[-1]["close"]) if values else 0.0
                         try:
                             spot_t = GOLD_API_MAP.get(internal)
                             if spot_t and values:
                                 spot_px = _fetch_goldapi_price(spot_t)["price"]
-                                last_c = float(values[-1]["close"])
                                 if spot_px > 0 and last_c > 0 and abs(spot_px - last_c) <= 120.0:
                                     values = _apply_offset(values, spot_px - last_c)
                                     offset_applied = True
+                                    try:
+                                        _learn_gold_offset(internal, spot_px, last_c)
+                                    except Exception:
+                                        pass
                         except Exception as s_exc:
                             log.debug("gold futures spot calibration skipped: %s", s_exc)
                         if not offset_applied:
-                            # v8.13.5 — NEVER serve raw CME futures as spot: the GC=F
-                            # premium (+13..18$) fabricates false RUNNING/SL_HIT states
-                            # against spot-anchored signals (the #46 incident). The
-                            # provider fails honestly and the chain moves on.
-                            raise RuntimeError("unoffsetted-futures")
+                            # v8.13.9 — fall back to the FRESH PERSISTED offset
+                            # (learned ≤48h ago from live spot-vs-venue
+                            # calibration, magnitude-capped ≤2% of the venue
+                            # price, age-checked) before failing: a momentary
+                            # gold-api hiccup must not wipe the whole gold chain
+                            # into «تعذر جلب» while the market is OPEN (the
+                            # Friday 13:47 incident). RAW futures (no documented
+                            # offset at all) are STILL never served — the #46
+                            # guarantee holds.
+                            off = _persisted_offset(internal)
+                            if off and last_c and abs(off) <= CALIB_MAX_RATIO * abs(last_c):
+                                values = _apply_offset(values, off)
+                                offset_applied = True
+                            else:
+                                raise RuntimeError("unoffsetted-futures")
                 elif provider == "fx-ref":
                     ysym = _yahoo_symbol_for(internal)
                     if not ysym:

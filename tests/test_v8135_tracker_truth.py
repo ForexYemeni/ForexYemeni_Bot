@@ -17,8 +17,22 @@ import pytest
 
 sys.path.insert(0, ".")
 
+from fysb import config
 from fysb.engines import market_data as md
 from fysb.engines.tracker import _documented_extreme, _evaluate_signal, _sl_touch_plausible
+
+
+@pytest.fixture(autouse=True)
+def _clean_gold_calibration():
+    """v8.13.9 hygiene: other tests may legitimately persist a fresh spot
+    calibration (the live path now persists it) — the unoffsettable-futures
+    tests here need a calibration-free start to assert the honest refusal."""
+    calib = config.DB_FILE.parent / "spot_calibration.json"
+    if calib.exists():
+        calib.unlink()
+    yield
+    if calib.exists():
+        calib.unlink()
 
 
 # ---------------------------------------------------------------------------

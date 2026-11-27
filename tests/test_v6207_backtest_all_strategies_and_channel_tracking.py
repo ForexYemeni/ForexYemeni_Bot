@@ -1,6 +1,6 @@
 """v6.20.7 regression tests:
 1. Backtest format_report() displays ALL executed strategies (no [:6] truncation),
-   total evaluated strategy count (13), and silent strategies transparently.
+   total evaluated strategy count (18), and silent strategies transparently.
 2. Linked channels default to ALL markets/timeframes/strategies, support 1-tap
    a:chanall enablement, and cleanly toggle ALL in markets/timeframes UI.
 3. End-to-end auto signal delivery + live-card editing + push alerts for linked
@@ -19,10 +19,11 @@ from fysb import config, db
 from fysb.engines.backtest import BacktestReport, format_report
 
 
-def test_backtest_report_shows_all_13_strategies_without_truncation():
+def test_backtest_report_shows_all_18_strategies_without_truncation():
     all_strats = [
         "ict", "smc", "price_action", "crt", "amd", "turtle_soup",
         "silver_bullet", "fibonacci", "trend", "ichimoku", "classic", "sk", "wyckoff",
+        "harmonic", "vwap_reclaim", "london_breakout", "divergence", "squeeze",
     ]
     by_strat = {
         code: {"trades": 2, "wins": 1, "win_rate_pct": 50.0, "net_r": 0.75}
@@ -49,9 +50,9 @@ def test_backtest_report_shows_all_13_strategies_without_truncation():
     # Every single one of the 10 active strategies must appear (no [:6] cap!)
     for code in all_strats[:10]:
         assert f"<b>{code}</b>" in html, f"Strategy {code} was truncated from report"
-    # Total evaluated count (13) and active ratio (10/13) are shown
-    assert "<b>13</b>" in html
-    assert "(10/13)" in html
+    # Total evaluated count (18) and active ratio (10/18) are shown
+    assert "<b>18</b>" in html
+    assert "(10/18)" in html
     # Remaining 3 silent strategies are listed transparently
     for silent in all_strats[10:]:
         assert silent in html

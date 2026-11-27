@@ -1657,7 +1657,8 @@ async def admin_backtest_run(q, uid, context, bot, symbol: str, tf: str, scope: 
     sc_mode = (scope or "enabled").strip().lower()
     min_sc = await afn.run(_effective_backtest_min_score)
     strats = None if sc_mode == "all" else (await afn.run(_enabled_backtest_strategies) or None)
-    scope_lbl = "جميع الـ 13 استراتيجية" if sc_mode == "all" else f"الاستراتيجيات المفعّلة ({len(strats or [])})"
+    from fysb.db import IMPLEMENTED_STRATEGIES
+    scope_lbl = f"جميع الـ {len(IMPLEMENTED_STRATEGIES)} استراتيجية" if sc_mode == "all" else f"الاستراتيجيات المفعّلة ({len(strats or [])})"
     await render(
         q,
         f"🧪 <b>جارٍ تشغيل الاختبار التاريخي المؤسسي لـ {esc(sym)} ({esc(tf_u)})…</b>\n"

@@ -116,6 +116,17 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     checks["rr_ok"] = rr >= 2.0
     earned += 6 if checks["rr_ok"] else 0
 
+    # v8.12.0 — institutional anchor confluence: the SMC zone landing on a
+    # classic daily pivot / opening anchor is institutional-grade supply/demand.
+    try:
+        from fysb.engines.intelligence import detect_anchor_confluence
+        _anch = detect_anchor_confluence(candles, entry, direction, atr_value=a)
+        checks["anchor_confluence"] = bool(_anch["detected"])
+        max_pts += 6
+        earned += 6 if _anch["detected"] else 0
+    except Exception:
+        checks["anchor_confluence"] = None
+
     score = normalized_score(earned, max_pts)
     if score < 58:
         return None

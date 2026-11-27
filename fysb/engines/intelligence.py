@@ -441,6 +441,56 @@ def detect_liquidity_sweep(candles: list[dict], lookback: int = 20) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# v8.12.0 — #13 Institutional Anchor Confluence (pivots + opening anchors)
+# ---------------------------------------------------------------------------
+
+def detect_anchor_confluence(candles: list[dict], price: float, direction: str,
+                             atr_value: float = 0.0) -> dict:
+    """Confluence of the entry price with a classic pivot or an opening anchor.
+
+    Pure OHLC arithmetic via fysb.engines.anchors: classic daily pivots
+    (previous UTC day P/S1..S3/R1..R3) plus NY-midnight / London-08:00 /
+    NY-09:30 / weekly opening anchors. Detected when the price sits within
+    0.35 ATR of a pivot level (or 0.5 ATR of an opening anchor) AND the level
+    sits on the correct side of the intended direction (support-like for BUY,
+    resistance-like for SELL). Bonus 2.0; honest `note` names the exact level.
+    """
+    from fysb.engines.analysis import atr as _atr
+    from fysb.engines.anchors import (
+        classic_pivots, nearest_anchor_distance, opening_anchors, pivot_confluence,
+    )
+    empty = {"detected": False, "level": 0.0, "bonus": 0.0, "note": ""}
+    if not candles or len(candles) < 30 or price <= 0:
+        return empty
+    a = atr_value if atr_value > 0 else _atr(candles)
+    if a <= 0:
+        return empty
+    pivots = classic_pivots(candles)
+    anchors = opening_anchors(candles)
+    level_name = pivot_confluence(price, pivots, 0.35)
+    level_price = float(pivots.get(level_name)) if (pivots and level_name) else 0.0
+    if not level_name and anchors:
+        name, dist = nearest_anchor_distance(price, anchors) or ("", 0.0)
+        if name and dist <= 0.5 * a:
+            level_name, level_price = name, float(anchors[name]["price"])
+    if not level_name or level_price <= 0:
+        return empty
+    # Side agreement: for BUY the level must act as support (at/below price);
+    # for SELL as resistance (at/above price). A level crossing the trade
+    # direction is obstruction, not confluence.
+    side_ok = (direction.upper() == "BUY" and level_price <= price + 0.05 * a) or \
+              (direction.upper() == "SELL" and level_price >= price - 0.05 * a)
+    if not side_ok:
+        return empty
+    return {
+        "detected": True,
+        "level": level_price,
+        "bonus": 2.0,
+        "note": f"تلاقيم مع المحور المؤسسي {level_name} عند {level_price:.5g}",
+    }
+
+
+# ---------------------------------------------------------------------------
 # #12 Live Currency Strength Meter (8 Major Currencies)
 # ---------------------------------------------------------------------------
 

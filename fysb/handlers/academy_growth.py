@@ -23,6 +23,8 @@ from fysb.services import audit as audit_log
 from fysb.services import payments as payments_service
 from fysb.theme import esc
 from fysb.ui import keyboards as kb
+from fysb.db import IMPLEMENTED_STRATEGIES as _N_STRATS_LIST
+_N_STRATS = len(_N_STRATS_LIST)
 
 _NUM_EMOJI = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣")
 
@@ -357,7 +359,7 @@ async def handle_user_growth(q, uid: int, action: str, context, bot) -> bool:
         cap = (
             f"🏆 <b><u>شهادة تخرج ملكية معتمدة — أكاديمية ForexYemeni</u></b>\n"
             f"▎👤 الطالب: <b>{esc(full_name)}</b>\n"
-            f"▎🎓 المسار: <b>{'المسار الاحترافي (13 استراتيجية)' if track == 'PAID' else 'المسار المجاني التأسيسي'}</b>\n"
+            f"▎🎓 المسار: <b>{f'المسار الاحترافي ({_N_STRATS} استراتيجية)' if track == 'PAID' else 'المسار المجاني التأسيسي'}</b>\n"
             f"▎🔐 الرقم التسلسلي: <code>{serial}</code>"
         )
         try:

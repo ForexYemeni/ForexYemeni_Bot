@@ -61,14 +61,14 @@ def test_four_tier_plans_ordered_strategies_and_active_catalogs():
     assert len(s_free) == 2 and s_free == {"CLASSIC", "TREND"}
     assert len(s_pro) == 5 and s_free < s_pro
     assert len(s_vip) == 9 and s_pro < s_vip
-    assert len(s_royal) == 13 and s_vip < s_royal
+    assert len(s_royal) == 18 and s_vip < s_royal
     elite_only = {"CRT", "AMD", "SILVER_BULLET", "TURTLE_SOUP"}
     assert elite_only.isdisjoint(s_vip)
     assert elite_only.issubset(s_royal)
 
-    # All plan markets & all 13 strategies are active in catalogs
+    # All plan markets & all 18 strategies are active in catalogs
     assert {"XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "US30", "NAS100", "BTCUSD"}.issubset(live_mkts)
-    assert len(live_strats) == 13
+    assert len(live_strats) == 18
 
 
 def test_configurable_free_trial_blocks_when_expired_and_admin_can_extend_or_unlimit():

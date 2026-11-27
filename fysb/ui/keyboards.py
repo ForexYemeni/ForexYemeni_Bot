@@ -285,7 +285,7 @@ def admin_hub_trading() -> InlineKeyboardMarkup:
          btn("🧭 قوة العملات (8)", "a:strength", style="primary")],
         [btn("🌐 الأسواق العالمية", "a:markets", style="primary"),
          btn("🎯 أسواق إشاراتي", "a:adminmkts", style="primary")],
-        [btn("🧩 الاستراتيجيات (13)", "a:strategies", style="primary"),
+        [btn("🧩 الاستراتيجيات (18)", "a:strategies", style="primary"),
          btn("⏱ الأطر الزمنية", "a:timeframes", style="primary")],
         [btn("🛡 إدارة المخاطر", "a:risk", style="danger"),
          btn("⚙️ أوضاع التشغيل", "a:modes", style="primary")],
@@ -372,7 +372,7 @@ ADMIN_HUBS = {
         "<blockquote>"
         "▎👑 <b>القيادة الفورية:</b> تحليل ForexYemeni الحقيقي · إدارة الإشارات · المحرك · إشارة الآن\n"
         "▎📊 <b>الذكاء والشارتات:</b> مركز الشارتات · درع الأخبار · مصفوفة الاستراتيجيات · قوة العملات\n"
-        "▎⚙️ <b>الضبط والمخاطر:</b> الأسواق · الاستراتيجيات (13) · الأطر الزمنية · المخاطر وأوضاع التشغيل"
+        "▎⚙️ <b>الضبط والمخاطر:</b> الأسواق · الاستراتيجيات · الأطر الزمنية · المخاطر وأوضاع التشغيل"
         "</blockquote>",
         admin_hub_trading,
     ),

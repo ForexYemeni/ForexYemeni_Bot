@@ -10,7 +10,7 @@ import logging
 from fysb.engines.strategies.base import Ctx, StrategyResult, result_error
 
 log = logging.getLogger(__name__)
-from fysb.engines.strategies import amd, classic, crt, fibonacci, ichimoku, ict, price_action, silver_bullet, sk, smc, trend, turtle_soup, wyckoff
+from fysb.engines.strategies import amd, classic, crt, divergence, fibonacci, harmonic, ichimoku, ict, london_breakout, price_action, silver_bullet, sk, smc, squeeze, trend, turtle_soup, vwap_reclaim, wyckoff
 
 REGISTRY: dict[str, object] = {
     "ICT": ict,
@@ -26,10 +26,16 @@ REGISTRY: dict[str, object] = {
     "CLASSIC": classic,              # classic trend + S/R + candle confirmation (v6.10.0)
     "SK": sk,                        # Scalper Key — close-confirmed momentum break (v6.10.0)
     "WYCKOFF": wyckoff,              # accumulation spring / distribution upthrust (v6.11.0)
+    "HARMONIC": harmonic,           # Gartley/Bat/Butterfly/Crab XABCD ratios (v8.12.0)
+    "VWAP_RECLAIM": vwap_reclaim,    # session VWAP/mean reclaim or reject (v8.12.0)
+    "LONDON_BREAKOUT": london_breakout,  # London opening-range breakout (v8.12.0)
+    "DIVERGENCE": divergence,        # Class A/B RSI divergence at swing pivots (v8.12.0)
+    "SQUEEZE": squeeze,              # Bollinger/Keltner squeeze fire (v8.12.0)
 }
 
 VERIFIABLE = {"ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP", "SILVER_BULLET",
-              "FIBONACCI", "TREND", "ICHIMOKU", "CLASSIC", "SK", "WYCKOFF"}
+              "FIBONACCI", "TREND", "ICHIMOKU", "CLASSIC", "SK", "WYCKOFF",
+              "HARMONIC", "VWAP_RECLAIM", "LONDON_BREAKOUT", "DIVERGENCE", "SQUEEZE"}
 
 
 def get(code: str):

@@ -33,7 +33,7 @@ def test_render_no_signal_card_is_luxurious_and_never_uses_old_plain_fallback():
     html = render_no_signal_card(
         symbol="XAUUSD",
         timeframe="M15",
-        strategy_label="جميع المنهجيات (13)",
+        strategy_label="جميع المنهجيات (18)",
         style_label="مضاربة يومية",
         status="REJECTED",
         reason="معاكس لاتجاه الفريم الأعلى (HTF=DOWN, قوة 1.54 ATR)",

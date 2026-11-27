@@ -107,6 +107,58 @@ def _fixture(code):
     elif code == "AMD":
         cs = make_candles([(100., 101.3, 99.7, 100.5)]*59 + [(101., 102., 100.3, 100.8)])
         bias = downtrend_candles(80)
+    elif code == "HARMONIC":
+        # BAT X=100 A=120 B=111 C=119.5 D=102.5 on a piecewise-linear ramp so
+        # the ONLY fractal pivots are the designed XABCD points.
+        waypoints = [(0, 110.0), (6, 105.0), (16, 115.0), (26, 113.0),
+                     (36, 117.0), (46, 111.0), (58, 107.0), (69, 107.0)]
+        vals = []
+        for i in range(70):
+            for (i0, p0), (i1, p1) in zip(waypoints, waypoints[1:]):
+                if i0 <= i <= i1:
+                    base = p0 + (p1 - p0) * (i - i0) / (i1 - i0)
+                    break
+            vals.append((base, base + 2.0, base - 2.0, base))
+        cs = make_candles(vals)
+        cs[6]["low"] = 100.0        # X
+        cs[16]["high"] = 120.0      # A
+        cs[26]["low"] = 111.0       # B
+        cs[36]["high"] = 119.5      # C
+        cs[58]["low"] = 102.5       # D
+    elif code == "VWAP_RECLAIM":
+        vals = [(100.0, 101.0, 99.0, 100.0)] * 11 + [(102.0, 103.0, 101.0, 102.0)] * 27
+        cs = make_candles(vals)
+        cs[-2]["low"] = 101.4       # touch the session benchmark
+        cs[-1].update(open=101.3, close=103.0, high=103.2, low=101.2)
+    elif code == "LONDON_BREAKOUT":
+        # t0 = 02:00 naive-UTC (= London GMT in November); OR = bars 24..31
+        vals = [(100.0, 100.4, 99.6, 100.1)] * 39
+        cs = make_candles(vals, start_hour=2)
+        cs[-1].update(open=100.1, high=101.6, low=99.7, close=101.2)
+    elif code == "DIVERGENCE":
+        import math
+        vals = []
+        for i in range(70):
+            base = 100.0 + 2.0 * math.sin(i / 5.0)
+            vals.append((base, base + 0.4, base - 0.4, base))
+        cs = make_candles(vals)
+        cs[30]["low"] = 96.0        # first swing low
+        cs[60]["low"] = 95.0        # lower low
+        cs[45]["high"] = 104.0
+        cs[-1].update(open=96.5, close=98.0, high=98.2, low=96.2)
+    elif code == "SQUEEZE":
+        # Homogeneous quiet tape with a mild upward drift (RSI > 55), then a
+        # conviction close beyond the Bollinger band.
+        vals = []
+        for i in range(60):
+            base = 100.0 + 0.05 * (i // 2)
+            c = base + 0.20 if i % 2 == 0 else base
+            o = base
+            vals.append((o, max(o, c) + 0.35, min(o, c) - 0.35, c))
+        cs = make_candles(vals)
+        last = cs[-1]
+        cs[-1].update(open=last["close"], close=last["close"] + 1.0,
+                      high=last["close"] + 1.2, low=last["close"] - 0.2)
     else:
         raise AssertionError(code)
     return Ctx("XAUUSD", "M15", cs, bias)

@@ -173,7 +173,10 @@ def test_fxref_gold_degrades_after_repeated_failures_and_recovers(clean_gold_cha
 
 def test_royal_diagnosis_names_layers_without_brands(clean_gold_chain):
     md._fxref_gold_fail["XAUUSD"] = (time.time(), 5)   # spot leg failing hard
+    # v8.14.7: this contract is about the LAYER diagnosis — the Friday
+    # pre-close window has its own honest variant, tested separately
     with patch.object(md, "_ordered_chain", return_value=["fx-ref", "venue-gold"]), \
+         patch.object(md, "_pre_close_window", return_value=False), \
          patch.object(md, "_fetch_yahoo_candles", side_effect=RuntimeError("net")), \
          patch.object(md, "_fetch_goldapi_price", side_effect=RuntimeError("net")), \
          patch.object(md, "_fetch_venue_gold_candles", side_effect=RuntimeError("net")), \

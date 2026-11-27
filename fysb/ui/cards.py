@@ -320,11 +320,54 @@ def render_user_card(u: dict, profile: dict) -> str:
 
 def diagnose_no_signal(status: str, reason: str = "") -> tuple[str, str, str, str]:
     """Translate raw engine status/reason into a luxury institutional protection
-    diagnosis tuple: (icon, title, explanation, recommendation)."""
+    diagnosis tuple: (icon, title, explanation, recommendation).
+
+    v8.14.7 — the royal full-truth card (owner decree): EVERY line is built
+    from the ONE actual reason the engine returned. The static possibilities
+    template («السوق مغلق أو يمرّ بساعة سيولة أو لم تتوفر شموع…») is executed —
+    a card may never offer a false possibility beside the real cause, and a
+    closed market must say CLOSED 100% with the real reopen anchor."""
     st = (status or "").upper().strip()
-    r = (reason or "").strip()
+    r = theme_ar_reason((reason or "").strip())
     rl = r.lower()
 
+    # ① the real closure — the session calendar itself said closed (the
+    #    v8.14.7 royal reason carries «مغلق فعلاً 100%»; the legacy mapping
+    #    carries «وفق تقويم الجلسات» — both are calendar statements)
+    if "مغلق فعلاً 100%" in r or "وفق تقويم الجلسات" in r:
+        return (
+            "🔒",
+            "السوق مغلق فعلاً 100% — وفق تقويم الجلسات الملكي",
+            "هذا إغلاق حقيقي معلن في تقويم الجلسات — لا شيء يُصنَّع على سوق مغلق، والإشارات تعود فور الانفتاح بأول شمعة صالحة.",
+            "أعد الفحص بعد عودة السوق، أو فعّل <b>البحث التلقائي</b> ليراقب نيابة عنك ضمن مدته المعلنة — لا إشارات على سوق مغلق أبداً.",
+        )
+    # ② the Friday pre-close provider-death window — BOTH truths named
+    if "يقفل رسمياً بعد دقائق" in r or "التغذية توقفت" in r:
+        return (
+            "⏳",
+            "نافذة ما قبل الإغلاق — التغذية توقفت والسوق يقفل رسمياً",
+            "توقفت تغذية الأسعار خلال الساعة الأخيرة قبل الإغلاق الرسمي — لا إشارات تُصنَّع على تغذية ميتة، والسوق يقفل رسمياً بعد دقائق.",
+            "لا فائدة من إعادة المحاولة الآن — العودة الأحد 18:00 بتوقيت نيويورك؛ فعّل <b>البحث التلقائي</b> ليستأنف المراقبة بعد العودة.",
+        )
+    # ③ the daily settlement pause (v8.14.5 royal breathing window)
+    if "استراحة التسوية" in r:
+        return (
+            "🌙",
+            "استراحة التسوية اليومية — السوق يلتفت أنفاسه",
+            "استراحة تسوية يومية قصيرة ومعلنة سلفاً في تقويم الجلسات — لا إشارات تُصنَّع داخلها، والتدفق والإشارات يعودان فور انتهائها.",
+            "أعد الفحص فور انتهاء الاستراحة، أو فعّل <b>البحث التلقائي</b> ليلتقط أول فرصة حقيقية بعد العودة.",
+        )
+    # ④ honest data protection (stale/frozen/insufficient/chain/proxy) — the
+    #    refusal is real, the reason verbatim, zero counters
+    if any(a in r for a in ("أسعار غير حية", "متجمّد", "مجمّدة", "عينة ناقصة",
+                            "تعذر جلب بيانات", "للعرض فقط",
+                            "بيانات أقدم من الحد المسموح")):
+        return (
+            "🛡",
+            "حماية البيانات الصادقة — لا إشارة على بيانات غير صالحة",
+            "المحرك يرفض التوليد على بيانات لا تليق بالتنفيذ المؤسسي — سبب الرفض الفعلي مذكور حرفياً في التشخيص الفني أعلاه.",
+            "أعد المحاولة بعد لحظات، أو فعّل <b>البحث التلقائي</b> ليراقب التغذية نيابة عنك.",
+        )
     if "htf" in rl or "الفريم الأعلى" in r or "عكس الاتجاه" in r:
         return (
             "🛡",
@@ -360,23 +403,20 @@ def diagnose_no_signal(status: str, reason: str = "") -> tuple[str, str, str, st
             "المعطيات الحالية لم تبلغ الحد الصارم للجودة أو نسبة العائد إلى المخاطرة المعتمدة، والمنصة لا تُصدر إلا الفرص النخبوية.",
             "فعّل <b>البحث التلقائي الملكي</b> لانتظار فرصة بدرجة جودة أعلى، أو جرّب إطاراً زمنياً آخر.",
         )
-    if (
-        st == "ERROR"
-        or "مغلق" in r
-        or "سيولة" in r
-        or "جلسة" in r
-        or "بيانات" in r
-        or "شموع" in r
-        or "مزوّد" in r
-        or "مزود" in r
-        or "thin" in rl
-        or "stale" in rl
-    ):
+    # ⑤ honest catch-alls — the reason itself is the truth, verbatim above
+    if st == "REJECTED":
         return (
-            "🌙",
-            "حالة الجلسة والسيولة — السوق غير مهيّأ للتنفيذ حالياً",
-            "السوق مغلق أو يمرّ بساعة سيولة ضعيفة أو لم تتوفر شموع لحظية كافية للتحقق الدقيق؛ السلامة أولاً دائماً.",
-            "أعد المحاولة خلال جلسة لندن أو نيويورك، أو فعّل <b>البحث التلقائي</b> وسيتولى المحرك المراقبة عنك.",
+            "🛡",
+            "رفض حماية صادق من المحرك",
+            "المحرك رفض هذه الدورة لسبب فعلي محدد مذكور حرفياً في التشخيص الفني أعلاه — حماية رأس المال أولاً.",
+            "أعد المحاولة لاحقاً، أو راجع التشخيص الفني أعلاه لمعرفة السبب بالتحديد.",
+        )
+    if st == "ERROR":
+        return (
+            "⚙️",
+            "تعذر إتمام الدورة تقنياً — لا تخمين بلا بيانات",
+            "حدث عطل فعلي منع إتمام الفحص — السبب الحقيقي مذكور في التشخيص الفني أعلاه، ولا تُصنَّع نتيجة بلا بيانات.",
+            "أعد المحاولة بعد قليل؛ إن تكرر العطل راجع حالة التغذية من لوحة المالك.",
         )
     return (
         "👑",

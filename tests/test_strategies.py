@@ -90,11 +90,11 @@ class TestRegistry(unittest.TestCase):
             self.assertIn(code, VERIFIABLE)
 
     def test_ten_strategies_shipped(self):
-        """The owner contract: 13 real, tested strategies live (v6.11.0 added
-        WYCKOFF to the v6.10.0 twelve)."""
+        """The owner contract: 18 real, tested strategies live (v8.12.0 added
+        HARMONIC/VWAP_RECLAIM/LONDON_BREAKOUT/DIVERGENCE/SQUEEZE to the 13)."""
         from fysb.db import IMPLEMENTED_STRATEGIES
         from fysb.engines.strategies import VERIFIABLE
-        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 13)
+        self.assertEqual(len(IMPLEMENTED_STRATEGIES), 18)
         self.assertIn("CLASSIC", IMPLEMENTED_STRATEGIES)
         self.assertIn("SK", IMPLEMENTED_STRATEGIES)
         self.assertIn("WYCKOFF", IMPLEMENTED_STRATEGIES)

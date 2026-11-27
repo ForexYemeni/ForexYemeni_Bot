@@ -118,9 +118,12 @@ def leaderboard_text(limit: int = 8) -> str:
 # the same order, and the order upgrades itself as history accumulates.
 # v6.12.0 — ONLY real implemented & automated-tested strategies (13 modules).
 # All 25 empty/unimplemented placeholders have been permanently purged.
+# v8.12.0 — five new schools appended (HARMONIC, VWAP_RECLAIM, LONDON_BREAKOUT,
+# DIVERGENCE, SQUEEZE) → 18 implemented modules.
 BASELINE_ORDER = [
     "ICT", "SMC", "CRT", "PRICE_ACTION", "WYCKOFF", "FIBONACCI",
     "ICHIMOKU", "TREND", "CLASSIC", "SK", "AMD", "SILVER_BULLET", "TURTLE_SOUP",
+    "HARMONIC", "VWAP_RECLAIM", "LONDON_BREAKOUT", "DIVERGENCE", "SQUEEZE",
 ]
 
 

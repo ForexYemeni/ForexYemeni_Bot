@@ -249,7 +249,7 @@ class TestLuxuryPlans(_Base):
         self.assertGreater(vip["max_signals_per_day"], pro["max_signals_per_day"])
         self.assertGreater(len(vip["strategies"].split(",")), len(pro["strategies"].split(",")))
         self.assertGreater(royal["max_signals_per_day"], vip["max_signals_per_day"])
-        self.assertEqual(len(royal["strategies"].split(",")), 13)
+        self.assertEqual(len(royal["strategies"].split(",")), 18)
 
     def test_force_merge_retired(self):
         """The old boot merge stuffed every implemented strategy into FREE —

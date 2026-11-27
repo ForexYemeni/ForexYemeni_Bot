@@ -1040,7 +1040,7 @@ async def _render_partner_channel(q, p: dict, ch: dict, bot):
     mkt_label = "جميع الأسواق (ALL)" if (not mkts_raw or "ALL" in [m.upper() for m in mkts_raw]) else "، ".join(mkts_raw)
     tf_label = "جميع الأطر (ALL)" if (not tfs_raw or "ALL" in [t.upper() for t in tfs_raw]) else "، ".join(tf_name(t) for t in tfs_raw)
     strat_label = (
-        "جميع الاستراتيجيات (13)"
+        "جميع الاستراتيجيات (18)"
         if (not strats_raw or "ALL" in [s.upper() for s in strats_raw])
         else "، ".join(strategy_name(s) for s in strats_raw)
     )
@@ -1150,7 +1150,7 @@ async def _render_partner_feat(q, ch: dict, kind: str, bot):
     else:
         from fysb.engines.strategies import VERIFIABLE
         items = ["ALL"] + list(VERIFIABLE)
-        title = "الاستراتيجيات (13)"
+        title = "الاستراتيجيات (18)"
     rows = [
         [
             kb.btn(

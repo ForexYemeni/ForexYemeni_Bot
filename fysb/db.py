@@ -1051,11 +1051,12 @@ DEFAULT_ANALYSES_QUOTA = {"FREE": 1, "PRO": 4, "VIP": 10, "ROYAL": 25}
 # Strategy codes implemented + covered by the automated test-suite.
 IMPLEMENTED_STRATEGIES = ["ICT", "SMC", "PRICE_ACTION", "CRT", "AMD", "TURTLE_SOUP",
                           "SILVER_BULLET", "FIBONACCI", "TREND", "ICHIMOKU",
-                          "CLASSIC", "SK", "WYCKOFF"]
+                          "CLASSIC", "SK", "WYCKOFF",
+                          "HARMONIC", "VWAP_RECLAIM", "LONDON_BREAKOUT", "DIVERGENCE", "SQUEEZE"]
 
 # v6.22.0 — 4-TIER ROYAL PLAN ARCHITECTURE (FREE trial + PRO + VIP + ROYAL ELITE).
 # One-time versioned migration stamps all 4 plans, enables all plan markets and
-# all 13 implemented strategies, and sets FREE's configurable trial duration (7d).
+# all implemented strategies (18 as of v8.12.0), and sets FREE's configurable trial duration (7d).
 # Subsequent boots NEVER overwrite Admin's own customizations.
 PLANS_4TIER_V6220 = {
     "FREE": {
@@ -1081,7 +1082,7 @@ PLANS_4TIER_V6220 = {
         "title": "الباقة الملكية — ROYAL ELITE", "price": 79.0, "duration_days": 30, "min_score": 60,
         "max_signals_per_day": 25, "max_analyses_per_day": 25,
         "markets": ROYAL_MARKETS, "timeframes": "M1,M5,M15,M30,H1,H4,D1",
-        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP",
+        "strategies": "CLASSIC,TREND,PRICE_ACTION,FIBONACCI,ICHIMOKU,SMC,ICT,SK,WYCKOFF,CRT,AMD,SILVER_BULLET,TURTLE_SOUP,HARMONIC,VWAP_RECLAIM,LONDON_BREAKOUT,DIVERGENCE,SQUEEZE",
         "enabled": 1,
     },
 }
@@ -1331,7 +1332,12 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 ("ICHIMOKU", "Ichimoku Kinko Hyo", "نظام السحابة الياباني: كسر الكومو + تقاطع تينكان/كيجون + سحابة مستقبلية مؤكدة (منفذة واختبارة آلياً)."),
                 ("CLASSIC", "CLASSIC", "التحليل الكلاسيكي: اتجاه EMA50 + مستوى أفقي حقيقي من القمم والقيعان + تأكيد شمعة ابتلاع/دبوس (منفذة واختبارة آلياً)."),
                 ("SK", "SK", "محرك سكالبينج سريع: مستوى مفتاحي 12 شمعة يُكسر بإغلاق مؤكد + زخم RSI + اتجاه EMA9/21 (منفذة واختبارة آلياً)."),
-                ("WYCKOFF", "Wyckoff", "منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً)."),
+                ("WYCKOFF", "Wyckoff", "منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + دخول ثانوي LPS/LPSY + جهد مقابل نتيجة + تقصّر الدفعة + تأكيد الحجم عند توفره (منفذة واختبارة آلياً)."),
+                ("HARMONIC", "Harmonics", "الأنماط الهارمونية: Gartley/Bat/Butterfly/Crab بنسب XABCD المنشورة (±سماحية معلنة) على محاور Zigzag حقيقية؛ الدخول عند D والوقف خلف X/D والأهداف من تصحيحات AD (منفذة واختبارة آلياً)."),
+                ("VWAP_RECLAIM", "VWAP Reclaim", "معيار الجلسة المؤسسي VWAP (أو متوسط الجلسة بصدق عند غياب الحجم): تفاعل مؤكد مع المستوى ثم استعادة/رفض بإغلاق قناعة؛ الوقف خلف قاع الارتداد والأهداف 2R/3R/4.5R (منفذة واختبارة آلياً)."),
+                ("LONDON_BREAKOUT", "London Breakout", "اختراق افتتاح لندن: نطاق أول ساعتين 08:00–09:59 بتوقيت لندن ثم كسر طازج بإغلاق قناعة بعد 10:00؛ الوقف عند الجهة المقابلة للنطاق والأهداف قياس النطاق (منفذة واختبارة آلياً)."),
+                ("DIVERGENCE", "Divergence", "التباعد الكلاسيكي Class A/B: قاع/قمة سعرية جديدة مقابل RSI معاكس عند محاور السوينغ نفسها + شمعة تأكيد بإغلاق قناعة؛ الوقف خلف المحور الثاني والأهداف 2R/3R/4.5R (منفذة واختبارة آلياً)."),
+                ("SQUEEZE", "BB Squeeze", "انضغاط بولنجر/كيلتنر (TTM مبسّط معلناً): العرض في أضيق 20% تاريخياً وبولنجر داخل كيلتنر ثم إطلاق بإغلاق خارج النطاق بجسم ≥0.3 ATR + RSI موافق؛ الوقف خلف نطاق كيلتنر المقابل (منفذة واختبارة آلياً)."),
             ]:
                 c.execute(
                     "INSERT OR IGNORE INTO strategy_catalog(code,title,description,enabled,verified,created_at,updated_at,min_confidence) VALUES(?,?,?,1,1,?,?,60)",
@@ -1356,8 +1362,16 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                 tuple(IMPLEMENTED_STRATEGIES),
             )
             # v6.11.0 — WYCKOFF graduation description refresh.
+            # v8.12.0 — full-school refresh for WYCKOFF/ICHIMOKU/PRICE_ACTION
+            # (same unconditional-boot precedent as the original refresh).
             c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='WYCKOFF'",
-                      ("منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + تأكيد الحجم عند توفره؛ الوقف خلف ذيل الحدث والأهداف قياس المدى (منفذة واختبارة آلياً).",
+                      ("منهج وايكوف: نطاق تداول حقيقي + Spring/Upthrust يخترق الحد ويغلق داخله + دخول ثانوي LPS/LPSY + جهد مقابل نتيجة + تقصّر الدفعة + تأكيد الحجم عند توفره (منفذة واختبارة آلياً).",
+                       config.now()))
+            c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='ICHIMOKU'",
+                      ("نظام السحابة الياباني الكامل: كسر الكومو + تقاطع/انحياز تينكان-كيجون + سحابة مستقبلية + تشيكو في فضاء مفتوح + ارتداد كيجون + نضارة انقلاب الكومو (منفذة واختبارة آلياً).",
+                       config.now()))
+            c.execute("UPDATE strategy_catalog SET description=?, updated_at=? WHERE code='PRICE_ACTION'",
+                      ("قراءة شموع كاملة: ابتلاع/دبوس + شمعة داخلية + انعكاس شمعتين + نجمة صباحية/مسائية + اختراق فاشل فخ + ترجيح الموقع (مستويات سيكولوجية ودعم/مقاومة) (منفذة واختبارة آلياً).",
                        config.now()))
             # Auto-encrypt any legacy plaintext broker_adapters.config_json rows (ENC1).
             from fysb.services import secrets as secrets_service
@@ -1409,7 +1423,7 @@ def init_db(snapshot_before_structural: bool = True) -> list[str]:
                         "UPDATE market_catalog SET enabled=1, verified=1, updated_at=? WHERE symbol=?",
                         (config.now(), m_sym),
                     )
-                # Ensure all 13 implemented strategies & M1..D1 timeframes are enabled
+                # Ensure all implemented (18) strategies & M1..D1 timeframes are enabled
                 for s_code in IMPLEMENTED_STRATEGIES:
                     c.execute(
                         "UPDATE strategy_catalog SET enabled=1, verified=1, updated_at=? WHERE code=?",

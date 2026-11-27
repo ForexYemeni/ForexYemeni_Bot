@@ -27,16 +27,16 @@ def isolated_db(tmp_path, monkeypatch):
 # =============================================================================
 # 1. Strategy catalog cleanup (ONLY the 13 real implemented strategies)
 # =============================================================================
-def test_only_13_real_strategies_exist(isolated_db):
+def test_only_18_real_strategies_exist(isolated_db):
     with db.conn() as c:
         rows = c.execute("SELECT code, verified, enabled FROM strategy_catalog ORDER BY code").fetchall()
     codes = {r["code"] for r in rows}
     expected = set(db.IMPLEMENTED_STRATEGIES)
-    assert len(expected) == 13
+    assert len(expected) == 18
     assert codes == expected
     assert all(r["verified"] == 1 and r["enabled"] == 1 for r in rows)
     assert set(strategy_stats.BASELINE_ORDER) == expected
-    for fake in ("ELLIOTT_WAVE", "HARMONIC", "VWAP", "ATR_BREAKOUT", "SUPERTREND"):
+    for fake in ("ELLIOTT_WAVE", "VOLUME_PROFILE", "VWAP", "ATR_BREAKOUT", "SUPERTREND"):
         assert fake not in codes
         assert fake not in strategy_stats.BASELINE_ORDER
 

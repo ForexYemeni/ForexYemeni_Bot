@@ -310,6 +310,16 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 if not c_checks.get("sweep"):
                     bonus += sweep["bonus"]
                 extra_notes.append(sweep["note"])
+            # v8.12.0 — institutional anchor confluence (daily pivots + session
+            # opening anchors). Skipped when the engine already scored it.
+            try:
+                anchors_res = _intel.detect_anchor_confluence(candles, float(cand.entry), d_key)
+                if anchors_res["detected"]:
+                    if not c_checks.get("anchor_confluence"):
+                        bonus += anchors_res["bonus"]
+                    extra_notes.append(anchors_res["note"])
+            except Exception as exc:
+                log.debug("anchor confluence skipped: %s", exc)
             if bonus:
                 cand.score = int(max(0, min(95, round(float(cand.score) + bonus))))
             cand.reasons = list(cand.reasons or []) + extra_notes

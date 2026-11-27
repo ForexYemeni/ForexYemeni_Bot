@@ -1,4 +1,4 @@
-"""ICHIMOKU — explicit mechanical subset of Ichimoku, not every trading variant.
+"""ICHIMOKU — full mechanical Ichimoku continuation set (extended v8.12.0).
 
 Tenkan9/Kijun26; current cloud from calculations26 bars back with SpanB52.
 Require close outside cloud, TK alignment, matching forward cloud, current close
@@ -6,8 +6,16 @@ beyond close26 bars ago (Chikou proxy), and bias close beyond its Kijun.
 A fresh TK cross is a bonus, NOT mandatory. Entry: close.
 Stop: Kijun +/-0.5 ATR, widened if tight (not the cloud boundary).
 Targets2R/3R/5R. Weights: cloud14, TK10, fresh-cross8, forward-cloud8,
-Chikou8, bias8, kill-zone6, volatility4, RR5 (total71).
+Chikou8, bias8, kill-zone6, volatility4, RR5 (base71) PLUS the v8.12.0
+full-school quality factors: Kijun-bounce/TK-re-test entry quality10,
+Kumo-twist freshness8 (twist within the last 10 bars), Chikou open-space8
+(close clears the whole lag-window structure, not one reference close),
+Kijun proximity6 (continuation not over-extended). Total max103.
 Minimum score58; minimum83 bars.
+
+Ichimoku "time elements" (Ochi numerical counts) are intentionally NOT
+implemented — they are numerology without mechanical edge evidence and the
+engine honestly declares their absence instead of faking them.
 
 Checklist merit is normalized to42..95, NOT a win probability. Callers must
 supply correctly labelled completed candles and enforce issuance/risk policy.
@@ -75,6 +83,53 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             break
     checks["fresh_cross"] = fresh
     earned += 8 if fresh else 0
+
+    # v8.12.0 — Kijun-bounce / TK re-test: price pulled back into the
+    # Tenkan–Kijun corridor within the last 3 closed bars and closed back on
+    # the signal side — the classic Ichimoku continuation entry quality.
+    corridor_hi, corridor_lo = max(tenkan, kijun), min(tenkan, kijun)
+    bounced = False
+    for c in candles[-4:-1]:
+        if direction == "BUY" and float(c["low"]) <= corridor_hi + 0.05 * a and float(c["close"]) > corridor_hi:
+            bounced = True
+        if direction == "SELL" and float(c["high"]) >= corridor_lo - 0.05 * a and float(c["close"]) < corridor_lo:
+            bounced = True
+    checks["kijun_bounce"] = bounced
+    earned += 10 if bounced else 0
+
+    # v8.12.0 — Kumo twist FRESHNESS: the forward-cloud regime flipped within
+    # the last 10 bars (an aged twist carries less continuation room).
+    twist_age = None
+    prev_bull = None
+    for i in range(max(SENKOU_B_P, len(candles) - 60), len(candles)):
+        win = candles[:i + 1]
+        fa = (_mid(win, TENKAN_P) + _mid(win, KIJUN_P)) / 2.0
+        fb = _mid(win, SENKOU_B_P)
+        bull = fa > fb
+        if prev_bull is not None and bull != prev_bull:
+            twist_age = len(candles) - 1 - i
+        prev_bull = bull
+    twist_fresh = twist_age is not None and twist_age <= 10
+    checks["kumo_twist_fresh"] = twist_fresh
+    earned += 8 if twist_fresh else 0
+
+    # v8.12.0 — Chikou in OPEN SPACE: the current close, plotted 26 bars back,
+    # clears the whole price structure around the lag window (not just the
+    # single reference close).
+    lag_win = candles[-(DISPLACEMENT + 5):-(DISPLACEMENT - 2)] if len(candles) >= DISPLACEMENT + 5 else []
+    if lag_win:
+        chikou_open = (all(close > float(c["high"]) for c in lag_win) if direction == "BUY"
+                       else all(close < float(c["low"]) for c in lag_win))
+    else:
+        chikou_open = False
+    checks["chikou_open_space"] = chikou_open
+    earned += 8 if chikou_open else 0
+
+    # v8.12.0 — Kijun proximity: continuation entry not over-extended from
+    # its mean-reversion anchor.
+    kijun_near = abs(close - kijun) <= 2.0 * a
+    checks["kijun_proximity"] = kijun_near
+    earned += 6 if kijun_near else 0
 
     fut_bullish = fut_a > fut_b
     checks["future_cloud"] = (direction == "BUY" and fut_bullish) or (direction == "SELL" and not fut_bullish)

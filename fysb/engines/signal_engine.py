@@ -20,7 +20,7 @@ from datetime import timedelta
 
 from fysb import config, db
 from fysb.config import log
-from fysb.engines import market_data
+from fysb.engines import honesty, market_data
 from fysb.engines.analysis import atr, atr_pct, confirmed_candles, structure_labels
 from fysb.engines.entry_state import birth_pulse_line, birth_status, is_stale_entry
 from fysb.engines.strategies import (consensus_filter, diagnosis_begin,
@@ -243,7 +243,7 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
     except RuntimeError as e:
         _log_run(symbol, entry_tf, "DATA_ERROR", str(e))
         return {"status": "ERROR", "signal_id": None, "reason": str(e), "score": None}
-    if market_data.is_stale(payload) and not force:
+    if market_data.is_stale(payload) and not force and honesty.stale_gate_enabled():
         # v8.13.1 — the admin-facing engine_runs detail now carries the whole
         # failover chain verdict (providers tried / stale / cooldown / mismatch)
         # so a frozen feed is traceable from the diagnostics center.
@@ -274,6 +274,22 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         return {"status": "REJECTED", "signal_id": None,
                 "reason": _reason, "score": None}
 
+    # v8.14.9 — «وضع المؤجل الصادق»: the OWNER may disarm the age gate from
+    # System & Security (or force a manual cycle). The cycle then proceeds on
+    # the freshest available snapshot — stamped honestly on the user surface
+    # (the deferred-honesty note rides the stored reason) and logged
+    # STALE_BYPASS/FORCE_BYPASS in engine_runs for the owner alone. Nothing
+    # becomes silent, nothing fake.
+    if market_data.is_stale(payload):
+        payload["stale_bypass"] = True
+        _chain = ",".join(payload.get("chain_errors") or []) or "chain-clean"
+        _why = "force=1" if force else "honesty_gate=0"
+        _run_code = ("FROZEN_BYPASS" if payload.get("feed_frozen")
+                     else ("FORCE_BYPASS" if force else "STALE_BYPASS"))
+        _log_run(symbol, entry_tf, _run_code,
+                 f"age={int(payload['age_seconds'])}s repeats={payload.get('frozen_repeats', 0)} "
+                 f"chain=[{_chain}] {_why}")
+
     if payload.get("is_proxy"):
         return {"status": "REJECTED", "signal_id": None, "reason": "proxy candles are indicative only, not execution evidence", "score": None}
     actual_bias_tf = bias_tf
@@ -294,8 +310,12 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
 
     # 4.5: Non-repainting closed-candle guard (v6.20.0) — strip any still-forming
     # bar so signals & indicators are computed strictly on confirmed candle closes.
-    candles = confirmed_candles(payload["values"], entry_tf)
-    bias_candles = confirmed_candles(bias_candles, actual_bias_tf)
+    # v8.14.9 — the OWNER may disarm this law from System & Security; the
+    # forming bar then enters the computation and the engine_runs line records
+    # the armed state (repaint_off) so the run is always traceable.
+    _strip = honesty.closed_candles_only()
+    candles = confirmed_candles(payload["values"], entry_tf) if _strip else list(payload["values"])
+    bias_candles = confirmed_candles(bias_candles, actual_bias_tf) if _strip else list(bias_candles)
     from fysb.engines.strategies.base import candle_input_error
     if candle_input_error(candles) or candle_input_error(bias_candles):
         return {"status": "REJECTED", "signal_id": None, "reason": "invalid candle history", "score": None}
@@ -324,7 +344,8 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                 _corr_provider = _provider_symbol(_corr_sym)
                 _corr = market_data.fetch_candles(_corr_provider, market_data.parse_interval(entry_tf), api_key)
                 if isinstance(_corr, dict) and _corr.get("values") and not market_data.is_stale(_corr):
-                    _corr_series = confirmed_candles(_corr["values"], entry_tf)
+                    _corr_series = (confirmed_candles(_corr["values"], entry_tf)
+                                    if _strip else list(_corr["values"]))
                     if not candle_input_error(_corr_series):
                         ctx.correlated_candles = _corr_series
                         _SMT_CACHE[_corr_key] = (time.time(), _corr_series)
@@ -651,14 +672,17 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (symbol, best.direction, entry_tf, best.entry, best.stop, best.tp1, best.tp2, best.tp3,
                          f"{best.tp1},{best.tp2},{best.tp3}", best.rr, best.score, best.code,
-                         " | ".join(best.reasons), birth_status_now, sig_source, int(created_by or 0),
+                         ((" | ".join(best.reasons) + " | " + honesty.stale_bypass_note(payload))
+                          if payload.get("stale_bypass") else " | ".join(best.reasons)),
+                         birth_status_now, sig_source, int(created_by or 0),
                          config.now(), payload.get("provider") or payload.get("source") or "UNKNOWN", payload["last_candle_iso"],
                          json.dumps({r.code: r.score for r in results}), _expiry_iso(),
                          0.0, 0.0, filled_at_birth, live_px))
         sid = cur.lastrowid
         c.execute("UPDATE signals SET accounting_model='PARTIAL_50_25_25' WHERE id=?", (sid,))
     _log_run(symbol, entry_tf, "SIGNAL_CREATED",
-             f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}")
+             f"id={sid} {best.summary()} | {bias_note} | birth={birth_status_now} live={live_px:g}"
+             + ("" if _strip else " | repaint_off"))
 
     # v6.24.0 (#6 Tier-Aware Best Pick): if AUTO emitted an upper-tier strategy
     # (e.g. SMC/ICT) on a market+TF that FREE allows (e.g. XAUUSD M15/H1), check

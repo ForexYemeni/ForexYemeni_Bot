@@ -734,6 +734,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_settings(q, uid, context, bot)
     elif act == "toggleuimode":
         await admin_system.admin_toggle_ui_mode(q, uid, context, bot)
+    elif act == "togglestalegate":
+        await admin_system.admin_toggle_stale_gate(q, uid, context, bot)
+    elif act == "togglerepaint":
+        await admin_system.admin_toggle_repaint(q, uid, context, bot)
     elif act == "freeset":
         await admin_system.admin_free_set(q, uid, context, bot)
     elif act == "demobalset":

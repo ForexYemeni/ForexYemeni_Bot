@@ -28,6 +28,18 @@ def _fake_user(uid: int):
     return type("U", (), {"id": uid, "username": f"u{uid}", "full_name": f"User {uid}"})()
 
 
+
+def _stale_dt(i):
+    """Near-stale candle stamps (last candle ~60min ago) — stale vs the M15
+    limit (45min) yet under the v8.13.6 ancient threshold (3x limit), so the
+    recovery-credit contract still applies verbatim."""
+    from datetime import datetime, timedelta
+    end = datetime.utcnow() - timedelta(minutes=60)
+    m = 60 - (15 * i) % 60
+    t = end - timedelta(minutes=15 * i)
+    return t.strftime("%Y-%m-%d %H:%M:00")
+
+
 class TestPhase3MarketData(unittest.TestCase):
     def setUp(self):
         from fysb.engines import provider_health
@@ -62,7 +74,7 @@ class TestPhase3MarketData(unittest.TestCase):
 
     def test_venue_gold_fails_over_from_binance_to_bybit_paxg(self):
         bybit_candles = [
-            {"datetime": f"2026-11-24 {i // 4:02d}:{(i % 4) * 15:02d}:00",
+            {"datetime": _stale_dt(i),
              "open": 3550.0, "high": 3555.0, "low": 3545.0, "close": 3552.0}
             for i in range(45)
         ]
@@ -80,7 +92,7 @@ class TestPhase3MarketData(unittest.TestCase):
         # Expire cooldown window so binance is tried again
         md._fail_streak["binance|BTCUSD|15min"] = (0.0, 2)
         candles = [
-            {"datetime": f"2026-11-24 {i // 4:02d}:{(i % 4) * 15:02d}:00",
+            {"datetime": _stale_dt(i),
              "open": 90000.0, "high": 90100.0, "low": 89900.0, "close": 90050.0}
             for i in range(45)
         ]

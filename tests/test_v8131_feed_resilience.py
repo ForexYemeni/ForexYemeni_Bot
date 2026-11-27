@@ -85,7 +85,7 @@ def test_chain_returns_fresh_payload_and_marks_success():
 def test_stale_fallback_carries_chain_verdict_for_admin_surfaces():
     """All providers stale → the honest stale payload carries the per-provider
     verdict list (engine_runs material — never user-facing prose)."""
-    end = datetime.now(timezone.utc) - timedelta(hours=24)
+    end = datetime.now(timezone.utc) - timedelta(hours=1.6)
     stale = _candles_15min(120, end)
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
          patch.object(md, "_fetch_td_candles", return_value=stale), \

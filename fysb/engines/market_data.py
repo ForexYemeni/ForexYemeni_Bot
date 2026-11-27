@@ -720,6 +720,16 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                             for k, _v in sorted(_cache.items(), key=lambda kv: kv[1]["t"])[:50]:
                                 _cache.pop(k, None)
                     return payload
+                # v8.13.6 — ancient-payload guard: a provider answering a 15min
+                # request with a snapshot older than 3× the staleness limit
+                # (cached CDN page / frozen mirror / throttled API serving old
+                # pages) is a FAILED provider, never a "freshest stale"
+                # candidate — a 31-hour zombie must not be the platform's best
+                # answer for an M15 request (the 1898-minute incident).
+                if payload["age_seconds"] > 3 * staleness_limit(interval):
+                    _mark_failure(provider, internal, interval, "ancient-snapshot")
+                    errors.append(f"{provider}:ancient(age={int(payload['age_seconds']) // 60}min)")
+                    continue
                 if stale_fallback is None or payload["age_seconds"] < stale_fallback["age_seconds"]:
                     stale_fallback = payload
                 errors.append(f"{provider}:stale(age={int(payload['age_seconds']) // 60}min)")

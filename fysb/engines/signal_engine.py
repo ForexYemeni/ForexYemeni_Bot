@@ -219,8 +219,13 @@ def generate_signal(symbol: str, timeframe: str = "", force: bool = False,
         _log_run(symbol, entry_tf, _run_code,
                  f"last candle {payload['last_candle_iso']} age={int(payload['age_seconds'])}s "
                  f"repeats={payload.get('frozen_repeats', 0)} chain=[{_chain}]")
+        if payload.get("feed_frozen"):
+            _reason = (f"data frozen (repeats {payload.get('frozen_repeats', 1)}, "
+                       f"age {int(payload['age_seconds'])//60}min)")
+        else:
+            _reason = f"data stale (age {int(payload['age_seconds'])//60}min)"
         return {"status": "REJECTED", "signal_id": None,
-                "reason": f"data stale (age {int(payload['age_seconds'])//60}min)", "score": None}
+                "reason": _reason, "score": None}
 
     if payload.get("is_proxy"):
         return {"status": "REJECTED", "signal_id": None, "reason": "proxy candles are indicative only, not execution evidence", "score": None}

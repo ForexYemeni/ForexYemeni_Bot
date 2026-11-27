@@ -52,6 +52,35 @@ TASKS_REF = []
 log.info("BOOT: %s v%s — this exact build is running", config.BRAND, config.VERSION)
 
 
+def _fresh_page_on_boot() -> None:
+    """v8.14.0 — the royal fresh page, EXECUTED once on the first boot after
+    v8.14.0 (the owner's documented decision: «حذف جميع الإشارات السابقة
+    ونبدا من الآن باشارات جديدة وكل شيء جديد حقيقي 100%» — no archive,
+    mandatory notice to all holders, signals-scope only).
+
+    Boot-time execution makes the wipe DETERMINISTIC on the production server
+    (no button press required). Holders are captured BEFORE the wipe (the
+    deliveries table is part of the scope) and stashed for the background
+    loop, which sends the mandatory notice once Telegram is up. Idempotent:
+    the `fresh_page_executed` stamp means it can never run twice."""
+    import json as _json
+    if db.get_setting("fresh_page_executed", "0") == "1":
+        return
+    try:
+        from fysb.engines import tracker as _trk
+        holders = _trk.fresh_page_holders()
+        counts = _trk.fresh_page_wipe()
+        db.set_setting("fresh_page_executed", "1")
+        db.set_setting("fresh_page_notice_holders", _json.dumps(sorted(holders)))
+        db.set_setting("fresh_page_notice_pending", "1")
+        log.warning("BOOT: FRESH PAGE executed — signals wiped (%s); mandatory "
+                    "notice queued for %s holders", counts.get("signals", 0), len(holders))
+    except Exception as exc:
+        # never block the bot boot on the wipe — but leave the stamp unset so
+        # the next boot retries the owner's standing decision
+        log.exception("BOOT: fresh page deferred: %s", type(exc).__name__)
+
+
 def preflight() -> bool:
     """Validate environment + database before touching Telegram."""
     problems = config.validate_boot()
@@ -64,6 +93,7 @@ def preflight() -> bool:
     if not ok:
         log.error("BOOT: database integrity failed: %s", integrity)
         return False
+    _fresh_page_on_boot()
     log.info("BOOT: database ok (%s)", integrity)
     log.info("BOOT: brand=%s build=%s | admin_id=%s | db=%s | market_key=%s",
              config.BRAND, config.BUILD_NAME, config.ADMIN_ID,

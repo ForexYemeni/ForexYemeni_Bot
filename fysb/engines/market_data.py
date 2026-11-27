@@ -71,6 +71,13 @@ CROSSCHECK_ATR_MULT = 2.0        # …×ATR15 volatility component — strict ag
 SPOT_CROSSCHECK_TTL = 120.0      # live-spot crosscheck quote cache (quota-safe)
 FXREF_GOLD_DEGRADE_AFTER = 4     # XAUUSD=X repeated failures → skip the leg
 FXREF_GOLD_DEGRADE_SECS = 900.0  # …for 15 minutes (then it is retried)
+# v8.14.4 — «السبوت المُثبت» (the verified pass): an offset payload that is
+# BOTH fresh quote↔quote-calibrated AND tight-crosschecked against the LIVE
+# spot quote is spot-PROVEN — signal-grade, not display-only:
+CALIB_QUOTEPAIR_PROOF_MAX_AGE = 30 * 60   # offset must be ≤30 minutes old
+VERIFY_FLOOR_USD = 2.0                    # tight verdict: max($2, 0.1%, 1×ATR15)
+VERIFY_TOL_RATIO = 0.001
+VERIFY_ATR_MULT = 1.0
 
 # Symbol maps (internal normalized symbol -> venue/reference symbol).
 YAHOO_FX_MAP = {
@@ -482,6 +489,15 @@ def _fxref_gold_record(internal: str, ok: bool) -> None:
     _fxref_gold_fail[internal] = (time.time(), streak + 1)
 
 
+def _gold_market_closed() -> bool:
+    """v8.14.4 — XAU spot weekly closure (approx: Fri ≥21:00 … Sun <22:00 UTC).
+    Yahoo raising while the market is CLOSED is expected, not a provider
+    failure — it must never feed the degradation streak."""
+    now = datetime.now(timezone.utc)
+    wd = now.weekday()
+    return (wd == 4 and now.hour >= 21) or wd == 5 or (wd == 6 and now.hour < 22)
+
+
 def _gold_chain_diagnosis(internal: str) -> str:
     """v8.14.3 — royal honest diagnosis: WHEN the gold chain dies, the error
     names WHICH layer died and why — never a vague «تعذر جلب» again.
@@ -741,6 +757,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
     # and returned honestly (callers still reject it by their own freshness
     # gates) — it is NEVER cached, so the next attempt re-tries the chain live.
     stale_fallback: dict | None = None
+    calibrated_spot_proof: dict | None = None   # v8.14.4 — venue verdict stash
 
     # v8.13.1 — TWO-PASS chain: pass 1 respects cooldowns; if nothing fresh
     # came back, pass 2 retries EVERY provider ignoring cooldowns (a provider
@@ -758,6 +775,7 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     # v8.0.0 (SIG-3): Prefer real CME Gold Futures (`GC=F`) via Yahoo first
                     # (zero crypto PAXG depeg!), then fail over to PAXG + GoldAPI spot offset.
                     used_futures = False
+                    offset_applied = False   # shared by BOTH sub-paths (PAXG + GC=F)
                     values = []
                     try:
                         yvals = _fetch_yahoo_candles("GC=F", interval, outputsize)
@@ -785,7 +803,6 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                         # premium (~0.3–1.5%) lives inside a physical corridor
                         # instead of the v8.14.2 pairing clamp that made live
                         # calibration impossible on production ($53 gap).
-                        offset_applied = False
                         last_c = float(values[-1]["close"]) if values else 0.0
                         spot_px = None
                         try:
@@ -836,13 +853,28 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     except Exception:
                         spot_now = None
                     if spot_now and values:
-                        tol = max(CROSSCHECK_FLOOR_USD,
-                                  CROSSCHECK_TOL_RATIO * float(spot_now),
-                                  CROSSCHECK_ATR_MULT * _series_atr(values))
-                        if abs(float(values[-1]["close"]) - float(spot_now)) > tol:
+                        div = abs(float(values[-1]["close"]) - float(spot_now))
+                        atr15 = _series_atr(values)
+                        kill_tol = max(CROSSCHECK_FLOOR_USD,
+                                       CROSSCHECK_TOL_RATIO * float(spot_now),
+                                       CROSSCHECK_ATR_MULT * atr15)
+                        if div > kill_tol:
                             log.warning("venue-gold payload refused: close %s diverges from live spot %s (tol %.2f)",
-                                        values[-1]["close"], spot_now, tol)
+                                        values[-1]["close"], spot_now, kill_tol)
                             raise RuntimeError("venue-spot divergence (live crosscheck)")
+                        # v8.14.4 — CALIBRATED_SPOT verdict: fresh quote↔quote
+                        # offset + tight divergence = spot-PROVEN, signal-grade
+                        verify_tol = max(VERIFY_FLOOR_USD,
+                                         VERIFY_TOL_RATIO * float(spot_now),
+                                         VERIFY_ATR_MULT * atr15)
+                        cal = _load_calib().get(internal)
+                        off_age = (time.time() - float((cal or {}).get("ts") or 0)) if cal else 1e18
+                        if offset_applied and off_age <= CALIB_QUOTEPAIR_PROOF_MAX_AGE and div <= verify_tol:
+                            calibrated_spot_proof = {
+                                "offset_age_min": round(off_age / 60.0, 1),
+                                "divergence_usd": round(div, 2),
+                                "verify_tol_usd": round(verify_tol, 2),
+                            }
                 elif provider == "fx-ref":
                     ysym = _yahoo_symbol_for(internal)
                     if not ysym:
@@ -855,7 +887,9 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     try:
                         values = _fetch_yahoo_candles(ysym, interval, outputsize)
                     except Exception:
-                        if internal == "XAUUSD":
+                        # v8.14.4 fairness: yahoo raising while the market is
+                        # CLOSED is expected — never feed the degrade streak
+                        if internal == "XAUUSD" and not _gold_market_closed():
                             _fxref_gold_record(internal, False)
                         raise
                     if internal == "XAUUSD":
@@ -885,6 +919,14 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                 # immediately; stale data never blocks the remaining alternatives.
                 payload = _assemble(internal, interval, values, "LIVE", False, cache_key, symbol,
                                     provider_name=provider)
+                if calibrated_spot_proof and provider == "venue-gold":
+                    # v8.14.4 — «السبوت المُثبت»: the offset payload passed BOTH
+                    # proofs (fresh quote↔quote calibration + tight live-spot
+                    # divergence) → it IS the market, by evidence, not by faith:
+                    # signal-grade. (#46 holds: raw/unverified stays PROXY.)
+                    payload["is_proxy"] = False
+                    payload["instrument_kind"] = "CALIBRATED_SPOT"
+                    payload["spot_proof"] = dict(calibrated_spot_proof)
                 if not is_stale(payload):
                     _FEED_SNAPSHOTS.pop(cache_key, None)   # fresh again — reset freeze tracking
                     if use_cache:

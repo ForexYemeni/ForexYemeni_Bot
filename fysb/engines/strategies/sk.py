@@ -12,7 +12,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, ema, kill_zone, rsi, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -25,9 +25,11 @@ MIN_BREAK_ATR = 0.10
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("SK", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("SK", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
@@ -45,6 +47,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         direction = "SELL"
     checks["micro_trend"] = bool(direction)
     if not direction:
+        diagnosis_refuse("SK", "لا اتجاه مؤسسي واضح للنموذج")
         return None
     earned += 14
 
@@ -57,6 +60,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         broke = close < key - MIN_BREAK_ATR * a
     checks["key_break"] = broke
     if not broke:
+        diagnosis_refuse("SK", "لم يُكسر المفتاح بحد النموذج")
         return None
     earned += 16
 
@@ -64,6 +68,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     momentum_ok = (r >= 53.0) if direction == "BUY" else (r <= 47.0)
     checks["rsi_momentum"] = momentum_ok
     if not momentum_ok:
+        diagnosis_refuse("SK", "زخم RSI لا يدعم الاتجاه")
         return None
     earned += 10
 
@@ -92,6 +97,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.5, fallback_atr=1.0, max_atr=2.4, cap_atr=2.0)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("SK", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     tp1, tp2, tp3, rr = ensure_min_tp_rr(

@@ -13,7 +13,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -44,9 +44,11 @@ def _impulse_leg(window: list[dict], direction: str) -> tuple[int, int, float] |
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
+        diagnosis_refuse("FIBONACCI", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("FIBONACCI", "التقلب غير قابل للقياس الآن")
         return None
     window = candles[-40:]
     last = candles[-1]
@@ -58,6 +60,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         if leg and (best is None or leg[2] > best[3]):
             best = (direction, leg[0], leg[1], leg[2])
     if not best:
+        diagnosis_refuse("FIBONACCI", "لا موجة دافع مؤكدة للنموذج")
         return None
     direction, o_idx, e_idx, impulse = best
     origin_px = float(window[o_idx]["low"] if direction == "BUY" else window[o_idx]["high"])
@@ -68,6 +71,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     max_pts = 76.0
     checks["impulse"] = impulse >= IMPULSE_ATR * a
     if not checks["impulse"]:
+        diagnosis_refuse("FIBONACCI", "الموجة الدافعة أضعف من حد النموذج")
         return None
     earned += 12
 
@@ -75,12 +79,14 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     in_pocket = POCKET_LO <= depth <= POCKET_HI
     checks["golden_pocket"] = in_pocket
     if not in_pocket:
+        diagnosis_refuse("FIBONACCI", "السعر خارج الجيب الذهبي")
         return None
     earned += 18
 
     orderly = (close > origin_px) if direction == "BUY" else (close < origin_px)
     checks["orderly"] = orderly
     if not orderly:
+        diagnosis_refuse("FIBONACCI", "التصحيح غير منضبط داخل اتجاه الموجة")
         return None
     earned += 8
 
@@ -116,6 +122,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("FIBONACCI", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     # Fibonacci extensions are measured from the swing EXTREME, not from a

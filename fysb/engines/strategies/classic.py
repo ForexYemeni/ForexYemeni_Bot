@@ -13,7 +13,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, candle_patterns, ema, kill_zone, psych_level, role_flip, structure_labels, support_resistance
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -24,9 +24,11 @@ PROXIMITY_ATR = 2.0
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 55:
+        diagnosis_refuse("CLASSIC", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("CLASSIC", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
@@ -45,6 +47,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         direction = "SELL"
     checks["trend_side"] = bool(direction)
     if not direction:
+        diagnosis_refuse("CLASSIC", "لا اتجاه مؤسسي واضح للنموذج")
         return None
     earned += 14
 
@@ -52,6 +55,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     slope_ok = (e50_now > e50_prev) if direction == "BUY" else (e50_now < e50_prev)
     checks["ema50_slope"] = slope_ok
     if not slope_ok:
+        diagnosis_refuse("CLASSIC", "ميل EMA50 عكس الاتجاه المطلوب")
         return None
     earned += 8
 
@@ -68,11 +72,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             level = lv_f
     checks["level_retest"] = level is not None
     if level is None:
+        diagnosis_refuse("CLASSIC", "لا مستوى مرجعي مُختبر للنموذج")
         return None
     earned += 12
     side_ok = (close >= level - 0.2 * a) if direction == "BUY" else (close <= level + 0.2 * a)
     checks["correct_side"] = side_ok
     if not side_ok:
+        diagnosis_refuse("CLASSIC", "السعر في الجهة المعاكسة للمستوى")
         return None
     earned += 8
 
@@ -83,6 +89,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     confirm = any(p in (bull_pats if direction == "BUY" else bear_pats) for p in patterns)
     checks["candle_confirm"] = confirm
     if not confirm:
+        diagnosis_refuse("CLASSIC", "لا تأكيد إغلاق نمطي للنموذج")
         return None
     earned += 12
 
@@ -108,6 +115,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("CLASSIC", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     tp1, tp2, tp3, rr = ensure_min_tp_rr(

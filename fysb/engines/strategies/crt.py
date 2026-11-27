@@ -14,7 +14,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, fair_value_gaps, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -23,6 +23,7 @@ from fysb.engines.strategies.base import (
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
+        diagnosis_refuse("CRT", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
 
     # 1+2+3) True chronological CRT: the LATEST closed candle (`last = candles[-1]`)
@@ -31,6 +32,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     # where older bars were compared against a newer reference bar).
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("CRT", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = last["close"]
@@ -52,6 +54,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             sweep_side, sweep_level = "low", float(last["low"])
             break
     if ref is None:
+        diagnosis_refuse("CRT", "لا جرف مرجعي مؤكد للنواة المركزية")
         return None
 
     r_hi, r_lo = float(ref["high"]), float(ref["low"])
@@ -69,18 +72,22 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     # (bullish close after low sweep, bearish close after high sweep) — eliminates
     # weak false CRT sweeps in choppy Gold ranges.
     if direction == "BUY" and close <= float(last["open"]):
+        diagnosis_refuse("CRT", "إغلاق الإشارة عكس اتجاه النموذج")
         return None
     if direction == "SELL" and close >= float(last["open"]):
+        diagnosis_refuse("CRT", "إغلاق الإشارة عكس اتجاه النموذج")
         return None
 
     # 4) Entry: CRT mid (50% of range) — v6.19.0: reject invalidated range
     # breakouts and never place a BUY limit above close or SELL limit below close.
     if direction == "BUY":
         if close < r_lo:
+            diagnosis_refuse("CRT", "السعر خارج جهة الدخول المطلوبة للنموذج")
             return None
         entry = mid if close >= mid else close
     else:
         if close > r_hi:
+            diagnosis_refuse("CRT", "السعر خارج جهة الدخول المطلوبة للنموذج")
             return None
         entry = mid if close <= mid else close
 
@@ -92,6 +99,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=1.15, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("CRT", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     # 6) Targets: opposite side first, floored strictly >= 2.0R / 3.0R / 4.5R
@@ -192,6 +200,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     earned += 5 if week_ref else 0
 
     if not bias_ok:
+        diagnosis_refuse("CRT", "اتجاه الفريم الأعلى يعاكس النموذج")
         return None
     score = normalized_score(earned, max_pts)
     if score < 64:

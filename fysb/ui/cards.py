@@ -357,7 +357,17 @@ def diagnose_no_signal(status: str, reason: str = "") -> tuple[str, str, str, st
             "استراحة تسوية يومية قصيرة ومعلنة سلفاً في تقويم الجلسات — لا إشارات تُصنَّع داخلها، والتدفق والإشارات يعودان فور انتهائها.",
             "أعد الفحص فور انتهاء الاستراحة، أو فعّل <b>البحث التلقائي</b> ليلتقط أول فرصة حقيقية بعد العودة.",
         )
-    # ④ honest data protection (stale/frozen/insufficient/chain/proxy) — the
+    # ④ the royal 100% truth when NO examination ever ran (v8.14.8): the feed
+    #    died, so by the no-repaint law the strategies — including the CHOSEN
+    #    one — were never examined. Never dressed up as a strategy verdict.
+    if "لم تُفحص" in r:
+        return (
+            "📡",
+            "الفحص الاستراتيجي متوقف — التغذية لم تبلغ حد الصدق",
+            "الرفض وقع قبل أي فحص مؤسسي: التغذية لم تبلغ حد الصدق، وقانون عدم إعادة الرسم يمنع أي حكم على شموع جامدة — المنهجيات المختارة لم تُفحص ولم يُصدر عنها حكم بعد.",
+            "لا تُكرّر المحاولات اليدوية الآن — فعّل <b>البحث التلقائي</b>؛ فور عودة تغذية صالحة يبدأ الفحص تلقائياً ويعود بالسبب الحقيقي 100% من منهجيتك.",
+        )
+    # ⑤ honest data protection (stale/frozen/insufficient/chain/proxy) — the
     #    refusal is real, the reason verbatim, zero counters
     if any(a in r for a in ("أسعار غير حية", "متجمّد", "مجمّدة", "عينة ناقصة",
                             "تعذر جلب بيانات", "للعرض فقط",

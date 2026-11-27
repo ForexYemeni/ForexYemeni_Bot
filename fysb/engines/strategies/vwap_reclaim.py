@@ -15,7 +15,7 @@ from fysb import instruments  # noqa: F401 (kept for spec-aware callers)
 from fysb.engines.anchors import session_vwap
 from fysb.engines.analysis import atr, atr_pct, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -26,13 +26,16 @@ MIN_SCORE = 58
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 30:
+        diagnosis_refuse("VWAP_RECLAIM", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     vw = session_vwap(candles)
     if not vw:
+        diagnosis_refuse("VWAP_RECLAIM", "لا جلسة كافية لبناء VWAP")
         return None
     level = float(vw["level"])
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("VWAP_RECLAIM", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
@@ -55,6 +58,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         if len(below) >= max(3, len(window) // 2) and touch and conviction:
             direction = "SELL"
     if not direction:
+        diagnosis_refuse("VWAP_RECLAIM", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     pullback = candles[-6:-1]
@@ -65,6 +69,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(close, stop, direction, a, min_atr=0.9, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(close - stop)
     if risk <= 0:
+        diagnosis_refuse("VWAP_RECLAIM", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         close, stop,

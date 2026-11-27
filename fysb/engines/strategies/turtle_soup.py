@@ -13,7 +13,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import atr, atr_pct, kill_zone, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -25,6 +25,7 @@ LONG_LOOKBACK = 55          # v8.13.0 — the classical alternative reference wi
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < LOOKBACK + 12:
+        diagnosis_refuse("TURTLE_SOUP", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     last = candles[-1]
     prior = candles[-(LOOKBACK + 1):-1]
@@ -32,20 +33,24 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     lo = min(c["low"] for c in prior)
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("TURTLE_SOUP", "التقلب غير قابل للقياس الآن")
         return None
 
     direction, level = "", 0.0
     body = abs(last["close"] - last["open"])
     range_ = max(last["high"] - last["low"], 1e-12)
     if last["high"] > hi and last["low"] < lo:
+        diagnosis_refuse("TURTLE_SOUP", "جرف من الطرفين — لا جهة مؤكدة")
         return None  # both sides swept: do not choose SELL merely by if-order
     if not lo < last["close"] < hi:
+        diagnosis_refuse("TURTLE_SOUP", "الإغلاق خارج النطاق المرجعي")
         return None
     if last["high"] > hi and last["close"] < hi:
         direction, level = "SELL", hi          # failed upside breakout
     elif last["low"] < lo and last["close"] > lo:
         direction, level = "BUY", lo           # failed downside breakout
     if not direction:
+        diagnosis_refuse("TURTLE_SOUP", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     bias = structure_labels(ctx.bias_candles)
@@ -60,6 +65,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.6, fallback_atr=1.2, max_atr=2.6, cap_atr=2.2)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("TURTLE_SOUP", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

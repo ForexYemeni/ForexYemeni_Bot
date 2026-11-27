@@ -149,6 +149,21 @@ BINANCE_MAP = {
     "PEPEUSD": "PEPEUSDT",
 }
 BYBIT_MAP = {k: v for k, v in BINANCE_MAP.items() if k != "XAUUSD"}
+# v8.14.8 — the crypto-chain rescue layer: Yahoo serves real spot candles for
+# the majors even when BOTH crypto venues are blocked/unreachable from the
+# hosting server (the owner's live incident: BTC feed died completely while
+# the market was alive). Fourth layer in the crypto candle chain.
+YAHOO_CRYPTO_MAP = {
+    "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD",
+    "XRPUSD": "XRP-USD", "BNBUSD": "BNB-USD", "ADAUSD": "ADA-USD",
+    "DOGEUSD": "DOGE-USD", "AVAXUSD": "AVAX-USD", "LINKUSD": "LINK-USD",
+    "DOTUSD": "DOT-USD", "TONUSD": "TON-USD", "LTCUSD": "LTC-USD",
+    "BCHUSD": "BCH-USD", "TRXUSD": "TRX-USD", "SHIBUSD": "SHIB-USD",
+    "SUIUSD": "SUI-USD", "NEARUSD": "NEAR-USD", "ATOMUSD": "ATOM-USD",
+    "UNIUSD": "UNI-USD", "APTUSD": "APT-USD", "ARBUSD": "ARB-USD",
+    "OPUSD": "OP-USD", "XLMUSD": "XLM-USD", "HBARUSD": "HBAR-USD",
+    "PEPEUSD": "PEPE-USD",
+}
 GOLD_API_MAP = {   # real spot quote reference (no candles)
     "XAUUSD": "XAU", "XAGUSD": "XAG", "XPTUSD": "XPT", "XPDUSD": "XPD",
     "BTCUSD": "BTC", "ETHUSD": "ETH",
@@ -162,7 +177,8 @@ FOREX_ONLY = set(YAHOO_FX_MAP.keys())
 
 
 def _yahoo_symbol_for(internal: str) -> str | None:
-    return YAHOO_FX_MAP.get(internal) or YAHOO_METAL_MAP.get(internal) or YAHOO_EQUITY_MAP.get(internal)
+    return (YAHOO_FX_MAP.get(internal) or YAHOO_METAL_MAP.get(internal)
+            or YAHOO_EQUITY_MAP.get(internal) or YAHOO_CRYPTO_MAP.get(internal))
 
 _cache: dict[tuple, dict] = {}
 _fail_streak: dict[str, tuple[float, int]] = {}
@@ -196,7 +212,7 @@ _CANDLE_CHAINS = {
     "metal":  ["fx-ref", "twelvedata"],
     "fx":     ["fx-ref", "twelvedata"],
     "equity": ["fx-ref", "twelvedata"],
-    "crypto": ["binance", "bybit", "twelvedata"],
+    "crypto": ["binance", "bybit", "yahoo-crypto", "twelvedata"],
 }
 _QUOTE_CHAINS = {
     "gold":   ["spot-ref", "venue-gold", "twelvedata"],
@@ -924,6 +940,14 @@ def fetch_candles(symbol: str, interval: str, api_key: str = "", outputsize: int
                     if not bybit_sym:
                         continue
                     values = _fetch_bybit_candles(bybit_sym, interval, outputsize)
+                elif provider == "yahoo-crypto":
+                    # v8.14.8 — the venue-independent rescue layer: real spot
+                    # candles for crypto majors even when BOTH crypto venues
+                    # are blocked from the hosting server (owner's incident).
+                    ysym = _yahoo_symbol_for(internal)
+                    if not ysym:
+                        continue
+                    values = _fetch_yahoo_candles(ysym, interval, outputsize)
                 elif provider == "twelvedata":
                     values = _fetch_td_candles(_td_symbol(internal, symbol), interval,
                                                config.market_api_key(), outputsize)

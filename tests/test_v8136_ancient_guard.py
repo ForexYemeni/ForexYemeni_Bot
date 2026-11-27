@@ -35,7 +35,14 @@ def _clean_state():
     md._fail_streak.clear()
     md._cache.clear()
     md._FEED_SNAPSHOTS.clear()
+    # v8.14.8: these tests exercise freshness MECHANICS on relative stamps —
+    # when the lookback window crosses the live settlement pause, the v8.14.5
+    # fairness layer flips the stale verdict. Fairness has its OWN dedicated
+    # suite (test_v8145_settlement_fairness.py) — pin it to zero here.
+    _fair = patch.object(md, "settlement_frozen_seconds", return_value=0.0)
+    _fair.start()
     yield
+    _fair.stop()
     md._fail_streak.clear()
     md._cache.clear()
     md._FEED_SNAPSHOTS.clear()

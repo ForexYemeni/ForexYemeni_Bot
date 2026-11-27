@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fysb.engines.analysis import atr_pct, fair_value_gaps, ny_hour, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -48,10 +48,12 @@ def _window_of(dt_iso: str):
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 45:
+        diagnosis_refuse("SILVER_BULLET", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     last = candles[-1]
     wname = _window_of(last["datetime"])
     if not wname:
+        diagnosis_refuse("SILVER_BULLET", "خارج نافذة الرصاصة (نيويورك)")
         return None
 
     # Anchor to this DATE's window start, not the current clock hour or an
@@ -63,10 +65,12 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     acc = [c for c in candles[:-1]
            if prior_start <= _ny_datetime(c["datetime"]) < window_start]
     if len(acc) < 3:
+        diagnosis_refuse("SILVER_BULLET", "شموع نافذة الافتتاح غير كافية للنموذج")
         return None
     or_hi = max(c["high"] for c in acc)
     or_lo = min(c["low"] for c in acc)
     if or_hi <= or_lo:
+        diagnosis_refuse("SILVER_BULLET", "نطاق افتتاح نيويورك مسطح بلا مدى")
         return None
     close = last["close"]
     bias_dir = "BUY" if close > (or_hi + or_lo) / 2 else "SELL"
@@ -94,6 +98,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         fvg = f
         break
     if not fvg:
+        diagnosis_refuse("SILVER_BULLET", "لا فجوة قيمة عادلة داخل النافذة")
         return None
 
     direction = bias_dir
@@ -111,6 +116,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a_abs, min_atr=0.8, fallback_atr=1.4, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("SILVER_BULLET", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

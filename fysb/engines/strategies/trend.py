@@ -13,7 +13,7 @@ supply correctly labelled completed candles and enforce issuance/risk policy.
 """
 from fysb.engines.analysis import adx, atr, atr_pct, ema, kill_zone
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -31,9 +31,11 @@ def _stack(candles: list[dict]) -> tuple[float, float, float]:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 55:
+        diagnosis_refuse("TREND", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("TREND", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
@@ -50,6 +52,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         direction = "SELL"
     checks["stack"] = bool(direction)
     if not direction:
+        diagnosis_refuse("TREND", "لا اتجاه مؤسسي واضح للنموذج")
         return None
     earned += 14
 
@@ -57,6 +60,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     bias_ok = (direction == "BUY" and b21 > b50 + 0.1 * a) or (direction == "SELL" and b21 < b50 - 0.1 * a)
     checks["htf_bias"] = bias_ok
     if not bias_ok:
+        diagnosis_refuse("TREND", "اتجاه الفريم الأعلى يعاكس النموذج")
         return None
     earned += 10
 
@@ -74,6 +78,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             break
     checks["pullback"] = visited
     if not visited:
+        diagnosis_refuse("TREND", "لا ارتداد تصحيحي إلى منطقة القيمة")
         return None
     earned += 12
 
@@ -81,6 +86,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         else (close < e9 and float(last["close"]) < float(last["open"]))
     checks["resumption"] = resumed
     if not resumed:
+        diagnosis_refuse("TREND", "لا استئناف اتجاهي مؤكد بالإغلاق")
         return None
     earned += 10
 
@@ -104,6 +110,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=0.8, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("TREND", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     tp1, tp2, tp3, rr = ensure_min_tp_rr(

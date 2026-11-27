@@ -59,7 +59,9 @@ class TestPipeline(unittest.TestCase):
         with patch.object(market_data, "fetch_candles", return_value={**_valid_payload(), "age_seconds": 999999}):
             res = signal_engine.generate_signal("XAUUSD")
         self.assertEqual(res["status"], "REJECTED")
-        self.assertIn("stale", res["reason"])
+        # v8.14.8: the user-facing verdict is the honest Arabic truth —
+        # the feed missed the honesty limit and NO examination ever ran
+        self.assertIn("لم تُفحص", res["reason"])
 
     def test_provider_failure_logged_not_silent(self):
         with patch.object(market_data, "fetch_candles", side_effect=RuntimeError("provider down")):
@@ -83,6 +85,10 @@ class TestPipeline(unittest.TestCase):
              patch("fysb.engines.intelligence.dxy_bias_check", return_value={"delta": 0, "note": ""}), \
              patch("fysb.engines.signal_engine._allowed_strategies", return_value=["PRICE_ACTION"]):
             with db.conn() as c:
+                # v8.14.8: the session DB is shared — foreign open signals from
+                # earlier tests could trip the per-market cap before the
+                # duplicate gate. This test isolates DUPLICATE semantics only.
+                c.execute("DELETE FROM signals WHERE symbol='XAUUSD'")
                 c.execute("""INSERT INTO signals(symbol,direction,timeframe,entry,stop,tp1,tp2,tp3,targets,rr,score,
                              strategy,reason,status,source,created_by,created_at)
                              VALUES('XAUUSD','BUY','M15',100,95,110,115,120,'',2,70,'PRICE_ACTION','test dup','ACTIVE','AUTO',0,?)""",

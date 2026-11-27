@@ -17,7 +17,7 @@ merit normalized to 42..95 — NOT a win probability.
 """
 from fysb.engines.analysis import atr, atr_pct, rsi, swings, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -33,14 +33,17 @@ def _rsi_at(candles: list[dict], idx: int) -> float:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("DIVERGENCE", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("DIVERGENCE", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
     highs, lows = swings(candles, 2)
     if len(lows) < 2 or len(highs) < 2:
+        diagnosis_refuse("DIVERGENCE", "محاور التقلب غير مكتملة (بلا قاعين وقممين)")
         return None
 
     direction, cls, p1, p2, r1, r2 = "", "", 0.0, 0.0, 0.0, 0.0
@@ -62,15 +65,19 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             elif abs(rr2 - rr1) <= 2.0 and rr2 <= rr1:
                 direction, cls, p1, p2, r1, r2 = "SELL", "B", h1, h2, rr1, rr2
     if not direction:
+        diagnosis_refuse("DIVERGENCE", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     # Mandatory confirming close in the divergence direction:
     body = abs(close - float(last["open"]))
     if body < 0.25 * a:
+        diagnosis_refuse("DIVERGENCE", "تأكيد الإغلاق ضعيف البنية")
         return None
     if direction == "BUY" and not close > float(last["open"]):
+        diagnosis_refuse("DIVERGENCE", "الإغلاق عكس جهة الانحراف")
         return None
     if direction == "SELL" and not close < float(last["open"]):
+        diagnosis_refuse("DIVERGENCE", "الإغلاق عكس جهة الانحراف")
         return None
 
     if direction == "BUY":
@@ -80,6 +87,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(close, stop, direction, a, min_atr=0.9, fallback_atr=1.5, max_atr=2.8, cap_atr=2.4)
     risk = abs(close - stop)
     if risk <= 0:
+        diagnosis_refuse("DIVERGENCE", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         close, stop,

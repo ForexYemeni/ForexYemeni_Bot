@@ -51,7 +51,7 @@ CHECK_AR = {
     "rr_ok": "نسبة العائد إلى المخاطرة المعيارية", "pullback": "عودة سعرية للمتوسط",
     "resumption": "استئناف الاتجاه", "stack": "تراص المتوسطات",
     "phase_expanding": "توسّع اتجاهي حي", "momentum": "زخم مؤكد",
-    "pattern": "نموذج شمعة مؤكد", "level": "مستوى أفقي قريب",
+    "pattern": "نموذج إغلاق مؤكد", "level": "مستوى أفقي قريب",
     "side": "الجهة الصحيحة من المستوى", "slope": "ميل متوسط متوافق",
     "impulse": "انفعال اتجاهي بحد أدنى", "pocket": "الإغلاق داخل الجيب الذهبي",
     "orderly": "مسار منظم بلا تشتت", "pocket_sweep": "جرف داخل الجيب",
@@ -63,7 +63,7 @@ CHECK_AR = {
     "squeeze_state": "انضغاط تاريخي (Squeeze)", "bandwidth_extreme": "انكماش مدى عند قاع تاريخي",
     "trigger": "إطلاق اتجاهي مؤكد", "session": "جلسة صالحة للنموذج",
     "kz": "داخل منطقة قتل مؤسسية", "volatility": "تقلب مناسب",
-    "key": "مفتاح 12 شمعة سليم", "trend": "اتجاه قصير حاد",
+    "key": "مفتاح 12 إغلاقاً سليم", "trend": "اتجاه قصير حاد",
     "decisive": "كسر حاسم بإغلاق", "class_a": "انحراف فئة A واضح",
     "class_b": "انحراف فئة B", "divergence": "انحراف زخمي مؤكد",
     "volume": "حجم مؤكد", "effort_result": "توافق الجهد والنتيجة",
@@ -74,7 +74,7 @@ CHECK_AR = {
     "chikou": "تأكيد Chikou", "bias_kijun": "الإغلاق خلف Kijun",
     "kijun_bounce": "ارتداد Kijun بجودة", "kumo_twist": "انتعاش سحابة طازج",
     "chikou_space": "فراغ Chikou المفتوح", "break_fresh": "كسر طازج غير متجدد",
-    "body": "جسم اتجاهي كافٍ", "body_min": "جسم الشمعة ≥ الحد",
+    "body": "جسم اتجاهي كافٍ", "body_min": "جسم الإغلاق ≥ الحد",
     "location": "موقع النموذج محصَّن", "rsi": "RSI في نطاق الدعم",
     "sr": "مستوى قرب حقيقي", "dual_sweep": "لا جرف مزدوج",
     "mid": "المسافة لنقطة الارتداد الوسطى", "at_mid": "الوصول لنقطة 50%",
@@ -86,7 +86,7 @@ CHECK_AR = {
     "asian_range": "نطاق آسيا محدد", "at_hist_min_bandwidth": "انكماش عند قاع تاريخي",
     "band_exit_close": "إغلاق خارج النطاق", "bandwidth_expanding": "توسع مدى النطاق",
     "bandwidth_rank": "رتبة الانكماش التاريخية", "breaker_confluence": "تلاصق الكاسر",
-    "breakout_retest": "كسر مع إعادة اختبار", "candle_confirm": "تأكيد شمعة اتجاهية",
+    "breakout_retest": "كسر مع إعادة اختبار", "candle_confirm": "تأكيد الإغلاق النمطي الاتجاهي",
     "chikou_open_space": "فراغ Chikou المفتوح", "close_back_margin": "هامش العودة داخل النطاق",
     "class": "فئة الانحراف واضحة", "correct_side": "الجهة الصحيحة",
     "d_distribution_eq": "توزيع D بالمقاييس", "dol_room": "مساحة حتى هدف السيولة",
@@ -101,7 +101,7 @@ CHECK_AR = {
     "key_break": "كسر المفتاح بإغلاق", "kijun_proximity": "قرب Kijun",
     "kumo_twist_fresh": "انتعاش سحابة طازج", "level_kind": "نوع المستوى",
     "level_retest": "إعادة اختبار المستوى", "london_manip": "تلاعب لندن",
-    "long_window_55": "نافذة 55 شمعة", "lps_event_index": "حدث آخر نقطة عرض",
+    "long_window_55": "النافذة التحليلية الطويلة غير مكتملة", "lps_event_index": "حدث آخر نقطة عرض",
     "manipulation": "تلاعب واضح بجرف", "micro_trend": "اتجاه دقيق EMA9/21",
     "mss": "كسر بنية مصغّر (MSS)", "or_bias": "انحياز نطاق الافتتاح",
     "ote_depth": "عمق OTE المناسب", "ote_sweet": "داخل الجيب الأمثل",
@@ -147,10 +147,27 @@ def diagnosis_record(code: str, checks: dict, earned: float, max_pts: float) -> 
         pass  # diagnostics never break signal generation
 
 
+def diagnosis_refuse(code: str, gate_ar: str) -> None:
+    """v8.14.8 — pre-gate refusal: the strategy withdrew at a STRUCTURAL
+    precondition BEFORE its merit gate (candle history, session window,
+    bias direction, flat range...). The exact gate is named in royal Arabic
+    and recorded — the NO_SETUP card can never fall back to a vague verdict,
+    and a silent withdrawal is now mechanically impossible (CI contract)."""
+    try:
+        _DIAG.items = getattr(_DIAG, "items", []) or []
+        _DIAG.items.append({"code": str(code).upper(), "proximity": 0,
+                            "missing": [str(gate_ar)], "pre": True})
+    except Exception:
+        pass  # diagnostics never break signal generation
+
+
 def diagnosis_snapshot() -> list[dict]:
-    """This thread's refusal diagnostics (closest strategy first)."""
+    """This thread's refusal diagnostics (closest strategy first).
+    v8.14.8 — merit-gate entries (real proximity) lead; pre-gate refusals
+    follow in examination order — a pre-gate withdrawal never outranks a
+    strategy that actually reached its merit gate."""
     items = list(getattr(_DIAG, "items", []) or [])
-    items.sort(key=lambda d: -d["proximity"])
+    items.sort(key=lambda d: (bool(d.get("pre")), -d["proximity"]))
     return items
 
 

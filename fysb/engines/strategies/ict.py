@@ -17,7 +17,7 @@ from fysb.engines.analysis import (
     premium_discount, structure_labels, swings,
 )
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -26,6 +26,7 @@ from fysb.engines.strategies.base import (
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 40:
+        diagnosis_refuse("ICT", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     last = candles[-1]
     close = last["close"]
@@ -59,6 +60,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     elif sweep_dir == "BUY" and (mss["choch"] or mss["bos"]) and mss["trend"] != "up":
         direction = "SELL"
     if not direction:
+        diagnosis_refuse("ICT", "لا اتجاه مؤسسي واضح للنموذج")
         return None
 
     # --- Entry: retrace into the nearest INTACT FVG/OB in trade direction ---
@@ -100,11 +102,13 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
         or (direction == "SELL" and mss["trend"] != "up" and close <= float(last["open"]))
     )
     if not (has_matching_sweep or has_zone_trigger):
+        diagnosis_refuse("ICT", "لا جرف موافق ولا زناد منطقة بعد الكسر")
         return None
 
     # --- Stop: beyond the swept liquidity level / recent extreme -----------
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("ICT", "التقلب غير قابل للقياس الآن")
         return None
     if direction == "BUY":
         swing_low = min(c["low"] for c in candles[-8:])
@@ -116,6 +120,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
 
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("ICT", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
     tp1, tp2, tp3, rr = ensure_min_tp_rr(
         entry, stop,

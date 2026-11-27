@@ -25,7 +25,7 @@ Score is checklist merit normalized to 42..95 — NOT a win probability.
 """
 from fysb.engines.analysis import atr, atr_pct, structure_labels
 from fysb.engines.strategies.base import (
-    diagnosis_record,
+    diagnosis_record, diagnosis_refuse,
     Ctx, StrategyResult, cap_stop, ensure_min_tp_rr, normalized_score, checked_strategy,
 )
 
@@ -105,15 +105,18 @@ def _pivots_for(last5: list[dict]) -> tuple | None:
 def evaluate(ctx: Ctx) -> StrategyResult | None:
     candles = ctx.candles
     if len(candles) < 60:
+        diagnosis_refuse("HARMONIC", "تاريخ الشموع أقصر من الحد الأدنى للنموذج")
         return None
     a = atr(candles)
     if a <= 0:
+        diagnosis_refuse("HARMONIC", "التقلب غير قابل للقياس الآن")
         return None
     last = candles[-1]
     close = float(last["close"])
 
     zig = _zigzag(candles)
     if len(zig) < 5:
+        diagnosis_refuse("HARMONIC", "محاور الزيجزاغ غير مكتملة للنموذج")
         return None
 
     best = None  # (direction, pattern, centering, x, a, b, c, d)
@@ -139,6 +142,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
             if best is None or centering > best[2]:
                 best = (direction, name, centering, x, a_px, b, c, d)
     if best is None:
+        diagnosis_refuse("HARMONIC", "لا نمط توافقي مكتمل البنية")
         return None
 
     direction, name, centering, x, a_px, b, c, d = best
@@ -154,6 +158,7 @@ def evaluate(ctx: Ctx) -> StrategyResult | None:
     stop = cap_stop(entry, stop, direction, a, min_atr=1.0, fallback_atr=1.6, max_atr=2.8, cap_atr=2.4)
     risk = abs(entry - stop)
     if risk <= 0:
+        diagnosis_refuse("HARMONIC", "حساب الوقف غير سليم (مخاطرة صفرية)")
         return None
 
     # Targets from the AD leg with platform floors applied separately:

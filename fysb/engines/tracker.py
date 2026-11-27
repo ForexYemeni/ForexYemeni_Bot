@@ -383,22 +383,24 @@ def check_open_signals(api_key: str) -> dict:
             "proof_signals": proof_signals, "chart_events": chart_events}
 
 
-def _documented_extreme(sig: dict, payload: dict) -> tuple[float, float]:
-    """(extreme_price, signed_pips) — the furthest documented price travel in
-    the trade's favour within the tracked window AFTER the fill anchor.
-    This is the number the notification can PROVE from provider candles; the
-    card shows it next to any achieved target so every claim carries its own
-    documented witness (v6.8.0 honesty)."""
+def _documented_extreme(sig: dict, payload: dict, adverse: bool = False) -> tuple[float, float]:
+    """(extreme_price, signed_pips) — the furthest documented price travel
+    within the tracked window AFTER the fill anchor. v8.13.5: the side is
+    HONEST to the card being sent — target/running cards witness the trade's
+    own direction (favour side), while SL_HIT/BE cards must witness the
+    OPPOSITE side (for a SELL: the max HIGH is the stop-touch evidence; the
+    old favour-side min-low printed a self-contradicting «-14.3 pips» witness
+    next to a «-118.2 pips» stop announcement)."""
     try:
         entry = float(sig["entry"])
         cut = _utc_cutoff(sig.get("filled_at") or sig.get("created_at") or "")
         post = [c for c in (payload.get("values") or []) if c.get("datetime", "") >= cut]
         if not post:
             return 0.0, 0.0
-        if sig["direction"] == "BUY":
-            ext = max(float(c["high"]) for c in post)
+        if (sig["direction"] == "BUY") != bool(adverse):
+            ext = max(float(c["high"]) for c in post)      # BUY-favour / SELL-adverse
         else:
-            ext = min(float(c["low"]) for c in post)
+            ext = min(float(c["low"]) for c in post)       # SELL-favour / BUY-adverse
         return ext, drift_pips(sig["symbol"], sig["direction"], entry, ext)
     except Exception:
         return 0.0, 0.0
@@ -706,6 +708,27 @@ def _card_refresh_edits(sig: dict, live_px: float, refs: list[dict], market_row=
     return out
 
 
+def _sl_touch_plausible(walked: list[dict], idx: int, touch_px: float,
+                        direction: str, a: float) -> bool:
+    """v8.13.5 — spike guard for stop-loss touches. A candle whose extreme
+    blasts beyond the prior 5-bar range by >3x ATR is feed garbage (the #46
+    incident: a futures-premium spike faked an SL touch the broker chart never
+    showed). Such an isolated outlier must not kill the trade on its own —
+    a real stop touch repeats on the next candle/next poll. With too little
+    history or no usable ATR the touch is judged plausible (no blocking)."""
+    if idx < 3 or a <= 0:
+        return True
+    ref_lo, ref_hi = [], []
+    for c in walked[max(0, idx - 5):idx]:
+        ref_lo.append(float(c["low"]))
+        ref_hi.append(float(c["high"]))
+    if not ref_lo:
+        return True
+    if direction == "SELL":
+        return touch_px <= (max(ref_hi) + 3.0 * a)
+    return touch_px >= (min(ref_lo) - 3.0 * a)
+
+
 def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0) -> str | None:
     """Return the next status if price data justifies it, else None.
 
@@ -739,6 +762,12 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     pip = max(instruments.spec(sig["symbol"]).pip_size, 1e-9)
     buf = instruments.tp_confirm_pips(sig["symbol"]) * pip
     ask_spread = instruments.typical_spread_pips(sig["symbol"]) * pip * 0.5
+    # v8.13.5 — ATR for the stop-touch spike guard (0.0 when history is short)
+    try:
+        from fysb.engines.analysis import atr as _atr
+        a = _atr(walked) or _atr(candles or []) or 0.0
+    except Exception:
+        a = 0.0
     progress_tp = hit_tp
     # Track the bar index where the already-banked target (hit_tp) was reached
     # so the fill bar itself (at entry) never false-triggers a breakeven stop.
@@ -785,7 +814,11 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
             if known_after or legacy_after:
                 return f"TP{progress_tp}_BE"
         if sl_now and progress_tp == 0:
-            return "SL_HIT"
+            # v8.13.5 — spike guard: an isolated outlier candle beyond 3x ATR of
+            # the prior range must NOT fake a stop-out; a genuine touch repeats.
+            touch_px = hi if direction == "SELL" else lo
+            if _sl_touch_plausible(walked, idx, touch_px, direction, a):
+                return "SL_HIT"
         if new_tp > progress_tp:
             progress_tp = new_tp
             banked_bar_idx = idx
@@ -1001,9 +1034,12 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
     detail = ""
     result_line = f"▎📈 النتيجة النموذجية حتى الآن: <b>{pips_result:+.1f} pips</b>"
-    ext_px, ext_pips = _documented_extreme(sig, payload)
+    ext_adverse = (status == "SL_HIT") or bool(is_be_close)
+    ext_px, ext_pips = _documented_extreme(sig, payload, adverse=ext_adverse)
     if ext_px:
-        result_line += (f" · أعلى تلامس موثق: <code>{instruments.fmt_price(sig['symbol'], ext_px)}</code> "
+        ext_label = ("أقصى تلامس موثق بالاتجاه المعاكس" if ext_adverse
+                     else "أقصى تلامس موثق في اتجاه الصفقة")
+        result_line += (f" · {ext_label}: <code>{instruments.fmt_price(sig['symbol'], ext_px)}</code> "
                         f"({ext_pips:+.1f} pips)")
     result_line += "\n"
     if status == "RUNNING":

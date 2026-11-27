@@ -227,6 +227,10 @@ def ar_reason(reason: str) -> str:
     for needle, ar in _REASON_SUBS:
         if needle in low:
             return ar
+    m = _re.search(r"settlement pause (\d{2}:\d{2})-(\d{2}:\d{2})", low)
+    if m:
+        return (f"🌙 استراحة التسوية اليومية للأسواق ({m.group(1)}–{m.group(2)} UTC / 17:00–18:00 نيويورك) — "
+                "السوق يلتفت أنفاسه دقائق محدودة كل يوم؛ التدفق والإشارات يعودان فور انتهائها بأول شمعة صالحة")
     m = _re.search(r"data stale \(age (\d+)min\)", low)
     if m:
         return f"بيانات أقدم من الحد المسموح ({m.group(1)} دقيقة) — رفض صادق، لا إشارة من شموع جامدة"

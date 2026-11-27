@@ -298,11 +298,18 @@ class TestMarketState(unittest.TestCase):
         import fysb.engines.market_data as md
         from datetime import datetime, timezone
         real_now = md.datetime
+        _SAT = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)  # a Saturday
         class FakeDT:
+            # v8.14.5: callable + delegating — market_state now CONSTRUCTS
+            # datetimes (DST-aware settlement anchors), not only .now()
+            def __call__(self, *a, **k):
+                return datetime(*a, **k)
             @staticmethod
             def now(tz=None):
-                return datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)  # a Saturday
-        md.datetime = type("m", (), {"now": staticmethod(lambda tz=None: FakeDT.now(tz))})
+                return _SAT if tz is None else _SAT.astimezone(tz)
+            def __getattr__(self, item):
+                return getattr(datetime, item)
+        md.datetime = FakeDT()
         try:
             self.assertIs(market_state("metal"), False)
         finally:

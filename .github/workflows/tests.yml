@@ -24,4 +24,24 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Run full regression suite
-        run: python -m pytest -q
+        run: python -m pytest -q --junitxml=/tmp/results.xml
+      - name: Report failing tests as annotations
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import xml.etree.ElementTree as ET
+          p = '/tmp/results.xml'
+          if not os.path.exists(p):
+              print('::error::no results file (pytest crashed before writing)')
+              raise SystemExit(0)
+          root = ET.parse(p).getroot()
+          n = 0
+          for tc in root.iter('testcase'):
+              for kind in ('failure', 'error'):
+                  for f in tc.findall(kind):
+                      n += 1
+                      msg = (f.get('message') or '').replace('\n', ' ')[:180]
+                      print(f"::error::{tc.get('classname')}::{tc.get('name')} — {msg}")
+          print(f"{'no failures' if n == 0 else str(n) + ' failing test(s) reported'}")
+          PYEOF

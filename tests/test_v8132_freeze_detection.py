@@ -45,33 +45,33 @@ def _fetch_stale(hours: float):
 
 
 def test_same_snapshot_twice_with_open_market_marks_frozen():
-    p1 = _fetch_stale(24)                       # first stale sighting — no mark yet
+    p1 = _fetch_stale(1.6)                       # first stale sighting — no mark yet
     assert not p1.get("feed_frozen")
     # simulate ≥10 minutes having passed since the first sighting
     key = ("XAUUSD", "15min", 120)
     md._FEED_SNAPSHOTS[key]["t"] -= md.FEED_FROZEN_MIN_GAP_SECONDS + 5
-    p2 = _fetch_stale(24)                       # same frozen iso, 10+ min later
+    p2 = _fetch_stale(1.6)                       # same frozen iso, 10+ min later
     assert p2.get("feed_frozen") is True
     assert p2.get("frozen_repeats") == 1
     # and again → repeats accumulate
     md._FEED_SNAPSHOTS[key]["t"] -= md.FEED_FROZEN_MIN_GAP_SECONDS + 5
-    p3 = _fetch_stale(24)
+    p3 = _fetch_stale(1.6)
     assert p3.get("frozen_repeats") == 2
 
 
 def test_changed_snapshot_resets_the_tracking():
-    _fetch_stale(24)
+    _fetch_stale(1.6)
     key = ("XAUUSD", "15min", 120)
     md._FEED_SNAPSHOTS[key]["t"] -= md.FEED_FROZEN_MIN_GAP_SECONDS + 5
     # feed moved: a NEW iso (1 hour newer data) — never frozen
-    p2 = _fetch_stale(23)
+    p2 = _fetch_stale(1.5)
     assert not p2.get("feed_frozen")
     assert md._FEED_SNAPSHOTS[key]["repeats"] == 0
 
 
 def test_closed_market_never_marks_frozen():
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
-         patch.object(md, "_fetch_td_candles", return_value=_old_candles(6)), \
+         patch.object(md, "_fetch_td_candles", return_value=_old_candles(1.8)), \
          patch.object(md, "market_state", return_value=False), \
          patch.object(md.provider_health, "is_open", return_value=False):
         p1 = md.fetch_candles("XAUUSD", "15min", "k", use_cache=False)
@@ -84,7 +84,7 @@ def test_closed_market_never_marks_frozen():
 
 
 def test_fresh_data_clears_freeze_tracking():
-    _fetch_stale(24)
+    _fetch_stale(1.6)
     key = ("XAUUSD", "15min", 120)
     assert key in md._FEED_SNAPSHOTS
     end = datetime.now(timezone.utc)             # now the feed recovers

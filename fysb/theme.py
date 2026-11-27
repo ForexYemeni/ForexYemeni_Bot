@@ -230,6 +230,10 @@ def ar_reason(reason: str) -> str:
     m = _re.search(r"data stale \(age (\d+)min\)", low)
     if m:
         return f"بيانات أقدم من الحد المسموح ({m.group(1)} دقيقة) — رفض صادق، لا إشارة من شموع جامدة"
+    m = _re.search(r"data frozen \(repeats (\d+), age (\d+)min\)", low)
+    if m:
+        return (f"🧊 التغذية مجمّدة — نفس اللقطة تتكرر ({m.group(1)}) والسوق مفتوح؛ "
+                f"مصدر الأسعار متجمّد مؤقتاً: راجع اتصال السيرفر ومفتاح السوق ثم أعد المحاولة")
     m = _re.search(r"insufficient candles \((\d+)\)", low)
     if m:
         return f"شموع غير كافية للتحقق المؤسسي ({m.group(1)} شمعة فقط)"

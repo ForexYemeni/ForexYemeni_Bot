@@ -18,7 +18,11 @@ from fysb.theme import rich
 
 
 def _candle(i, base=3500.0):
-    return {"datetime": f"2026-11-20 {i // 60:02d}:{i % 60:02d}:00",
+    # v8.13.6: recent 15m stamps (last candle ~20min ago) — fresh vs the
+    # staleness limit so the calibration contract is tested, not the age gate
+    from datetime import datetime, timedelta
+    t = datetime.utcnow() - timedelta(minutes=20 + 15 * (239 - i))
+    return {"datetime": t.strftime("%Y-%m-%d %H:%M:00"),
             "open": base + i, "high": base + i + 2, "low": base + i - 2,
             "close": base + i + 1}
 

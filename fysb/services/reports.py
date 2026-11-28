@@ -151,9 +151,30 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
         w = " AND ".join(where)
         total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {w}", params).fetchone()["n"]
         if total == 0:
+            # v8.14.21 — the honest empty state: WHY it is empty + what you DO
+            # have for real (period totals + the active markets/strategies).
+            # A dead-end "empty" page without guidance is a failure of luxury.
+            wp, pp = ["1=1"], []
+            if since:
+                wp.append("created_at>=?")
+                pp.append(since)
+            wpe = " AND ".join(wp)
+            total_period = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {wpe}", pp).fetchone()["n"]
+            total_all = c.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
+            act_sym = c.execute(f"SELECT symbol v, COUNT(*) n FROM signals WHERE {wpe} "
+                                "GROUP BY symbol ORDER BY n DESC LIMIT 4", pp).fetchall()
+            act_str = c.execute(f"SELECT strategy v, COUNT(*) n FROM signals WHERE {wpe} "
+                                "GROUP BY strategy ORDER BY n DESC LIMIT 4", pp).fetchall()
+            sym_txt = " · ".join(f"<b>{esc(r['v'])}</b> ({r['n']})" for r in act_sym) or "— لا شيء بعد —"
+            str_txt = " · ".join(f"<b>{esc(r['v'])}</b> ({r['n']})" for r in act_str) or "— لا شيء بعد —"
             return (f"📊 <b><u>التقرير التفاعلي الصادق</u></b>\n"
-                    f"<blockquote>▎{filt_txt}</blockquote>\n"
-                    "▎لا إشارات مطابقة لهذه التصفية بعد — وسّع التصفية أو أرسل إشارات.")
+                    f"<blockquote>▎{filt_txt}\n"
+                    "▎🫥 لا إشارات في هذا المقطع المحدد بالضبط — وهذا هو الصدق الكامل\n"
+                    f"▎📡 داخل الفترة المختارة (كل الأسواق والاستراتيجيات): <b>{total_period}</b> إشارة\n"
+                    f"▎🗄 إجمالي سجل البوت من اليوم الأول: <b>{total_all}</b> إشارة\n"
+                    f"▎🔥 الأكثر نشاطاً داخل الفترة: {sym_txt}\n"
+                    f"▎🧠 الاستراتيجيات النشطة داخل الفترة: {str_txt}</blockquote>\n"
+                    "<i>اضغط «🎲 كل ما لديك في الفترة» لرؤية كل أرقامك الحقيقية فوراً — أو وسّع التصفية.</i>")
         rows = c.execute(f"""SELECT status, COUNT(*) n FROM signals WHERE {w}
                              GROUP BY status ORDER BY n DESC""", params).fetchall()
         status_txt = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b>" for r in rows)
@@ -252,8 +273,23 @@ def filtered_trades_detail(market: str | None = None, strategy: str | None = Non
         matched = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {' AND '.join(where)}",
                             params).fetchone()["n"]
     if not rows:
+        # v8.14.21 — the honest empty detail: the period's real totals, no dead end
+        from fysb.services.digest import cutoff_iso as _cut2
+        wp2, pp2 = ["1=1"], []
+        s2 = _cut2(days)
+        if s2:
+            wp2.append("created_at>=?")
+            pp2.append(s2)
+        w2 = " AND ".join(wp2)
+        with db.conn() as c2:
+            tp = c2.execute(f"SELECT COUNT(*) n FROM signals WHERE {w2}", pp2).fetchone()["n"]
+            tc = c2.execute(f"SELECT COUNT(*) n FROM signals WHERE {w2} AND "
+                            "(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN')"
+                            " OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))", pp2).fetchone()["n"]
         return ("📋 <b>تفاصيل الصفقات المغلقة</b>\n"
-                "▎لا صفقات مغلقة ضمن هذه التصفية بعد.")
+                f"▎لا صفقات مغلقة ضمن هذه التصفية — والصدق كامل.\n"
+                f"▎داخل الفترة: <b>{tp}</b> إشارة (منها <b>{tc}</b> مغلقة) — "
+                "اضغط «🎲 كل ما لديك في الفترة» أو وسّع التصفية.")
     from fysb.engines.tracker import seq_of
     body = [f"📋 <b>تفاصيل الصفقات المغلقة</b> — <b>{matched}</b> مطابقة "
             f"(آخر {len(rows)}):"]

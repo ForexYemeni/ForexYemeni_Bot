@@ -169,7 +169,7 @@ def test_clear_resets_every_dimension():
     q, _ = _fire("a:repf:clear", ctx)
     page = page_for(q, ctx)
     assert "السوق: <b>الكل</b>" in page and "الاستراتيجية: <b>الكل</b>" in page
-    assert ctx.user_data["rep_filter"] == {"market": None, "strategy": None, "timeframe": None}
+    assert ctx.user_data["rep_filter"] == {"market": None, "strategy": None, "timeframe": None, "days": None}  # v8.14.20: period is the 4th dimension
 
 
 def test_state_is_per_admin_isolated():

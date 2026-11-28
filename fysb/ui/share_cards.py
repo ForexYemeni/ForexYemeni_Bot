@@ -352,13 +352,21 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     f_row = _font(19, "bold")
     f_mono = _font(18, "mono")
 
-    days = int(digest.get("days") or 7)
-    period_en = f"WEEKLY REPORT • LAST {days} DAYS" if days <= 10 else f"MONTHLY REPORT • LAST {days} DAYS"
+    days = int(digest.get("days") or 0)
+    if days == 0:
+        period_en = "FULL HISTORY REPORT"
+    else:
+        period_en = f"WEEKLY REPORT • LAST {days} DAYS" if days <= 10 else f"MONTHLY REPORT • LAST {days} DAYS"
     brand = str(config.BRAND or "FOREXYEMENI").upper()
     ts = config.mecca_chart_dt_12h(digest.get("generated_at") or None)
+    # v8.14.20 — the exact slice is stamped on the card (only named dimensions)
+    slice_en = str(digest.get("slice_ar") or "").strip()
+    audit_line = f"VERIFIED SIGNAL PERFORMANCE AUDIT  •  {ts}"
+    if slice_en and slice_en != "كل الأبعاد":
+        audit_line = f"SLICE: {slice_en}  •  {audit_line}"
 
     draw.text((54, 44), f"{brand}  EXECUTIVE DIGEST", font=f_title, fill=GOLD_BRIGHT)
-    draw.text((54, 86), f"VERIFIED SIGNAL PERFORMANCE AUDIT  •  {ts}", font=f_sub, fill=TEXT_MUTED)
+    draw.text((54, 86), audit_line, font=f_sub, fill=TEXT_MUTED)
     draw.rounded_rectangle([W - 380, 46, W - 54, 90], radius=22, fill=(212, 175, 55, 32), outline=GOLD, width=2)
     draw.text((W - 354, 58), f"🏆  {period_en}", font=f_pill, fill=GOLD_BRIGHT)
 

@@ -116,7 +116,7 @@ def dashboard_view() -> str:
 
 
 def filtered_signals_report(market: str | None = None, strategy: str | None = None,
-                            timeframe: str | None = None) -> str:
+                            timeframe: str | None = None, days: int | None = None) -> str:
     """v8.14.18 — the COMPREHENSIVE INTERACTIVE REPORT: the owner picks any
     market/strategy/timeframe slice (or ALL of a dimension) and gets the
     honest closed-ledger truth for EXACTLY that slice. Every number is a real
@@ -125,6 +125,8 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
       * closed ledger classified by STATUS semantics (banked TP / lock = win,
         SL = loss) — per-symbol pips + their TRUE usd_move at 0.01 lot
       * hit-rate, average recorded quality (score), average planned RR (rr)
+    v8.14.20 — the FOURTH dimension: an honest period (days=None => full
+    history) bounds every number below; the period is named on the report.
     Zero mixed-unit sums: pips are NEVER aggregated across symbols — USD is."""
     where, params = ["1=1"], []
     if market:
@@ -136,9 +138,15 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
     if timeframe:
         where.append("timeframe=?")
         params.append(timeframe)
+    from fysb.services.digest import cutoff_iso, period_ar as _period_lab
+    since = cutoff_iso(days)
+    if since:
+        where.append("created_at>=?")
+        params.append(since)
     filt_txt = (f"📈 السوق: <b>{esc(market or 'الكل')}</b> · "
                 f"🧠 الاستراتيجية: <b>{esc(strategy or 'الكل')}</b> · "
-                f"⏱ الإطار: <b>{esc(timeframe or 'الكل')}</b>")
+                f"⏱ الإطار: <b>{esc(timeframe or 'الكل')}</b> · "
+                f"⏳ الفترة: <b>{esc(_period_lab(days))}</b>")
     with db.conn() as c:
         w = " AND ".join(where)
         total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {w}", params).fetchone()["n"]
@@ -211,10 +219,12 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
 
 
 def filtered_trades_detail(market: str | None = None, strategy: str | None = None,
-                           timeframe: str | None = None, limit: int = 15) -> str:
+                           timeframe: str | None = None, limit: int = 15,
+                           days: int | None = None) -> str:
     """v8.14.19 — the closed-trades rows of the exact filtered slice (A-to-Z
     completeness): every settled trade with its truthful settlement — the
-    50-pip decree included — newest first, capped for readability."""
+    50-pip decree included — newest first, capped for readability.
+    v8.14.20 — the honest period bounds the rows too (days=None => full)."""
     where, params = ["1=1"], []
     if market:
         where.append("symbol=?")
@@ -225,6 +235,11 @@ def filtered_trades_detail(market: str | None = None, strategy: str | None = Non
     if timeframe:
         where.append("timeframe=?")
         params.append(timeframe)
+    from fysb.services.digest import cutoff_iso
+    since = cutoff_iso(days)
+    if since:
+        where.append("created_at>=?")
+        params.append(since)
     where.append("(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN')"
                  " OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))")
     from fysb import instruments as _inst

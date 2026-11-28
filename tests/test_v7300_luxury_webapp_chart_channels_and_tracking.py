@@ -264,7 +264,7 @@ def test_luxury_tracking_chart_and_tracker_chart_events(isolated_db, monkeypatch
         )
 
     # Candles push well above TP1 (2662 + 2 pips confirm) without hitting TP2
-    tp1_candles = _sample_candles(2650.0, 25, step=0.4)
+    tp1_candles = _sample_candles(2645.0, 25, step=0.4)   # never reaches the +$5 lock level (2655)
     tp1_candles.append({
         "datetime": "2026-11-25 10:26:00",
         "open": 2659.0, "high": 2665.5, "low": 2658.5, "close": 2664.2,

@@ -679,6 +679,10 @@ ADD_COLUMNS = {
         "filled_at": "TEXT DEFAULT ''",
         "private_user_id": "INTEGER DEFAULT 0",
         "accounting_model": "TEXT DEFAULT 'LEGACY_LEVEL'",
+        "profit_50_hit": "INTEGER DEFAULT 0",
+        "profit_50_at": "TEXT DEFAULT ''",
+        "locked_sl": "REAL DEFAULT 0",
+        "locked_pips": "REAL DEFAULT 0",
     },
     "signal_deliveries": {
         "chat_id": "TEXT DEFAULT ''",

@@ -24,7 +24,7 @@ from fysb import theme
 
 
 def _candles(age_hours: float, n: int = 120) -> list[dict]:
-    end = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    end = md.datetime.now(timezone.utc) - timedelta(hours=age_hours)
     return [{"datetime": (end - timedelta(minutes=15 * i)).strftime("%Y-%m-%d %H:%M:%S"),
              "open": 2600.0, "high": 2601.0, "low": 2599.0, "close": 2600.5,
              "volume": 1000} for i in range(n, 0, -1)]
@@ -109,3 +109,14 @@ def test_theme_maps_frozen_reason_without_provider_names():
 def test_theme_keeps_plain_stale_mapping():
     s = theme.ar_reason("data stale (age 1898min)")
     assert "أسعار غير حية" in s  # v8.14.6: no counters on the user surface
+
+
+@pytest.fixture(autouse=True)
+def _frozen_market_friday():
+    """v8.14.10 — CI crossed the Fri→Sat boundary and the weekend widening
+    reclassified every test's «stale» payload as fresh (mechanics unchanged).
+    Pin the market clock to Friday noon UTC — the suite tests the MECHANICS,
+    never the wall calendar."""
+    from tests.helpers import frozen_market_clock
+    with frozen_market_clock():
+        yield

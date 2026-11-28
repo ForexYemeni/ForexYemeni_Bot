@@ -301,7 +301,7 @@ class TestEntryFillActivation(unittest.TestCase):
     def test_entry_crossed_becomes_running(self):
         """SELL entry 3581.60, price trades down to 3575 (entry crossed, TP1 NOT
         reached) -> status must become RUNNING, not stay «بانتظار التنفيذ»."""
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 1)
         with db.conn() as c:
@@ -311,9 +311,9 @@ class TestEntryFillActivation(unittest.TestCase):
         self.assertTrue(result["notifications"])         # receivers notified once
 
     def test_running_not_reannounced_on_second_pass(self):
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 0)  # no duplicate activation
         with db.conn() as c:
@@ -329,7 +329,7 @@ class TestEntryFillActivation(unittest.TestCase):
             self.assertEqual(c.execute("SELECT status FROM signals").fetchone()["status"], "ACTIVE")
 
     def test_running_then_tp1_hits(self):
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")
         with db.conn() as c:
             c.execute("UPDATE signals SET half_notified=1")
@@ -346,7 +346,7 @@ class TestEntryFillActivation(unittest.TestCase):
         with db.conn() as c:
             c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)",
                       (self.sid, 555001, config.now()))
-        payload = self._payload(3582.0, 3575.0)
+        payload = self._payload(3582.0, 3577.0)
         with patch.object(tracker.market_data, "fetch_candles", return_value=payload):
             result = tracker.check_open_signals("")
         user_text = result["notifications"][0][1]     # deliveries first, admin note last
@@ -355,7 +355,7 @@ class TestEntryFillActivation(unittest.TestCase):
         self.assertIn("pips", user_text)
 
     def test_running_row_tracked_by_expiry_sweep(self):
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")
         old = (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
         with db.conn() as c:

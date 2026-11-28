@@ -27,7 +27,7 @@ from fysb.config import log
 from fysb.theme import bar, card, esc
 from fysb.ui import share_cards
 
-WIN_STATUSES = ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE", "CLOSED_WIN", "WIN")
+WIN_STATUSES = ("TP1_HIT", "TP2_HIT", "TP3_HIT", "TP1_BE", "TP2_BE", "CLOSED_WIN", "WIN", "LOCKED_50")
 LOSS_STATUSES = ("SL_HIT", "LOSS")
 OPEN_STATUSES = ("ACTIVE", "RUNNING", "PENDING")
 CANCELLED_STATUSES = ("CANCELLED", "EXPIRED")

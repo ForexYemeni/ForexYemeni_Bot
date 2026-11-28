@@ -20,7 +20,7 @@ from fysb.engines import market_data as md
 
 
 def _old_candles(hours: float, n: int = 120) -> list[dict]:
-    end = datetime.now(timezone.utc) - timedelta(hours=hours)
+    end = md.datetime.now(timezone.utc) - timedelta(hours=hours)   # frozen Friday clock
     return [{"datetime": (end - timedelta(minutes=15 * i)).strftime("%Y-%m-%d %H:%M:%S"),
              "open": 2600.0, "high": 2601.0, "low": 2599.0, "close": 2600.5,
              "volume": 1000} for i in range(n, 0, -1)]
@@ -91,7 +91,7 @@ def test_fresh_data_clears_freeze_tracking():
     _fetch_stale(1.6)
     key = ("XAUUSD", "15min", 120)
     assert key in md._FEED_SNAPSHOTS
-    end = datetime.now(timezone.utc)             # now the feed recovers
+    end = md.datetime.now(timezone.utc)          # frozen Friday clock — feed recovers
     fresh = [{"datetime": (end - timedelta(minutes=15 * i)).strftime("%Y-%m-%d %H:%M:%S"),
               "open": 2600.0, "high": 2601.0, "low": 2599.0, "close": 2600.5,
               "volume": 1000} for i in range(120, 0, -1)]
@@ -114,3 +114,14 @@ def test_signal_engine_uses_feed_frozen_run_code(monkeypatch):
     assert payload.get("feed_frozen") is True and payload.get("frozen_repeats") == 2
     # the run-code selection logic mirrors the engine branch
     assert ("FEED_FROZEN" if payload.get("feed_frozen") else "STALE_DATA") == "FEED_FROZEN"
+
+
+@pytest.fixture(autouse=True)
+def _frozen_market_friday():
+    """v8.14.10 — CI crossed the Fri→Sat boundary and the weekend widening
+    reclassified every test's «stale» payload as fresh (mechanics unchanged).
+    Pin the market clock to Friday noon UTC — the suite tests the MECHANICS,
+    never the wall calendar."""
+    from tests.helpers import frozen_market_clock
+    with frozen_market_clock():
+        yield

@@ -20,10 +20,11 @@ Rules:
 import json
 
 from fysb import config, db, instruments
-from fysb.engines import market_data
+from fysb.engines import honesty, market_data
 from fysb.config import log
 
-TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED")
+TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED", "LOCKED_50")
+LOCK50_USD = 5.0   # 🏅 the royal lock: +$5 at 0.01 lot — 50 gold pips, 500 BTC pips, one truth
 
 # v6.8.0 — CONSERVATIVE target confirmation: a target is banked only when the
 # provider candle PENETRATES the level by this margin, not merely grazes it.
@@ -257,7 +258,11 @@ def check_open_signals(api_key: str) -> dict:
                 # target, that truth is applied directly (one honest
                 # transition) instead of announcing RUNNING for a trade that
                 # already ended.
-                transition = _evaluate_signal(sig, candles, cutoff=fill_c["datetime"])
+                _lock_info: dict = {}
+                transition = _evaluate_signal(sig, candles, cutoff=fill_c["datetime"],
+                                              lock_out=_lock_info)
+                _handle_lock_arm(sig, _lock_info, transition, payload, live_px, notifications,
+                                chart_event=_record_chart_event)
                 if transition:
                     notes, res_pips, new_edits = _apply_transition(
                         sig, transition, payload, live_px, filled_at=fill_c["datetime"])
@@ -330,7 +335,10 @@ def check_open_signals(api_key: str) -> dict:
             continue
 
         # ---- FILLED signals: full lifecycle from the fill candle onward ----
-        transition = _evaluate_signal(sig, candles, live_px=live_px)
+        _lock_info = {}
+        transition = _evaluate_signal(sig, candles, live_px=live_px, lock_out=_lock_info)
+        _handle_lock_arm(sig, _lock_info, transition, payload, live_px, notifications,
+                                chart_event=_record_chart_event)
         if transition:
             stats["updated"] += 1
             notes, result_pips, new_edits = _apply_transition(sig, transition, payload, live_px)
@@ -729,7 +737,8 @@ def _sl_touch_plausible(walked: list[dict], idx: int, touch_px: float,
     return touch_px >= (min(ref_lo) - 3.0 * a)
 
 
-def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0) -> str | None:
+def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: float = 0.0,
+                    lock_out: dict | None = None) -> str | None:
     """Return the next status if price data justifies it, else None.
 
     Only candles AT/AFTER the fill anchor are walked — `cutoff` (or the
@@ -752,6 +761,7 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     entry = float(sig["entry"])
     sl, tp1, tp2, tp3 = sig["stop"], sig["tp1"], sig["tp2"], sig["tp3"]
     hit_tp = int(sig["hit_tp"] or 0)
+    symbol_key = sig["symbol"]
 
     cut = _utc_cutoff(cutoff or sig.get("filled_at") or sig.get("created_at") or "")
     walked = [c for c in candles if _utc_cutoff(c["datetime"]) >= cut]
@@ -773,6 +783,30 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     # so the fill bar itself (at entry) never false-triggers a breakeven stop.
     banked_bar_idx = -1
     be_stopped = False
+    # v8.14.10 — «القفل الملكي +50»: any open trade whose DOCUMENTED favorable
+    # excursion reaches +$5 (0.01 lot — real usd_move, every market) is LOCKED:
+    # from that closed-candle touch onward it can never close below +$5 — a
+    # retrace into the original stop closes at the LOCKED level, not a loss.
+    # Chronological: a stop touch on bars BEFORE the lock touch still kills
+    # (pre-lock honesty unchanged); once any target banks, the existing BE
+    # machinery governs (the lock only guards the unbanked trade).
+    lock_on = honesty.lock50_enabled()
+    lock_pre_armed = bool(int(sig.get("profit_50_hit") or 0))
+    lock_armed = lock_pre_armed
+    locked_price = float(sig.get("locked_sl") or 0.0)
+    lock_arm_idx = -1
+    if lock_pre_armed and str(sig.get("profit_50_at") or ""):
+        # the arming candle's datetime is persisted — never re-close a
+        # pre-armed trade on the very bar that armed it
+        _arm_cut = _utc_cutoff(str(sig["profit_50_at"]))
+        for _i, _cc in enumerate(walked):
+            if _utc_cutoff(_cc["datetime"]) >= _arm_cut:
+                lock_arm_idx = _i
+                break
+    if lock_out is None:
+        lock_out = {}
+    lock_mrow = _market_row(sig["symbol"])
+    lock_pip = pip
     for idx, c in enumerate(walked):
         hi, lo = c["high"], c["low"]
         if direction == "BUY":
@@ -804,6 +838,21 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
                 new_tp = max(new_tp, 2)
             if progress_tp <= 2 and lo <= tp3 - tp_eff_buf:
                 new_tp = max(new_tp, 3)
+        # 🏅 the royal +$5 lock (v8.14.10) — RETURN-CLOSE. Once armed (a prior
+        # closed candle documented the +$5 touch), any later return into the
+        # locked level closes the trade as a WIN. Checked BEFORE the stop and
+        # BE rules: the locked level is nearer than both, so a retrace passes
+        # through it first — chronologically certain, never a guess, and
+        # never a loss after the documented touch.
+        if lock_on and progress_tp == 0 and lock_armed and locked_price > 0 \
+                and (idx > lock_arm_idx or lock_pre_armed):
+            hit_lock = (lo <= locked_price) if direction == "BUY" \
+                else ((hi + ask_spread) >= locked_price)
+            if hit_lock:
+                sig["locked_sl"] = locked_price
+                sig["locked_pips"] = float(lock_out.get("locked_pips")
+                                           or sig.get("locked_pips") or 0.0)
+                return "LOCKED_50"
         # BE becomes effective on the bar AFTER a target was reached. Check
         # it BEFORE any new target on that bar (conservative intrabar order).
         # Crucially this applies to progress earned in THIS walk, not just the
@@ -824,6 +873,28 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
             banked_bar_idx = idx
             if progress_tp == 3:
                 break
+        # 🏅 arming — ONLY on a pure survival bar at loop tail: no stop touch
+        # (the SL branch above returned on those; sl_now also covers
+        # spike-guard-rejected outliers), no banked target (progress stays 0
+        # or the branch is skipped). A bar that both banked $5 and slapped
+        # the stop resolves to the STOP — same-bar chronology is unknowable,
+        # pre-lock honesty unchanged. The documented touch must be a closed
+        # candle the trade lived through; from the NEXT bar the lock guards.
+        if lock_on and progress_tp == 0 and not lock_armed and not sl_now:
+            exc_pips = (instruments.pips(symbol_key, entry, hi) if direction == "BUY"
+                        else instruments.pips(symbol_key, lo, entry))
+            if exc_pips > 0:
+                per_pip_usd = instruments.usd_move(symbol_key, 1.0, 0.01, lock_mrow,
+                                                   px=float(c["close"]))
+                if per_pip_usd > 0 and exc_pips * per_pip_usd >= LOCK50_USD:
+                    lock_armed = True
+                    lock_arm_idx = idx
+                    sig["profit_50_at"] = c["datetime"]
+                    p50 = LOCK50_USD / per_pip_usd
+                    locked_price = (entry + p50 * lock_pip) if direction == "BUY" \
+                        else (entry - p50 * lock_pip)
+                    lock_out.update({"armed": True, "locked_sl": locked_price,
+                                     "locked_pips": p50, "armed_iso": c["datetime"]})
     if progress_tp > hit_tp:
         if progress_tp == 3:
             return "TP3_HIT"
@@ -963,6 +1034,51 @@ def halfway_reached(sig: dict, candles: list[dict]) -> bool:
     return False
 
 
+def _handle_lock_arm(sig: dict, lock_info: dict, transition: str | None,
+                     payload: dict, live_px: float, notifications: list,
+                     chart_event=None) -> None:
+    """v8.14.10 — first documented +$5 touch on an unbanked signal: persist the
+    royal lock (locked_sl/locked_pips/profit_50_hit) and send the luxury 🏅
+    alert ONCE. LOCKED_50 closes are persisted by _apply_transition itself."""
+    if not lock_info.get("armed") or transition == "LOCKED_50":
+        return
+    if int(sig.get("profit_50_hit") or 0):
+        return
+    try:
+        from fysb.theme import dir_badge, esc, tf_name
+        with db.conn() as c:
+            c.execute("""UPDATE signals SET profit_50_hit=1, profit_50_at=?, locked_sl=?,
+                         locked_pips=? WHERE id=? AND profit_50_hit=0""",
+                      (str(lock_info.get("armed_iso") or config.now()),
+                       float(lock_info.get("locked_sl") or 0.0),
+                       float(lock_info.get("locked_pips") or 0.0), int(sig["id"])))
+        sig["profit_50_hit"], sig["locked_sl"] = 1, float(lock_info.get("locked_sl") or 0.0)
+        sig["locked_pips"] = float(lock_info.get("locked_pips") or 0.0)
+        sig["profit_50_at"] = str(lock_info.get("armed_iso") or config.now())
+        seq = seq_of(int(sig["id"]))
+        lp = float(lock_info.get("locked_sl") or 0.0)
+        txt = (
+            f"🏅 <b><u>القفل الملكي — إشارتك مؤمّنة عند +50</u></b> — {esc(sig['symbol'])} "
+            f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+            "<blockquote>"
+            f"▎🏆 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>+5.00 $</b> بـ 0.01 لوت — "
+            "أصبحت رابحة مؤسسياً بلا نقاش.\n"
+            f"▎🛡 <b>القفل فعّل عند المستوى</b> <code>{esc(instruments.fmt_price(sig['symbol'], lp))}</code> "
+            "— أي عودة بعدها تُغلق الصفقة على <b>+5.00 $</b> لا على الخسارة أبداً.\n"
+            "▎👑 الأهداف الأعلى (TP1/TP2/TP3) باقية كما هي — القفل حماية لا سقف."
+            "</blockquote>\n"
+            "<i>لمسة موثقة بشمعة مغلقة حقيقية من بيانات السوق اللحظية.</i>"
+        )
+        notifications.extend(_alert_targets(sig, txt))
+        if chart_event is not None:
+            chart_event(sig, "PROFIT_50", payload, live_px or 0.0,
+                        float(lock_info.get("locked_pips") or 0.0), [])
+        _log(sig["symbol"], sig["timeframe"], "LOCK50_ARMED",
+             f"signal #{sig['id']} locked at {lp:.5f} (+{float(lock_info.get('locked_pips') or 0):.1f} pips = +5$)")
+    except Exception:
+        pass  # the lock itself is persisted in the walk; alerts never break tracking
+
+
 def _apply_transition(sig: dict, new_status: str, payload: dict,
                       live_px: float = 0.0, filled_at: str = "") -> tuple[list[tuple[int, str]], float, list]:
     """Persist the transition (idempotent); return (notifications, pips_result,
@@ -971,6 +1087,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     later target evaluation starts from the true fill moment."""
     from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
     is_be_close = new_status in ("TP1_BE", "TP2_BE")
+    is_lock = new_status == "LOCKED_50"   # v8.14.10 🏅 «مؤمّنة عند +50»
     status = {"TP1_BE": "TP1_HIT", "TP2_BE": "TP2_HIT"}.get(new_status, new_status)
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3,
               "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
@@ -978,11 +1095,20 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     from fysb import instruments
     if status == "SL_HIT":
         pips_result = -instruments.pips(sig["symbol"], sig["entry"], sig["stop"])
+    elif status == "LOCKED_50":
+        # 🏅 the royal locked profit: the REAL documented +$5 excursion level —
+        # never a loss, never fabricated: the level the market actually touched.
+        pips_result = float(sig.get("locked_pips") or 0.0)
+        if pips_result <= 0 and float(sig.get("locked_sl") or 0) > 0:
+            if sig["direction"] == "BUY":
+                pips_result = instruments.pips(sig["symbol"], float(sig["entry"]), float(sig["locked_sl"]))
+            else:
+                pips_result = instruments.pips(sig["symbol"], float(sig["locked_sl"]), float(sig["entry"]))
     elif status.startswith("TP"):
         tp_map = {1: sig["tp1"], 2: sig["tp2"], 3: sig["tp3"]}
         pips_result = instruments.pips(sig["symbol"], sig["entry"], tp_map[hit_tp])
     from fysb.engines.accounting import PARTIAL_MODEL, modeled_r
-    if sig.get("accounting_model") == PARTIAL_MODEL and (status.startswith("TP") or status == "SL_HIT"):
+    if sig.get("accounting_model") == PARTIAL_MODEL and (status.startswith("TP") or status == "SL_HIT" or status == "LOCKED_50"):
         banked_r = modeled_r(sig, hit_tp=hit_tp, status=status)
         if banked_r is not None:
             pips_result = banked_r * instruments.pips(sig["symbol"], sig["entry"], sig["stop"])
@@ -994,16 +1120,31 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         r = c.execute("SELECT status, closed_at FROM signals WHERE id=?", (sig["id"],)).fetchone()
         if not r or r["status"] in TERMINAL or (r["closed_at"] or ""):
             return [], 0.0, []  # already closed/terminal — never double-update
-        updated = c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
-                     data_time=?, live_px=?, filled_at=?, half_notified=?
-                     WHERE id=? AND status=? AND (closed_at IS NULL OR closed_at='')""",
-                  (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
-                   live_px, filled_at or sig.get("filled_at") or "", half_done, sig["id"], sig["status"]))
+        if is_lock:
+            # 🏅 the royal close persists the full lock record — same-eval
+            # arm+close (no _handle_lock_arm pass) must still carry the
+            # documented +$5 columns into the archive and accounting.
+            updated = c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
+                         data_time=?, live_px=?, filled_at=?, half_notified=?,
+                         profit_50_hit=1, profit_50_at=?, locked_sl=?, locked_pips=?
+                         WHERE id=? AND status=? AND (closed_at IS NULL OR closed_at='')""",
+                      (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
+                       live_px, filled_at or sig.get("filled_at") or "", half_done,
+                       str(sig.get("profit_50_at") or payload.get("last_candle_iso") or ""),
+                       float(sig.get("locked_sl") or 0.0),
+                       float(sig.get("locked_pips") or 0.0),
+                       sig["id"], sig["status"]))
+        else:
+            updated = c.execute("""UPDATE signals SET status=?, hit_tp=?, closed_at=?, pips_result=?,
+                         data_time=?, live_px=?, filled_at=?, half_notified=?
+                         WHERE id=? AND status=? AND (closed_at IS NULL OR closed_at='')""",
+                      (status, hit_tp, closed_at, pips_result, payload["last_candle_iso"],
+                       live_px, filled_at or sig.get("filled_at") or "", half_done, sig["id"], sig["status"]))
         if updated.rowcount != 1:
             return [], 0.0, []
     _log(sig["symbol"], sig["timeframe"], f"TRANSITION:{new_status}",
          f"signal #{sig['id']} pips={pips_result:.1f} filled_at={filled_at or sig.get('filled_at') or '-'}")
-    if status in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"):
+    if status in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "LOCKED_50"):
         try:
             from fysb.services import strategy_stats
             strategy_stats.invalidate_leaderboard_cache()
@@ -1057,7 +1198,17 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         detail = ("▎⛔ <b>فات الدخول:</b> لم يصل السعر إلى منطقة الدخول إطلاقاً وبلغ الهدف الأول دونها — "
                   "فكرة فات وقتها تُغلق بشرف: لا تُحتسب نتيجة ولا يُفتح ما لم يُنفّذ.\n")
         result_line = ""
-    if is_be_close:
+    if is_lock:
+        lock_px = float(sig.get("locked_sl") or 0.0)
+        detail = (
+            f"▎🏅 <b>القفل الملكي فعّل:</b> الصفقة لمست مبلغاً موثقاً بقيمة <b>+5.00 $</b> بـ 0.01 لوت "
+            f"وأُقفل وقفها المؤسسي عند المستوى "
+            f"<code>{instruments.fmt_price(sig['symbol'], lock_px) if lock_px else '—'}</code>.\n"
+            f"▎👑 <b>لا خسارة أبداً بعد اللمسة:</b> عودة السعر بعد القفل تُغلق الصفقة على ربح "
+            f"<b>+{pips_result:.1f} pips (+5.00 $)</b> بـ 0.01 لوت — "
+            f"والأهداف الأعلى TP1/TP2/TP3 باقية كما هي؛ القفل حماية لا سقف.\n"
+        )
+    elif is_be_close:
         tp_px = float(tp_map[hit_tp])
         detail = (
             f"▎🏁 الهدف المحقق سابقاً: <code>{instruments.fmt_price(sig['symbol'], tp_px)}</code>"
@@ -1084,7 +1235,10 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     # number the signals center displays (after deletions the following
     # signals take the freed numbers), never the raw internal id.
     seq = seq_of(sig["id"])
-    status_label = f"{status_ar(status)} · إغلاق مؤمّن عند الدخول 🛡" if is_be_close else status_ar(status)
+    if is_lock:
+        status_label = "🏅 مؤمّنة عند +50 — القفل الملكي حفظ الربح"
+    else:
+        status_label = f"{status_ar(status)} · إغلاق مؤمّن عند الدخول 🛡" if is_be_close else status_ar(status)
     text = (
         f"📡 <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"

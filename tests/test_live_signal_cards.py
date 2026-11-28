@@ -78,9 +78,9 @@ class LiveCardBase(unittest.TestCase):
 
 class TestTransitionEditsOriginalCard(LiveCardBase):
     def test_entry_cross_edits_the_held_card(self):
-        """SELL 3581.60, candles close 3578.50 → RUNNING + the original card is
+        """SELL 3581.60, candles close 3579.50 → RUNNING + the original card is
         re-rendered with the new status and a live price line."""
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 1)
         self.assertEqual(len(result["edits"]), 1)
@@ -89,17 +89,17 @@ class TestTransitionEditsOriginalCard(LiveCardBase):
         self.assertIn("نشطة — قيد التنفيذ في السوق", text)   # new status on the card
         self.assertNotIn("بانتظار التنفيذ", text)            # old status GONE
         self.assertIn("سعر السوق الآن", text)                # live pulse line
-        self.assertIn("3,578.50", text)                      # the actual close
-        self.assertIn("+31.0 pips", text)                    # (3581.60-3578.50)/0.1 in-favour
+        self.assertIn("3,579.50", text)                      # the actual close
+        self.assertIn("+21.0 pips", text)                    # (3581.60-3579.50)/0.1 in-favour
         with db.conn() as c:
             row = c.execute("SELECT status,live_px FROM signals WHERE id=?", (self.sid,)).fetchone()
         self.assertEqual(row["status"], "RUNNING")
-        self.assertAlmostEqual(row["live_px"], 3578.50, places=6)
+        self.assertAlmostEqual(row["live_px"], 3579.50, places=6)
 
     def test_admin_notice_arabic_with_real_drift(self):
         """The admin must NEVER again see «RUNNING (+0.0 pips)» while the trade
         is in profit — Arabic label + the true drift from entry."""
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3570.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             result = tracker.check_open_signals("")
         admin_texts = [t for uid, t in result["notifications"] if uid == ADMIN]
         # this pass fires BOTH the activation notice AND the halfway advisory —
@@ -108,14 +108,14 @@ class TestTransitionEditsOriginalCard(LiveCardBase):
         self.assertEqual(len(running_admin), 1)
         self.assertNotIn("RUNNING", running_admin[0])
         self.assertNotIn("+0.0 pips", running_admin[0])
-        self.assertIn("3,576.00", running_admin[0])
-        self.assertIn("+56.0 pips", running_admin[0])    # (3581.60-3576.0)/0.1
+        self.assertIn("3,579.50", running_admin[0])
+        self.assertIn("+21.0 pips", running_admin[0])    # (3581.60-3579.5)/0.1
 
     def test_deliveries_without_refs_never_break(self):
         """Legacy rows (pre-refs) simply produce no edit — no crash, no spam."""
         with db.conn() as c:
             c.execute("UPDATE signal_deliveries SET chat_id='', message_id=0")
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 1)
         self.assertEqual(result["edits"], [])
@@ -124,7 +124,7 @@ class TestTransitionEditsOriginalCard(LiveCardBase):
             self.assertEqual(c.execute("SELECT status FROM signals").fetchone()["status"], "RUNNING")
 
     def test_tp1_hit_edits_card_with_banked_result(self):
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")
         with db.conn() as c:
             c.execute("UPDATE signals SET half_notified=1")
@@ -142,27 +142,27 @@ class TestLivePulseRefresh(LiveCardBase):
     def test_first_pulse_edits_then_quiet_until_meaningful_move(self):
         """Already-RUNNING signal: an unchanged price does NOT re-edit; a ≥3-pip
         travel (0.3 USD on gold) re-renders the card with the fresh close."""
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")               # ACTIVE -> RUNNING (+pulse, px 3578.50)
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.5)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.5)):
             result = tracker.check_open_signals("")      # close 3578.75 → delta 2.5 pips < 3 → silence
         self.assertEqual(result["stats"]["refreshed"], 0)
         self.assertEqual(result["edits"], [])
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3574.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3584.0, 3577.0)):
             result = tracker.check_open_signals("")      # close 3578.00 → delta 5 pips ≥ 3 → pulse
         self.assertEqual(result["stats"]["refreshed"], 1)
         self.assertEqual(len(result["edits"]), 1)
-        self.assertIn("3,578.00", result["edits"][0][3])
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3574.0)):
+        self.assertIn("3,580.50", result["edits"][0][3])
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3584.0, 3577.0)):
             result = tracker.check_open_signals("")      # same price → silence again
         self.assertEqual(result["stats"]["refreshed"], 0)
         self.assertEqual(result["edits"], [])
 
     def test_refresh_updates_data_time(self):
-        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3575.0)):
+        with patch.object(tracker.market_data, "fetch_candles", return_value=self._payload(3582.0, 3577.0)):
             tracker.check_open_signals("")
         iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        payload = self._payload(3582.0, 3574.0)
+        payload = self._payload(3583.0, 3577.0)
         payload["last_candle_iso"] = iso
         with patch.object(tracker.market_data, "fetch_candles", return_value=payload):
             result = tracker.check_open_signals("")
@@ -170,7 +170,7 @@ class TestLivePulseRefresh(LiveCardBase):
         with db.conn() as c:
             row = c.execute("SELECT data_time,live_px FROM signals WHERE id=?", (self.sid,)).fetchone()
         self.assertEqual(row["data_time"], iso)
-        self.assertAlmostEqual(row["live_px"], 3578.0, places=6)
+        self.assertAlmostEqual(row["live_px"], 3580.0, places=6)
 
 
 class TestSignedDrift(unittest.TestCase):

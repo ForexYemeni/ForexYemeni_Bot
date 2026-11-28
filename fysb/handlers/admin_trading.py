@@ -233,7 +233,8 @@ def _pl_exec_card(b: dict, title: str = "الملخص التنفيذي العا�
         f"📉 إجمالي الخسائر: <b>{b['gross_loss_usd']:+,.2f} $</b>\n"
         f"▎⚖️ معامل الربح (Profit Factor): <b>{b['pf']}</b>\n"
         f"▎🏁 التوزيع: 👑 TP3: <b>{b['tp3_n']}</b> · 🥈 TP2: <b>{b['tp2_n']}</b> · "
-        f"🥇 TP1: <b>{b['tp1_n']}</b> · 🛑 وقف: <b>{b['sl_n']}</b></blockquote>"
+        f"🥇 TP1: <b>{b['tp1_n']}</b> · 🏅 مؤمّنة: <b>{b.get('locked_n', 0)}</b> · "
+        f"🛑 وقف: <b>{b['sl_n']}</b></blockquote>"
     )
 
 

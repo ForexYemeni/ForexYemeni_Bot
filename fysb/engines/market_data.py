@@ -1299,7 +1299,14 @@ def fair_age_seconds(payload: dict, now: float | None = None) -> float:
     must never count against the data. Raw age stays on the payload; only the
     VERDICT uses the fair age (guard contract unchanged: really-frozen feeds
     still die, weekends still widen)."""
-    raw = float(payload.get("age_seconds", 1e9) or 1e9)
+    _v = payload.get("age_seconds")
+    try:
+        # v8.14.10 — `or 1e9` lied: an exact 0.0 age (the FRESHEST possible
+        # payload) is falsy in Python and was read as missing → 1e9 → instantly
+        # «ancient». None/blank means missing; a real 0.0 means NOW.
+        raw = 1e9 if _v is None or _v == "" else float(_v)
+    except (TypeError, ValueError):
+        raw = 1e9
     try:
         dt = datetime.fromisoformat(str(payload.get("last_candle_iso") or "").replace("Z", "+00:00"))
         if dt.tzinfo is None:

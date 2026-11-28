@@ -63,7 +63,7 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         if include_private:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
-                "pips_result, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
+                "pips_result, profit_50_hit, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
                 "FROM signals WHERE created_at>=? ORDER BY id DESC",
                 (since,),
             ).fetchall()]
@@ -71,7 +71,7 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         else:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
-                "pips_result, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
+                "pips_result, profit_50_hit, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
                 "FROM signals WHERE created_at>=? "
                 "AND COALESCE(private_user_id,0)=0 "
                 "AND COALESCE(UPPER(source),'') NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED') "
@@ -110,9 +110,21 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
 
         from fysb.engines.accounting import is_closed
         closed = is_closed(r)
-        is_win = closed and (st in WIN_STATUSES or (pips > 0 and st not in LOSS_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES))
-        is_loss = closed and (st in LOSS_STATUSES or (pips < 0 and st not in WIN_STATUSES and st not in OPEN_STATUSES and st not in CANCELLED_STATUSES))
-        is_open = (not is_win and not is_loss and st in OPEN_STATUSES + ("TP1_HIT", "TP2_HIT"))
+        # v8.14.19 — the Truth Ledger governs CLOSED rows: the 50-pip decree
+        # (a documented threshold touch is a WIN at the threshold, never a
+        # loss) + status semantics for everything else. Zero sign-guessing.
+        from fysb.services import ledger as _ledger
+        is_win = is_loss = False
+        if closed:
+            verdict, eff_pips = _ledger.closed_verdict(r)
+            if verdict == "win":
+                pips = eff_pips
+                is_win = True
+            elif verdict == "loss":
+                pips = eff_pips
+                is_loss = True
+        is_open = (not is_win and not is_loss and st not in CANCELLED_STATUSES
+                   and (not closed or st in OPEN_STATUSES + ("TP1_HIT", "TP2_HIT")))
         is_cancel = (not is_win and not is_loss and st in CANCELLED_STATUSES)
 
         if is_win:
@@ -134,7 +146,7 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         if not (is_win or is_loss):
             continue
 
-        r_val = _calc_r_multiple(r)
+        r_val = _calc_r_multiple(_ledger.effective_row(r))
 
         usd_val = 0.0
         try:

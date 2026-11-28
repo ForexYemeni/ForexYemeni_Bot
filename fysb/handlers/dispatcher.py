@@ -392,7 +392,7 @@ async def _route_admin(q, context, uid: int, action: str):
     if act == "home":
         from fysb.handlers.common import build_admin_home_card, render
         await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
-    elif act in ("bridge", "promos", "promo_new", "digest_now", "digestgo", "digestcancel") or act.startswith(("br_", "digestgo:")):
+    elif act in ("bridge", "promos", "promo_new") or act.startswith("br_"):
         from fysb.handlers import auto_bridge_bot
         await auto_bridge_bot.handle_admin_bridge(q, uid, act, arg, arg2, context, bot)
     elif act in ("true_analysis", "tatoggle_global", "taset", "talist", "utamenu", "utagrant", "utarevoke"):
@@ -856,6 +856,12 @@ async def _route_admin(q, context, uid: int, action: str):
         else:
             await admin_reports_ui.rep_filter_pick(q, uid, context, bot,
                                                    [arg] + ([arg2] if arg2 else []))
+    elif act == "repfd":
+        # v8.14.19 — the closed-trades rows of the filtered slice
+        await admin_reports_ui.rep_filter_trades(q, uid, context, bot)
+    elif act == "repfb":
+        # v8.14.19 — preview-to-owner then broadcast the EXACT filtered report
+        await admin_reports_ui.rep_filter_broadcast(q, uid, context, bot, arg)
     elif act == "repusers":
         await admin_system.admin_rep_users(q, uid, context, bot)
     elif act == "repsignals":

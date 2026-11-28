@@ -296,7 +296,7 @@ def test_v772_native_bot_buttons_and_admin_home_panel_button(env, monkeypatch):
     exec_cbs = [b.callback_data for r in kb.admin_hub_execution().inline_keyboard for b in r]
     fin_cbs = [b.callback_data for r in kb.admin_hub_finance().inline_keyboard for b in r]
     assert "a:bridge" in exec_cbs
-    assert "a:promos" in fin_cbs and "a:digest_now" in fin_cbs
+    assert "a:promos" in fin_cbs and "a:repfilter" in fin_cbs  # v8.14.19: unified interactive report replaced digest_now
 
     # 2) Admin menu stays 4 rows offline, and prepends Royal Admin WebApp button when live HTTPS URL is ready
     monkeypatch.setattr(config, "WEBAPP_URL", "")

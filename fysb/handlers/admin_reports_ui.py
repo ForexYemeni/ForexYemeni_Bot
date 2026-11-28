@@ -16,7 +16,7 @@ from __future__ import annotations
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from fysb import afn, db
+from fysb import afn, config, db
 from fysb.handlers.common import render
 from fysb.services import audit as audit_log
 from fysb.ui import keyboards as kb
@@ -127,11 +127,101 @@ async def rep_filter_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):
     await afn.run(audit_log.log, uid,
                   f"interactive_report:{f.get('market') or 'ALL'}:{f.get('strategy') or 'ALL'}:{f.get('timeframe') or 'ALL'}")
     rows = [
-        [kb.btn("🔄 تحديث التقرير", "a:repf:run", style="success")],
-        [kb.btn("🧭 تعديل التصفية", "a:repfilter", style="primary"),
-         kb.btn("♻️ تصفير", "a:repf:clear", style="danger")],
+        [kb.btn("📋 تفاصيل الصفقات المغلقة", "a:repfd", style="primary")],
+        [kb.btn("📤 بث هذا التقرير للقنوات", "a:repfb:preview", style="success")],
+        [kb.btn("🔄 تحديث التقرير", "a:repf:run", style="primary"),
+         kb.btn("🧭 تعديل التصفية", "a:repfilter", style="primary")],
+        [kb.btn("♻️ تصفير الفلاتر", "a:repf:clear", style="danger")],
     ]
     await render(q, body, kb.admin_nav(rows), bot)
+
+
+async def rep_filter_trades(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):
+    """v8.14.19 — the A-to-Z completeness: every closed trade of the slice,
+    truthfully settled (the 50-pip decree included), newest first."""
+    f = _get_filter(context.user_data)
+    from fysb.services import reports
+    body = await afn.run(reports.filtered_trades_detail,
+                         f.get("market"), f.get("strategy"), f.get("timeframe"))
+    rows = [
+        [kb.btn("📊 رجوع للتقرير", "a:repf:run", style="success")],
+        [kb.btn("🧭 تعديل التصفية", "a:repfilter", style="primary")],
+    ]
+    await render(q, body, kb.admin_nav(rows), bot)
+
+
+def _broadcast_targets() -> list[str]:
+    """Sync helper — enabled broadcast channels (db access stays out of async bodies)."""
+    with db.conn() as c:
+        return [str(r["chat_id"]).strip()
+                for r in c.execute("SELECT chat_id FROM broadcast_channels WHERE enabled=1").fetchall()]
+
+
+async def rep_filter_broadcast(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, arg: str):
+    """v8.14.19 — broadcast the EXACT filtered report, preview-first: the
+    deliverable lands on the owner's chat alone, then he confirms. Nothing
+    leaves the bot until his explicit confirmation."""
+    f = _get_filter(context.user_data)
+    from fysb.services import reports
+    body = await afn.run(reports.filtered_signals_report,
+                         f.get("market"), f.get("strategy"), f.get("timeframe"))
+    if arg == "confirm":
+        text = str(context.user_data.get("repf_broadcast_text") or "")
+        context.user_data.pop("repf_broadcast_text", None)
+        if not text:
+            await render(q, "⛔ لا يوجد تقرير جاهز للبث — ولّد التقرير أولاً.",
+                         kb.admin_nav(), bot)
+            return
+        targets = await afn.run(_broadcast_targets)
+        sent, errors = 0, 0
+        for cid in [t for t in targets if t]:
+            try:
+                await await_bot_send(bot, cid, text)
+                sent += 1
+            except Exception:
+                errors += 1
+        await afn.run(audit_log.log, uid,
+                      f"interactive_report_broadcast:{f.get('market') or 'ALL'}:{f.get('strategy') or 'ALL'}:{f.get('timeframe') or 'ALL'}:{sent}")
+        await render(
+            q,
+            f"✅ <b>تم بث التقرير الصادق للقنوات</b>\n"
+            f"<blockquote>▎القنوات المستلمة: <b>{sent}</b> · أخطاء: <b>{errors}</b>\n"
+            f"▎التصفية: سوق {_lab(f.get('market'))} · استراتيجية {_lab(f.get('strategy'))} · إطار {_lab(f.get('timeframe'))}</blockquote>",
+            kb.admin_nav([[kb.btn("🧭 التقرير التفاعلي", "a:repfilter", style="primary")]]), bot)
+        return
+
+    if arg == "cancel":
+        context.user_data.pop("repf_broadcast_text", None)
+        await render(q, "❌ <b>أُلغي البث</b> — لم يُرسل التقرير لأحد.",
+                     kb.admin_nav([[kb.btn("📊 رجوع للتقرير", "a:repf:run", style="primary")]]), bot)
+        return
+
+    # preview: the deliverable lands on the OWNER's chat alone + a confirm card
+    context.user_data["repf_broadcast_text"] = body
+    try:
+        await await_bot_send(bot, str(config.ADMIN_ID), body)
+    except Exception:
+        pass
+    await render(
+        q,
+        "📤 <b><u>معاينة البث الملكية</u></b>\n"
+        "<blockquote>▎التقرير الصادق الحقيقي كاملاً أُرسل لك الآن في رسالة منفصلة — "
+        "هذه النسخة نفسها هي التي ستُبث للقنوات حرفياً\n"
+        f"▎التصفية: سوق <b>{_lab(f.get('market'))}</b> · استراتيجية <b>{_lab(f.get('strategy'))}</b> · "
+        f"إطار <b>{_lab(f.get('timeframe'))}</b></blockquote>\n"
+        "<i>لا شيء يُبث حتى تؤكد أنت القرار:</i>",
+        kb.admin_nav([
+            [kb.btn("✅ تأكيد البث للقنوات", "a:repfb:confirm", style="success"),
+             kb.btn("❌ إلغاء", "a:repfb:cancel", style="danger")],
+        ]), bot)
+
+
+async def await_bot_send(bot, chat_id: str, text: str):
+    """Chunked text delivery to one chat (4096-char Telegram cap, honestly split)."""
+    chunk = 3900
+    for i in range(0, max(len(text), 1), chunk):
+        await bot.send_message(chat_id=int(chat_id), text=text[i:i + chunk],
+                               parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def rep_filter_clear(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):

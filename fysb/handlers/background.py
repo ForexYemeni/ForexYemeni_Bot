@@ -1103,10 +1103,14 @@ async def auto_digest_loop(app):
     await asyncio.sleep(45)
     while True:
         try:
+            # v8.14.15 «ختم الملخصات الملكي»: now_dt/today are computed ALWAYS at
+            # the top of the loop — the v8.14.11 personal-digest block reads
+            # now_dt.hour outside `if enabled:`, so when auto digests are OFF
+            # the old code raised UnboundLocalError('now_dt') every 30 minutes.
+            now_dt = config.mecca_now()
+            today = now_dt.strftime("%Y-%m-%d")
             enabled = (await afn.run(db.get_setting, "auto_digest_enabled", "1") or "1") == "1"
             if enabled:
-                now_dt = config.mecca_now()
-                today = now_dt.strftime("%Y-%m-%d")
                 # Sunday (weekday == 6) at/after 10:00pm Mecca -> Weekly 7d Digest
                 if now_dt.weekday() == 6 and now_dt.hour >= 22:
                     last_w = await afn.run(db.get_setting, "last_weekly_digest_day", "")

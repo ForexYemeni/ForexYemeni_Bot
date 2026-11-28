@@ -287,6 +287,7 @@ CREATE TABLE IF NOT EXISTS chart_channels(
   send_on_signal INTEGER NOT NULL DEFAULT 1,
   send_on_tracking INTEGER NOT NULL DEFAULT 1,
   send_on_schedule INTEGER NOT NULL DEFAULT 1,
+  send_on_scale INTEGER NOT NULL DEFAULT 1,
   last_sent TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS signal_watchers(
@@ -748,6 +749,9 @@ ADD_COLUMNS = {
         "media_file_id": "TEXT NOT NULL DEFAULT ''",
         "media_caption": "TEXT NOT NULL DEFAULT ''",
         "edited_by_admin": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "chart_channels": {
+        "send_on_scale": "INTEGER NOT NULL DEFAULT 1",
     },
 }
 

@@ -1308,3 +1308,190 @@ def render_analysis_chart(an: dict, market_row=None) -> bytes | None:
     img.convert("RGB").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
+
+
+# ---------------------------------------------------------------------------
+# v8.14.25 — «لوحة الميزان الملكي» — the Royal Scale public board
+# ---------------------------------------------------------------------------
+
+def _ar(txt: str) -> str:
+    """Shape Arabic text for Pillow (contextual forms + visual bidi order).
+
+    Falls back to the plain string when the shaping libraries are absent —
+    image rendering never crashes the bot because of typography."""
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        return get_display(arabic_reshaper.reshape(str(txt)))
+    except Exception:
+        return str(txt)
+
+
+def _ema_series(values: list[float], period: int) -> list[float]:
+    """Standard EMA (real math over the real closes — no shortcuts)."""
+    if not values:
+        return []
+    k = 2.0 / (period + 1.0)
+    out = [float(values[0])]
+    for v in values[1:]:
+        out.append(float(v) * k + out[-1] * (1.0 - k))
+    return out
+
+
+def render_scale_board(res: dict, candles: list[dict], *,
+                       elapsed: float = 0.0, deep: bool = False) -> bytes | None:
+    """«لوحة الميزان الملكي» — the Royal Scale result as a luxury PNG board.
+
+    Real OHLC candles (the SAME series the scale measured) drawn as candlesticks
+    with EMA20/EMA50 overlays and a measured-stats band: the honest TP1-bank
+    floor, the baseline counts, the quarantine drop. NO entry/SL/TP levels are
+    drawn — this is a MEASUREMENT board, not a trade signal — and no guaranteed
+    numbers: the footer states the figures are historical samples.
+    Returns None when Pillow is missing, the result failed, or the candles are
+    too thin — never crashes the bot."""
+    if not PIL_AVAILABLE or not res or res.get("error"):
+        return None
+    bars = list(candles or [])[-140:]
+    if len(bars) < 60:
+        return None
+    try:
+        closes = [float(b["close"]) for b in candles]
+        highs = [float(b["high"]) for b in bars]
+        lows = [float(b["low"]) for b in bars]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    base = res.get("baseline") or {}
+    quar = res.get("quarantine") or {}
+    n = int(base.get("n") or 0)
+    wr = float(base.get("wr") or 0.0)
+    pf = float(base.get("pf") or 0.0)
+    max_dd = float(base.get("max_dd") or 0.0)
+    floor = float(res.get("tp1_bank_rate") or 0.0)
+    nd = len(quar.get("dropped") or [])
+    bars_tested = int(res.get("bars_tested") or 0)
+    pf_txt = "INF" if pf >= 99.0 else f"{pf:.2f}"
+    symbol = str(res.get("symbol") or "XAUUSD").upper()
+    tf = str(res.get("timeframe") or "M15").upper()
+
+    W, H = 1200, 680
+    img = Image.new("RGBA", (W, H), BG_DARK)
+    draw = ImageDraw.Draw(img)
+
+    f_brand = _load_font(22, "bold")
+    f_title = _load_font(26, "bold")
+    f_sub = _load_font(14, "reg")
+    f_mono = _load_font(14, "mono")
+    f_badge = _load_font(15, "bold")
+    f_stat_lbl = _load_font(14, "reg")
+    f_stat_val = _load_font(24, "bold")
+    f_wm = _load_font(54, "bold")
+
+    # Outer luxury double-accent gold frame + header band (house style)
+    draw.rounded_rectangle([6, 6, W - 7, H - 7], radius=18, outline=(46, 56, 80, 255), width=2)
+    draw.rounded_rectangle([10, 10, W - 11, H - 11], radius=15, outline=(212, 175, 55, 70), width=1)
+    draw.rectangle([12, 12, W - 13, 94], fill=HEADER_BG)
+    draw.line([(12, 12), (260, 12)], fill=BORDER_GOLD, width=3)
+    draw.line([(W - 260, 12), (W - 13, 12)], fill=BORDER_GOLD, width=3)
+    draw.line([(12, 94), (W - 13, 94)], fill=BORDER_GOLD, width=2)
+
+    draw.text((28, 18), "FOREXYEMENI  ROYAL  SCALE", fill=BORDER_GOLD, font=f_brand)
+    draw.text((28, 49), _ar(f"الميزان الملكي — {symbol} · {tf}"), fill=TEXT_LIGHT, font=f_title)
+
+    px = 580
+    px += _draw_pill(draw, px, 49, f"BARS {bars_tested}", (36, 46, 70, 255), GOLD_SOFT, f_badge, 10, 4) + 10
+    px += _draw_pill(draw, px, 49, "DEEP" if deep else "STD", (30, 42, 62, 255), TEXT_LIGHT, f_badge, 10, 4) + 10
+    _draw_pill(draw, px, 49, f"TIME {elapsed:.0f}s", (30, 42, 62, 255), TP_COLOR, f_badge, 10, 4)
+
+    # ---- plot geometry ----
+    plot_l, plot_t, plot_r, plot_b = 44, 112, W - 78, H - 208
+    plot_w, plot_h = plot_r - plot_l, plot_b - plot_t
+    lo, hi = min(lows), max(highs)
+    if hi - lo < 1e-9:
+        hi, lo = hi + 1.0, lo - 1.0
+    pad = (hi - lo) * 0.08
+    hi_p, lo_p = hi + pad, lo - pad
+
+    def y_of(price: float) -> int:
+        return int(plot_t + (hi_p - float(price)) / (hi_p - lo_p) * plot_h)
+
+    # grid + price axis (right, mono)
+    for g in range(5):
+        gy = plot_t + int(plot_h * g / 4)
+        draw.line([(plot_l, gy), (plot_r, gy)], fill=GRID_COLOR, width=1)
+        g_price = hi_p - (hi_p - lo_p) * g / 4
+        draw.text((plot_r + 10, gy - 8), instruments.fmt_price(symbol, g_price), fill=TEXT_MUTED, font=f_mono)
+
+    # candlesticks (bull/bear, wick + body)
+    n_bars = len(bars)
+    step = plot_w / n_bars
+    bw = max(2.0, step * 0.62)
+    for i, bar in enumerate(bars):
+        o, c = float(bar["open"]), float(bar["close"])
+        h, l = float(bar["high"]), float(bar["low"])
+        cx = int(plot_l + i * step + step / 2)
+        col = BULL_COLOR if c >= o else BEAR_COLOR
+        draw.line([(cx, y_of(h)), (cx, y_of(l))], fill=col, width=1)
+        top, bot = sorted((y_of(o), y_of(c)))
+        draw.rectangle([int(cx - bw / 2), top, int(cx + bw / 2), max(bot, top + 1)], fill=col)
+
+    # EMA overlays (computed over the FULL real closes, sliced to the window)
+    ema20 = _ema_series(closes, 20)[-n_bars:]
+    ema50 = _ema_series(closes, 50)[-n_bars:]
+    for series, col in ((ema20, GOLD_SOFT), (ema50, (56, 189, 248, 255))):
+        pts = [(int(plot_l + i * step + step / 2), y_of(v)) for i, v in enumerate(series)]
+        if len(pts) >= 2:
+            draw.line(pts, fill=col, width=2, joint="curve")
+
+    # last price dashed marker + right tag
+    last_px = closes[-1]
+    ly = y_of(last_px)
+    _draw_dashed_line(draw, plot_l, plot_r, ly, BORDER_GOLD, dash=8, gap=5, width=2)
+    tag = instruments.fmt_price(symbol, last_px)
+    bbox = draw.textbbox((0, 0), tag, font=f_mono)
+    tw = bbox[2] - bbox[0]
+    draw.rounded_rectangle([plot_r + 4, ly - 11, plot_r + 4 + tw + 12, ly + 11],
+                           radius=6, fill=BORDER_GOLD)
+    draw.text((plot_r + 10, ly - 7), tag, fill=BG_DARK, font=f_mono)
+
+    # legend
+    draw.text((plot_l + 6, plot_t + 6), "EMA20", fill=GOLD_SOFT, font=f_mono)
+    draw.text((plot_l + 62, plot_t + 6), "EMA50", fill=(56, 189, 248, 255), font=f_mono)
+
+    # watermark
+    draw.text((plot_l + plot_w // 2 - 220, plot_t + plot_h // 2 - 30),
+              "FOREXYEMENI", fill=WATERMARK_COLOR, font=f_wm)
+
+    # ---- measured stats band (real numbers from the scale result only) ----
+    band_t, band_b = H - 196, H - 58
+    draw.rectangle([12, band_t, W - 13, band_b], fill=PANEL_BG)
+    draw.line([(12, band_t), (W - 13, band_t)], fill=BORDER_GOLD, width=2)
+    draw.line([(12, band_t + 1), (150, band_t + 1)], fill=BORDER_GOLD, width=3)
+    draw.line([(W - 150, band_t + 1), (W - 13, band_t + 1)], fill=BORDER_GOLD, width=3)
+
+    stats = [
+        (_ar("الأرضية الصادقة (TP1 قبل أي وقف)"), f"{floor:.1f}%", BORDER_GOLD),
+        (_ar("صفقات مقاسة"), str(n), TEXT_LIGHT),
+        (_ar("نسبة النجاح المقاسة"), f"{wr:.1f}%", TP_COLOR),
+        (_ar("عامل الربح"), pf_txt, TP_COLOR),
+        (_ar("الحجر أسقط أنظمة"), str(nd), SL_COLOR),
+        (_ar("أقصى تراجع"), f"{max_dd:.1f}R", TEXT_MUTED),
+    ]
+    cell_w = (W - 24) / len(stats)
+    for idx, (lbl, val, col) in enumerate(stats):
+        cx0 = 12 + idx * cell_w
+        draw.text((cx0 + 14, band_t + 16), lbl[:28], fill=TEXT_MUTED, font=f_stat_lbl)
+        draw.text((cx0 + 14, band_t + 42), str(val)[:12], fill=col, font=f_stat_val)
+    draw.text((28, band_t + 78),
+              _ar("قيس قبل الثقة — الميزان يفحص التاريخ شمعة بشمعة ببوابات الإنتاج الحقيقية"),
+              fill=TEXT_MUTED, font=f_sub)
+
+    # footer — the honesty line (numbers are samples, nothing is guaranteed)
+    draw.text((34, H - 40),
+              _ar("أرقام نموذجية على التاريخ — لا ضمان ربح ولا رقم نسبة مضمون · الدرجة استيفاء شروط وليست احتمال فوز"),
+              fill=TEXT_MUTED, font=f_sub)
+    draw.text((W - 330, H - 40), "FOREXYEMENI · ROYAL SCALE", fill=BORDER_GOLD, font=f_sub)
+
+    out = io.BytesIO()
+    img.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()

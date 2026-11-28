@@ -46,11 +46,15 @@ def _clean():
         c.execute("DELETE FROM signals")
         c.execute("DELETE FROM settings WHERE key LIKE 'quarantine%'")
         c.execute("DELETE FROM ui_events")
+        c.execute("DELETE FROM chart_channels")
+        c.execute("DELETE FROM audit")
     yield
     with db.conn() as c:
         c.execute("DELETE FROM signals")
         c.execute("DELETE FROM settings WHERE key LIKE 'quarantine%'")
         c.execute("DELETE FROM ui_events")
+        c.execute("DELETE FROM chart_channels")
+        c.execute("DELETE FROM audit")
     # leave no worker behind between tests
     async def _drain():
         job = admin_scale._JOBS.get("royal_scale")
@@ -269,7 +273,8 @@ def test_scale_run_answers_instantly_and_delivers_to_owner_chat():
               "by_strategy": {"TREND": {"n": 2, "wr": 50.0, "pf": 2.0, "net_r": 1.0,
                                         "wins": 1, "losses": 1, "exp": 0.5, "max_dd": -1.0}},
               "variants": []}
-    with patch("fysb.services.royal_scale.run_scale", return_value=canned):
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=[]), \
+         patch("fysb.services.royal_scale.run_scale", return_value=canned):
         (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
     q = queries[0]
     page = page_for(q, ctx)  # the ROUTE page — instant, not the report
@@ -290,7 +295,8 @@ def test_scale_run_surfaces_the_real_error_to_owner_chat_never_fabricates():
     ctx = MockContext(bot=bot)
     ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
                                     "outputsize": 400, "strategy": None}
-    with patch("fysb.services.royal_scale.run_scale",
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=[]), \
+         patch("fysb.services.royal_scale.run_scale",
                side_effect=RuntimeError("provider unreachable")):
         (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
     q = queries[0]
@@ -328,7 +334,8 @@ def test_scale_run_surfaces_the_real_error_never_fabricates():
     ctx = MockContext(bot=bot)
     ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
                                     "outputsize": 400, "strategy": None}
-    with patch("fysb.services.royal_scale.run_scale",
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=[]), \
+         patch("fysb.services.royal_scale.run_scale",
                side_effect=RuntimeError("provider unreachable")):
         (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
     owner_msgs = [m for m in bot.sent if m["chat_id"] == ADMIN]
@@ -346,3 +353,204 @@ def test_risk_board_carries_the_quarantine_floor_dials():
     src = open("fysb/handlers/admin_trading.py", encoding="utf-8").read()
     assert '"quarantine_wr_floor"' in src and '"quarantine_pf_floor"' in src and '"quarantine_n"' in src
     assert '"quarantine_wr_floor": (10.0, 80.0)' in src  # bounded — no absurd values
+
+
+# ---------------------------------------------------------------------------
+# v8.14.25 — «التقرير العام الفاخر»: لوحة الميزان بصورة الشارت الحقيقي
+# ---------------------------------------------------------------------------
+
+def _canned_result(trades=None):
+    trades = trades or [_t("TREND", "TP3_HIT", 2.0, 85), _t("TREND", "TP1_BE", 0.0, 75),
+                        _t("ICT", "SL_HIT", -1.0, 68)]
+    return {"symbol": "XAUUSD", "timeframe": "M15", "bars_tested": 800, "error": "",
+            "baseline": royal_scale.aggregate(trades),
+            "unfilled": 0, "matrix": {}, "tp1_bank_rate": royal_scale.tp1_bank_rate(trades),
+            "grid": royal_scale.score_grid(trades),
+            "quarantine": royal_scale.quarantine_sim(trades),
+            "by_strategy": {}, "variants": []}
+
+
+def _add_pub_channel(chat_id: str, *, scale: int = 1, enabled: int = 1) -> int:
+    from fysb.services import chart_channels as cch
+    cid = cch.add_channel(chat_id, title=f"pub-{chat_id}", markets="ALL")
+    if enabled != 1:
+        cch.toggle_channel(cid)
+    if scale != 1:
+        cch.toggle_flag(cid, "send_on_scale")
+    return cid
+
+
+def test_scale_board_renders_real_candles_and_refuses_fake_ones():
+    """The luxury board draws REAL OHLC candles; it refuses to render when the
+    scale failed or the candles are too thin — never a fabricated picture."""
+    from PIL import Image as PILImage
+    from fysb.ui import charts
+    res = _canned_result()
+    candles = _bull_series(800)
+    png = charts.render_scale_board(res, candles, elapsed=17.0, deep=False)
+    assert png and png[:8] == b"\x89PNG\r\n\x1a\n"
+    img = PILImage.open(__import__("io").BytesIO(png))
+    assert img.size == (1200, 680)
+    # guards: failed scale and thin candles never render
+    assert charts.render_scale_board({**res, "error": "provider down"}, candles) is None
+    assert charts.render_scale_board(res, candles[:10]) is None
+
+
+def test_scale_caption_is_measured_and_honest_never_a_guarantee():
+    """The public caption carries the MEASURED figures + the mandatory honesty
+    lines; a failed scale produces an EMPTY caption (never published)."""
+    from fysb.services import chart_channels as cch
+    res = _canned_result()
+    cap = cch.build_luxury_scale_caption(res, elapsed=17.0, deep=True)
+    assert "لوحة الميزان الملكي" in cap and "XAUUSD" in cap and "15 دقيقة" in cap
+    floor = res["tp1_bank_rate"]
+    assert f"{floor:.1f}%" in cap
+    assert "الأرضية الصادقة" in cap and "قياس عميق" in cap
+    assert "أرقام نموذجية على التاريخ" in cap
+    assert "لا ضمان ربح ولا رقم نسبة مضمون" in cap
+    assert "الدرجة استيفاء شروط وليست احتمال فوز" in cap
+    assert cch.build_luxury_scale_caption({**res, "error": "x"}) == ""
+
+
+def test_send_on_scale_flag_lifecycle_and_matching():
+    """The new «عند الميزان» channel flag: default ON, toggles persist, and
+    matching_channels(mode='scale') serves only opted enabled channels."""
+    from fysb.services import chart_channels as cch
+    cid = _add_pub_channel("-10077001")
+    ch = cch.get_channel(cid)
+    assert int(ch["send_on_scale"]) == 1
+    assert cch.matching_channels("XAUUSD", mode="scale")
+    cch.toggle_flag(cid, "send_on_scale")
+    assert int(cch.get_channel(cid)["send_on_scale"]) == 0
+    assert not cch.matching_channels("XAUUSD", mode="scale")
+    cch.toggle_flag(cid, "send_on_scale")
+    cch.toggle_channel(cid)  # disabled channel must not match
+    assert not cch.matching_channels("XAUUSD", mode="scale")
+
+
+def test_scale_report_publishes_only_to_opted_enabled_channels():
+    """deliver_scale_report serves ONLY enabled channels with send_on_scale=1,
+    reports the honest count, and records last_sent for the served ones."""
+    from fysb.services import chart_channels as cch
+    on = _add_pub_channel("-10077002")
+    off_flag = _add_pub_channel("-10077003", scale=0)
+    disabled = _add_pub_channel("-10077004", enabled=0)
+    bot = MockBot()
+    cap = cch.build_luxury_scale_caption(_canned_result(), elapsed=9.0)
+    sent = asyncio.run(cch.deliver_scale_report(bot, "XAUUSD", b"PNGDATA", cap))
+    assert sent == 1
+    assert [str(p["chat_id"]) for p in bot.photos] == ["-10077002"]
+    ch = cch.get_channel(on)
+    assert ch["last_sent"]
+    assert not cch.get_channel(off_flag)["last_sent"]
+    assert not cch.get_channel(disabled)["last_sent"]
+    # empty caption (failed scale) and empty png are guards — nothing is sent
+    assert asyncio.run(cch.deliver_scale_report(bot, "XAUUSD", b"PNGDATA", "")) == 0
+    assert asyncio.run(cch.deliver_scale_report(bot, "XAUUSD", b"", cap)) == 0
+    assert len(bot.photos) == 1
+
+
+def test_scale_worker_delivers_owner_photo_and_publishes_public_board():
+    """THE FULL ROYAL FLOW: one press → instant answer → detached worker →
+    owner's chat gets the PHOTO board + the full report + the honest public
+    line → opted public channels receive the luxury board photo."""
+    from fysb.services import chart_channels as cch
+    _add_pub_channel("-10077005")
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+    canned = _canned_result()
+    candles = _bull_series(800)
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=candles), \
+         patch("fysb.services.royal_scale.run_scale", return_value=canned):
+        (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
+    page = page_for(queries[0], ctx)
+    assert "النتيجة ستصلك في شاتك فور اكتمالها" in page  # the route stays instant
+
+    owner_texts = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_texts and "الميزان الملكي — القياس قبل الثقة" in owner_texts[-1]["text"]
+    assert "التقرير العام" in owner_texts[-1]["text"]
+    assert "قناة عامة" in owner_texts[-1]["text"]
+    owner_photos = [p for p in bot.photos if p["chat_id"] == ADMIN]
+    assert owner_photos, "the owner must receive the luxury board photo"
+    assert "لوحة الميزان الملكي" in owner_photos[-1]["caption"]
+    pub_photos = [p for p in bot.photos if str(p["chat_id"]) == "-10077005"]
+    assert pub_photos, "the opted public channel must receive the board"
+    pub_cap = pub_photos[-1]["caption"]
+    assert "أرقام نموذجية على التاريخ" in pub_cap and "لا ضمان ربح" in pub_cap
+    with db.conn() as c:
+        rows = c.execute("SELECT action FROM audit WHERE action LIKE 'royal_scale_public%'").fetchall()
+    assert any("royal_scale_public:XAUUSD:1ch" in r["action"] for r in rows)
+
+
+def test_scale_worker_without_channels_reports_the_honest_state():
+    """No opted public channels → the owner is told the real state (how to
+    enable), the board still lands in the owner's chat, nothing is faked."""
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=_bull_series(800)), \
+         patch("fysb.services.royal_scale.run_scale", return_value=_canned_result()):
+        _press_on_live_loop(["a:scale:run"], ctx)
+    owner_texts = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_texts and "لا قنوات مفعّلة لتقارير الميزان بعد" in owner_texts[-1]["text"]
+    assert "عند الميزان" in owner_texts[-1]["text"]
+    owner_photos = [p for p in bot.photos if p["chat_id"] == ADMIN]
+    assert owner_photos, "the owner photo does not depend on public channels"
+    pub = [p for p in bot.photos if p["chat_id"] != ADMIN]
+    assert not pub
+
+
+def test_chart_fetch_failure_degrades_gracefully_report_still_arrives():
+    """The chart fetch failing must NEVER break the scale: the report still
+    reaches the owner, no photo is sent, and the real reason is audited."""
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles",
+               side_effect=RuntimeError("provider unreachable")), \
+         patch("fysb.services.royal_scale.run_scale", return_value=_canned_result()):
+        _press_on_live_loop(["a:scale:run"], ctx)
+    owner_texts = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_texts and "الميزان الملكي — القياس قبل الثقة" in owner_texts[-1]["text"]
+    assert "التقرير العام" not in owner_texts[-1]["text"]
+    assert not bot.photos
+    with db.conn() as c:
+        rows = c.execute("SELECT action FROM audit WHERE action LIKE "
+                         "'royal_scale_chart_candles_failed%'").fetchall()
+    assert rows and "provider unreachable" in rows[-1]["action"]
+
+
+def test_failed_scale_is_never_published_anywhere():
+    """A FAILED scale publishes NOTHING — no photo, no public channel, the real
+    error reaches the owner's chat as before."""
+    from fysb.services import chart_channels as cch
+    _add_pub_channel("-10077006")
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+    with patch("fysb.handlers.admin_scale._fetch_chart_candles", return_value=_bull_series(800)), \
+         patch("fysb.services.royal_scale.run_scale",
+               side_effect=RuntimeError("provider unreachable")):
+        _press_on_live_loop(["a:scale:run"], ctx)
+    owner_texts = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_texts and "السبب الحقيقي" in owner_texts[-1]["text"]
+    assert "provider unreachable" in owner_texts[-1]["text"]
+    assert not bot.photos, "a failed scale must never render or publish a board"
+
+
+def test_scale_board_matches_scale_numbers_exactly():
+    """The board is fed the SAME result the report shows — the floor %, the
+    counts, the quarantine drop are identical (one truth, two surfaces)."""
+    from fysb.ui import charts
+    res = _canned_result()
+    trades = [_t("TREND", "TP3_HIT", 2.0, 85), _t("TREND", "TP1_BE", 0.0, 75),
+              _t("ICT", "SL_HIT", -1.0, 68)]
+    assert res["tp1_bank_rate"] == royal_scale.tp1_bank_rate(trades)
+    assert res["baseline"]["n"] == 3
+    png = charts.render_scale_board(res, _bull_series(800), elapsed=5.0)
+    assert png  # the board renders with the very same numbers

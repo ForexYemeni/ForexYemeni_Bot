@@ -1646,27 +1646,12 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             sig = await afn.run(_signal_row, target_id)
             if sig:
                 sig_d = dict(sig)
-                row = await afn.run(_market_row, sig_d["symbol"])
-                from fysb.ui import charts as _charts
-                m = _charts.live_signal_metrics(sig_d, row=row)
-                bn = (bot_un or config.BRAND or "ForexYemeniBot").lstrip("@")
-                payload = {
-                    "kind": "signal",
-                    "symbol": sig_d["symbol"],
-                    "direction": sig_d["direction"],
-                    "strategy": sig_d.get("strategy") or "ROYAL",
-                    "timeframe": sig_d.get("timeframe") or "M15",
-                    "entry": float(sig_d.get("entry") or 0),
-                    "exit_price": float(m.get("live_px") or sig_d.get("tp1") or sig_d.get("entry") or 0),
-                    "tp3": float(sig_d.get("tp3") or sig_d.get("tp1") or 0),
-                    "tp_label": str(sig_d.get("status") or "ACTIVE").upper(),
-                    "pips": float(m.get("pips") or sig_d.get("pips_result") or 0),
-                    "rr": float(sig_d.get("rr") or 0),
-                    "score": int(sig_d.get("score") or 0),
-                    "ref_link": f"t.me/{bn}?start=ref_{uid}",
-                    "ref_label": f"SHARED VIA {config.BRAND} • REF #{uid}",
-                    "timestamp": str(sig_d.get("closed_at") or sig_d.get("created_at") or config.now()),
-                }
+                # v8.14.11 — the honest payload builder: documented result for
+                # closed trades (LOCKED_50 → locked_sl · SL → stop · TP → the
+                # banked level), true floating value for open ones. Never 0
+                # pips on a winner, never live drift on a recorded result.
+                payload = await afn.run(
+                    _sc.signal_share_payload, sig_d, bot_un, uid)
         png = await asyncio.to_thread(_sc.render_pnl_share_card, payload) if payload else None
         if not png:
             await render(q, "⚠️ تعذر إنشاء بطاقة الربح حالياً.", kb.user_nav([[kb.btn("↩️ رجوع", "u:signals")]]), bot)
@@ -1941,6 +1926,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         await render(q, body, kb.user_nav([
             [kb.btn("💰 تعديل الرصيد", "u:demobal"), kb.btn("⚖️ المخاطرة", "u:demorisk")],
             [kb.btn("📦 اللوت", "u:demolot"), kb.btn(f"🤖 النسخ التلقائي: {'إيقاف' if s['auto_trade'] else 'تفعيل'}", "u:demoauto")],
+            [kb.btn(f"⚖️ تنبيه الصفقة المعاكسة: {'إيقاف' if s.get('opposite_alert', 1) else 'تفعيل'}", "u:demohedge")],
             [kb.btn(f"🛡 تأمين 50% TP1 + BE: {'إيقاف' if s.get('partial_tp_be', True) else 'تفعيل'}", "u:demopartialbe", style="primary")],
             [kb.btn("↩️ التجريبي", "u:demo")],
         ]), bot)
@@ -2000,6 +1986,17 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         state = "مفعل 🤖 — ستنفذ كل إشارة مؤهلة تلقائياً في حسابك بحجمك ومخاطرتك" if not s["auto_trade"] else "متوقف"
         await render(q, f"🤖 التنفيذ التلقائي الآن: <b>{state}</b>.",
                      kb.user_nav([[kb.btn("↩️ الإعدادات", "u:demoset")]]), bot)
+
+    elif action == "demohedge":
+        from fysb.engines import demo as demo_engine
+        s = await afn.run(demo_engine.demo_settings, uid)
+        cur = bool(s.get("opposite_alert", 1))
+        await afn.run(demo_engine.set_opposite_alert, uid, not cur)
+        state = ("مفعّل ⚖️ — عند صدور إشارة معاكسة تماماً لحيازتك المفتوحة تصلك بطاقة ملكية فورية "
+                 "مبنية على صفقاتك الحقيقية 100% لتقرر بوعي") if not cur else "متوقف ⚪ — لن يصلك تنبيه الصفقة المعاكسة"
+        await render(q, f"⚖️ <b>تنبيه الصفقة المعاكسة الآن: {state}</b>.",
+                     kb.user_nav([[kb.btn("⚙️ إعدادات التجريبي", "u:demoset"), kb.btn("🧪 التجريبي", "u:demo")]]),
+                     bot)
 
     elif action == "demopick":
         rows = await afn.run(_open_signals_rows, uid)

@@ -430,9 +430,14 @@ async def _deliver_private_signal(bot, uid: int, sig: dict) -> bool:
                         )
         except Exception:
             log.debug("auto signal chart skipped for user=%s sig=%s", uid, sig.get("id"))
-        exec_res = await afn.run(user_trade.auto_execute, sig, uid)
-        if exec_res and exec_res.get("ok"):
-            await bot.send_message(uid, user_trade.execution_card(exec_res, sig), parse_mode="HTML")
+        # v8.14.11 — no demo execution at creation: the position opens only
+        # when the tracker confirms the true market fill (the royal fill gate).
+        try:
+            opp = await afn.run(user_trade.opposite_alerts_for_delivery, sig, [uid])
+            for _u, txt in opp:
+                await bot.send_message(uid, txt, parse_mode="HTML")
+        except Exception:
+            pass
         return True
     except Exception:
         if not got:

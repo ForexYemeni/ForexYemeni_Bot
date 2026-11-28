@@ -91,6 +91,120 @@ def auto_execute(sig: dict, user_id: int, acc: dict | None = None) -> dict | Non
         return None
 
 
+def opposite_alert_enabled(user_id: int) -> bool:
+    """v8.14.11 — the royal opposite-trade alert: ON by default (the
+    protective institutional contract), the owner's toggle flips it."""
+    try:
+        acc = demo_engine.get_or_create_account(user_id)
+        # v8.14.11 — the falsy-zero law: an explicit OFF (0) must never be
+        # re-read as missing; only None/blank means the default (ON).
+        val = acc.get("opposite_alert")
+        return True if val is None or val == "" else bool(int(val))
+    except Exception:
+        return True
+
+
+def opposite_holding_conflicts(user_id: int, symbol: str, direction: str) -> list[dict]:
+    """100% REAL holdings only — never guesses:
+      * an OPEN demo position on this symbol in the OPPOSITE direction;
+      * a trade the user personally marked «دخلت الصفقة» (trade_journal
+        TAKEN, still OPEN) on this symbol in the OPPOSITE direction.
+    Anything else (ignored signals, closed trades) is NOT a holding."""
+    sym = instruments.normalize(symbol)
+    opp = "SELL" if str(direction).upper() == "BUY" else "BUY"
+    out: list[dict] = []
+    with db.conn() as c:
+        for r in c.execute("""SELECT id, symbol, direction, lots, entry, tp, sl
+                              FROM demo_positions
+                              WHERE user_id=? AND status='OPEN' AND symbol=? AND direction=?""",
+                           (user_id, sym, opp)).fetchall():
+            out.append({"source": "DEMO", "id": int(r["id"]), "symbol": sym,
+                        "direction": opp, "lots": float(r["lots"] or 0),
+                        "entry": float(r["entry"] or 0)})
+        for r in c.execute("""SELECT j.id, j.symbol, j.direction, j.lots,
+                              COALESCE(s.entry, 0) AS entry
+                              FROM trade_journal j LEFT JOIN signals s ON s.id=j.signal_id
+                              WHERE j.user_id=? AND j.status='OPEN' AND j.action='TAKEN'
+                                    AND j.symbol=? AND j.direction=?""",
+                           (user_id, sym, opp)).fetchall():
+            out.append({"source": "JOURNAL", "id": int(r["id"]), "symbol": sym,
+                        "direction": opp, "lots": float(r["lots"] or 0),
+                        "entry": float(r["entry"] or 0)})
+    return out
+
+
+def opposite_alert_text(sig: dict, conflicts: list[dict]) -> str:
+    """The luxury, honest, real-data opposite-trade alert."""
+    from fysb.theme import dir_badge, esc, tf_name
+    from fysb import instruments as _ins
+    sym = sig["symbol"]
+    lines = []
+    for cf in conflicts[:4]:
+        src = "حسابك التجريبي 🤖" if cf["source"] == "DEMO" else "مفكرتك 📓"
+        lines.append(
+            f"▎⚠️ صفقتك المفتوحة: <b>{esc(cf['symbol'])}</b> "
+            f"{'🟢' if cf['direction'] == 'BUY' else '🔴'} <b>{'شراء' if cf['direction'] == 'BUY' else 'بيع'}</b>"
+            f" · <code>{cf['lots']:.2f} lot</code> · دخول <code>{_ins.fmt_price(sym, cf['entry']) if cf['entry'] else '—'}</code>"
+            f" — <i>{src}</i>")
+    body = "\n".join(lines)
+    return (
+        f"⚖️ <b><u>تنبيه الصفقة المعاكسة الملكي</u></b> — {esc(sym)} "
+        f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+        "<blockquote>"
+        f"▎🆕 إشارة جديدة في الاتجاه <b>المعاكس تماماً</b> لصفقة/صفقات مفتوحة لديك:\n"
+        f"{body}\n"
+        "▎👑 <b>القانون المؤسسي:</b> لا تحمل اتجاهين متناقضين في نفس الأداة — "
+        "قرر بوعي كامل: أغلق صفقتك المعاكسة أو اجعل الإشارة الجديدة فرصة منفصلة بعد الإغلاق."
+        "</blockquote>\n"
+        "<i>تنبيه مبني على حيازتك الحقيقية المفتوحة 100% — يمكنك إيقافه من إعدادات التجريبي.</i>"
+    )
+
+
+def opposite_alerts_for_delivery(sig: dict, delivered_uids: list[int]) -> list[tuple[int, str]]:
+    """Sync scan used off the delivery critical path: for each recipient with
+    the alert ON and a REAL opposite holding — one luxury alert."""
+    out: list[tuple[int, str]] = []
+    for uid in delivered_uids:
+        try:
+            if not opposite_alert_enabled(uid):
+                continue
+            conflicts = opposite_holding_conflicts(uid, sig["symbol"], sig["direction"])
+            if conflicts:
+                out.append((uid, opposite_alert_text(sig, conflicts)))
+        except Exception:
+            continue
+    return out
+
+
+def dispatch_demo_fills(sig: dict) -> list[tuple[int, str]]:
+    """v8.14.11 — the royal fill gate (the owner's decree).
+
+    A demo position opens ONLY when the signal truly fills in the market —
+    the tracker's ACTIVE→RUNNING transition (a real candle touched the entry)
+    — NEVER at signal creation. Every user the signal was delivered to whose
+    auto-trade is ON gets his position at the honest entry price, exactly
+    once (a demo position for this signal already existing skips him)."""
+    sid = int(sig.get("id") or 0)
+    if sid <= 0:
+        return []
+    out: list[tuple[int, str]] = []
+    with db.conn() as c:
+        rows = c.execute("""SELECT DISTINCT a.user_id FROM signal_deliveries d
+                            JOIN demo_accounts a ON a.user_id = d.user_id
+                            WHERE d.signal_id=? AND a.auto_trade=1""", (sid,)).fetchall()
+    for r in rows:
+        uid = int(r["user_id"])
+        with db.conn() as c:
+            dup = c.execute("SELECT 1 FROM demo_positions WHERE user_id=? AND signal_id=? LIMIT 1",
+                            (uid, sid)).fetchone()
+        if dup:
+            continue
+        res = auto_execute(sig, uid)
+        if res and res.get("ok"):
+            out.append((uid, execution_card(res, sig)))
+    return out
+
+
 def execution_card(exec_res: dict, sig: dict) -> str:
     """Luxury 'your trade was opened automatically' card."""
     symbol = exec_res.get("symbol", sig["symbol"])

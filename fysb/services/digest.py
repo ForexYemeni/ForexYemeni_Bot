@@ -324,6 +324,52 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
     return "\n".join(blocks)
 
 
+def personal_royal_digest(user_id: int, days: int = 1) -> str | None:
+    """v8.14.11 — the royal PERSONAL daily summary: one paid subscriber's own
+    delivered, closed trades — wins, royal locks, honest stops, net pips.
+    Built ONLY from real recorded rows; returns None when the subscriber had
+    zero closed activity (no vanity empty cards, no fabricated numbers)."""
+    lo = _cutoff_iso(days)
+    with db.conn() as c:
+        rows = c.execute(
+            """SELECT s.status, s.pips_result, s.symbol, s.direction, s.strategy,
+               s.locked_pips, s.closed_at
+               FROM signal_deliveries d JOIN signals s ON s.id=d.signal_id
+               WHERE d.user_id=? AND s.closed_at>=? AND s.closed_at!=''
+               ORDER BY s.closed_at DESC""",
+            (int(user_id), lo)).fetchall()
+    if not rows:
+        return None
+    wins = [r for r in rows if r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "LOCKED_50")]
+    locks = [r for r in rows if r["status"] == "LOCKED_50"]
+    stops = [r for r in rows if r["status"] == "SL_HIT"]
+    net_pips = sum(float(r["pips_result"] or 0.0) for r in rows)
+    day = config.mecca_now().strftime("%Y-%m-%d")
+    lock_note = " (كل قفلة حفظت +5.00 $ بـ 0.01 لوت — لا خسارة أبداً)" if locks else ""
+    lines = [
+        "👑 <b><u>ملخصك الملكي الشخصي</u></b> — آخر {} يوم".format(days),
+        "🗓 {} — صفقاتك المغلقة الموثقة فقط".format(day),
+        "<blockquote>"
+        "▎📊 صفقاتك: <b>{}</b> — 🏆 رابحة <b>{}</b> · 🛑 وقف <b>{}</b>\n"
+        "▎🏅 قفلات ملكية: <b>{}</b>{}\n"
+        "▎📈 صافي النتيجة المسجلة: <b>{:+.1f} pips</b>"
+        "</blockquote>".format(len(rows), len(wins), len(stops), len(locks), lock_note, net_pips),
+    ]
+    icons = {"TP3_HIT": "👑", "TP2_HIT": "🥈", "TP1_HIT": "🥇", "LOCKED_50": "🏅",
+             "SL_HIT": "🛑", "TP1_BE": "🛡", "TP2_BE": "🛡"}
+    for r in rows[:8]:
+        lines.append(
+            "▎{} <b>{}</b> {} <b>{:+.1f} pips</b> — {}".format(
+                icons.get(r["status"], "•"), esc(str(r["symbol"])),
+                "🟢" if r["direction"] == "BUY" else "🔴",
+                float(r["pips_result"] or 0.0), esc(str(r["closed_at"] or "").replace("T", " ")[:16])))
+    if net_pips >= 0:
+        lines.append("✨ <i>استمر بنفس الالتزام — القرار المؤسسي يُبنى على وثيقة موثقة.</i>")
+    else:
+        lines.append("🛡 <i>الخسارة المحدودة جزء من القانون — الوقف الحقيقي حماية لمسارك.</i>")
+    return "\n".join(lines)
+
+
 def channel_broadcast_allowed(d: dict) -> tuple[bool, str]:
     """Minimum disclosed sample only; NEVER suppress losing periods."""
     decided = int(d.get("decided") or 0)

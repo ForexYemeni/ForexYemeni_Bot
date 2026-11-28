@@ -1065,31 +1065,6 @@ def _preload_demo_accounts(uids: list[int]) -> dict[int, dict]:
     return out
 
 
-async def _offload_auto_executes(sig: dict, items: list[tuple[int, dict | None]], bot_send) -> int:
-    """v6.16.0 Phase 6: run demo auto_execute OFF the critical signal delivery
-    path in bounded worker threads so signal delivery & button taps never stall."""
-    if not items:
-        return 0
-    import asyncio as _asyncio
-    from fysb.services import user_trade
-    sem = _asyncio.Semaphore(6)
-    executed = 0
-
-    async def _one(uid: int, acc: dict | None):
-        nonlocal executed
-        async with sem:
-            exec_res = await _asyncio.to_thread(user_trade.auto_execute, sig, uid, acc)
-            if exec_res and exec_res.get("ok"):
-                executed += 1
-                try:
-                    await bot_send(uid, user_trade.execution_card(exec_res, sig))
-                except Exception:
-                    pass
-
-    await _asyncio.gather(*(_one(uid, acc) for uid, acc in items), return_exceptions=True)
-    return executed
-
-
 async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool = True) -> dict:
     """Step 16 — deliver a stored signal to eligible users AND enabled broadcast channels.
 
@@ -1145,7 +1120,6 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
     if pulse:
         base_card += "\n\n<blockquote>" + pulse + "</blockquote>"
 
-    auto_exec_queue: list[tuple[int, dict | None]] = []
     delivered_uids: list[int] = []
     sig_created_dt = _parse_iso_utc(sig.get("created_at") or "")
     is_free_only = str(sig.get("source") or "").upper() == "AUTO_FREE"
@@ -1210,16 +1184,29 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             except TypeError:
                 msg = await bot_send(uid, text)
             stats["sent"] += 1
-            delivered_uids.append(uid)
             await _afn.run(record_delivery_refs, uid, sig["id"], msg)
         except Exception:
             stats["failed"] += 1
             await _afn.run(release_signal, uid, sig["id"])
             continue
 
-        # Queue demo auto-execution off the critical delivery path
-        if acc and acc.get("auto_trade"):
-            auto_exec_queue.append((uid, acc))
+        # v8.14.11 — NO demo execution at creation: the position opens only
+        # at the true market fill (the tracker's RUNNING transition gates it).
+        delivered_uids.append(uid)
+
+    # v8.14.11 — the royal opposite-trade alert: real holdings, per-user
+    # toggle, off the critical path (one luxury alert per holding user).
+    if delivered_uids:
+        try:
+            opp_notes = await _afn.run(user_trade.opposite_alerts_for_delivery, sig, delivered_uids)
+            for uid, txt in opp_notes:
+                try:
+                    await bot_send(uid, txt)
+                    stats["opposite_alerts"] = stats.get("opposite_alerts", 0) + 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # 5) unified broadcast to all matching enabled Telegram channels/groups
     real_bot = bot or getattr(bot_send, "_bot", None)
@@ -1266,8 +1253,6 @@ async def emit_to_users(signal_row, bot_send, bot=None, include_channels: bool =
             log.debug("auto chart broadcast skipped for signal #%s: %s", sig.get("id"), type(e).__name__)
 
     # 6) offloaded demo auto-execution (bounded thread pool, non-blocking loop)
-    if auto_exec_queue:
-        stats["auto_executed"] = await _offload_auto_executes(sig, auto_exec_queue, bot_send)
 
     # 7) v7.7.0 Royal Auto-Bridge dispatch (Broker Demo & Live connections, policy-gated)
     try:

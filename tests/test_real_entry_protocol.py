@@ -252,8 +252,8 @@ class TestLifecycleDiscipline(unittest.TestCase):
         start = datetime.now(timezone.utc) - timedelta(minutes=55)
         vals = _candles(start, 1, 3650.0, 3600.0, open_px=3620.0)      # TP visit, no entry touch
         vals += _candles(start + timedelta(minutes=5), 3, 3605.0, 3595.0, open_px=3600.0)
-        vals += _candles(start + timedelta(minutes=20), 1, 3595.0, 3580.0,
-                         open_px=3590.0)                               # THE fill candle
+        vals += _candles(start + timedelta(minutes=20), 1, 3590.5, 3580.0,
+                         open_px=3586.0)                               # THE fill candle
         with patch.object(tracker.market_data, "fetch_candles", return_value=_payload(vals)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 1)
@@ -278,8 +278,8 @@ class TestLifecycleDiscipline(unittest.TestCase):
         start = datetime.now(timezone.utc) - timedelta(minutes=35)
         vals = _candles(start, 1, 3620.0, 3600.0, open_px=3610.0)      # half visit, no fill
         vals += _candles(start + timedelta(minutes=5), 2, 3605.0, 3595.0, open_px=3600.0)
-        vals += _candles(start + timedelta(minutes=15), 1, 3595.0, 3580.0,
-                         open_px=3590.0)                               # fill candle
+        vals += _candles(start + timedelta(minutes=15), 1, 3590.5, 3580.0,
+                         open_px=3586.0)                               # fill candle
         with patch.object(tracker.market_data, "fetch_candles", return_value=_payload(vals)):
             tracker.check_open_signals("")
         with db.conn() as c:
@@ -318,7 +318,7 @@ class TestLegacySalvage(unittest.TestCase):
                       " VALUES(?,?,?,?,?)", (sid, 555123, config.now(), "555000", 888))
         # open 3581.2 sits INSIDE the at-market band; high never reaches 3581.60
         vals = _candles(datetime.now(timezone.utc) - timedelta(minutes=60), 4,
-                        3581.4, 3576.0, open_px=3581.2)
+                        3581.4, 3577.2, open_px=3581.2)
         with patch.object(tracker.market_data, "fetch_candles", return_value=_payload(vals)):
             result = tracker.check_open_signals("")
         self.assertEqual(result["stats"]["updated"], 1)

@@ -31,6 +31,14 @@ def modeled_r(row: dict, hit_tp: int | None = None, status: str | None = None) -
         if not math.isfinite(risk) or risk <= 0:
             return None
         st = status or str(row.get("status") or "").upper()
+        if st == "LOCKED_50":
+            # 🏅 the royal lock: the REAL documented locked pips over planned risk
+            lp = float(row.get("locked_pips") or 0.0)
+            if lp > 0:
+                from fysb import instruments as _ins
+                rp = _ins.pips(row["symbol"], row["entry"], row["stop"])
+                return (lp / rp) if rp else None
+            return None
         if st == "SL_HIT" and not int(row.get("hit_tp") or 0):
             return -1.0
         if row.get("accounting_model") != PARTIAL_MODEL:

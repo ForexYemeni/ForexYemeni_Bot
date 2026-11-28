@@ -19,6 +19,14 @@ from fysb import db
 
 STALE_GATE_KEY = "honesty_stale_gate"        # "1" = law active (default)
 CLOSED_ONLY_KEY = "no_repaint_closed_only"   # "1" = law active (default)
+LOCK50_KEY = "lock_50_enabled"               # "1" = royal lock armed (default)
+
+
+def lock50_enabled() -> bool:
+    """🏅 the royal +$5 lock (0.01 lot, every market) — ON by default: any
+    open signal whose documented favorable excursion reaches $5 at 0.01 lot
+    is LOCKED — it can never close below +$5, whatever the retrace."""
+    return (db.get_setting(LOCK50_KEY, "1") or "1") == "1"
 
 
 def stale_gate_enabled() -> bool:

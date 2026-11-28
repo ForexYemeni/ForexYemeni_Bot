@@ -39,8 +39,8 @@ def leaderboard() -> list[dict]:
     with db.conn() as c:
         rows = [dict(r) for r in c.execute(
             """SELECT * FROM signals
-               WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
-                 AND (status IN ('TP3_HIT','SL_HIT') OR COALESCE(closed_at,'')!='')
+               WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT','LOCKED_50')
+                 AND (status IN ('TP3_HIT','SL_HIT','LOCKED_50') OR COALESCE(closed_at,'')!='')
                  AND COALESCE(private_user_id,0)=0
                  AND COALESCE(UPPER(source),'') NOT IN
                      ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED')""").fetchall()]
@@ -50,14 +50,16 @@ def leaderboard() -> list[dict]:
         d = agg.setdefault(code, {"n": 0, "wins": 0, "sl": 0, "tp2": 0, "tp3": 0, "r_sum": 0.0, "r_n": 0})
         d["n"] += 1
         hit = int(r["hit_tp"] or 0)
-        if hit >= 1:
+        # v8.14.10 🏅: a royally locked trade (+$5 documented) IS a real win —
+        # banked profit must never be buried as a loss (owner's decree).
+        if hit >= 1 or (r["status"] or "").upper() == "LOCKED_50":
             d["wins"] += 1
         if hit >= 2:
             d["tp2"] += 1
         if hit >= 3:
             d["tp3"] += 1
-        if hit == 0:
-            d["sl"] += 1          # SL_HIT rows carry hit_tp = 0 by definition
+        if hit == 0 and (r["status"] or "").upper() == "SL_HIT":
+            d["sl"] += 1          # only genuine stop-outs are losses here
         from fysb.engines.accounting import modeled_r
         value = modeled_r(r)
         if value is not None:

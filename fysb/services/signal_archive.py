@@ -109,8 +109,8 @@ def summarize_rows(rows: list[dict]) -> dict:
         closed = is_signal_closed(r)
         if not closed and st in _OPEN_STATUSES:
             open_n += 1
-        elif st == "TP3_HIT" or (st in ("TP1_HIT", "TP2_HIT") and closed):
-            wins += 1
+        elif st == "TP3_HIT" or st == "LOCKED_50" or (st in ("TP1_HIT", "TP2_HIT") and closed):
+            wins += 1  # v8.14.10 🏅: a royally locked trade is a real win
             net_pips += float(r.get("pips_result") or 0.0)
         elif st == "SL_HIT":
             losses += 1
@@ -219,10 +219,10 @@ def admin_signals_page(
                   COUNT(*) AS total_n,
                   COALESCE(SUM(CASE WHEN status IN ('ACTIVE','RUNNING','TP1_HIT','TP2_HIT')
                                     AND (closed_at IS NULL OR closed_at='') THEN 1 ELSE 0 END), 0) AS open_n,
-                  COALESCE(SUM(CASE WHEN status='TP3_HIT'
+                  COALESCE(SUM(CASE WHEN status='TP3_HIT' OR status='LOCKED_50'
                                     OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='') THEN 1 ELSE 0 END), 0) AS wins_n,
                   COALESCE(SUM(CASE WHEN status='SL_HIT' THEN 1 ELSE 0 END), 0) AS losses_n,
-                  COALESCE(SUM(CASE WHEN status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')
+                  COALESCE(SUM(CASE WHEN status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT','LOCKED_50')
                                     THEN pips_result ELSE 0 END), 0) AS net_pips
                 FROM signals WHERE {w_sql}""",
             args,
@@ -326,7 +326,7 @@ def format_pf(gross_profit: float, gross_loss: float) -> str:
 
 
 def _period_where(period: str) -> tuple[list[str], list]:
-    where = ["status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')"]
+    where = ["status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT','LOCKED_50')"]
     args: list = []
     p = (period or "all").strip().lower()
     if p == "today":
@@ -381,7 +381,7 @@ def admin_pl_detailed(period: str = "all", sector: str = "", symbol: str = "") -
         return {
             "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
             "net_usd": 0.0, "gross_profit_usd": 0.0, "gross_loss_usd": 0.0,
-            "tp1_n": 0, "tp2_n": 0, "tp3_n": 0, "sl_n": 0,
+            "tp1_n": 0, "tp2_n": 0, "tp3_n": 0, "sl_n": 0, "locked_n": 0,
         }
 
     grand = _empty_bucket()
@@ -441,6 +441,8 @@ def admin_pl_detailed(period: str = "all", sector: str = "", symbol: str = "") -
                 bucket["tp3_n"] += 1
             elif st == "SL_HIT":
                 bucket["sl_n"] += 1
+            elif st == "LOCKED_50":
+                bucket["locked_n"] = bucket.get("locked_n", 0) + 1
 
         sb_sym = by_symbol[sym]
         sb_sym["net_pips"] += pips

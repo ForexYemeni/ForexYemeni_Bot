@@ -533,6 +533,13 @@ async def admin_settings(q, uid, context, bot):
                            style="danger" if st_gate else "success"),
                     kb.btn("🧊 عدم إعادة الرسم: " + ("إيقاف" if no_re else "تفعيل"), "a:togglerepaint",
                            style="danger" if no_re else "success")])
+    lock50 = (await afn.run(db.get_setting, "lock_50_enabled", "1")) == "1"
+    lines.append("🏅 القفل الملكي +50 (5$ بـ0.01 لوت): " + (
+        "<b>مفعّل</b> — أي إشارة تلمس +5$ موثقاً تُقفل: لا خسارة بعد اللمسة أبداً وتُحسب رابحة"
+        if lock50 else
+        "<b>معطّل</b> — العودة بعد الربح قد تُغلق على وقف الخسارة (سلوك ما قبل v8.14.10)"))
+    rows_kb.append([kb.btn("🏅 القفل +50: " + ("إيقاف" if lock50 else "تفعيل"), "a:togglelock50",
+                           style="danger" if lock50 else "success")])
     rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance", style="danger"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
     rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
@@ -563,6 +570,18 @@ async def admin_toggle_stale_gate(q, uid, context, bot):
     new_val = "0" if cur else "1"
     await afn.run(db.set_setting, "honesty_stale_gate", new_val)
     await afn.run(audit_log.log, uid, f"honesty_stale_gate:{new_val}")
+    await admin_settings(q, uid, context, bot)
+
+
+async def admin_toggle_lock50(q, uid, context, bot):
+    """v8.14.10 — 🏅 the royal +$5 lock (0.01 lot, every market): ON = any
+    signal whose documented favorable excursion reaches $5 is LOCKED — it can
+    never close below +$5, counts as a real WIN everywhere, and the trader is
+    alerted the moment it arms. OFF = pre-v8.14.10 behavior. Audit-logged."""
+    cur = (await afn.run(db.get_setting, "lock_50_enabled", "1")) == "1"
+    new_val = "0" if cur else "1"
+    await afn.run(db.set_setting, "lock_50_enabled", new_val)
+    await afn.run(audit_log.log, uid, f"lock_50_enabled:{new_val}")
     await admin_settings(q, uid, context, bot)
 
 

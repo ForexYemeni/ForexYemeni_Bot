@@ -272,7 +272,8 @@ def is_signal_closed(sig) -> bool:
         st = (sig["status"] or "").upper()
     except Exception:
         st = ""
-    if st in ("TP3_HIT", "SL_HIT", "EXPIRED", "CANCELLED"):
+    # v8.14.22 — LOCKED_50 is settled (the lock banked the threshold) — never "open".
+    if st in ("TP3_HIT", "SL_HIT", "EXPIRED", "CANCELLED", "LOCKED_50"):
         return True
     try:
         closed_at = sig["closed_at"]

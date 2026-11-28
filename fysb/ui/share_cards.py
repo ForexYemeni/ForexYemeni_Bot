@@ -355,6 +355,8 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     days = int(digest.get("days") or 0)
     if days == 0:
         period_en = "FULL HISTORY REPORT"
+    elif days == 1:
+        period_en = "LAST 24 HOURS"
     else:
         period_en = f"WEEKLY REPORT • LAST {days} DAYS" if days <= 10 else f"MONTHLY REPORT • LAST {days} DAYS"
     brand = str(config.BRAND or "FOREXYEMENI").upper()
@@ -368,7 +370,7 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     draw.text((54, 44), f"{brand}  EXECUTIVE DIGEST", font=f_title, fill=GOLD_BRIGHT)
     draw.text((54, 86), audit_line, font=f_sub, fill=TEXT_MUTED)
     draw.rounded_rectangle([W - 380, 46, W - 54, 90], radius=22, fill=(212, 175, 55, 32), outline=GOLD, width=2)
-    draw.text((W - 354, 58), f"🏆  {period_en}", font=f_pill, fill=GOLD_BRIGHT)
+    draw.text((W - 354, 58), period_en, font=f_pill, fill=GOLD_BRIGHT)  # v8.14.22: no emoji glyphs the font lacks (tofu box)
 
     draw.line([(54, 126), (W - 54, 126)], fill=(212, 175, 55, 90), width=1)
 
@@ -452,7 +454,7 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
     tp1 = int(digest.get("tp1_hits") or 0)
     draw.text(
         (74, 690),
-        f"OFFICIAL: {total} (CLOSED {decided})  •  TP3:{tp3} TP2:{tp2} TP1:{tp1} SL:{losses} OPEN:{open_c}  •  0.01 LOT: {usd_001:+,.2f}$",
+        f"SIGNALS: {total} (CLOSED {decided})  •  TP3:{tp3} TP2:{tp2} TP1:{tp1} SL:{losses} OPEN:{open_c}  •  0.01 LOT: {usd_001:+,.2f}$",
         font=f_mono,
         fill=GOLD_BRIGHT,
     )

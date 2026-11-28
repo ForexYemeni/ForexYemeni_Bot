@@ -168,11 +168,16 @@ def _matching_count(f: dict) -> int:
 def _build_slice_png(f: dict) -> tuple[bytes | None, dict]:
     """The REAL market picture: the executive card rendered from the exact
     slice & period aggregates (the 50-pip decree included). Returns
-    (png_bytes | None, honest_digest_dict)."""
+    (png_bytes | None, honest_digest_dict).
+    v8.14.22 — ONE TRUTH: include_private=True — the owner's picture counts
+    EXACTLY the population the interactive report counts (every source, no
+    silent exclusions). The weekly channel digest keeps its official-only
+    policy; the owner's slice never diverges from his own report again."""
     from fysb.services import digest as _digest
     from fysb.ui import share_cards
     d = _digest.build_digest_data(days=f.get("days"), market=f.get("market"),
-                                 strategy=f.get("strategy"), timeframe=f.get("timeframe"))
+                                 strategy=f.get("strategy"), timeframe=f.get("timeframe"),
+                                 include_private=True)
     try:
         png = share_cards.render_performance_digest_card(d)
     except Exception:

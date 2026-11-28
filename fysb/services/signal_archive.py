@@ -98,32 +98,50 @@ def ar_date_short(day_iso: str) -> str:
 
 
 def summarize_rows(rows: list[dict]) -> dict:
-    """Compute honest live/closed KPIs over a set of signal dicts."""
+    """Compute honest live/closed KPIs over a set of signal dicts.
+
+    v8.14.22 — ONE TRUTH: the Truth Ledger governs every verdict here exactly
+    as it does in the interactive report and the digest — a stop that touched
+    the lock threshold is a WIN at the threshold (the 50-pip decree), never a
+    loss. The net is honest USD at 0.01 lot per trade — pips are NEVER summed
+    across different assets (the old mixed '+596.2 pips' line is executed)."""
+    from fysb import instruments as _inst
+    from fysb.services.ledger import closed_verdict
     total = len(rows)
     open_n = 0
     wins = 0
     losses = 0
+    rescued = 0
+    net_usd = 0.0
     net_pips = 0.0
     for r in rows:
-        st = (r.get("status") or "").upper()
-        closed = is_signal_closed(r)
-        if not closed and st in _OPEN_STATUSES:
-            open_n += 1
-        elif st == "TP3_HIT" or st == "LOCKED_50" or (st in ("TP1_HIT", "TP2_HIT") and closed):
-            wins += 1  # v8.14.10 🏅: a royally locked trade is a real win
-            net_pips += float(r.get("pips_result") or 0.0)
-        elif st == "SL_HIT":
+        row = dict(r)
+        st = (row.get("status") or "").upper()
+        closed = is_signal_closed(row)
+        if st in ("ACTIVE", "RUNNING", "PENDING") or (
+                st in ("TP1_HIT", "TP2_HIT") and not (str(row.get("closed_at") or "").strip())):
+            open_n += 1  # open runner (incl. one that already banked TP1/TP2)
+            continue
+        verdict, eff_pips = closed_verdict(row)
+        if verdict == "win":
+            wins += 1
+            if st == "SL_HIT":
+                rescued += 1  # 🏅 the decree: a touched stop settles at the threshold
+            net_usd += _inst.usd_move(str(row.get("symbol") or "XAUUSD"), eff_pips, 0.01)
+            net_pips += eff_pips
+        elif verdict == "loss":
             losses += 1
-            net_pips += float(r.get("pips_result") or 0.0)
-        elif st in ("TP1_HIT", "TP2_HIT"):
-            # Open runner that already banked TP1/TP2 profit
-            net_pips += float(r.get("pips_result") or 0.0)
+            net_usd += _inst.usd_move(str(row.get("symbol") or "XAUUSD"), eff_pips, 0.01)
+            net_pips += eff_pips
+        # cancelled/expired → counted nowhere (the honest report's semantics)
     return {
         "total": total,
         "open": open_n,
         "wins": wins,
         "losses": losses,
-        "net_pips": round(net_pips, 1),
+        "rescued": rescued,
+        "net_pips": round(net_pips, 1),   # ledger pips of DECIDED rows (same-asset rows only in practice)
+        "net_usd": round(net_usd, 2),     # the honest cross-asset net at 0.01 lot
     }
 
 
@@ -146,10 +164,16 @@ def luxury_day_header(
         f"🏆 رابحة: <b>{summary['wins']}</b> · "
         f"🛑 وقف: <b>{summary['losses']}</b>",
     ]
-    if summary["wins"] or summary["losses"] or summary["net_pips"] != 0:
-        pips_sign = "📈" if summary["net_pips"] >= 0 else "📉"
+    if summary.get("rescued"):
         card_lines.append(
-            f"▎{pips_sign} صافي النقاط المحققة: <b>{summary['net_pips']:+.1f} pips</b>"
+            f"▎🏅 قانون الخمسين نقطة: <b>{summary['rescued']}</b> صفقة لمست العتبة فحُسبت رابحة عند عتبة التأمين — لا تُعد خاسرة أبداً"
+        )
+    if summary["wins"] or summary["losses"] or float(summary.get("net_usd") or 0) != 0:
+        usd_sign = "📈" if float(summary.get("net_usd") or 0) >= 0 else "📉"
+        # v8.14.22 — ONE TRUTH: the net is honest USD at 0.01 lot (the ledger's
+        # verdicts) — pips are NEVER summed across different assets.
+        card_lines.append(
+            f"▎{usd_sign} الصافي الموثوق (دفتر الحقيقة): <b>{float(summary.get('net_usd') or 0):+.2f}$</b> · 0.01 لوت لكل صفقة"
         )
     if total_pages > 1:
         card_lines.append(f"▎📄 صفحة <b>{page + 1}</b> من <b>{total_pages}</b>")

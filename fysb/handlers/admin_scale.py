@@ -7,8 +7,20 @@ before/after board — baseline, the TP1-bank honest floor, the quality grid,
 the quarantine simulation and (deep, owner-triggered) the relaxed-gate
 "what if" variants. Nothing is fabricated; empty histories say so; errors
 carry their real reason. The decision stays the owner's.
+
+v8.14.24 — THE ROYAL PATTERN FOR HEAVY WORK: the button route answers
+INSTANTLY (the 20-second hard route budget must never be spent on a
+multi-minute backtest — that was the real cause of the timeout the owner
+hit), the scale job runs DETACHED in the background, and the finished
+report lands in the OWNER'S CHAT as its own message. One scale at a time
+(the scale is one instrument) — a second press says so honestly. Errors
+reach the owner's chat with their real reason. The worker reference is
+kept in _JOBS so tests (and /fix) can await it deterministically.
 """
 from __future__ import annotations
+
+import asyncio
+import time
 
 from telegram.ext import ContextTypes
 
@@ -21,6 +33,9 @@ ALL_LABEL = "الكل"
 DEPTH_PRESETS = ((400, "سريع · 400 شمعة"), (800, "قياسي · 800 شمعة"), (1500, "عميق · 1500 شمعة"))
 TF_PRESETS = ("M5", "M15", "M30", "H1", "H4")
 STRAT_QUICK = ("TREND", "ICT", "SMC", "PRICE_ACTION", "FIBONACCI", "ICHIMOKU", "CLASSIC", "SK")
+
+_JOBS: dict[str, asyncio.Task] = {}   # single-flight: the scale is ONE instrument
+_JOB_INFO: dict[str, str] = {}        # current job label for honest "busy" pages
 
 
 def _get_state(ud: dict) -> dict:
@@ -151,38 +166,66 @@ async def scale_set(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, kind: 
 
 
 async def scale_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, deep: bool = False):
-    """Run the REAL engine through afn.run (sync helper) — honest errors surface."""
+    """v8.14.24 — the button answers INSTANTLY and the scale runs DETACHED:
+    the 20-second royal route budget is never spent on a multi-minute
+    backtest (that was the real cause of the timeout). The finished report
+    lands in the owner's chat as its own message; errors arrive with their
+    real reason; one scale runs at a time — the second press says so."""
     st = _get_state(context.user_data)
-    from fysb.services import royal_scale
+    key = "royal_scale"
+    if key in _JOBS and not _JOBS[key].done():
+        await render(q,
+                     f"⏳ <b>آلة الميزان مشغولة الآن بقياس آخر</b>\n"
+                     f"<blockquote>▎القياس الجاري: {_JOB_INFO.get(key, '…')}\n"
+                     "▎الميزان جهاز واحد — يمنع تكدّس القياسات الثقيلة على المحرك\n"
+                     "▎ستصلك نتائج القياس الجاري في شاتك فور اكتماله</blockquote>",
+                     kb.admin_nav([[kb.btn("🧭 مركز التقارير", "a:reports", style="primary")]]), bot)
+        return
+
     strategies = [st["strategy"]] if st.get("strategy") else None
+    sym = st.get("symbol") or "XAUUSD"
+    tf = st.get("timeframe") or "M15"
+    depth = int(st.get("outputsize") or 800)
+    _JOB_INFO[key] = f"{sym} · {tf} · {st.get('strategy') or 'الكل'} · {depth} شمعة" + (" · عميق" if deep else "")
     await render(q,
-                 f"⏳ <b>الميزان يعمل الآن على {st.get('symbol')} · {st.get('timeframe')}</b>\n"
-                 "<blockquote>▎يفحص التاريخ شمعة بشمعة ببوابات الإنتاج — القياس العميق "
-                 "قد يستغرق دقيقة أو أكثر.</blockquote>",
+                 f"⏳ <b>الميزان يعمل الآن — النتيجة ستصلك في شاتك فور اكتمالها</b>\n"
+                 f"<blockquote>▎القياس: {_JOB_INFO[key]}\n"
+                 "▎يفحص التاريخ شمعة بشمعة ببوابات الإنتاج — قد يستغرق دقيقة أو أكثر\n"
+                 "▎هذه الضغطة أُنجزت فوراً — القياس يعمل في الخلفية بلا مهلة</blockquote>",
                  kb.admin_nav([[kb.btn("🧭 مركز التقارير", "a:reports", style="primary")]]), bot)
+    await afn.run(audit_log.log, uid,
+                  f"royal_scale_start:{sym}:{tf}:{st.get('strategy') or 'ALL'}:{depth}:"
+                  f"{'deep' if deep else 'std'}")
 
-    def _job():
-        return royal_scale.run_scale(symbol=st.get("symbol") or "XAUUSD",
-                                     timeframe=st.get("timeframe") or "M15",
-                                     strategies=strategies,
-                                     outputsize=int(st.get("outputsize") or 800),
-                                     deep=deep)
+    async def _worker():
+        t0 = time.monotonic()
+        from fysb.services import royal_scale
 
-    try:
-        res = await afn.run(_job)
-        body = await afn.run(royal_scale.render_scale_report, res)
-        await afn.run(audit_log.log, uid,
-                      f"royal_scale:{st.get('symbol')}:{st.get('timeframe')}:"
-                      f"{st.get('strategy') or 'ALL'}:{int(st.get('outputsize') or 800)}:"
-                      f"{'deep' if deep else 'std'}")
-    except Exception as e:
-        body = ("⛔ <b>تعذر إتمام القياس — السبب الحقيقي:</b>\n"
-                f"<blockquote>▎{str(e)[:200]}</blockquote>\n"
-                "<i>جرّب عمقاً أقل أو سوقاً آخر — والسبب يُعرض لا يُبتلع.</i>")
-    rows = [
-        [kb.btn("🔄 إعادة القياس", "a:scale:run", style="success"),
-         kb.btn("🧪 القياس العميق", "a:scale:deep", style="primary")],
-        [kb.btn("⚖️ إعدادات الميزان", "a:scale", style="primary"),
-         kb.btn("🧭 مركز التقارير", "a:reports", style="primary")],
-    ]
-    await render(q, body, kb.admin_nav(rows), bot)
+        def _job():
+            return royal_scale.run_scale(symbol=sym, timeframe=tf, strategies=strategies,
+                                         outputsize=depth, deep=deep)
+
+        try:
+            res = await afn.run(_job)
+            body = await afn.run(royal_scale.render_scale_report, res)
+            elapsed = time.monotonic() - t0
+            body += (f"\n\n⏱ زمن القياس الفعلي: <b>{elapsed:.0f} ثانية</b> · "
+                     f"{'القياس العميق' if deep else 'القياس القياسي'}")
+            await afn.run(audit_log.log, uid,
+                          f"royal_scale_done:{sym}:{tf}:{st.get('strategy') or 'ALL'}:{depth}:"
+                          f"{'deep' if deep else 'std'}:{elapsed:.0f}s")
+        except Exception as e:
+            body = ("⛔ <b>تعذر إتمام القياس — السبب الحقيقي:</b>\n"
+                    f"<blockquote>▎{str(e)[:200]}</blockquote>\n"
+                    "<i>جرّب عمقاً أقل أو سوقاً آخر — والسبب يُعرض لا يُبتلع.</i>")
+        finally:
+            _JOBS.pop(key, None)
+            _JOB_INFO.pop(key, None)
+        from fysb.handlers.admin_reports_ui import await_bot_send
+        try:
+            await await_bot_send(bot, config.ADMIN_ID, body)
+        except Exception as e:
+            # delivery itself failed — the reason must reach the owner somehow
+            await afn.run(audit_log.log, uid, f"royal_scale_delivery_failed:{str(e)[:120]}")
+
+    _JOBS[key] = asyncio.create_task(_worker())

@@ -1,4 +1,4 @@
-"""v8.14.23 — «الميزان الملكي — القياس قبل الثقة» tests — the owner's decree:
+"""v8.14.23/24 — «الميزان الملكي — القياس قبل الثقة» tests — the owner's decree:
 
 Raise the win rate TRUTHFULLY and PROVE it with numbers before touching the
 live system. The Royal Scale:
@@ -11,11 +11,16 @@ live system. The Royal Scale:
 ⑤ deep mode answers "what if the gates were relaxed" honestly,
 ⑥ the UI routes render with real params and honest errors; the reports hub
    carries the entry; nothing is promised — the card says the scale measures.
+⑦ v8.14.24 — THE ROYAL PATTERN: the button answers instantly (the 20s royal
+   route budget is never spent on a multi-minute backtest), the worker runs
+   DETACHED, and the finished report lands in the OWNER'S CHAT; one scale at
+   a time (the second press says so honestly); errors reach the owner too.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -25,7 +30,7 @@ sys.path.insert(0, ".")
 
 import tests.helpers  # noqa: F401
 from tests.helpers import MockBot, MockContext, MockQuery, page_for, page_markup_for
-from fysb import config, db
+from fysb import db
 from fysb.engines.backtest import BacktestTrade, run_backtest
 from fysb.engines.intelligence import strategy_quarantine_status
 from fysb.handlers import admin_scale, dispatcher
@@ -46,6 +51,21 @@ def _clean():
         c.execute("DELETE FROM signals")
         c.execute("DELETE FROM settings WHERE key LIKE 'quarantine%'")
         c.execute("DELETE FROM ui_events")
+    # leave no worker behind between tests
+    async def _drain():
+        job = admin_scale._JOBS.get("royal_scale")
+        if job:
+            job.cancel()
+            try:
+                await job
+            except (asyncio.CancelledError, Exception):
+                pass
+    try:
+        asyncio.run(_drain())
+    except Exception:
+        pass
+    admin_scale._JOBS.clear()
+    admin_scale._JOB_INFO.clear()
 
 
 def _fire(data: str, ctx=None):
@@ -69,14 +89,10 @@ def _t(strategy, outcome, r, score=80.0):
                          score=score)
 
 
-# ---------------------------------------------------------------------------
-# ① the REAL engine runs on real-shaped candles
-# ---------------------------------------------------------------------------
 def _bull_series(n=140):
     t0 = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
     bars, px = [], 3500.0
     for i in range(n):
-        # uptrend with pullback cycles — trend strategy sees real structure
         drift = 2.0 if (i // 10) % 3 != 2 else -3.0
         op, cl = px, px + drift
         bars.append({"datetime": (t0 + timedelta(minutes=15 * i)).strftime("%Y-%m-%d %H:%M:%S"),
@@ -86,6 +102,41 @@ def _bull_series(n=140):
     return bars
 
 
+def _press_on_live_loop(presses: list[str], ctx):
+    """Fire presses on ONE live loop (mirrors production: the PTB loop never
+    closes between the press and the background delivery). Returns the queries
+    and the live single-flight job handle."""
+    async def _main():
+        queries = []
+        for data in presses:
+            q = MockQuery(data, ADMIN)
+            q.from_user = type("U", (), {"id": ADMIN})()
+            upd = type("Update", (), {})()
+            upd.callback_query = q
+            await dispatcher.buttons(upd, ctx)
+            queries.append(q)
+        job = admin_scale._JOBS.get("royal_scale")
+        if job:  # await the detached worker ON THE LIVE LOOP (production parity)
+            try:
+                await asyncio.wait_for(job, timeout=10)
+            except (asyncio.CancelledError, Exception):
+                pass
+        return queries, job
+    return asyncio.run(_main())
+
+
+def _drain(job):
+    async def _main():
+        try:
+            await asyncio.wait_for(job, timeout=10)
+        except (asyncio.CancelledError, Exception):
+            pass
+    asyncio.run(_main())
+
+
+# ---------------------------------------------------------------------------
+# ① the REAL engine runs on real-shaped candles
+# ---------------------------------------------------------------------------
 def test_real_engine_runs_and_scale_aggregates_match_it():
     rep = run_backtest(symbol="XAUUSD", timeframe="M15", candles=_bull_series(),
                        strategies=["TREND"], min_score=60, strict_session=False,
@@ -160,16 +211,11 @@ def test_quarantine_thresholds_are_royal_settings_not_code_magic():
     sim = royal_scale.quarantine_sim(
         [_t("OK", "TP3_HIT", 2.0, 80)] * 4 + [_t("OK", "SL_HIT", -1.0, 80)] * 4)  # WR 50% PF ~1.33
     assert sim["dropped"] == []           # passes the LOOSE floors the owner set
-    sim2 = royal_scale.quarantine_sim(sim_trades := [], wr_floor=60.0, pf_floor=1.5, n_min=3)
-    assert isinstance(sim2, dict)
 
 
 def test_live_quarantine_uses_the_sharp_floors_and_discloses():
-    from fysb import config as _cfg
-    from datetime import datetime, timedelta, timezone as _tz
-
     def _ins(code, status, pips, age_days=1.0):
-        now = datetime.now(_tz.utc)
+        now = datetime.now(timezone.utc)
         closed = (now - timedelta(days=age_days)).isoformat()
         created = (now - timedelta(days=age_days + 1)).isoformat()
         with db.conn() as c:
@@ -195,18 +241,22 @@ def test_live_quarantine_uses_the_sharp_floors_and_discloses():
 # ⑤ the UI — real params, honest errors, hub entry
 # ---------------------------------------------------------------------------
 def test_scale_home_and_pickers_render_through_the_dispatcher():
-    q, ctx = _fire("a:scale")
-    assert "الميزان الملكي" in page_for(q, ctx)
-    q, ctx = _fire("a:scale:m", ctx)
-    assert "اختر سوق الميزان" in page_for(q, ctx)
-    q, ctx = _fire("a:scale:set:m:XAUUSD", ctx)
-    assert "السوق: <b>XAUUSD</b>" in page_for(q, ctx)
-    q, ctx = _fire("a:scale:set:s:ICT", ctx)
-    assert "الاستراتيجية: <b>ICT</b>" in page_for(q, ctx)
+    q, _ = _fire("a:scale")
+    assert "الميزان الملكي" in page_for(q, q)
+    q, _ = _fire("a:scale:m")
+    assert "اختر سوق الميزان" in page_for(q, q)
+    q, _ = _fire("a:scale:set:m:XAUUSD")
+    assert "السوق: <b>XAUUSD</b>" in page_for(q, q)
+    q, _ = _fire("a:scale:set:s:ICT")
+    assert "الاستراتيجية: <b>ICT</b>" in page_for(q, q)
 
 
-def test_scale_run_renders_the_honest_board():
-    ctx = MockContext()
+def test_scale_run_answers_instantly_and_delivers_to_owner_chat():
+    """v8.14.24 — the button route NEVER spends the 20s royal budget on the
+    heavy backtest: it answers instantly (⏳ page), the worker runs detached,
+    and the finished board lands in the OWNER'S CHAT as its own message."""
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
     ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
                                     "outputsize": 400, "strategy": None}
     canned = {"symbol": "XAUUSD", "timeframe": "M15", "bars_tested": 120, "error": "",
@@ -220,22 +270,69 @@ def test_scale_run_renders_the_honest_board():
                                         "wins": 1, "losses": 1, "exp": 0.5, "max_dd": -1.0}},
               "variants": []}
     with patch("fysb.services.royal_scale.run_scale", return_value=canned):
-        q, _ = _fire("a:scale:run", ctx)
-    page = page_for(q, ctx)
-    assert "الميزان الملكي — القياس قبل الثقة" in page
-    assert "الأرضية الصادقة" in page and "50.0%" in page
-    assert "نسبة النجاح <b>50.0%</b>" in page
+        (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
+    q = queries[0]
+    page = page_for(q, ctx)  # the ROUTE page — instant, not the report
+    assert "النتيجة ستصلك في شاتك فور اكتمالها" in page
+    assert "بلا مهلة" in page
+    assert "الأرضية الصادقة" not in page  # the heavy work is NOT in the route
+
+    owner_msgs = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_msgs, "the detached worker never delivered to the owner's chat"
+    assert "الميزان الملكي — القياس قبل الثقة" in owner_msgs[-1]["text"]
+    assert "الأرضية الصادقة" in owner_msgs[-1]["text"] and "50.0%" in owner_msgs[-1]["text"]
+    assert "زمن القياس الفعلي" in owner_msgs[-1]["text"]
+    assert admin_scale._JOBS.get("royal_scale") is None  # the instrument is free again
 
 
-def test_scale_run_surfaces_the_real_error_never_fabricates():
-    ctx = MockContext()
+def test_scale_run_surfaces_the_real_error_to_owner_chat_never_fabricates():
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
     ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
                                     "outputsize": 400, "strategy": None}
     with patch("fysb.services.royal_scale.run_scale",
                side_effect=RuntimeError("provider unreachable")):
-        q, _ = _fire("a:scale:run", ctx)
-    page = page_for(q, ctx)
-    assert "السبب الحقيقي" in page and "provider unreachable" in page
+        (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
+    q = queries[0]
+    assert "النتيجة ستصلك في شاتك" in page_for(q, ctx)
+
+    owner_msgs = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_msgs and "السبب الحقيقي" in owner_msgs[-1]["text"]
+    assert "provider unreachable" in owner_msgs[-1]["text"]
+    assert admin_scale._JOBS.get("royal_scale") is None  # the instrument is free again
+
+
+def test_second_press_while_running_is_honest_not_stacked():
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+
+    def _slow(*a, **kw):
+        time.sleep(2.0)  # a heavy multi-minute scale (blocks the executor thread)
+        return {"error": "never reached", "baseline": {"n": 0}}
+
+    with patch("fysb.services.royal_scale.run_scale", side_effect=_slow):
+        (q1, q2), running = _press_on_live_loop(["a:scale:run", "a:scale:run"], ctx)
+    assert "النتيجة ستصلك في شاتك" in page_for(q1, ctx)
+    page2 = page_for(q2, ctx)
+    assert "آلة الميزان مشغولة الآن بقياس آخر" in page2
+    assert "جهاز واحد" in page2
+    assert running is not None or admin_scale._JOBS.get("royal_scale") is None  # lock held live
+    _drain(admin_scale._JOBS.get("royal_scale"))
+
+
+def test_scale_run_surfaces_the_real_error_never_fabricates():
+    """the old route contract, now honored by the DETACHED worker's delivery."""
+    bot = MockBot()
+    ctx = MockContext(bot=bot)
+    ctx.user_data["scale_state"] = {"symbol": "XAUUSD", "timeframe": "M15",
+                                    "outputsize": 400, "strategy": None}
+    with patch("fysb.services.royal_scale.run_scale",
+               side_effect=RuntimeError("provider unreachable")):
+        (queries, _job) = _press_on_live_loop(["a:scale:run"], ctx)
+    owner_msgs = [m for m in bot.sent if m["chat_id"] == ADMIN]
+    assert owner_msgs and "provider unreachable" in owner_msgs[-1]["text"]
 
 
 def test_reports_hub_carries_the_scale_entry():

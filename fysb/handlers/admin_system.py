@@ -511,13 +511,13 @@ async def admin_settings(q, uid, context, bot):
         ("broadcast_rate_per_sec", "📣 معدل الإعلانات/ثانية"),
         ("signal_expiry_hours", "⏳ صلاحية الإشارة (ساعة)"),
     ]
-    ui_edit = (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1"
+    # v8.14.16 — the In-Place Edit toggle is EXECUTED (owner verdict): the
+    # setting is never read for delivery anymore; fresh-page is the only mode.
     lines = ["⚙️ <b>الإعدادات العامة</b>", ""]
     rows_kb = []
     for key, title in pairs:
         val = await afn.run(db.get_setting, key, "—")
         lines.append(f"{title}: <b>{esc(val)}</b>")
-    lines.append(f"🖼 وضع التنقل بالواجهة: <b>{'تعديل مكاني سلس (edit_text)' if ui_edit else 'رسالة جديدة مع كل ضغطة'}</b>")
     # v8.14.9 — «مفتاحا الصدق الملكيان» (owner-controlled institutional laws)
     st_gate = (await afn.run(db.get_setting, "honesty_stale_gate", "1")) == "1"
     no_re = (await afn.run(db.get_setting, "no_repaint_closed_only", "1")) == "1"
@@ -545,11 +545,9 @@ async def admin_settings(q, uid, context, bot):
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
     rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
                     kb.btn("⏳ تعديل صلاحية الإشارة", "a:expiryset")])
-    rows_kb.append([kb.btn(
-        f"🖼 التنقل: {'تبديل إلى رسالة جديدة' if ui_edit else 'تبديل إلى التعديل المكاني'}",
-        "a:toggleuimode",
-        style="primary",
-    )])
+    # v8.14.16 — «التنقل: تبديل إلى التعديل المكاني» button is DELETED forever
+    # (owner verdict): toggling it put the whole UI into edit_text delivery,
+    # which hid pages on scrolled chats and made every button look dead.
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
 
 
@@ -601,12 +599,8 @@ async def admin_button_eye_clear(q, uid, context, bot):
     await admin_button_eye(q, uid, context, bot)
 
 
-async def admin_toggle_ui_mode(q, uid, context, bot):
-    cur = (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1"
-    new_val = "0" if cur else "1"
-    await afn.run(db.set_setting, "ui_edit_in_place", new_val)
-    await afn.run(audit_log.log, uid, f"ui_edit_in_place:{new_val}")
-    await admin_settings(q, uid, context, bot)
+# v8.14.16 — admin_toggle_ui_mode() EXECUTED: the toggle that could switch the
+# whole bot into invisible edit-in-place delivery no longer exists.
 
 
 async def admin_toggle_stale_gate(q, uid, context, bot):

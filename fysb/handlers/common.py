@@ -85,50 +85,21 @@ async def _send_guarded(send_fn, text: str, markup=None):
 
 
 async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
-    """Deliver callback pages reliably (v6.14.1 — Proven Fresh Page by default,
-    optional In-Place Edit toggle in Admin Settings, + automatic BadRequest
-    fallback stripping button styles / repairing HTML so buttons NEVER fail).
+    """Deliver callback pages reliably (v8.14.16 — «إعدام وضع التعديل المكاني»).
 
-    Returns the delivered/edited Message object so callers (like u:signalview)
+    The legacy In-Place Edit toggle (a:toggleuimode / ui_edit_in_place) is
+    EXECUTED per the owner's verdict: its edit_text delivery hid pages on
+    scrolled chats and swallowed even /probe's own success card — every press
+    "succeeded" as an invisible edit while the owner saw a DEAD button.
+    The ONLY delivery from this day is the proven fresh page: reply_text
+    right under the tap (or bot.send_message for >48h panels), with the
+    automatic style-strip fallback so buttons NEVER fail. force_new stays
+    for caller compatibility; delivery NEVER edits an old message again.
+
+    Returns the delivered Message object so callers (like u:signalview)
     can pin message_id/chat_id for live tracker edits.
     """
     t0 = time.monotonic()
-    edit_mode = (not force_new) and (await afn.run(db.get_setting, "ui_edit_in_place", "0") == "1")
-
-    if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
-        try:
-            # v8.14.12 — the edit path honors the same length contract as the
-            # fresh path: a page beyond Telegram's text cap degrades instead
-            # of dying the whole press.
-            from fysb.ui import htmlguard as _hg
-            edit_text_out = _hg.truncate_safe(text, 3900)
-            msg = await q.message.edit_text(
-                text=edit_text_out,
-                reply_markup=markup,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            log.info("PAGE RENDERED | user=%s | method=edit_in_place | %.0fms",
-                     q.from_user.id, (time.monotonic() - t0) * 1000)
-            callback_feedback.page_delivered(q)
-            return msg if msg is not None else q.message
-        except BadRequest as e:
-            if "message is not modified" in str(e).lower():
-                log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
-                         q.from_user.id, (time.monotonic() - t0) * 1000)
-                # v8.14.12 — a visually identical page is a SILENT press for
-                # the owner; the royal button eye must see it.
-                try:
-                    from fysb.services import ui_diagnostics
-                    await afn.run(ui_diagnostics.record_not_modified,
-                                  q.from_user.id, getattr(q, "data", "") or "")
-                except Exception:
-                    pass
-                callback_feedback.page_delivered(q)
-                return q.message
-            log.debug("edit_text fallback (%s) -> sending fresh page", e)
-        except Exception as e:
-            log.debug("edit_text fallback (%s) -> sending fresh page", type(e).__name__)
 
     if q.message is not None and hasattr(q.message, "reply_text"):
         msg = await _send_guarded(q.message.reply_text, text, markup)
@@ -439,7 +410,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     up_txt = f"{up // 3600} ساعة {up % 3600 // 60} د" if up >= 3600 else f"{up // 60} دقيقة {up % 60} ث"
     db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
     import telegram as _tg
-    ui_mode = "تعديل مكاني" if (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1" else "رسالة جديدة (فورية)"
+    ui_mode = "رسالة جديدة (فورية) — الوضع الوحيد منذ v8.14.16 (وضع التعديل المكاني أُعدم نهائياً)"
     # v8.14.13 — the royal main valve state rides the live diagnosis
     try:
         from fysb.services import ui_diagnostics as _eye

@@ -207,9 +207,10 @@ class TestRoyalRestore(unittest.TestCase):
         db.init_db()
         common._last_panel.clear()
 
-    def test_tap_on_registered_panel_edits_in_place_when_enabled(self):
-        # When ui_edit_in_place="1" is enabled, edits the panel in place;
-        # default ("0") delivers a fresh reply_text page right under the tap.
+    def test_tap_on_registered_panel_delivers_fresh_reply_even_with_legacy_edit_setting(self):
+        # v8.14.16 — the In-Place Edit toggle is EXECUTED: even a legacy DB that
+        # still carries ui_edit_in_place="1" from the deleted toggle NEVER edits
+        # in place again — every tap delivers a fresh reply under the panel.
         db.set_setting("ui_edit_in_place", "1")
         try:
             q = MockQuery("a:signals", ADMIN)
@@ -218,20 +219,23 @@ class TestRoyalRestore(unittest.TestCase):
             asyncio.run(dispatcher.buttons(_mk_update(q), ctx))
             self.assertTrue(q._answered)
             self.assertEqual(ctx.bot.sent, [], "render never uses bot.send_message for touchable panels")
-            self.assertTrue(q.message.edits, "edit mode edits the panel in place smoothly")
+            self.assertTrue(q.message.replies, "fresh reply right under the tap — the only mode")
+            self.assertFalse(q.message.edits, "nothing is ever edited in place again")
             self.assertFalse(q.message.deleted, "never deletes the tapped panel")
-            self.assertIn("مركز إدارة الإشارات", q.message.edits[-1]["text"])
+            self.assertIn("مركز إدارة الإشارات", q.message.replies[-1]["text"])
         finally:
             db.set_setting("ui_edit_in_place", "0")
 
-    def test_tap_on_stale_panel_delivers_cleanly_in_both_modes(self):
-        # In-place mode ("1") edits cleanly; fresh-message mode ("0") sends reply_text.
+    def test_tap_on_stale_panel_delivers_freshly_in_both_settings(self):
+        # v8.14.16 — delivery is fresh with ANY stored value of the executed toggle.
         db.set_setting("ui_edit_in_place", "1")
-        q, ctx = fire("a:home", ADMIN)
-        self.assertTrue(q.message.edits)
-        self.assertIn("SUPER ADMIN", page_for(q, ctx))
-
-        db.set_setting("ui_edit_in_place", "0")
+        try:
+            q, ctx = fire("a:home", ADMIN)
+            self.assertTrue(q.message.replies, "legacy '1' must NOT edit — fresh reply always")
+            self.assertFalse(q.message.edits)
+            self.assertIn("SUPER ADMIN", page_for(q, ctx))
+        finally:
+            db.set_setting("ui_edit_in_place", "0")
         try:
             q2, ctx2 = fire("a:home", ADMIN)
             self.assertTrue(q2.message.replies, "fresh-message mode must deliver via reply_text")

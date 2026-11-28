@@ -914,8 +914,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_backup_restore(q, uid, context, bot)
     elif act == "settings":
         await admin_system.admin_settings(q, uid, context, bot)
-    elif act == "toggleuimode":
-        await admin_system.admin_toggle_ui_mode(q, uid, context, bot)
+    # v8.14.16 — the a:toggleuimode route is EXECUTED with the button itself;
+    # a ghost press now falls through to the unknown-action reply contract.
     elif act == "btnfail":
         await admin_system.admin_button_eye(q, uid, context, bot)
     elif act == "btnfailclear":

@@ -135,12 +135,20 @@ def test_signal_buttons_colored_buy_green_sell_red():
     assert mk.inline_keyboard[1][0].to_dict()["style"] == "danger"
 
 
-def test_smart_render_fresh_by_default_edit_opt_in_and_badrequest_fallback(ui_env):
+def test_smart_render_fresh_by_default_and_badrequest_fallback(ui_env):
     # 1. Default mode is "0" (proven fresh reply_text page under every tap — never hidden!)
     assert db.get_setting("ui_edit_in_place", "0") == "0"
     q, ctx = _fire("a:settings", ADMIN)
     assert q.message.replies and not q.message.edits
-    assert "رسالة جديدة" in page_for(q, ctx)
+    # v8.14.16 — the In-Place Edit toggle is EXECUTED: no line, no button, no route.
+    page_txt = page_for(q, ctx)
+    assert "وضع التنقل" not in page_txt
+    assert "التعديل المكاني" not in page_txt
+    mk = page_markup_for(q, ctx)
+    assert not any(
+        getattr(b, "callback_data", None) == "a:toggleuimode"
+        for row in mk.inline_keyboard for b in row
+    )
 
     # 2. If Telegram ever rejects styled buttons with BadRequest, _send_guarded
     # automatically strips styles and retries cleanly so NO button can ever die!
@@ -157,31 +165,18 @@ def test_smart_render_fresh_by_default_edit_opt_in_and_badrequest_fallback(ui_en
     assert sr_msg.replies, "style rejection must automatically fall back to plain buttons"
     assert "SUPER ADMIN" in sr_msg.replies[-1]["text"]
 
-    # 3. Admin live toggle a:toggleuimode enables edit_text mode ("1") and back to "0"
-    q_t1, ctx_t1 = _fire("a:toggleuimode", ADMIN)
-    assert db.get_setting("ui_edit_in_place") == "1"
-    assert q_t1.message.edits and not q_t1.message.replies
+    # 3. v8.14.16 — fresh delivery is THE ONLY mode: even a legacy DB still
+    # carrying ui_edit_in_place='1' from the deleted toggle NEVER edits again.
+    db.set_setting("ui_edit_in_place", "1")
+    try:
+        q_f, ctx_f = _fire("a:home", ADMIN)
+        assert q_f.message.replies and not q_f.message.edits
+        assert "SUPER ADMIN" in page_for(q_f, ctx_f)
+    finally:
+        db.set_setting("ui_edit_in_place", "0")
 
-    # 4. In edit_text mode: BadRequest("Message is not modified") is silently absorbed
-    class NotModifiedMsg(MockMessage):
-        async def edit_text(self, *a, **kw):
-            raise BadRequest("Message is not modified")
-
-    nm_msg = NotModifiedMsg()
-    q_nm, ctx_nm = _fire("a:home", ADMIN, msg=nm_msg)
-    assert q_nm._answered
-    assert not nm_msg.replies
-
-    # 5. In edit_text mode: BadRequest("Message can't be edited") falls back to reply_text
-    class UneditableMsg(MockMessage):
-        async def edit_text(self, *a, **kw):
-            raise BadRequest("Message can't be edited")
-
-    ue_msg = UneditableMsg()
-    q_ue, ctx_ue = _fire("a:home", ADMIN, msg=ue_msg)
-    assert ue_msg.replies and "SUPER ADMIN" in ue_msg.replies[-1]["text"]
-
-    # Toggle back to "0"
-    q_t2, ctx_t2 = _fire("a:toggleuimode", ADMIN)
+    # 4. v8.14.16 — the toggle route is dead: a ghost press hits the
+    # unknown-action reply contract and the setting stays untouched.
+    q_g, ctx_g = _fire("a:toggleuimode", ADMIN)
+    assert q_g.message.replies, "ghost press must still get a page — never die silently"
     assert db.get_setting("ui_edit_in_place") == "0"
-    assert q_t2.message.replies

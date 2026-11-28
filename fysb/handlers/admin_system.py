@@ -540,6 +540,7 @@ async def admin_settings(q, uid, context, bot):
         "<b>معطّل</b> — العودة بعد الربح قد تُغلق على وقف الخسارة (سلوك ما قبل v8.14.10)"))
     rows_kb.append([kb.btn("🏅 القفل +50: " + ("إيقاف" if lock50 else "تفعيل"), "a:togglelock50",
                            style="danger" if lock50 else "success")])
+    rows_kb.append([kb.btn("🩺 عين الأزرار الملكية", "a:btnfail", style="primary")])
     rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance", style="danger"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
     rows_kb.append([kb.btn("🧪 تعديل رصيد التجريبي", "a:demobalset"),
@@ -550,6 +551,54 @@ async def admin_settings(q, uid, context, bot):
         style="primary",
     )])
     await render(q, "\n".join(lines), kb.admin_nav(rows_kb), bot)
+
+
+async def admin_button_eye(q, uid, context, bot):
+    """v8.14.12 — «عين الأزرار الملكية»: every silent, failed, or
+    visually-unchanged button press from PRODUCTION, readable from the
+    owner's phone. Raw facts only — the cause travels to the owner verbatim."""
+    from fysb.services import ui_diagnostics as _eye
+    events = await afn.run(_eye.recent, 12)
+    cnt = await afn.run(_eye.counts)
+    lines = [
+        "🩺 <b><u>عين الأزرار الملكية</u></b>",
+        "✨ كل ضغطة صامتة أو فاشلة من الإنتاج موثقة هنا بالسبب الحقيقي",
+        "<blockquote>"
+        f"▎💥 أعطال مسجلة: <b>{cnt.get('FAIL', 0)}</b>\n"
+        f"▎👁 ضغطات صامتة بلا تسليم: <b>{cnt.get('SILENT', 0)}</b>\n"
+        f"▎🔁 صفحات مطابقة بلا تغيير: <b>{cnt.get('NOT_MODIFIED', 0)}</b>"
+        "</blockquote>",
+    ]
+    if not events:
+        lines.append("<blockquote>▎✨ لا أحداث بعد — اضغط الزر الذي لا يعمل ثم عد إلى هذه الصفحة: سيظهر سببه الحقيقي هنا فوراً.</blockquote>")
+    else:
+        lines.append("📜 <b>آخر الأحداث (الأحدث أولاً):</b>")
+        for e in events:
+            kind = _eye.KIND_LABEL.get(e["kind"], e["kind"])
+            dur = f" · {e['duration_ms']:.0f}ms" if e.get("duration_ms") is not None else ""
+            lines.append(
+                f"▎{kind} — <code>{esc(str(e['data'] or '')[:40])}</code> "
+                f"(مستخدم {e['user_id']}){dur} — {esc(str(e['created_at'] or '')[:16])}")
+            detail = str(e.get("detail") or "").strip()
+            if detail and e["kind"] == "FAIL":
+                dlines = detail.splitlines()
+                lines.append(f"  <code>{esc(dlines[0][:120])}</code>")
+                if len(dlines) > 1:
+                    tail = "\n".join(dlines[-4:])
+                    lines.append(f"  <pre>{esc(tail)[:400]}</pre>")
+            elif detail:
+                lines.append(f"  <i>{esc(detail[:140])}</i>")
+    body = "\n".join(lines)
+    rows_kb = [[kb.btn("🧹 مسح السجل", "a:btnfailclear", style="danger"),
+                kb.btn("⚙️ الإعدادات", "a:settings")]]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
+async def admin_button_eye_clear(q, uid, context, bot):
+    from fysb.services import ui_diagnostics as _eye
+    n = await afn.run(_eye.clear)
+    await afn.run(audit_log.log, uid, f"btnfail_clear:{n}")
+    await admin_button_eye(q, uid, context, bot)
 
 
 async def admin_toggle_ui_mode(q, uid, context, bot):

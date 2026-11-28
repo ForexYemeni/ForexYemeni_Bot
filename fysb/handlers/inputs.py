@@ -69,7 +69,7 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
               "awaiting_market_add", "awaiting_user_search", "reject_payment_id",
               "awaiting_broadcast_text", "awaiting_support_config", "awaiting_support_field",
               "awaiting_restore", "awaiting_free_quota", "awaiting_demo_balance",
-              "awaiting_expiry_hours", "awaiting_chan_add", "awaiting_usdt_wallet",
+              "awaiting_expiry_hours", "awaiting_lock_pips", "awaiting_chan_add", "awaiting_usdt_wallet",
               "awaiting_plan_field", "awaiting_plan_custom",
               "awaiting_partner_add", "awaiting_partner_channel", "awaiting_partner_brand",
               "awaiting_partner_limit", "bridge_draft", "admin_bridge_input")
@@ -83,7 +83,7 @@ DRAFT_KEYS = ("plan_draft", "pm_draft", "broker_draft", "awaiting_signal",
 CLEAR_ON_NAV = ("awaiting_signal", "awaiting_market_add", "awaiting_user_search",
                 "reject_payment_id", "awaiting_broadcast_text", "awaiting_support_config",
                 "awaiting_support_field", "awaiting_restore", "awaiting_free_quota",
-                "awaiting_demo_balance", "awaiting_expiry_hours", "awaiting_chan_add",
+                "awaiting_demo_balance", "awaiting_expiry_hours", "awaiting_lock_pips", "awaiting_chan_add",
                 "awaiting_usdt_wallet", "awaiting_plan_field", "awaiting_plan_custom",
                 "awaiting_broadcast_photo", "broadcast_draft", "awaiting_usdt_txid",
                 "usdt_chain", "awaiting_demo_bal_user", "awaiting_receipt",
@@ -898,6 +898,24 @@ async def _admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
         except ValueError as e:
             ud["awaiting_expiry_hours"] = True
             await update.effective_message.reply_text(f"❌ {safe(e)} — أرسل رقماً بالساعات (مثال: 72).")
+        return True
+
+    # ---------- v8.14.17 — the owner's editable lock threshold ----------
+    if ud.pop("awaiting_lock_pips", False):
+        try:
+            val = int(float(text))
+            if not (20 <= val <= 500):
+                raise ValueError("العتبة يجب أن تكون بين 20 و 500 نقطة")
+            await afn.run(db.set_setting, "lock_pips", val)
+            await afn.run(audit_log.log, uid, f"lock_pips_set:{val}")
+            usd = round(val * 0.1, 2)
+            await update.effective_message.reply_text(
+                f"✅ عتبة التأمين الجديدة: <b>{val} نقطة</b> = <b>+{usd:.2f} $</b> بـ 0.01 لوت.\n"
+                "الحد يطبَّق فوراً على الإشارات الحيّة والقادمة عبر usd_move الحقيقي لكل أداة.",
+                parse_mode="HTML")
+        except ValueError as e:
+            ud["awaiting_lock_pips"] = True
+            await update.effective_message.reply_text(f"❌ {safe(e)} — أرسل رقماً بالنقاط (مثال: 70).")
         return True
 
     # ---------- Broadcast-channel / group add ----------

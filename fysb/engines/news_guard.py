@@ -407,7 +407,7 @@ def render_luxury_news_alert_card(ev: dict, *, buf_min: int | None = None) -> st
 
     when_txt = f"خلال <b>{mins} دقيقة</b>" if mins > 0 else "<b>الآن / للتو</b>"
     return (
-        f"🚨 <b><u>نشرة الأخبار الاقتصادية الملكية — خبر عالي التأثير</u></b>\n"
+        f"🚨 <b><u>نشرة الأخبار الاقتصادية — خبر عالي التأثير</u></b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"<blockquote>"
         f"▎{flag} العملة المتأثرة: <b>{esc(ccy)} ({esc(ccy_ar)})</b>\n"
@@ -415,7 +415,7 @@ def render_luxury_news_alert_card(ev: dict, *, buf_min: int | None = None) -> st
         f"▎⏰ الموعد: <code>{esc(t_mecca)}</code> ({when_txt})\n"
         f"{data_line}"
         f"▎🌐 الأسواق الأكثر تأثراً: {mkt_line}\n"
-        f"▎🛡 <b>بروتوكول الحماية الملكي:</b> يُتوقّع تذبذب حاد واتساع في السبريد — "
+        f"▎🛡 <b>بروتوكول الحماية:</b> يُتوقّع تذبذب حاد واتساع في السبريد — "
         f"أمّن صفقاتك المفتوحة وتجنّب المخاطرة الزائدة حول الخبر (±{wmin} دقيقة)."
         f"</blockquote>\n"
         f"<i>👑 تنبيه مؤسسي فوري من {config.BRAND} · {config.BOT_SIGNATURE}</i>"
@@ -434,7 +434,7 @@ def render_luxury_news_digest_card(
     now_s = config.mecca_dt_12h()
     if not evs:
         return (
-            f"📰 <b><u>النشرة الاقتصادية الملكية — {config.BRAND}</u></b>\n"
+            f"📰 <b><u>النشرة الاقتصادية — {config.BRAND}</u></b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"<blockquote>"
             f"▎🟢 الأجواء الاقتصادية هادئة خلال الـ 48 ساعة القادمة — لا توجد أخبار حمراء عالية التأثير مجدولة.\n"
@@ -443,7 +443,7 @@ def render_luxury_news_digest_card(
             f"<i>👑 {config.BRAND} Royal Calendar · {now_s} · {config.BOT_SIGNATURE}</i>"
         )
     lines = [
-        f"📰 <b><u>النشرة الاقتصادية الملكية — أهم أخبار 48 ساعة</u></b>",
+        f"📰 <b><u>النشرة الاقتصادية — أهم أخبار 48 ساعة</u></b>",
         "━━━━━━━━━━━━━━━━━━",
         "<blockquote>",
     ]
@@ -504,7 +504,7 @@ def render_news_calendar_html(
         "<blockquote>"
         f"▎🛡 درع حماية المحرك: <b>{'🟢 مفعّل — حماية تلقائية نشطة' if on else '⚪ متوقف'}</b>\n"
         f"▎⏱ نافذة الحظر حول الخبر القوي: <b>±{wmin} دقيقة</b>\n"
-        f"▎📢 البث التلقائي للأخبار الفاخرة: <b>{'🟢 مفعّل تلقائياً' if auto_b else '⚪ متوقف'}</b>\n"
+        f"▎📢 البث التلقائي للأخبار: <b>{'🟢 مفعّل تلقائياً' if auto_b else '⚪ متوقف'}</b>\n"
         f"▎📤 وجهات البث المفعّلة: <b>{dest_txt}</b>\n"
         f"▎🩺 صحة التقويم: <b>{'🟢 حي ومحدّث' if _health['state'] == 'OK' else ('🟡 يعمل ببيانات محفوظة (' + str(_health['cache_age_minutes']) + ' د) — قرار الخبر يبقى صادقاً' if _health['state'] == 'CACHED' else '🔴 لا توجد بيانات تقويم صالحة')}</b>"
         "</blockquote>",

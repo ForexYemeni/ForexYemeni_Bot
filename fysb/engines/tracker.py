@@ -24,8 +24,11 @@ from fysb.engines import honesty, market_data
 from fysb.config import log
 
 TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED", "LOCKED_50")
+# v8.14.17 — the lock threshold is now the OWNER-EDITABLE setting
+# honesty.lock_pips()/lock_usd() (default 50 gold pips = $5 at 0.01 lot).
+# LOCK50_USD/NEAR50_USD below are only the documented DEFAULT fallbacks.
 LOCK50_USD = 5.0
-NEAR50_USD = 4.0   # v8.14.11 — the documented «one dollar away» royal whisper   # 🏅 the royal lock: +$5 at 0.01 lot — 50 gold pips, 500 BTC pips, one truth
+NEAR50_USD = 4.0
 
 # v6.8.0 — CONSERVATIVE target confirmation: a target is banked only when the
 # provider candle PENETRATES the level by this margin, not merely grazes it.
@@ -487,7 +490,7 @@ def _halfway_notes(sig: dict, candles: list[dict], live_px: float = 0.0) -> tupl
     usd_tp2 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp2_val), 0.01, px=tp2_val)
     usd_tp3 = instruments.usd_move(symbol, instruments.pips(symbol, entry, tp3_val), 0.01, px=tp3_val)
     text = (
-        f"💧 <b>إدارة الصفقة الملكية</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+        f"💧 <b>إدارة الصفقة</b> — {esc(symbol)} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
         f"▎✨ وصل السعر <b>نصف الطريق</b> نحو الهدف الأول.\n"
         f"▎✅ <b>الصفقة تعتبر رابحة حتى الآن</b> — حققت <b>{drift:+.1f} نقطة</b> من الدخول"
@@ -806,6 +809,11 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
     # (pre-lock honesty unchanged); once any target banks, the existing BE
     # machinery governs (the lock only guards the unbanked trade).
     lock_on = honesty.lock50_enabled()
+    # v8.14.17 — the owner's EDITABLE threshold (default 50 gold pips = $5 at
+    # 0.01 lot; any value 20–500 via settings). USD-threshold stays uniform
+    # across markets through the real usd_move per-pip equivalence.
+    _lock_usd = honesty.lock_usd()
+    _near_usd = max(_lock_usd - 1.0, 0.5)
     lock_pre_armed = bool(int(sig.get("profit_50_hit") or 0))
     lock_armed = lock_pre_armed
     locked_price = float(sig.get("locked_sl") or 0.0)
@@ -901,22 +909,22 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
             if exc_pips > 0:
                 per_pip_usd = instruments.usd_move(symbol_key, 1.0, 0.01, lock_mrow,
                                                    px=float(c["close"]))
-                if per_pip_usd > 0 and exc_pips * per_pip_usd >= LOCK50_USD:
+                if per_pip_usd > 0 and exc_pips * per_pip_usd >= _lock_usd:
                     lock_armed = True
                     lock_arm_idx = idx
                     sig["profit_50_at"] = c["datetime"]
-                    p50 = LOCK50_USD / per_pip_usd
+                    p50 = _lock_usd / per_pip_usd
                     locked_price = (entry + p50 * lock_pip) if direction == "BUY" \
                         else (entry - p50 * lock_pip)
                     lock_out.update({"armed": True, "locked_sl": locked_price,
                                      "locked_pips": p50, "armed_iso": c["datetime"]})
-                elif per_pip_usd > 0 and exc_pips * per_pip_usd >= NEAR50_USD \
+                elif per_pip_usd > 0 and exc_pips * per_pip_usd >= _near_usd \
                         and not str(sig.get("near_50_at") or ""):
                     # v8.14.11 — the honest whisper: one documented touch at
                     # >=$4 (never >=$5 — that arms the full lock) on a pure
                     # survival bar, ONCE per signal's lifetime.
                     lock_out.update({"near": True, "near_iso": c["datetime"],
-                                     "away_usd": LOCK50_USD - exc_pips * per_pip_usd})
+                                     "away_usd": _lock_usd - exc_pips * per_pip_usd})
     if progress_tp > hit_tp:
         if progress_tp == 3:
             return "TP3_HIT"
@@ -1066,6 +1074,8 @@ def _handle_lock_arm(sig: dict, lock_info: dict, transition: str | None,
         return
     if not lock_info.get("armed") and not lock_info.get("near"):
         return
+    _lk_usd = honesty.lock_usd()      # v8.14.17 — the editable threshold
+    _lk_pips = honesty.lock_pips()
     near = lock_info.get("near")
     if near and not int(sig.get("profit_50_hit") or 0) \
             and not str(sig.get("near_50_at") or ""):
@@ -1079,18 +1089,18 @@ def _handle_lock_arm(sig: dict, lock_info: dict, transition: str | None,
             away = float(lock_info.get("away_usd") or 1.0)
             seq = seq_of(int(sig["id"]))
             txt = (
-                f"⏳ <b><u>على بُعد خطوة من التأمين الملكي 🏅</u></b> — {esc(sig['symbol'])} "
+                f"⏳ <b><u>على بُعد خطوة من التأمين 🏅</u></b> — {esc(sig['symbol'])} "
                 f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
                 "<blockquote>"
-                f"▎📌 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>+{LOCK50_USD - away:.2f} $</b> بـ 0.01 لوت "
-                f"— أنت على بُعد <b>{away:.2f} $</b> فقط من التأمين الملكي عند +5 $.\n"
-                "▎🛡 اللمسة القادمة إلى +5 $ تُقفل الصفقة للأبد: لا خسارة ممكنة بعدها مهما ارتد السعر."
+                f"▎📌 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>{_lk_usd - away:+.2f} $</b> بـ 0.01 لوت "
+                f"— أنت على بُعد <b>{away:.2f} $</b> فقط من التأمين عند +{_lk_pips} نقطة (+{_lk_usd:.2f} $).\n"
+                f"▎🛡 اللمسة القادمة إلى +{_lk_usd:.2f} $ تُقفل الصفقة للأبد: لا خسارة ممكنة بعدها مهما ارتد السعر."
                 "</blockquote>\n"
                 "<i>لمسة موثقة بشمعة مغلقة حقيقية — تنبيه واحد صادق لا يُكرر.</i>"
             )
             notifications.extend(_alert_targets(sig, txt))
             _log(sig["symbol"], sig["timeframe"], "NEAR50",
-                 f"signal #{sig['id']} touched +{LOCK50_USD - away:.2f}$ (away {away:.2f}$)")
+                 f"signal #{sig['id']} touched +{_lk_usd - away:.2f}$ (away {away:.2f}$)")
         except Exception:
             pass
     if int(sig.get("profit_50_hit") or 0):
@@ -1112,15 +1122,17 @@ def _handle_lock_arm(sig: dict, lock_info: dict, transition: str | None,
         sig["profit_50_at"] = str(lock_info.get("armed_iso") or config.now())
         seq = seq_of(int(sig["id"]))
         lp = float(lock_info.get("locked_sl") or 0.0)
+        _lk_usd = honesty.lock_usd()
+        _lk_pips = honesty.lock_pips()
         txt = (
-            f"🏅 <b><u>القفل الملكي — إشارتك مؤمّنة عند +50</u></b> — {esc(sig['symbol'])} "
+            f"🏅 <b><u>التأمين عند الربح — إشارتك مؤمّنة عند +{_lk_pips} نقطة</u></b> — {esc(sig['symbol'])} "
             f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
             "<blockquote>"
-            f"▎🏆 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>+5.00 $</b> بـ 0.01 لوت — "
+            f"▎🏆 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>+{_lk_usd:.2f} $</b> بـ 0.01 لوت — "
             "أصبحت رابحة مؤسسياً بلا نقاش.\n"
-            f"▎🛡 <b>القفل فعّل عند المستوى</b> <code>{esc(instruments.fmt_price(sig['symbol'], lp))}</code> "
-            "— أي عودة بعدها تُغلق الصفقة على <b>+5.00 $</b> لا على الخسارة أبداً.\n"
-            "▎👑 الأهداف الأعلى (TP1/TP2/TP3) باقية كما هي — القفل حماية لا سقف."
+            f"▎🛡 <b>التأمين فعّل عند المستوى</b> <code>{esc(instruments.fmt_price(sig['symbol'], lp))}</code> "
+            f"— أي عودة بعدها تُغلق الصفقة على <b>+{_lk_usd:.2f} $</b> لا على الخسارة أبداً.\n"
+            "▎👑 الأهداف الأعلى (TP1/TP2/TP3) باقية كما هي — التأمين حماية لا سقف."
             "</blockquote>\n"
             "<i>لمسة موثقة بشمعة مغلقة حقيقية من بيانات السوق اللحظية.</i>"
         )
@@ -1142,7 +1154,7 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     later target evaluation starts from the true fill moment."""
     from fysb.theme import dir_badge, esc, status_ar, strategy_name, tf_name
     is_be_close = new_status in ("TP1_BE", "TP2_BE")
-    is_lock = new_status == "LOCKED_50"   # v8.14.10 🏅 «مؤمّنة عند +50»
+    is_lock = new_status == "LOCKED_50"   # v8.14.10 🏅 locked at the owner's threshold
     status = {"TP1_BE": "TP1_HIT", "TP2_BE": "TP2_HIT"}.get(new_status, new_status)
     hit_tp = {"TP1_HIT": 1, "TP2_HIT": 2, "TP3_HIT": 3,
               "SL_HIT": int(sig["hit_tp"] or 0)}.get(status, int(sig["hit_tp"] or 0))
@@ -1255,12 +1267,14 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
         result_line = ""
     if is_lock:
         lock_px = float(sig.get("locked_sl") or 0.0)
+        _lk_usd = honesty.lock_usd()
+        _lk_pips = honesty.lock_pips()
         detail = (
-            f"▎🏅 <b>القفل الملكي فعّل:</b> الصفقة لمست مبلغاً موثقاً بقيمة <b>+5.00 $</b> بـ 0.01 لوت "
+            f"▎🏅 <b>التأمين فعّل:</b> الصفقة لمست مبلغاً موثقاً بقيمة <b>+{_lk_usd:.2f} $</b> بـ 0.01 لوت "
             f"وأُقفل وقفها المؤسسي عند المستوى "
             f"<code>{instruments.fmt_price(sig['symbol'], lock_px) if lock_px else '—'}</code>.\n"
             f"▎👑 <b>لا خسارة أبداً بعد اللمسة:</b> عودة السعر بعد القفل تُغلق الصفقة على ربح "
-            f"<b>+{pips_result:.1f} pips (+5.00 $)</b> بـ 0.01 لوت — "
+            f"<b>+{pips_result:.1f} نقطة (+{_lk_usd:.2f} $)</b> بـ 0.01 لوت — "
             f"والأهداف الأعلى TP1/TP2/TP3 باقية كما هي؛ القفل حماية لا سقف.\n"
         )
     elif is_be_close:
@@ -1291,11 +1305,11 @@ def _apply_transition(sig: dict, new_status: str, payload: dict,
     # signals take the freed numbers), never the raw internal id.
     seq = seq_of(sig["id"])
     if is_lock:
-        status_label = "🏅 مؤمّنة عند +50 — القفل الملكي حفظ الربح"
+        status_label = f"🏅 مؤمّنة عند +{honesty.lock_pips()} نقطة — الربح محفوظ"
     else:
         status_label = f"{status_ar(status)} · إغلاق مؤمّن عند الدخول 🛡" if is_be_close else status_ar(status)
     text = (
-        f"📡 <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+        f"📡 <b><u>تحديث الإشارة #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
         f"<blockquote>"
         f"▎📌 الحالة الجديدة: <b>{status_label}</b>\n"
         f"{result_line}"

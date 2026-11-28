@@ -188,7 +188,7 @@ def test_v7400_news_guard_symbols_error_honesty_and_luxury_auto_broadcast(env):
     alert_html = news_guard.render_luxury_news_alert_card(ev)
     assert "خبر عالي التأثير" in alert_html and "US Non-Farm Payrolls" in alert_html
     digest_html = news_guard.render_luxury_news_digest_card([ev])
-    assert "النشرة الاقتصادية الملكية" in digest_html and "185K" in digest_html
+    assert "النشرة الاقتصادية" in digest_html and "185K" in digest_html
 
     # Broadcast delivers to Admin + Users + Partners + Channels (deduplicated)
     bot = _FakeBot()
@@ -215,7 +215,7 @@ def test_v7400_news_guard_symbols_error_honesty_and_luxury_auto_broadcast(env):
     sent_ids2 = {c[0] for c in bot2.sent}
     assert USER_UID not in sent_ids2  # users toggle was turned OFF!
     assert PARTNER_UID in sent_ids2 and -100777111 in sent_ids2
-    assert "تم إرسال النشرة الاقتصادية الفاخرة" in txt_now
+    assert "تم إرسال النشرة الاقتصادية" in txt_now
 
 
 def test_v7400_backtest_all_enabled_markets_pagination_real_spread_and_score(env):

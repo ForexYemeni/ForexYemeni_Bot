@@ -102,7 +102,7 @@ def test_luxury_webapp_templates_and_chart_channel_api(isolated_db):
     st, _, html_a = wa_server.dispatch_request("GET", "/admin", {})
     a_txt = html_a.decode("utf-8")
     assert st == 200
-    assert "لوحة الإدارة الملكية" in a_txt
+    assert "لوحة الإدارة" in a_txt
     assert "قنوات الشارت فقط" in a_txt
     assert "ngrok-skip-browser-warning" in a_txt
 
@@ -233,7 +233,7 @@ def test_user_signal_now_auto_sends_luxury_chart(isolated_db, monkeypatch):
     uid_sent, png_bytes, cap = bot.photos[0]
     assert uid_sent == TEST_USER_ID
     assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
-    assert "الشارت الملكي" in cap and "XAUUSD" in cap
+    assert "الشارت الاحترافي" in cap and "XAUUSD" in cap
 
 
 def test_luxury_tracking_chart_and_tracker_chart_events(isolated_db, monkeypatch):

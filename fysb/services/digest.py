@@ -223,7 +223,7 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
         quarantined = []
 
     best_strategy = top_strategies[0]["strategy"] if top_strategies else "—"
-    period_ar = f"التقرير الأسبوعي الفاخر (آخر {days} أيام)" if days <= 10 else f"التقرير الشهري الفاخر (آخر {days} يوماً)"
+    period_ar = f"التقرير الأسبوعي (آخر {days} أيام)" if days <= 10 else f"التقرير الشهري (آخر {days} يوماً)"
     verdict_ar = _exec_verdict(decided, net_r, profit_factor, net_pips)
 
     return {
@@ -347,7 +347,7 @@ def personal_royal_digest(user_id: int, days: int = 1) -> str | None:
     day = config.mecca_now().strftime("%Y-%m-%d")
     lock_note = " (كل قفلة حفظت +5.00 $ بـ 0.01 لوت — لا خسارة أبداً)" if locks else ""
     lines = [
-        "👑 <b><u>ملخصك الملكي الشخصي</u></b> — آخر {} يوم".format(days),
+        "👑 <b><u>ملخصك الشخصي</u></b> — آخر {} يوم".format(days),
         "🗓 {} — صفقاتك المغلقة الموثقة فقط".format(day),
         "<blockquote>"
         "▎📊 صفقاتك: <b>{}</b> — 🏆 رابحة <b>{}</b> · 🛑 وقف <b>{}</b>\n"

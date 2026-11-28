@@ -392,7 +392,7 @@ async def _route_admin(q, context, uid: int, action: str):
     if act == "home":
         from fysb.handlers.common import build_admin_home_card, render
         await render(q, await build_admin_home_card(), kb.admin_menu(), bot)
-    elif act in ("bridge", "promos", "promo_new", "digest_now") or act.startswith("br_"):
+    elif act in ("bridge", "promos", "promo_new", "digest_now", "digestgo", "digestcancel") or act.startswith(("br_", "digestgo:")):
         from fysb.handlers import auto_bridge_bot
         await auto_bridge_bot.handle_admin_bridge(q, uid, act, arg, arg2, context, bot)
     elif act in ("true_analysis", "tatoggle_global", "taset", "talist", "utamenu", "utagrant", "utarevoke"):
@@ -928,6 +928,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_toggle_lock50(q, uid, context, bot)
     elif act == "freeset":
         await admin_system.admin_free_set(q, uid, context, bot)
+    elif act == "lockset":
+        await admin_system.admin_lock_set(q, uid, context, bot)
     elif act == "demobalset":
         await admin_system.admin_demo_bal_set(q, uid, context, bot)
     elif act == "expiryset":

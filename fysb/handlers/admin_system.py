@@ -534,12 +534,23 @@ async def admin_settings(q, uid, context, bot):
                     kb.btn("🧊 عدم إعادة الرسم: " + ("إيقاف" if no_re else "تفعيل"), "a:togglerepaint",
                            style="danger" if no_re else "success")])
     lock50 = (await afn.run(db.get_setting, "lock_50_enabled", "1")) == "1"
-    lines.append("🏅 القفل الملكي +50 (5$ بـ0.01 لوت): " + (
-        "<b>مفعّل</b> — أي إشارة تلمس +5$ موثقاً تُقفل: لا خسارة بعد اللمسة أبداً وتُحسب رابحة"
+    # v8.14.17 — the lock threshold is the OWNER-EDITABLE setting (20–500
+    # gold pips; default 50 = $5 at 0.01 lot). The line and buttons are live.
+    lock_pips_v = await afn.run(db.get_setting, "lock_pips", "50")
+    try:
+        lock_pips_v = int(float(lock_pips_v or "50"))
+    except Exception:
+        lock_pips_v = 50
+    if lock_pips_v < 20 or lock_pips_v > 500:
+        lock_pips_v = 50
+    lock_usd_v = round(lock_pips_v * 0.1, 2)
+    lines.append(f"🏅 التأمين عند الربح (النقاط: <b>{lock_pips_v}</b> = {lock_usd_v:.2f}$ بـ0.01 لوت): " + (
+        "<b>مفعّل</b> — أي إشارة تلمس العتبة موثقاً تُقفل: لا خسارة بعد اللمسة أبداً وتُحسب رابحة"
         if lock50 else
         "<b>معطّل</b> — العودة بعد الربح قد تُغلق على وقف الخسارة (سلوك ما قبل v8.14.10)"))
-    rows_kb.append([kb.btn("🏅 القفل +50: " + ("إيقاف" if lock50 else "تفعيل"), "a:togglelock50",
-                           style="danger" if lock50 else "success")])
+    rows_kb.append([kb.btn("🏅 التأمين: " + ("إيقاف" if lock50 else "تفعيل"), "a:togglelock50",
+                           style="danger" if lock50 else "success"),
+                    kb.btn(f"✏️ عتبة التأمين: {lock_pips_v}", "a:lockset", style="primary")])
     rows_kb.append([kb.btn("🩺 عين الأزرار الملكية", "a:btnfail", style="primary")])
     rows_kb.append([kb.btn("🔧 تبديل الصيانة", "a:togglemaintenance", style="danger"),
                     kb.btn("🆓 تعديل الحد المجاني", "a:freeset")])
@@ -643,6 +654,24 @@ async def admin_toggle_repaint(q, uid, context, bot):
 async def admin_free_set(q, uid, context, bot):
     context.user_data["awaiting_free_quota"] = True
     await render(q, "🆓 أرسل الرقم الجديد للحد اليومي للباقة المجانية (1-10):", kb.admin_nav(), bot)
+
+
+async def admin_lock_set(q, uid, context, bot):
+    """v8.14.17 — the owner's editable lock threshold (gold pips, 20–500).
+    50 = $5 at 0.01 lot; 70 = $7; the USD threshold follows the real
+    per-pip equivalence across every market via usd_move. Audit-logged."""
+    context.user_data["awaiting_lock_pips"] = True
+    cur = await afn.run(db.get_setting, "lock_pips", "50")
+    await render(
+        q,
+        "🏅 <b>تعديل عتبة التأمين عند الربح</b>\n"
+        "<blockquote>"
+        f"▎القيمة الحالية: <b>{cur}</b> نقطة (= {float(cur or 50) * 0.1:.2f}$ بـ0.01 لوت)\n"
+        "▎أرسل العدد الجديد بالنقاط الذهبية — المدى المسموح: <b>20 إلى 500</b>\n"
+        "▎مثال: أرسل <code>70</code> ليصبح التأمين عند +70 نقطة (+7$ بـ0.01 لوت)"
+        "</blockquote>\n"
+        "<i>الحد الفوري يصلح الإشارات الحيّة والقادمة معاً — الحساب عبر usd_move الحقيقي لكل أداة.</i>",
+        kb.admin_nav([[kb.btn("❌ إلغاء", "a:settings", style="danger")]]), bot)
 
 
 async def admin_demo_bal_set(q, uid, context, bot):

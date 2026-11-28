@@ -277,7 +277,7 @@ def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted()
     asyncio.run(common_handler.start(upd, ctx))
     assert replies
     txt, mk = replies[-1]
-    assert "لوحة الشريك الملكي" in txt
+    assert "لوحة الشريك" in txt
     assert "حساب شريك قناة حصري" in txt
     all_cb = [b.callback_data for row in mk.inline_keyboard for b in row if b.callback_data]
     assert all(not c.startswith("u:") for c in all_cb), f"Leaked user button in partner home: {all_cb}"
@@ -290,7 +290,7 @@ def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted()
     asyncio.run(dispatcher.buttons(q_upd, ctx))
     assert rep
     r_txt, r_mk = rep[-1]
-    assert "لوحة الشريك الملكي" in r_txt
+    assert "لوحة الشريك" in r_txt
     r_cb = [b.callback_data for row in r_mk.inline_keyboard for b in row if b.callback_data]
     assert all(not c.startswith("u:") for c in r_cb)
 
@@ -316,7 +316,7 @@ def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted()
     replies.clear()
     asyncio.run(common_handler.start(upd, ctx))
     txt_u, mk_u = replies[-1]
-    assert "لوحة الشريك الملكي" not in txt_u
+    assert "لوحة الشريك" not in txt_u
     u_cb = [b.callback_data for row in mk_u.inline_keyboard for b in row if b.callback_data]
     assert any(c.startswith("u:") for c in u_cb), "Disabled partner must revert to regular User menu!"
 
@@ -328,7 +328,7 @@ def test_strict_partner_only_mode_locks_user_account_until_disabled_or_deleted()
     replies.clear()
     asyncio.run(common_handler.start(upd, ctx))
     txt_u2, mk_u2 = replies[-1]
-    assert "لوحة الشريك الملكي" not in txt_u2
+    assert "لوحة الشريك" not in txt_u2
     u_cb2 = [b.callback_data for row in mk_u2.inline_keyboard for b in row if b.callback_data]
     assert any(c.startswith("u:") for c in u_cb2)
 

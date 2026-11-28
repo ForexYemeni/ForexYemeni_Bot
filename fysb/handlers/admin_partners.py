@@ -39,7 +39,7 @@ def _fmt_limit_badge(limit: int) -> str:
 async def admin_partners(q, uid, context, bot):
     plist = await afn.run(partners_svc.list_partners)
     lines = [
-        "🤝 <b><u>مركز شركاء القنوات وحارس VIP الملكي</u></b>",
+        "🤝 <b><u>مركز شركاء القنوات وحارس VIP</u></b>",
         "━━━━━━━━━━━━━━━━━━",
         "<blockquote>",
         "▎💰 <b>نموذج تقاسم الأرباح:</b> يضيف الشريك البوت لقناته، ويُرفق كل منشور بزر اشتراك خاص به، وتُحتسب عمولته تلقائياً فور تفعيل أي اشتراك مدفوع.",
@@ -88,7 +88,7 @@ async def admin_partner_add(q, uid, context, bot):
         "▎مثال 1 (سريع — عمولة 25% افتراضياً):\n"
         "<code>123456789</code>\n\n"
         "▎مثال 2 (بالاسم والنسبة):\n"
-        "<code>123456789 | قناة الذهب الملكي | 30</code>\n\n"
+        "<code>123456789 | قناة الذهب | 30</code>\n\n"
         "▎👑 فور التسجيل سيحصل الشريك على رابط إحالة حصري + لوحة <code>/partner</code> الخاصة به."
         "</blockquote>"
     )
@@ -530,12 +530,12 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
         ta_line = f"▎👑 <b>تحليل ForexYemeni الحقيقي:</b> 🟢 مفعّل ({ta_d}) · رادارات نشطة: <b>{len(ta_mons)}</b>\n"
 
     body = [
-        f"👑 <b><u>لوحة الشريك الملكي — {esc(p['title'])}</u></b>",
+        f"👑 <b><u>لوحة الشريك — {esc(p['title'])}</u></b>",
         "━━━━━━━━━━━━━━━━━━",
         f"🕒 <code>{esc(now_ksa)}</code>  ·  🛡 <b>حساب شريك قناة حصري</b>",
         "",
         "<blockquote>",
-        f"▎💎 <b>نسبة عمولتك الملكية:</b> <b>{p['commission_pct']:.0f}%</b> من كل اشتراك مدفوع",
+        f"▎💎 <b>نسبة عمولتك:</b> <b>{p['commission_pct']:.0f}%</b> من كل اشتراك مدفوع",
         f"▎📣 <b>وضع النشر المعتمد:</b> <b>{mode_ar}</b>",
         f"▎📺 <b>قنواتك المربوطة:</b> <b>{active_ch}</b> نشطة من أصل <b>{len(chans)}</b>",
         f"{ta_line}"
@@ -551,7 +551,7 @@ async def _build_partner_home(p: dict) -> tuple[str, InlineKeyboardMarkup]:
     ]
     rows_kb = []
     if config.webapp_ready():
-        rows_kb.append([kb.webapp_btn("📱 فتح بوابة الشريك الملكي (Mini App)", config.webapp_page_url("/", {"tab": "partner"}), style="success")])
+        rows_kb.append([kb.webapp_btn("📱 فتح بوابة الشريك (Mini App)", config.webapp_page_url("/", {"tab": "partner"}), style="success")])
     if ta_st["active"]:
         rows_kb.append([
             kb.btn("👑 تحليل ForexYemeni الحقيقي", "u:true_analysis", style="success"),
@@ -631,7 +631,7 @@ async def _render_partner_anl_markets(q, bot, *, category: str = "", page: int =
             q,
             f"🔬 <b><u>التحليل المؤسسي الفوري — {icon} {title}</u></b>\n"
             f"<blockquote>▎إجمالي أدوات القسم المفعّلة: <b>{len(items)}</b> (صفحة <b>{pg}/{total_pages}</b>)\n"
-            f"▎اختر السوق لتوليد شارت <b>FOREXYEMENI</b> المؤسسي الفاخر + التحليل الكامل فوراً:</blockquote>",
+            f"▎اختر السوق لتوليد شارت <b>FOREXYEMENI</b> المؤسسي + التحليل الكامل فوراً:</blockquote>",
             _partner_nav(rows_m, include_home=True),
             bot,
         )
@@ -665,7 +665,7 @@ async def _render_partner_anl_markets(q, bot, *, category: str = "", page: int =
         "━━━━━━━━━━━━━━━━━━\n"
         "<blockquote>"
         f"▎🌐 <b>الأسواق المفعّلة المتاحة لك الآن:</b> <b>{len(rows_db)}</b> أداة عالمية (الذهب، الفضة، الفوركس، الكريبتو، المؤشرات، الطاقة والأسهم).\n"
-        "▎⚡ اختر من الاختصارات السريعة أو تصفّح أي قسم بالأسفل لتوليد التحليل + الشارت الفاخر فوراً:"
+        "▎⚡ اختر من الاختصارات السريعة أو تصفّح أي قسم بالأسفل لتوليد التحليل + الشارت فوراً:"
         "</blockquote>",
         _partner_nav(rows_m, include_home=True),
         bot,
@@ -711,12 +711,12 @@ async def handle_partner_callback(q, uid: int, context, bot, raw_action: str):
             await render(
                 q,
                 f"🔬 <b><u>اختيار الإطار الزمني — {esc(sym_arg)}</u></b>\n"
-                "<blockquote>سيتم إرسال الشارت التحليلي الفاخر بشعار <b>FOREXYEMENI</b> تلقائياً مع التقرير:</blockquote>",
+                "<blockquote>سيتم إرسال الشارت التحليلي بشعار <b>FOREXYEMENI</b> تلقائياً مع التقرير:</blockquote>",
                 _partner_nav(rows_tf, include_home=True),
                 bot,
             )
             return
-        await render(q, f"🔬 <b>جارٍ توليد التحليل المؤسسي والشارت الفاخر ({esc(sym_arg)} · {esc(tf_arg)})...</b>", None)
+        await render(q, f"🔬 <b>جارٍ توليد التحليل المؤسسي والشارت ({esc(sym_arg)} · {esc(tf_arg)})...</b>", None)
         import asyncio as _asyncio
         import io as _io
         from fysb.services import analytics as _anl

@@ -173,7 +173,7 @@ def test_near_whisper_fires_once_then_silences():
     notes: list = []
     tracker._handle_lock_arm(sig, lock_info, None, {"values": bars}, 3604.0, notes)
     assert sig["near_50_at"]
-    assert any("من التأمين الملكي" in txt for _, txt in notes)
+    assert any("من التأمين" in txt for _, txt in notes)
     # a second documented touch in the $4 band never repeats
     sig2 = dict(sig)
     lock2: dict = {}
@@ -223,7 +223,7 @@ def test_royal_locks_board_shows_live_floors():
                    live_px=3570.0)
     _insert_db_sig(41, sig)
     body = royal_locks_board()
-    assert "القفلات الملكية" in body and "3,576.60" in body
+    assert "القفلات" in body and "3,576.60" in body
     assert "مؤمّنة الآن: <b>1</b>" in body
 
 
@@ -240,7 +240,7 @@ def test_personal_royal_digest_is_honest_and_empty_free():
             c.execute("INSERT INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)",
                       (sid, 880, config.now()))
     txt = personal_royal_digest(880, 1)
-    assert txt and "ملخصك الملكي الشخصي" in txt
+    assert txt and "ملخصك الشخصي" in txt
     assert "صفقاتك: <b>2</b>" in txt and "قفلات ملكية: <b>1</b>" in txt
     assert "+50.0 pips" in txt and "-113.1 pips" in txt
     assert personal_royal_digest(881, 1) is None            # zero activity → silence

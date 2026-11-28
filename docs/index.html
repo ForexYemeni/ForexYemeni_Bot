@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Royal Mini App v8.14.16</title>
+<title>FOREXYEMENI — Royal Mini App v8.14.17</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root {
@@ -261,7 +261,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ROYAL</div>
-      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockUser">--:--am بتوقيت مكة</span> · v8.14.16</div>
+      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockUser">--:--am بتوقيت مكة</span> · v8.14.17</div>
     </div>
   </div>
   <div class="top-right">
@@ -504,7 +504,7 @@ input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217,
       <div class="hero">
         <div class="hero-top">
           <div>
-            <div class="hero-title">👑 بوابة الشريك الملكي المعتمد (Channel Partner)</div>
+            <div class="hero-title">👑 بوابة الشريك المعتمد (Channel Partner)</div>
             <div class="hero-plan" id="pBrandTitle">—</div>
           </div>
           <span class="badge b-gold" id="pCommPill">🥇 0%</span>
@@ -1185,7 +1185,7 @@ async function runSignalNow(){
 
 let _lastShareBlobUrl = null;
 async function openShareCard(kind, id){
-  toast('🎨 جارٍ تصميم بطاقة الربح الملكية...');
+  toast('🎨 جارٍ تصميم بطاقة الربح...');
   const ep = kind === 'demo' ? `/api/share-card/demo?id=${id}` : `/api/share-card/signal?id=${id}`;
   try{
     const res = await fetch(API_BASE + ep, {
@@ -1202,7 +1202,7 @@ async function openShareCard(kind, id){
       modal.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(4,7,12,.88);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:16px';
       modal.innerHTML = `<div style="max-width:520px;width:100%;background:var(--card);border:1px solid rgba(212,175,55,.4);border-radius:20px;padding:14px;box-shadow:0 24px 60px rgba(0,0,0,.7)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح الملكية للمشاركة</b>
+          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح للمشاركة</b>
           <button onclick="closeShareModal()" style="background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-weight:800">✖</button>
         </div>
         <img id="shareCardImg" style="width:100%;border-radius:14px;border:1px solid var(--border);display:block;margin-bottom:10px"/>

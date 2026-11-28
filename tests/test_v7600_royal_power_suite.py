@@ -90,7 +90,7 @@ def test_03_auto_weekly_monthly_performance_digest(env):
     d, cap, png = digest_svc.build_digest_bundle(days=7)
     assert d["total"] == 3 and d["wins"] == 2 and d["losses"] == 1
     assert d["net_pips"] == 99.0 and d["best_strategy"] == "SMC"
-    assert "التقرير الأسبوعي الفاخر" in cap
+    assert "التقرير الأسبوعي" in cap
     assert png is not None and png[:8] == b"\x89PNG\r\n\x1a\n"
 
     # Admin API endpoints

@@ -521,7 +521,7 @@ input:focus,select:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(217
       <div class="hero">
         <div class="hero-top">
           <div>
-            <div class="hero-title">👑 بوابة الشريك الملكي المعتمد (Channel Partner)</div>
+            <div class="hero-title">👑 بوابة الشريك المعتمد (Channel Partner)</div>
             <div class="hero-plan" id="pBrandTitle">—</div>
           </div>
           <span class="badge b-gold" id="pCommPill">🥇 0%</span>
@@ -1202,7 +1202,7 @@ async function runSignalNow(){{
 
 let _lastShareBlobUrl = null;
 async function openShareCard(kind, id){{
-  toast('🎨 جارٍ تصميم بطاقة الربح الملكية...');
+  toast('🎨 جارٍ تصميم بطاقة الربح...');
   const ep = kind === 'demo' ? `/api/share-card/demo?id=${{id}}` : `/api/share-card/signal?id=${{id}}`;
   try{{
     const res = await fetch(API_BASE + ep, {{
@@ -1219,7 +1219,7 @@ async function openShareCard(kind, id){{
       modal.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(4,7,12,.88);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:16px';
       modal.innerHTML = `<div style="max-width:520px;width:100%;background:var(--card);border:1px solid rgba(212,175,55,.4);border-radius:20px;padding:14px;box-shadow:0 24px 60px rgba(0,0,0,.7)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح الملكية للمشاركة</b>
+          <b style="color:var(--gold2);font-size:13.5px">🏆 بطاقة الربح للمشاركة</b>
           <button onclick="closeShareModal()" style="background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-weight:800">✖</button>
         </div>
         <img id="shareCardImg" style="width:100%;border-radius:14px;border:1px solid var(--border);display:block;margin-bottom:10px"/>
@@ -1866,7 +1866,7 @@ input:focus,select:focus{{border-color:var(--gold)}}
         <div class="card-hdr"><h3>⚡ مفاتيح التحكم المركزية (1-Tap)</h3><span class="pill">تحكم فوري</span></div>
         <div class="toggles" id="togglesBox"></div>
         <div style="margin-top:11px">
-          <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+          <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الآن</button>
         </div>
       </div>
 
@@ -2108,8 +2108,8 @@ input:focus,select:focus{{border-color:var(--gold)}}
           <button class="btn on" onclick="sendDigestNow(30)">📆 بث التقرير الشهري الآن</button>
         </div>
         <div class="btn-row">
-          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=7','📊 التقرير الأسبوعي الفاخر PNG')">🖼 معاينة الأسبوعي PNG</button>
-          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=30','📆 التقرير الشهري الفاخر PNG')">🖼 معاينة الشهري PNG</button>
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=7','📊 التقرير الأسبوعي PNG')">🖼 معاينة الأسبوعي PNG</button>
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=30','📆 التقرير الشهري PNG')">🖼 معاينة الشهري PNG</button>
         </div>
       </div>
       <div class="card gold-edge">
@@ -2125,7 +2125,7 @@ input:focus,select:focus{{border-color:var(--gold)}}
           <span class="pill red" id="newsCountPill">0 خبر</span>
         </div>
         <div id="adminNewsBox"><div class="empty">—</div></div>
-        <button class="btn gold" style="width:100%;margin-top:10px" onclick="sendLuxuryNewsNow()">📤 بث النشرة الاقتصادية الفاخرة الآن</button>
+        <button class="btn gold" style="width:100%;margin-top:10px" onclick="sendLuxuryNewsNow()">📤 بث النشرة الاقتصادية الآن</button>
       </div>
     </div>
   </div>
@@ -2441,7 +2441,7 @@ async function toggleKey(key){{
 }}
 async function sendLuxuryNewsNow(){{
   const r = await api('/api/admin/news-broadcast',{{method:'POST',body:'{{}}'}});
-  toast(r.ok ? '📤 تم بث نشرة الأخبار الفاخرة بنجاح' : (r.error||'خطأ'), !r.ok);
+  toast(r.ok ? '📤 تم بث نشرة الأخبار بنجاح' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }}
 let _ccAddSelected = ['ALL'];

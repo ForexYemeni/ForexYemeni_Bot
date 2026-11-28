@@ -72,7 +72,7 @@ def test_active_plan_highlighted_in_green_and_hides_payment_methods(env):
 
     # 2) Opening active VIP plan shows luxury Membership Card with ZERO payment methods!
     v_txt, v_mk = _fire_user(uid, "u:planview:VIP")
-    assert "بطاقة العضوية الملكية المفعّلة" in v_txt
+    assert "بطاقة العضوية المفعّلة" in v_txt
     assert "مشترك ومفعّل بالفعل الآن" in v_txt
     assert "المحافظ الموثقة" not in v_txt
     v_datas = [b.callback_data or "" for row in v_mk.inline_keyboard for b in row]

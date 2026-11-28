@@ -423,3 +423,11 @@ def admin_nav(extra_rows: list | None = None) -> InlineKeyboardMarkup:
     rows = list(extra_rows or [])
     rows.append([btn("↩️ مركز الإدارة", "a:home", style="primary")])
     return InlineKeyboardMarkup(rows)
+
+
+def guard_probe_button() -> InlineKeyboardMarkup:
+    """v8.14.14 — «الحرس الملكي»: the /probe test button (fyprobe).
+
+    The owner's own finger proves the full chain alive end-to-end; the guard
+    records the press as PROBE in the eye."""
+    return InlineKeyboardMarkup([[btn("🛡 اضغط هذا الزر لاختبار الحرس", "fyprobe")]])

@@ -331,13 +331,17 @@ async def btnfail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from fysb.services import ui_diagnostics as _eye
     events = await afn.run(_eye.recent, 12)
     cnt = await afn.run(_eye.counts)
+    arr = _eye.arrival_stats()
     lines = [
         "🩺 <b><u>عين الأزرار الملكية (أمر مباشر)</u></b>",
         "<blockquote>"
         f"▎💥 أعطال: <b>{cnt.get('FAIL', 0)}</b> · "
         f"👁 صامتة: <b>{cnt.get('SILENT', 0)}</b> · "
         f"⏱ مهلات: <b>{cnt.get('TIMEOUT', 0)}</b> · "
-        f"🔁 مطابقة: <b>{cnt.get('NOT_MODIFIED', 0)}</b>"
+        f"🔁 مطابقة: <b>{cnt.get('NOT_MODIFIED', 0)}</b>\n"
+        f"▎🛡 الحرس: نقرات الجلسة <b>{arr.get('total', 0)}</b> (آخرها "
+        f"<code>{safe(str(arr.get('last_data') or '—')[:36])}</code>) · إسقاطات <b>{cnt.get('DROP', 0)}</b> · "
+        f"خام <b>{cnt.get('RAW', 0)}</b> · اختبارات <b>{cnt.get('PROBE', 0)}</b>"
         "</blockquote>",
     ]
     if not events:
@@ -395,6 +399,24 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(body, parse_mode="HTML")
 
 
+async def probe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.14.14 — «الحرس الملكي»: /probe sends a dedicated test button.
+
+    The owner's own finger proves the FULL chain alive end-to-end in seconds:
+    Telegram → polling → dispatch gate → guard → engine → page. A successful
+    press records PROBE in the eye; a dead one is impossible to hide because
+    every layer around it records its own evidence.
+    """
+    if not is_private_user_update(update):
+        return
+    await update.effective_message.reply_text(
+        "🛡 <b>اختبار الحرس الملكي</b>\n"
+        "اضغط الزر أدناه. إن جاءت بطاقة النجاح فالسلسلة كاملة حيّة من الزر حتى المحرك.\n"
+        "وإن لم يأتِ شيء: أرسل <code>/btnfail</code> — كل طبقة حول الضغطة تسجّل إثباتها تلقائياً، "
+        "فالطبقة الميتة ستظهر بالاسم.",
+        parse_mode=ParseMode.HTML, reply_markup=kb.guard_probe_button())
+
+
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v6.8.3 — the 5-second remote diagnosis.
 
@@ -424,7 +446,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from fysb import afn as _afn_mod
         _cnt = await afn.run(_eye.counts)
         _depth = _afn_mod.stats()
-        valve = (f"◆ عين الأزرار: أعطال {_cnt.get('FAIL', 0)} · صامتة {_cnt.get('SILENT', 0)} · "
+        valve = (f"◆ عين الأزرار: نقرات الجلسة {_eye.arrival_stats().get('total', 0)} · أعطال {_cnt.get('FAIL', 0)} · صامتة {_cnt.get('SILENT', 0)} · "
                  f"مهلات {_cnt.get('TIMEOUT', 0)} · عمال الواجهة: نشِط {_depth['active']} · طابور {_depth['queued']}\n")
     except Exception:
         valve = ""
@@ -668,6 +690,24 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         return
+    # v8.14.14 — the guard's last net: ANY unhandled error PTB delivers here
+    # (including one raised before/around the dispatcher armor) lands in the
+    # eye with the real traceback — and the callback spinner is cleared.
+    try:
+        q = getattr(update, "callback_query", None)
+        if q is not None:
+            import traceback as _tb
+            from fysb.services import ui_diagnostics
+            uid = getattr(getattr(q, "from_user", None), "id", 0) or 0
+            tb_txt = "".join(_tb.format_exception(type(err), err, err.__traceback__))[-1200:] if err else ""
+            await afn.run(ui_diagnostics.record, "RAW", uid, q.data or "",
+                          f"{type(err).__name__}: {err}\n{tb_txt}", None)
+            try:
+                await asyncio.wait_for(q.answer(), 1.0)
+            except Exception:
+                pass
+    except Exception:
+        pass
     log.error("Unhandled application error", exc_info=err)
     try:
         # v8.0.1: NEVER post error replies into Telegram channels or groups!

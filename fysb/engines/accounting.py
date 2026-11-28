@@ -16,7 +16,10 @@ def is_private(row: dict) -> bool:
 
 def is_closed(row: dict) -> bool:
     st = str(row.get("status") or "").upper()
-    return st in ("TP3_HIT", "SL_HIT", "TP1_BE", "TP2_BE", "WIN", "LOSS", "CLOSED_WIN") or (
+    # v8.14.22 — LOCKED_50 is a SETTLED outcome (the royal lock banked the
+    # threshold): it must never surface as "open" in any aggregate — the
+    # Truth Ledger then rules it a win.
+    return st in ("TP3_HIT", "SL_HIT", "TP1_BE", "TP2_BE", "WIN", "LOSS", "CLOSED_WIN", "LOCKED_50") or (
         st in ("TP1_HIT", "TP2_HIT") and bool(row.get("closed_at")))
 
 

@@ -181,7 +181,7 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
         # v8.14.19 — the Truth Ledger (the 50-pip decree) per filtered row
         closed = c.execute(f"""SELECT symbol, status, pips_result, profit_50_hit
                                FROM signals
-                               WHERE {w} AND (status IN ('TP3_HIT','SL_HIT','LOCKED_50')
+                               WHERE {w} AND (status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN','TP1_BE','TP2_BE','WIN','LOSS')
                                   OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))""",
                            params).fetchall()
         from fysb import instruments as _inst
@@ -261,7 +261,7 @@ def filtered_trades_detail(market: str | None = None, strategy: str | None = Non
     if since:
         where.append("created_at>=?")
         params.append(since)
-    where.append("(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN')"
+    where.append("(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN','TP1_BE','TP2_BE','WIN','LOSS')"
                  " OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))")
     from fysb import instruments as _inst
     from fysb.services import ledger as _ledger
@@ -284,7 +284,7 @@ def filtered_trades_detail(market: str | None = None, strategy: str | None = Non
         with db.conn() as c2:
             tp = c2.execute(f"SELECT COUNT(*) n FROM signals WHERE {w2}", pp2).fetchone()["n"]
             tc = c2.execute(f"SELECT COUNT(*) n FROM signals WHERE {w2} AND "
-                            "(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN')"
+                            "(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN','TP1_BE','TP2_BE','WIN','LOSS')"
                             " OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))", pp2).fetchone()["n"]
         return ("📋 <b>تفاصيل الصفقات المغلقة</b>\n"
                 f"▎لا صفقات مغلقة ضمن هذه التصفية — والصدق كامل.\n"
@@ -342,7 +342,7 @@ def signals_report() -> str:
         closed = c.execute(
             """SELECT symbol, status, pips_result, profit_50_hit
                FROM signals
-               WHERE status IN ('TP3_HIT','SL_HIT','LOCKED_50')
+               WHERE status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN','TP1_BE','TP2_BE','WIN','LOSS')
                   OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')"""
         ).fetchall()
         from fysb import instruments as _inst

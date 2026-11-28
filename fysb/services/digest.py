@@ -33,8 +33,34 @@ OPEN_STATUSES = ("ACTIVE", "RUNNING", "PENDING")
 CANCELLED_STATUSES = ("CANCELLED", "EXPIRED")
 
 
-def _cutoff_iso(days: int) -> str:
+def cutoff_iso(days: int | None) -> str | None:
+    """v8.14.20 — the one period cutoff generator (public; string-comparable
+    with config.now() ISO timestamps). days=None => full history (no cutoff)."""
+    if days is None:
+        return None
     return (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
+
+
+def _cutoff_iso(days: int) -> str:
+    return cutoff_iso(days) or ""
+
+
+def period_ar(days: int | None) -> str:
+    """v8.14.20 — honest Arabic period label shared by every report surface."""
+    if days is None:
+        return "كل التاريخ"
+    if int(days) == 1:
+        return "آخر 24 ساعة"
+    if int(days) <= 10:
+        return f"آخر {int(days)} أيام"
+    return f"آخر {int(days)} يوماً"
+
+
+def slice_ar(market: str | None, strategy: str | None, timeframe: str | None) -> str:
+    """v8.14.20 — the exact slice label (only non-ALL dimensions are named)."""
+    parts = [str(v) for v in (market, strategy, timeframe) if v]
+    return " · ".join(parts) if parts else "كل الأبعاد"
+
 
 
 def _calc_r_multiple(r: dict) -> float:
@@ -55,33 +81,53 @@ def _exec_verdict(decided: int, net_r: float, pf: float, net_pips: float) -> str
     return "🛡 فترة سلبية/متذبذبة — دون إخفاء الخسائر"
 
 
-def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
-    """Aggregate real institutional signal performance metrics from the live database."""
-    days = max(1, int(days))
-    since = _cutoff_iso(days)
+def build_digest_data(days: int | None = 7, include_private: bool = False,
+                      market: str | None = None, strategy: str | None = None,
+                      timeframe: str | None = None) -> dict:
+    """Aggregate real institutional signal performance metrics from the live
+    database. v8.14.20 — the SAME honest engine also serves the interactive
+    unified report: optional market/strategy/timeframe slice + optional period
+    (days=None => full history). Every number stays a real aggregate of the
+    exact requested slice — zero fabrication, zero mixed-unit sums."""
+    since = cutoff_iso(days)
+    slice_where, slice_params = [], []
+    if market:
+        slice_where.append("symbol=?")
+        slice_params.append(market)
+    if strategy:
+        slice_where.append("strategy=?")
+        slice_params.append(strategy)
+    if timeframe:
+        slice_where.append("timeframe=?")
+        slice_params.append(timeframe)
+    _slice_w = (" AND " + " AND ".join(slice_where)) if slice_where else ""
+    _slice_p = list(slice_params)
+    _period_w = (" AND created_at>=?" if since else "")
+    _period_p = [since] if since else []
     with db.conn() as c:
         if include_private:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
                 "pips_result, profit_50_hit, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
-                "FROM signals WHERE created_at>=? ORDER BY id DESC",
-                (since,),
+                f"FROM signals WHERE 1=1{_period_w}{_slice_w} ORDER BY id DESC",
+                (*_period_p, *_slice_p),
             ).fetchall()]
             private_excluded = 0
         else:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, symbol, direction, strategy, timeframe, entry, stop, status, hit_tp, "
                 "pips_result, profit_50_hit, score, source, created_at, closed_at, private_user_id, accounting_model, tp1, tp2, tp3 "
-                "FROM signals WHERE created_at>=? "
+                f"FROM signals WHERE 1=1{_period_w}{_slice_w} "
                 "AND COALESCE(private_user_id,0)=0 "
                 "AND COALESCE(UPPER(source),'') NOT IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED') "
                 "ORDER BY id DESC",
-                (since,),
+                (*_period_p, *_slice_p),
             ).fetchall()]
             private_excluded = int((c.execute(
-                "SELECT COUNT(*) AS n FROM signals WHERE created_at>=? AND (COALESCE(private_user_id,0)>0 "
+                "SELECT COUNT(*) AS n FROM signals WHERE 1=1"
+                f"{_period_w} AND (COALESCE(private_user_id,0)>0 "
                 "OR UPPER(source) IN ('SIGNAL_NOW','ADMIN_SIGNAL_NOW','TRUE_ANALYSIS_INSTANT','TRUE_ANALYSIS_CONFIRMED'))",
-                (since,),
+                (*_period_p,),
             ).fetchone() or {"n": 0})["n"] or 0)
 
     total = len(rows)
@@ -230,17 +276,27 @@ def build_digest_data(days: int = 7, include_private: bool = False) -> dict:
     quarantined: list[dict] = []
     try:
         from fysb.engines import intelligence as _intel
-        quarantined = _intel.list_quarantined_strategies(lookback_days=max(14, days))
+        quarantined = _intel.list_quarantined_strategies(lookback_days=max(14, int(days or 30)))
     except Exception:
         quarantined = []
 
     best_strategy = top_strategies[0]["strategy"] if top_strategies else "—"
-    period_ar = f"التقرير الأسبوعي (آخر {days} أيام)" if days <= 10 else f"التقرير الشهري (آخر {days} يوماً)"
+    _period_label = period_ar(days)
+    _slice_label = slice_ar(market, strategy, timeframe)
+    if _slice_label != "كل الأبعاد":
+        # v8.14.20 — the filtered slice: short honest period + the exact slice
+        _period_label = f"{_period_label} · {_slice_label}"
+    else:
+        # the plain digest keeps its traditional weekly/monthly wording
+        _period_label = ("كل التاريخ" if days is None else
+                         f"التقرير الأسبوعي (آخر {int(days)} أيام)" if int(days) <= 10
+                         else f"التقرير الشهري (آخر {int(days)} يوماً)")
     verdict_ar = _exec_verdict(decided, net_r, profit_factor, net_pips)
 
     return {
-        "days": days,
-        "period_ar": period_ar,
+        "days": int(days) if days else 0,
+        "slice_ar": _slice_label,
+        "period_ar": _period_label,
         "generated_at": config.now(),
         "total": total,
         "decided": decided,

@@ -847,15 +847,29 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "repfilter":
         await admin_reports_ui.rep_filter_home(q, uid, context, bot)
     elif act == "repf":
-        # v8.14.18 — the interactive report router: repf:m[:SYMBOL] /
-        # repf:s[:STRATEGY] / repf:t[:TF] / repf:run / repf:clear
+        # v8.14.18/20 — the interactive report router: repf:m[:SYMBOL] /
+        # repf:s[:STRATEGY] / repf:t[:TF] / repf:d[:DAYS] / repf:run / repf:clear
         if arg == "run":
             await admin_reports_ui.rep_filter_run(q, uid, context, bot)
         elif arg == "clear":
             await admin_reports_ui.rep_filter_clear(q, uid, context, bot)
+        elif arg == "d":
+            if arg2:
+                await admin_reports_ui.rep_filter_days_set(q, uid, context, bot, arg2)
+            else:
+                await admin_reports_ui.rep_filter_days(q, uid, context, bot)
+        elif arg == "pg":
+            k, _, p = (arg2 or "").partition(":")
+            await admin_reports_ui.rep_filter_pick_page(q, uid, context, bot, k, p)
         else:
             await admin_reports_ui.rep_filter_pick(q, uid, context, bot,
                                                    [arg] + ([arg2] if arg2 else []))
+    elif act == "repfp":
+        # v8.14.20 — the REAL market picture: the executive PNG of the slice
+        await admin_reports_ui.rep_send_png(q, uid, context, bot)
+    elif act == "repfme":
+        # v8.14.20 — بث لي: the exact report lands on the owner's chat now
+        await admin_reports_ui.rep_send_me(q, uid, context, bot)
     elif act == "repfd":
         # v8.14.19 — the closed-trades rows of the filtered slice
         await admin_reports_ui.rep_filter_trades(q, uid, context, bot)

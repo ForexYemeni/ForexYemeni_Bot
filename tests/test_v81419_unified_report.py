@@ -210,6 +210,10 @@ def test_broadcast_confirm_sends_only_after_decision():
             sent_to.append(int(chat_id))
             return None
 
+        async def send_photo(self, chat_id, photo=None, caption="", **kw):
+            sent_to.append(int(chat_id))
+            return None
+
     upd = type("Update", (), {})()
     q = MockQuery("a:repfb:confirm", ADMIN)
     q.from_user = type("U", (), {"id": ADMIN})()
@@ -222,7 +226,7 @@ def test_broadcast_confirm_sends_only_after_decision():
         c.execute("INSERT INTO broadcast_channels(chat_id,enabled,title,created_at,updated_at)"
                   " VALUES(?,?,?,?,?)", (-1001234, 1, "قناة الاختبار", "2026-11-27 09:00", "2026-11-27 09:00"))
     asyncio.run(admin_reports_ui.rep_filter_broadcast(q, ADMIN, ctx, _Bot(), "confirm"))
-    assert sent_to == [-1001234]          # the channel — and ONLY the channel
+    assert sent_to == [-1001234, ADMIN]   # channel text + the owner's copy (v8.14.20) — nothing else
     assert ctx.user_data.get("repf_broadcast_text") is None  # state consumed
 
 

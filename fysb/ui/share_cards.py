@@ -376,7 +376,7 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
         ("NET RETURN (R)", f"{net_r:+.1f}R", EMERALD if net_r >= 0 else CRIMSON),
         ("PROFIT FACTOR", f"{pf:.2f}", EMERALD if pf >= 1.25 else (GOLD_BRIGHT if pf >= 1.0 else CRIMSON)),
         ("WIN RATE", f"{wr:.1f}%", EMERALD if wr >= 50 else GOLD_BRIGHT),
-        ("NET PIPS", f"{net_pips:+.1f}p", EMERALD if net_pips >= 0 else CRIMSON),
+        ("NET USD • 0.01 LOT", f"{usd_001:+,.2f}$", EMERALD if usd_001 >= 0 else CRIMSON),
     ]
     cw, gap, sx, ky = 258, 18, 54, 148
     for i, (lbl, val, col) in enumerate(kpis):
@@ -400,13 +400,12 @@ def render_performance_digest_card(digest: dict) -> bytes | None:
             ry = ly0 + 68 + idx * 54
             name = str(s.get("strategy") or "MANUAL").upper()[:13]
             swr = float(s.get("win_rate") or 0.0)
-            spips = float(s.get("pips") or 0.0)
             sr = float(s.get("net_r") or 0.0)
             stotal = int(s.get("total") or 0)
             draw.text((lx0 + 24, ry), f"{idx + 1}. {name}", font=f_row, fill=TEXT_MAIN)
             draw.text(
                 (lx0 + 360, ry),
-                f"{sr:+.1f}R · {swr:.0f}% · {spips:+.0f}p ({stotal})",
+                f"{sr:+.1f}R · {swr:.0f}% ({stotal})",
                 font=f_mono,
                 fill=EMERALD if sr >= 0 else CRIMSON,
             )

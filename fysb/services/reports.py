@@ -115,6 +115,89 @@ def dashboard_view() -> str:
     return "\n".join(out)
 
 
+def filtered_signals_report(market: str | None = None, strategy: str | None = None,
+                            timeframe: str | None = None) -> str:
+    """v8.14.18 — the COMPREHENSIVE INTERACTIVE REPORT: the owner picks any
+    market/strategy/timeframe slice (or ALL of a dimension) and gets the
+    honest closed-ledger truth for EXACTLY that slice. Every number is a real
+    SQL aggregate of the live signals table:
+      * counts by status (the whole lifecycle, nothing hidden)
+      * closed ledger classified by STATUS semantics (banked TP / lock = win,
+        SL = loss) — per-symbol pips + their TRUE usd_move at 0.01 lot
+      * hit-rate, average recorded quality (score), average planned RR (rr)
+    Zero mixed-unit sums: pips are NEVER aggregated across symbols — USD is."""
+    where, params = ["1=1"], []
+    if market:
+        where.append("symbol=?")
+        params.append(market)
+    if strategy:
+        where.append("strategy=?")
+        params.append(strategy)
+    if timeframe:
+        where.append("timeframe=?")
+        params.append(timeframe)
+    filt_txt = (f"📈 السوق: <b>{esc(market or 'الكل')}</b> · "
+                f"🧠 الاستراتيجية: <b>{esc(strategy or 'الكل')}</b> · "
+                f"⏱ الإطار: <b>{esc(timeframe or 'الكل')}</b>")
+    with db.conn() as c:
+        w = " AND ".join(where)
+        total = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {w}", params).fetchone()["n"]
+        if total == 0:
+            return (f"📊 <b><u>التقرير التفاعلي الصادق</u></b>\n"
+                    f"<blockquote>▎{filt_txt}</blockquote>\n"
+                    "▎لا إشارات مطابقة لهذه التصفية بعد — وسّع التصفية أو أرسل إشارات.")
+        rows = c.execute(f"""SELECT status, COUNT(*) n FROM signals WHERE {w}
+                             GROUP BY status ORDER BY n DESC""", params).fetchall()
+        status_txt = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b>" for r in rows)
+        closed = c.execute(f"""SELECT symbol, status, COUNT(*) n, COALESCE(SUM(pips_result),0) p
+                               FROM signals
+                               WHERE {w} AND (status IN ('TP3_HIT','SL_HIT','LOCKED_50')
+                                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))
+                               GROUP BY symbol, status""", params).fetchall()
+        per_symbol: dict[str, dict] = {}
+        for r in closed:
+            sym = r["symbol"] or "?"
+            row = per_symbol.setdefault(sym, {"w": 0, "l": 0, "pips": 0.0})
+            is_win = r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "LOCKED_50")
+            row["w"] += int(r["n"]) if is_win else 0
+            row["l"] += 0 if is_win else int(r["n"])
+            row["pips"] += float(r["p"] or 0)
+        from fysb import instruments as _inst
+        tot_w = sum(v["w"] for v in per_symbol.values())
+        tot_l = sum(v["l"] for v in per_symbol.values())
+        quality = c.execute(f"SELECT AVG(score) a FROM signals WHERE {w} AND score>0",
+                            params).fetchone()["a"]
+        avg_rr = c.execute(f"SELECT AVG(rr) a FROM signals WHERE {w} AND rr>0",
+                           params).fetchone()["a"]
+    out = [
+        "📊 <b><u>التقرير التفاعلي الصادق</u></b>",
+        f"<blockquote>▎{filt_txt}\n▎📡 الإجمالي المطابق: <b>{total}</b></blockquote>",
+        card(status_txt),
+    ]
+    body = [f"{ICON['signal']} <b>المغلق — الحقيقة كاملة</b>"]
+    if per_symbol:
+        tot_usd = 0.0
+        for sym in sorted(per_symbol):
+            v = per_symbol[sym]
+            usd = _inst.usd_move(sym, v["pips"], 0.01)
+            tot_usd += usd
+            body.append(f"▎<b>{esc(sym)}</b>: رابحة <b>{v['w']}</b> · خاسرة <b>{v['l']}</b> "
+                        f"· <b>{v['pips']:+.1f}</b> نقطة ≈ <b>{usd:+.2f}$</b>")
+        body.append("  ─────────────")
+        body.append(f"▎<b>الإجمالي:</b> رابحة <b>{tot_w}</b> · خاسرة <b>{tot_l}</b> · "
+                    f"النتيجة <b>{tot_usd:+.2f}$</b> <i>(عند 0.01 لوت لكل صفقة)</i>")
+        if tot_w + tot_l > 0:
+            body.append(f"▎نسبة الإصابة: <b>{tot_w / (tot_w + tot_l) * 100:.0f}%</b>")
+        if quality:
+            body.append(f"▎متوسط الجودة المسجل: <b>{float(quality):.1f}/100</b>")
+        if avg_rr:
+            body.append(f"▎متوسط RR المخطط: <b>1:{float(avg_rr):.1f}</b>")
+    else:
+        body.append("▎لا صفقات مغلقة ضمن هذه التصفية بعد — الأرقام تظهر لحظة إغلاق أول صفقة.")
+    out.append(card("\n".join(body)))
+    return "\n".join(out)
+
+
 def users_report() -> str:
     admin_id = config.ADMIN_ID
     with db.conn() as c:

@@ -23,7 +23,7 @@ from telegram.ext import ContextTypes
 
 from fysb import afn, config, db
 from fysb.config import log
-from fysb.handlers import admin_channels, admin_core, admin_partners, admin_referrals, admin_system, admin_trading, user_pages
+from fysb.handlers import admin_channels, admin_core, admin_partners, admin_referrals, admin_reports_ui, admin_system, admin_trading, user_pages
 from fysb.handlers import callback_feedback
 from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
@@ -844,6 +844,18 @@ async def _route_admin(q, context, uid: int, action: str):
     # --- system ---
     elif act == "reports":
         await admin_system.admin_reports(q, uid, context, bot)
+    elif act == "repfilter":
+        await admin_reports_ui.rep_filter_home(q, uid, context, bot)
+    elif act == "repf":
+        # v8.14.18 — the interactive report router: repf:m[:SYMBOL] /
+        # repf:s[:STRATEGY] / repf:t[:TF] / repf:run / repf:clear
+        if arg == "run":
+            await admin_reports_ui.rep_filter_run(q, uid, context, bot)
+        elif arg == "clear":
+            await admin_reports_ui.rep_filter_clear(q, uid, context, bot)
+        else:
+            await admin_reports_ui.rep_filter_pick(q, uid, context, bot,
+                                                   [arg] + ([arg2] if arg2 else []))
     elif act == "repusers":
         await admin_system.admin_rep_users(q, uid, context, bot)
     elif act == "repsignals":

@@ -25,6 +25,7 @@ BROADCAST_AUDIENCES = [("all", "👥 كل المستخدمين"), ("free", "🆓
 # --- Reports ------------------------------------------------------------------------
 async def admin_reports(q, uid, context, bot):
     rows_kb = [
+        [kb.btn("🧭 التقرير التفاعلي (سوق/استراتيجية/إطار)", "a:repfilter", style="success")],
         [kb.btn("👥 المستخدمون", "a:repusers"), kb.btn("📡 الإشارات", "a:repsignals")],
         [kb.btn("💳 المدفوعات", "a:reppayments"), kb.btn("💎 الاشتراكات", "a:repsubs")],
         [kb.btn("🧠 دورات المحرك", "a:repengine")],

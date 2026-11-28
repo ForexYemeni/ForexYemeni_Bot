@@ -38,6 +38,7 @@ class BacktestTrade:
     outcome: str       # SL_HIT, TP1_BE, TP2_BE, TP3_HIT, TIME_EXIT, UNFILLED
     r_result: float
     pips_result: float
+    score: float = 0.0  # v8.14.23 — the recorded gate score (the Royal Scale's quality grid)
 
 
 @dataclass
@@ -277,6 +278,7 @@ def run_backtest(
 
         future = candles[i + 1:min(n, i + 1 + max_hold_bars)]
         tr = _simulate_trade(sym, cand, future, i + 1, spread_pips=eff_spread)
+        tr.score = float(getattr(cand, "score", 0) or 0)  # v8.14.23 — royal grid input
         trades.append(tr)
         # Advance past exit (or past entry attempt if unfilled) to avoid overlapping trades
         i = max(i + 2, tr.exit_idx + 1)

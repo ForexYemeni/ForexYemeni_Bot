@@ -27,6 +27,7 @@ async def admin_reports(q, uid, context, bot):
     rows_kb = [
         [kb.btn("📊 التقرير الشامل التفاعلي (سوق/استراتيجية/إطار)", "a:repfilter", style="success")],
         [kb.btn("📋 التقرير التفاعلي — كل الأبعاد: الكل", "a:repf:run", style="primary")],
+        [kb.btn("⚖️ الميزان الملكي — القياس قبل الثقة", "a:scale", style="success")],
         [kb.btn("👥 المستخدمون", "a:repusers"), kb.btn("📡 الإشارات", "a:repsignals")],
         [kb.btn("💳 المدفوعات", "a:reppayments"), kb.btn("💎 الاشتراكات", "a:repsubs")],
         [kb.btn("🧠 دورات المحرك", "a:repengine")],
@@ -34,7 +35,9 @@ async def admin_reports(q, uid, context, bot):
     body = ("📈 <b><u>مركز التقارير الموحد</u></b>\n"
             "<blockquote>▎📊 تقرير واحد فاخر شامل حقيقي 100%: اختر السوق والاستراتيجية "
             "والإطار الزمني — أو الكل — وستولّد الحقيقة كاملة بدولار حقيقي لكل أداة "
-            "وقانون الخمسين نقطة المطبق تلقائياً.</blockquote>\n"
+            "وقانون الخمسين نقطة المطبق تلقائياً.\n"
+            "▎⚖️ الميزان الملكي: باك-تست صادق على تاريخك الحقيقي — الأرضية وشبكة الجودة "
+            "ومحاكاة الحجر — قبل أي قرار حي.</blockquote>\n"
             "كل الأرقام مستخرجة فعلياً من قاعدة البيانات لحظة التوليد:")
     await render(q, body, kb.admin_nav(rows_kb), bot)
 

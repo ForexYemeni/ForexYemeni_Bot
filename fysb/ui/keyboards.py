@@ -307,7 +307,7 @@ def admin_hub_finance() -> InlineKeyboardMarkup:
         [btn("🤝 نظام الإحالات", "a:refs", style="success"),
          btn("🎁 الهدايا والأكواد", "a:gifts", style="success")],
         [btn("🎓 أكاديمية التداول", "a:academy", style="primary"),
-         btn("📊 بث تقرير الأداء الآن", "a:digest_now", style="primary")],
+         btn("📊 تقرير الأداء الشامل التفاعلي", "a:repfilter", style="success")],
         [btn("📈 الإحصائيات التفصيلية", "a:statistics", style="primary"),
          btn("📋 التقارير الشاملة", "a:reports", style="primary")],
     ])
@@ -382,7 +382,7 @@ ADMIN_HUBS = {
         "<blockquote>"
         "▎💎 <b>العضويات والمال:</b> المستخدمون · الاشتراكات · المدفوعات · الباقات · وسائل الدفع والخصومات\n"
         "▎🚀 <b>النمو والشراكة:</b> تحليل ForexYemeni الحقيقي · الشركاء · العمولات · الإحالات · الهدايا والأكاديمية\n"
-        "▎📈 <b>التحليلات والتقارير:</b> الإحصائيات التفصيلية · التقارير الشاملة · بث تقرير الأداء"
+        "▎📈 <b>التحليلات والتقارير:</b> الإحصائيات التفصيلية · التقرير الشامل التفاعلي"
         "</blockquote>",
         admin_hub_finance,
     ),

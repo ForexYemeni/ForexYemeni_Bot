@@ -149,20 +149,27 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
         rows = c.execute(f"""SELECT status, COUNT(*) n FROM signals WHERE {w}
                              GROUP BY status ORDER BY n DESC""", params).fetchall()
         status_txt = "\n".join(f"▎<b>{esc(r['status'])}</b>: <b>{r['n']}</b>" for r in rows)
-        closed = c.execute(f"""SELECT symbol, status, COUNT(*) n, COALESCE(SUM(pips_result),0) p
+        # v8.14.19 — the Truth Ledger (the 50-pip decree) per filtered row
+        closed = c.execute(f"""SELECT symbol, status, pips_result, profit_50_hit
                                FROM signals
                                WHERE {w} AND (status IN ('TP3_HIT','SL_HIT','LOCKED_50')
-                                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))
-                               GROUP BY symbol, status""", params).fetchall()
+                                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))""",
+                           params).fetchall()
+        from fysb import instruments as _inst
+        from fysb.services import ledger as _ledger
         per_symbol: dict[str, dict] = {}
+        rescued = 0
         for r in closed:
+            verdict, eff_pips = _ledger.closed_verdict(r)
+            if verdict == "skip":
+                continue
+            if verdict == "win" and str(r["status"]).upper() == "SL_HIT":
+                rescued += 1
             sym = r["symbol"] or "?"
             row = per_symbol.setdefault(sym, {"w": 0, "l": 0, "pips": 0.0})
-            is_win = r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "LOCKED_50")
-            row["w"] += int(r["n"]) if is_win else 0
-            row["l"] += 0 if is_win else int(r["n"])
-            row["pips"] += float(r["p"] or 0)
-        from fysb import instruments as _inst
+            row["w"] += 1 if verdict == "win" else 0
+            row["l"] += 1 if verdict == "loss" else 0
+            row["pips"] += eff_pips
         tot_w = sum(v["w"] for v in per_symbol.values())
         tot_l = sum(v["l"] for v in per_symbol.values())
         quality = c.execute(f"SELECT AVG(score) a FROM signals WHERE {w} AND score>0",
@@ -188,6 +195,9 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
                     f"النتيجة <b>{tot_usd:+.2f}$</b> <i>(عند 0.01 لوت لكل صفقة)</i>")
         if tot_w + tot_l > 0:
             body.append(f"▎نسبة الإصابة: <b>{tot_w / (tot_w + tot_l) * 100:.0f}%</b>")
+        if rescued:
+            body.append(f"▎🏅 <b>قانون الخمسين نقطة:</b> <b>{rescued}</b> صفقة لمست العتبة "
+                        "فحُسبت رابحة عند عتبة التأمين — لا تُعد خاسرة أبداً")
         if quality:
             body.append(f"▎متوسط الجودة المسجل: <b>{float(quality):.1f}/100</b>")
         if avg_rr:
@@ -196,6 +206,52 @@ def filtered_signals_report(market: str | None = None, strategy: str | None = No
         body.append("▎لا صفقات مغلقة ضمن هذه التصفية بعد — الأرقام تظهر لحظة إغلاق أول صفقة.")
     out.append(card("\n".join(body)))
     return "\n".join(out)
+
+
+
+
+def filtered_trades_detail(market: str | None = None, strategy: str | None = None,
+                           timeframe: str | None = None, limit: int = 15) -> str:
+    """v8.14.19 — the closed-trades rows of the exact filtered slice (A-to-Z
+    completeness): every settled trade with its truthful settlement — the
+    50-pip decree included — newest first, capped for readability."""
+    where, params = ["1=1"], []
+    if market:
+        where.append("symbol=?")
+        params.append(market)
+    if strategy:
+        where.append("strategy=?")
+        params.append(strategy)
+    if timeframe:
+        where.append("timeframe=?")
+        params.append(timeframe)
+    where.append("(status IN ('TP3_HIT','SL_HIT','LOCKED_50','CLOSED_WIN')"
+                 " OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!=''))")
+    from fysb import instruments as _inst
+    from fysb.services import ledger as _ledger
+    with db.conn() as c:
+        rows = c.execute(f"""SELECT id, symbol, strategy, timeframe, status, pips_result,
+                                    profit_50_hit, closed_at, created_at
+                             FROM signals WHERE {' AND '.join(where)}
+                             ORDER BY id DESC LIMIT ?""", params + [int(limit)]).fetchall()
+        matched = c.execute(f"SELECT COUNT(*) n FROM signals WHERE {' AND '.join(where)}",
+                            params).fetchone()["n"]
+    if not rows:
+        return ("📋 <b>تفاصيل الصفقات المغلقة</b>\n"
+                "▎لا صفقات مغلقة ضمن هذه التصفية بعد.")
+    from fysb.engines.tracker import seq_of
+    body = [f"📋 <b>تفاصيل الصفقات المغلقة</b> — <b>{matched}</b> مطابقة "
+            f"(آخر {len(rows)}):"]
+    for r in rows:
+        verdict, eff_pips = _ledger.closed_verdict(r)
+        usd = _inst.usd_move(r["symbol"] or "?", eff_pips, 0.01)
+        badge = "✅" if verdict == "win" else "❌"
+        note = " 🏅<i>(قانون الخمسين)</i>" if (verdict == "win" and str(r["status"]).upper() == "SL_HIT") else ""
+        body.append(
+            f"▎{badge} <b>#{seq_of(int(r['id']))}</b> {esc(r['symbol'] or '?')} · "
+            f"{esc(str(r['strategy'] or '—'))} · {esc(str(r['timeframe'] or '—'))} · "
+            f"{esc(str(r['status']))} · <b>{eff_pips:+.1f}</b> نقطة ≈ <b>{usd:+.2f}$</b>{note}")
+    return card("\n".join(body))
 
 
 def users_report() -> str:
@@ -230,24 +286,30 @@ def signals_report() -> str:
         # STATUS semantics (banked TP / locked), losses by SL_HIT. Pips are
         # NEVER summed across symbols (a BTC pip ≠ a gold pip) — per-symbol
         # rows + one USD total via the real usd_move contract at 0.01 lot.
+        # v8.14.19 — the Truth Ledger: per-row verdict (the 50-pip decree —
+        # a documented threshold touch is a WIN at the threshold, never a loss)
         closed = c.execute(
-            """SELECT symbol, status, COUNT(*) n, COALESCE(SUM(pips_result), 0) p
+            """SELECT symbol, status, pips_result, profit_50_hit
                FROM signals
                WHERE status IN ('TP3_HIT','SL_HIT','LOCKED_50')
-                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')
-               GROUP BY symbol, status"""
+                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')"""
         ).fetchall()
         from fysb import instruments as _inst
+        from fysb.services import ledger as _ledger
         if closed:
             per_symbol: dict[str, dict] = {}
+            rescued = 0
             for r in closed:
+                verdict, eff_pips = _ledger.closed_verdict(r)
+                if verdict == "skip":
+                    continue
+                if verdict == "win" and str(r["status"]).upper() == "SL_HIT":
+                    rescued += 1  # the 50-pip decree rescued this stop row
                 sym = r["symbol"] or "?"
                 row = per_symbol.setdefault(sym, {"w": 0, "l": 0, "pips": 0.0})
-                is_win = r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "LOCKED_50")
-                is_loss = r["status"] == "SL_HIT"
-                row["w"] += int(r["n"]) if is_win else 0
-                row["l"] += int(r["n"]) if is_loss else 0
-                row["pips"] += float(r["p"] or 0)
+                row["w"] += 1 if verdict == "win" else 0
+                row["l"] += 1 if verdict == "loss" else 0
+                row["pips"] += eff_pips
             tot_w = sum(v["w"] for v in per_symbol.values())
             tot_l = sum(v["l"] for v in per_symbol.values())
             tot_usd = 0.0
@@ -264,6 +326,9 @@ def signals_report() -> str:
                         f"النتيجة <b>{tot_usd:+.2f}$</b> <i>(عند 0.01 لوت لكل صفقة)</i>")
             if tot_w + tot_l > 0:
                 body.append(f"▎نسبة الإصابة: <b>{tot_w / (tot_w + tot_l) * 100:.0f}%</b>")
+            if rescued:
+                body.append(f"▎🏅 <b>قانون الخمسين نقطة:</b> <b>{rescued}</b> صفقة لمست العتبة "
+                            "فحُسبت رابحة عند عتبة التأمين — لا تُعد خاسرة أبداً")
             lines.append(card("\n".join(body)))
     return "\n".join(lines)
 

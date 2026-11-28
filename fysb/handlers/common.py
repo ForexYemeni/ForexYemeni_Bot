@@ -318,6 +318,83 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 
+def _is_owner(update) -> bool:
+    uid = getattr(getattr(update, "effective_user", None), "id", 0) or 0
+    return uid == config.ADMIN_ID
+
+
+async def btnfail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.14.13 — «عين الأزرار» by COMMAND: the eye survives any button
+    outage (commands ride a completely separate pipeline from callbacks)."""
+    if not _is_owner(update):
+        return
+    from fysb.services import ui_diagnostics as _eye
+    events = await afn.run(_eye.recent, 12)
+    cnt = await afn.run(_eye.counts)
+    lines = [
+        "🩺 <b><u>عين الأزرار الملكية (أمر مباشر)</u></b>",
+        "<blockquote>"
+        f"▎💥 أعطال: <b>{cnt.get('FAIL', 0)}</b> · "
+        f"👁 صامتة: <b>{cnt.get('SILENT', 0)}</b> · "
+        f"⏱ مهلات: <b>{cnt.get('TIMEOUT', 0)}</b> · "
+        f"🔁 مطابقة: <b>{cnt.get('NOT_MODIFIED', 0)}</b>"
+        "</blockquote>",
+    ]
+    if not events:
+        lines.append("<blockquote>▎✨ لا أحداث — لا ضغطات صامتة ولا أعطال مسجلة.</blockquote>")
+    for e in events:
+        lines.append(
+            f"▎<b>{_eye.KIND_LABEL.get(e['kind'], e['kind'])}</b> "
+            f"<code>{safe(str(e['data'] or '')[:36])}</code> — {safe(str(e['created_at'] or '')[:16])}")
+        d = str(e.get("detail") or "").strip()
+        if d:
+            lines.append(f"  <i>{safe(d.splitlines()[0][:150])}</i>")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.14.13 — «الصمّام الملكي»: instant self-heal from the keyboard —
+    UI-pool recycle + live DB probe (read & write latency) + the eye state.
+    The guaranteed rescue lane when buttons are dead across all panels."""
+    if not _is_owner(update):
+        return
+    import time as _time
+    from fysb import afn as _afn_mod
+    from fysb.services import ui_diagnostics as _eye
+
+    def _probe():
+        t = _time.monotonic()
+        db.set_setting("last_fix_probe", config.now())          # WRITE probe
+        w_ms = (_time.monotonic() - t) * 1000
+        t = _time.monotonic()
+        ok = db.healthy()[0]                                     # READ probe
+        r_ms = (_time.monotonic() - t) * 1000
+        return ok, r_ms, w_ms
+
+    ok, r_ms, w_ms = await afn.run(_probe)
+    before = _afn_mod.stats()
+    await afn.run(_afn_mod.recycle)
+    after = _afn_mod.stats()
+    cnt = await afn.run(_eye.counts)
+    engine = "PostgreSQL (Supabase)" if config.USE_PG else "SQLite محلية"
+    db_line = (f"✅ قاعدة البيانات: قراءة <b>{r_ms:.0f}ms</b> · كتابة <b>{w_ms:.0f}ms</b> ({engine})"
+               if ok else
+               f"⛔ قاعدة البيانات لا تستجيب بسرعة (قراءة {r_ms:.0f}ms) — إن تكرر فهذا هو القاتل الحقيقي للأزرار")
+    body = (
+        "🛠 <b><u>الصمّام الملكي — إصلاح ذاتي فوري</u></b>\n"
+        "<blockquote>"
+        f"▎{db_line}\n"
+        f"▎♻️ مسبح عمال الواجهة: <b>{before['workers']}</b> عمال أُعيد بناؤه "
+        f"(قبل: نشِط {before['active']} · طابور {before['queued']} → الآن: طابور {after['queued']})\n"
+        f"▎🩺 العين: أعطال <b>{cnt.get('FAIL', 0)}</b> · صامتة <b>{cnt.get('SILENT', 0)}</b> · "
+        f"مهلات <b>{cnt.get('TIMEOUT', 0)}</b>\n"
+        "▎👑 إن كانت الأزرار ميتة: أُصلح أشيع سببها (تجوّع المسبح) الآن — وأعد الضغطة مباشرة."
+        "</blockquote>\n"
+        "<i>هذا الأمر خارج مسار الأزرار بنيةً — يعمل حتى لو ماتت كل الأزرار.</i>"
+    )
+    await update.effective_message.reply_text(body, parse_mode="HTML")
+
+
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v6.8.3 — the 5-second remote diagnosis.
 
@@ -341,6 +418,16 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_state = f"✅ متصلة ({db_ms:.0f}ms)" if ok else f"⛔ لا تستجيب ({db_ms:.0f}ms)"
     import telegram as _tg
     ui_mode = "تعديل مكاني" if (await afn.run(db.get_setting, "ui_edit_in_place", "0")) == "1" else "رسالة جديدة (فورية)"
+    # v8.14.13 — the royal main valve state rides the live diagnosis
+    try:
+        from fysb.services import ui_diagnostics as _eye
+        from fysb import afn as _afn_mod
+        _cnt = await afn.run(_eye.counts)
+        _depth = _afn_mod.stats()
+        valve = (f"◆ عين الأزرار: أعطال {_cnt.get('FAIL', 0)} · صامتة {_cnt.get('SILENT', 0)} · "
+                 f"مهلات {_cnt.get('TIMEOUT', 0)} · عمال الواجهة: نشِط {_depth['active']} · طابور {_depth['queued']}\n")
+    except Exception:
+        valve = ""
     color_state = "✅ مفعّلة بالكامل" if kb._HAS_STYLE else "⚠️ تحتاج تحديث python-telegram-bot>=22.7"
     await update.effective_message.reply_text(
         f"🩺 <b>فحص سريع — {config.BRAND}</b>\n"
@@ -348,7 +435,8 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"◆ المحرك: {engine}\n"
         f"◆ قاعدة البيانات: {db_state}\n"
         f"◆ وضع الأزرار: {ui_mode} · الألوان الفاخرة: {color_state}\n"
-        f"◆ مكتبة تلغرام: PTB v{getattr(_tg, '__version__', '?')} · مدة التشغيل: {up_txt}</blockquote>\n"
+        f"◆ مكتبة تلغرام: PTB v{getattr(_tg, '__version__', '?')} · مدة التشغيل: {up_txt}\n"
+        f"{valve}</blockquote>\n"
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"
         "<i>إذا لم يرد هذا الأمر أصلاً، فالنسخة العاملة على الاستضافة قديمة — أعد رفع الملفات الجديدة وأعد التشغيل.</i>",
         parse_mode=ParseMode.HTML)

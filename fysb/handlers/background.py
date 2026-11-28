@@ -1156,6 +1156,7 @@ async def post_init(app):
         asyncio.create_task(channels_loop(app), name="fysb-channels"),
         asyncio.create_task(watchers_loop(app), name="fysb-watchers"),
         asyncio.create_task(crypto_ws_loop(app), name="fysb-crypto-ws"),
+        asyncio.create_task(ui_health_loop(app), name="fysb-ui-valve"),
         asyncio.create_task(scheduled_charts_loop(app), name="fysb-sched-charts"),
     ]
     # v7.0.0 / v7.2.0: start embedded Mini App & Admin Web Panel HTTP server
@@ -1182,16 +1183,117 @@ async def post_init(app):
     _TASKS.append(asyncio.create_task(auto_digest_loop(app), name="fysb-auto-digest"))
     post_init._tasks_ref = _TASKS
     log.info("background loops started (%d)", len(_TASKS))
-    # v8.14.11 — «سجل الغياب الصادق»: if the last heartbeat is far behind,
-    # the owner gets ONE honest report of everything that closed in the gap.
+    # v8.14.13 — «الصمّام الملكي»: the boot card + the absence report ride a
+    # DETACHED timed task — polling starts INSTANTLY and boot can never hang
+    # on any network send (the v8.14.11 block awaited inside post_init).
+    _TASKS.append(asyncio.create_task(_boot_valve_task(app), name="fysb-boot-valve"))
+
+
+async def _boot_valve_task(app):
+    """v8.14.13 — fires 25s after boot, hard-timeboxed at every step:
+    the life card (build + DB verdict + the valve is armed), then the honest
+    absence report. Boot latency is now structurally independent of both."""
     try:
-        from fysb.services import absence as _absence
-        report, gap = await afn.run(_absence.build_absence_report)
-        if report:
-            await _safe_send(app.bot, config.ADMIN_ID, report)
-            log.warning("ABSENCE: %s seconds since the last heartbeat — report sent", int(gap))
+        await asyncio.sleep(25)
+        try:
+            await asyncio.wait_for(_safe_send(
+                app.bot, config.ADMIN_ID,
+                f"👑 <b>البنية حية — v{config.VERSION}</b>\n"
+                "<blockquote>▎🛡 الصمّام الملكي مسلّح: كل ضغطة صامتة أو عالقة "
+                "تُسجَّل وتُبلَّغ تلقائياً\n"
+                "▎🩺 العين: أرسل <code>/btnfail</code> · الإصلاح الفوري: "
+                "<code>/fix</code> · الفحص: <code>/ping</code></blockquote>"), 20)
+        except Exception:
+            pass
+        try:
+            from fysb.services import absence as _absence
+            report, gap = await asyncio.wait_for(
+                afn.run(_absence.build_absence_report), 15)
+            if report:
+                await asyncio.wait_for(_safe_send(app.bot, config.ADMIN_ID, report), 20)
+                log.warning("ABSENCE: %s seconds since the last heartbeat — report sent", int(gap))
+        except Exception:
+            log.debug("absence report skipped (valve safe)")
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        log.debug("absence report skipped")
+        log.debug("boot valve task ended harmlessly")
+
+
+async def ui_health_loop(app):
+    """v8.14.13 — the royal main valve loop (60s tick): starvation self-heal
+    + silence alarm. The tick itself is `_valve_tick` — directly testable."""
+    await asyncio.sleep(90)
+    starve_ticks = 0
+    while True:
+        starve_ticks = await _valve_tick(app, starve_ticks)
+        await asyncio.sleep(60)
+
+
+async def _valve_tick(app, starve_ticks: int = 0) -> int:
+    """One royal main valve cycle: (a) UI-pool starvation self-heal — a
+    sustained queue recycles the worker pool automatically; (b) the silence
+    alarm — ≥2 dead presses within 10 minutes PUSH the eye report to the
+    owner (he never needs a working button to learn why his buttons died)."""
+    from fysb import afn as _afn_mod
+    from fysb.services import ui_diagnostics as _eye
+    from fysb.services import audit as _audit
+    try:
+        depth = _afn_mod.stats()
+        if depth["queued"] >= 4:
+            starve_ticks += 1
+        else:
+            starve_ticks = 0
+        if starve_ticks >= 2:
+            starve_ticks = 0
+            await afn.run(_afn_mod.recycle)
+            await afn.run(_audit.log, 0, "ui_pool_recycled:auto")
+            log.warning("VALVE: UI pool recycled after sustained starvation (%s)", depth)
+            try:
+                await asyncio.wait_for(_safe_send(
+                    app.bot, config.ADMIN_ID,
+                    "♻️ <b>الصمّام الملكي شفى تجوّع عمال الواجهة تلقائياً</b> — "
+                    f"الطابور كان {depth['queued']} عمليات معلقة. الأزرار تعود للعمل الآن؛ "
+                    "السبب الحقيقي في العين: <code>/btnfail</code>"), 20)
+            except Exception:
+                pass
+        # silence alarm — every event kind the eye records as a dead press
+        recent = await afn.run(_eye.recent, 10)
+        fresh = [e for e in recent
+                 if e["kind"] in ("FAIL", "SILENT", "TIMEOUT")
+                 and _absence_or_none(e) < 600]
+        if len(fresh) >= 2:
+            last = await afn.run(db.get_setting, "last_valve_alarm", "")
+            if last != config.mecca_now().strftime("%Y-%m-%d %H:%M"):
+                await afn.run(db.set_setting, "last_valve_alarm",
+                              config.mecca_now().strftime("%Y-%m-%d %H:%M"))
+                body = (
+                    "🚨 <b><u>إنذار الصمّام الملكي — ضغطات ميتة الآن</u></b>\n"
+                    "<blockquote>" + "\n".join(
+                        f"▎{_eye.KIND_LABEL.get(e['kind'], e['kind'])} — "
+                        f"<code>{e['data'][:36]}</code> ({e['duration_ms'] or '?'}ms)"
+                        for e in fresh[:5]) + "\n"
+                    "▎🛠 الإصلاح الفوري من لوحة المفاتيح: <code>/fix</code> — "
+                    "والسبب الحقيقي: <code>/btnfail</code></blockquote>")
+                await asyncio.wait_for(_safe_send(app.bot, config.ADMIN_ID, body), 20)
+                log.warning("VALVE: silence alarm pushed (%d dead presses/10min)", len(fresh))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.debug("valve tick skipped: %s", type(e).__name__)
+    return starve_ticks
+
+
+def _absence_or_none(e: dict) -> float:
+    """Age (seconds) of a ui_event row since now; broken stamps read ancient."""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(e.get("created_at") or ""))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return 1e12
 
 
 def _warm_pg() -> None:

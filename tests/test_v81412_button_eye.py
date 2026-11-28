@@ -101,7 +101,7 @@ def test_eye_clear_wipes_the_ledger():
     ui_diagnostics.record_silent(1, "u:x", 10.0)
     assert ui_diagnostics.counts()["SILENT"] == 1
     q, _ = _fire("a:btnfailclear")
-    assert ui_diagnostics.counts() == {"FAIL": 0, "SILENT": 0, "NOT_MODIFIED": 0}
+    assert all(v == 0 for v in ui_diagnostics.counts().values())
 
 
 def test_eye_never_breaks_the_press_itself():
@@ -115,9 +115,12 @@ def test_eye_never_breaks_the_press_itself():
 
 
 def test_eye_ledger_is_size_capped():
-    for i in range(350):
+    # v8.14.14 — cap raised 300→600: the royal guard's evidence kinds
+    # (DROP/RAW/PROBE) share the ring with the classic kinds, so the ledger
+    # keeps more history; the cap itself stays a hard guarantee.
+    for i in range(650):
         ui_diagnostics.record("SILENT", i, f"u:x:{i}", "", 1.0)
-    assert ui_diagnostics.counts()["SILENT"] <= 300
+    assert ui_diagnostics.counts()["SILENT"] <= 600
 
 
 def test_dispatcher_routes_the_eye():

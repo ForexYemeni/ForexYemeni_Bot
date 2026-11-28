@@ -111,6 +111,7 @@ def main() -> int:
     try:
         if not preflight():
             return 1
+        from telegram import Update
         from telegram.ext import (
             Application, CallbackQueryHandler, CommandHandler, MessageHandler,
             PreCheckoutQueryHandler, filters,
@@ -120,8 +121,8 @@ def main() -> int:
         from fysb.handlers import common
         from fysb.handlers.common import (admin_command, backup_command, btnfail_command,
                                           error_handler, fix_command, menu_command,
-                                          ping_command, start, update_command)
-        from fysb.handlers.dispatcher import buttons
+                                          ping_command, probe_command, start, update_command)
+        from fysb.handlers.dispatcher import buttons, cb_tripwire
 
         # v6.11.0 — ZERO-WAIT BUTTONS (owner demand: «أزرار تستجيب بشكل أسرع
         # دون الانتظار للحظة واحدة»), three structural switches at once:
@@ -153,15 +154,25 @@ def main() -> int:
         app.add_handler(CommandHandler("btnfail", btnfail_command, filters=_PRIV))
         app.add_handler(CommandHandler("fix", fix_command, filters=_PRIV))
         app.add_handler(CallbackQueryHandler(buttons))
+        # v8.14.14 — «الحرس الملكي» tripwire in a LATER group: any callback the
+        # main gate never executed (dispatch drop) is caught here with evidence.
+        app.add_handler(CallbackQueryHandler(cb_tripwire), group=5)
+        app.add_handler(CommandHandler("probe", probe_command, filters=_PRIV))
         app.add_handler(PreCheckoutQueryHandler(inputs.on_pre_checkout))
         app.add_handler(MessageHandler(_PRIV & filters.SUCCESSFUL_PAYMENT, inputs.on_successful_payment))
         app.add_handler(MessageHandler(_PRIV & filters.PHOTO, inputs.on_photo))
         app.add_handler(MessageHandler(_PRIV & (filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL), inputs.on_media))
         app.add_handler(MessageHandler(_PRIV & filters.TEXT & ~filters.COMMAND, inputs.on_text))
         app.add_error_handler(error_handler)
-        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup /btnfail /fix + callbacks + text/photo)",
+        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup /btnfail /fix /probe + callbacks + guard-tripwire + text/photo)",
                  config.BRAND, config.BUILD_NAME, config.VERSION)
-        app.run_polling(drop_pending_updates=False)
+        # v8.14.14 — «الحرس الملكي»: allowed_updates=Update.ALL_TYPES is
+        # RE-ASSERTED on every single poll. If anything ever pinned a restricted
+        # allowed_updates list on the Telegram side (sticky server state), every
+        # callback_query would silently vanish — commands keep working, presses
+        # produce NOTHING anywhere. Re-asserting the full list every poll makes
+        # that whole failure class mechanically impossible.
+        app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
         if common.conflict_detected:
             # Another instance is polling with this token — installer maps exit 3 to the remedy.
             return 3

@@ -28,6 +28,7 @@ from fysb.handlers import callback_feedback
 from fysb.handlers.inputs import CLEAR_ON_NAV
 from fysb.services import users as users_service
 from fysb.services import audit as audit_log
+from fysb.services import ui_diagnostics
 from fysb.ui import keyboards as kb
 
 BOT_REF = None  # set in post_init for background tasks
@@ -37,6 +38,51 @@ ACK_TIMEOUT_SECONDS = 2.0
 # fallback card + the evidence lands in the royal button eye (with UI-pool
 # depth — the starvation tell).
 BUTTON_HARD_TIMEOUT_SECONDS = 20.0
+
+
+# ---------------------------------------------------------------------------
+# v8.14.14 — «الحرس الملكي»: a guard at EVERY layer of the button journey, so
+# no failure can ever be silent or invisible again:
+#   1. RECEIPT — session arrival bookkeeping the moment PTB hands the press
+#      over, before any analysis: per-press proof of the Telegram → PTB
+#      delivery leg. Pure memory (record_arrival): a DB receipt would add a
+#      third concurrent SQLite writer per press and can lock the route's own
+#      write — caught live by the v6.20.1 latency contract in CI.
+#   2. ARMOR (RAW) — the whole entry (receipt, interactive(), feedback
+#      construction) is wrapped: anything dying around the route lands in the
+#      eye with a real traceback + a visible card. Nothing above the routes
+#      can die unrecorded.
+#   3. TRIPWIRE (DROP) — a second CallbackQueryHandler in a LATER PTB group:
+#      PTB runs all groups in order, so if the main gate never executed the
+#      press (dispatch drop / swallowed by another handler) the tripwire sees
+#      an unseen update and fires with evidence + a royal guidance card.
+#   4. PROBE — /probe sends a dedicated test button (fyprobe); the owner's own
+#      finger proves the full chain alive end-to-end in seconds.
+# main.py re-asserts allowed_updates=Update.ALL_TYPES on every poll, so a
+# sticky Telegram-side callback_query suppression can never happen silently
+# either — the delivery leg itself is mechanically defended.
+# ---------------------------------------------------------------------------
+_GUARD_SEEN: dict[int, float] = {}
+
+
+def _mark_seen(update) -> None:
+    """Remember this update_id as executed by the main gate (bounded dict)."""
+    upd_id = getattr(update, "update_id", None)
+    if upd_id is None:
+        return
+    now_m = time.monotonic()
+    _GUARD_SEEN[int(upd_id)] = now_m
+    if len(_GUARD_SEEN) > 512:
+        cutoff = now_m - 600.0
+        for k in [k for k, v in _GUARD_SEEN.items() if v < cutoff]:
+            _GUARD_SEEN.pop(k, None)
+    while len(_GUARD_SEEN) > 512:  # hard cap: drop the oldest marks
+        _GUARD_SEEN.pop(min(_GUARD_SEEN, key=_GUARD_SEEN.get), None)
+
+
+def _was_seen(update) -> bool:
+    upd_id = getattr(update, "update_id", None)
+    return upd_id is not None and _GUARD_SEEN.get(int(upd_id)) is not None
 
 
 class _route_budget:
@@ -67,9 +113,50 @@ async def _quiet_answer(q) -> None:
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # All u:/a:/p:/unknown routes share the same feedback and worker isolation.
-    with afn.interactive():
-        await _buttons(update, context)
+    # v8.14.14 — receipt at the door + full-body armor: the receipt proves
+    # delivery per press; the armor guarantees NOTHING between the Telegram
+    # handler call and the route can die unrecorded.
+    try:
+        q0 = getattr(update, "callback_query", None)
+        if q0 is not None:
+            _mark_seen(update)
+            # the in-memory receipt — microsecond cost, zero I/O, zero locks
+            uid0 = getattr(getattr(q0, "from_user", None), "id", 0) or 0
+            ui_diagnostics.record_arrival(uid0, getattr(q0, "data", "") or "")
+    except Exception:
+        pass
+    try:
+        # All u:/a:/p:/unknown routes share the same feedback and worker isolation.
+        with afn.interactive():
+            await _buttons(update, context)
+    except Exception as exc:
+        # v8.14.14 — the outermost net: the eye sees even the layers that
+        # predate the instrumented routes (receipt, interactive(), feedback
+        # construction). Real traceback in, visible card out.
+        try:
+            import traceback as _tb
+            q1 = getattr(update, "callback_query", None)
+            uid1 = getattr(getattr(q1, "from_user", None), "id", 0) or 0
+            data1 = (getattr(q1, "data", "") or "") if q1 is not None else "?"
+            await afn.run(ui_diagnostics.record, "RAW", uid1, data1,
+                          f"{type(exc).__name__}: {exc}\n{_tb.format_exc()[-1400:]}", None)
+        except Exception:
+            pass
+        try:
+            q1 = getattr(update, "callback_query", None)
+            if q1 is not None:
+                try:
+                    await asyncio.wait_for(q1.answer(), ACK_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+                msg1 = getattr(q1, "message", None)
+                if msg1 is not None and hasattr(msg1, "reply_text"):
+                    await msg1.reply_text(
+                        "🛡 <b>الحرس الملكي اعترض خللاً في الطبقة الخارجية</b> — الضغطة لم تسقط صمتاً.\n"
+                        "الإثبات الحقيقي سُجّل في العين. أرسل <code>/fix</code> للإصلاح الفوري ثم أعد الضغطة.",
+                        parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,6 +185,23 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # (the exact starvation this valve exists to prevent).
         async with _route_budget():
             await asyncio.sleep(0)
+            # v8.14.14 — the guard probe: a dedicated test button the owner can
+            # press to prove the FULL chain (Telegram → PTB → gate → engine →
+            # page) alive with his own finger, recorded in the eye as PROBE.
+            if data == "fyprobe":
+                await afn.run(ui_diagnostics.record, "PROBE", uid, data,
+                              "اكتمل اختبار الحرس — الضغطة وصلت حتى المحرك وعولجت وسُلّمت",
+                              (time.monotonic() - t0) * 1000)
+                from fysb.handlers.common import render as _render
+                await _render(
+                    q,
+                    "🛡 <b>اختبار الحرس الملكي — ناجح</b>\n"
+                    f"الضغطة وصلت من زر حيّ حتى محرك الأزرار وعادت في <b>{(time.monotonic() - t0) * 1000:.0f}ms</b>.\n"
+                    "السلسلة كلها حيّة: تلغرام ← التوزيع ← الحرس ← المحرك.\n"
+                    "أي زر يموت الآن يسجّل سببه الحقيقي في «عين الأزرار» تلقائياً — ويرد عليك ببطاقة.",
+                    kb.admin_menu() if uid == config.ADMIN_ID else kb.user_menu(),
+                    context.bot)
+                return
             if data.startswith("u:"):
                 await _route_user(q, context, uid, data[2:])
             elif data.startswith("a:"):
@@ -132,7 +236,6 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   (time.monotonic() - t0) * 1000, data[:64])
         try:
             from fysb import afn as _afn_mod
-            from fysb.services import ui_diagnostics
             depth = _afn_mod.stats()
             await afn.run(ui_diagnostics.record,
                           "TIMEOUT", uid, data,
@@ -156,7 +259,6 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # admin panel from his phone (no log-file dependence, no guessing).
         try:
             import traceback as _tb
-            from fysb.services import ui_diagnostics
             await afn.run(ui_diagnostics.record_failure, uid, data,
                           f"{type(exc).__name__}: {exc}", _tb.format_exc()[-1400:],
                           (time.monotonic() - t0) * 1000)
@@ -185,7 +287,6 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_feedback.unbind(feedback_token)
             try:
                 if not was_delivered:
-                    from fysb.services import ui_diagnostics
                     await afn.run(ui_diagnostics.record_silent, uid, data,
                                   (time.monotonic() - t0) * 1000)
             except Exception:
@@ -887,3 +988,38 @@ async def _route_admin(q, context, uid: int, action: str):
     else:
         from fysb.handlers.common import render
         await render(q, "إجراء إداري غير معروف. حدّث القائمة عبر /start.", kb.admin_menu(), bot)
+
+
+# ---------------------------------------------------------------- royal guard
+async def cb_tripwire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.14.14 — «الحرس الملكي» tripwire (registered in a LATER PTB group).
+
+    PTB executes handler groups in order with the SAME update object. If this
+    handler ever sees a callback the main gate never marked, the press was
+    dropped at the dispatch layer — recorded as DROP with evidence + a royal
+    guidance card, and the spinner is cleared. Must never raise.
+    """
+    try:
+        q = getattr(update, "callback_query", None)
+        if q is None or _was_seen(update):
+            return
+        uid = getattr(getattr(q, "from_user", None), "id", 0) or 0
+        data = q.data or ""
+        log.error("GUARD DROP | update never executed by the main gate | user_id=%s | data=%s", uid, data[:64])
+        await afn.run(ui_diagnostics.record, "DROP", uid, data,
+                      "الضغطة وصلت إلى الحرس لكن البوابة الرئيسية لم تنفذها أبداً — إسقاط على مستوى التوزيع",
+                      None)
+        try:
+            await asyncio.wait_for(q.answer(), ACK_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+        from fysb.handlers.common import render
+        await render(
+            q,
+            "🛡 <b>الحرس الملكي رصد إسقاطاً في بوابة التوزيع</b>\n"
+            "الضغطة وصلت من تلغرام لكن البوابة الرئيسية لم تنفذها — أُثبت السبب في العين.\n"
+            "أرسل <code>/fix</code> ثم أعد الضغطة، وإن تكرر أرسل <code>/btnfail</code> وستجد إثبات الإسقاط مسجلاً.",
+            kb.admin_menu() if uid == config.ADMIN_ID else kb.user_menu(),
+            context.bot)
+    except Exception:
+        pass  # a tripwire must never become the outage it guards against

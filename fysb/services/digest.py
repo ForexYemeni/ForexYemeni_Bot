@@ -274,7 +274,7 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
         f"▎✅ رابحة: <b>{d['wins']}</b> ({tp_strip})  ·  ❌ وقف: <b>{d['losses']}</b>",
         f"▎🎯 نسبة النجاح: <b>{wr:.1f}%</b>  {bar(int(round(wr)), 100)}",
         f"▎⚖️ العائد النموذجي الصافي (R): <b>{net_r:+.2f}R</b>  ·  معامل الربح: <b>PF {pf:.2f}</b>",
-        f"▎💎 صافي النقاط: <b>{net_pips:+.1f}p</b>  ·  متوسط RR المخطط: <b>1:{rr:.1f}</b>",
+        f"▎💎 متوسط RR المخطط: <b>1:{rr:.1f}</b>",
         f"▎💵 تقدير نظري (0.01 لوت): <b>{usd001:+,.2f} $</b>  ·  🏆 الأفضل: <b>{esc(d['best_strategy'])}</b>",
     ])
 
@@ -282,11 +282,10 @@ def render_digest_caption(d: dict, *, admin_diagnostics: bool = False) -> str:
     strat_lines = ["🧠 <b>أقوى الاستراتيجيات أداءً (مرتبة بالعائد النموذجي R)</b>"]
     if d.get("top_strategies"):
         for i, s in enumerate(d["top_strategies"][:5]):
-            sp = float(s.get("pips") or 0.0)
             sr = float(s.get("net_r") or 0.0)
             strat_lines.append(
                 f"▎{medals[i]} <b>{esc(s['strategy'])}</b> — "
-                f"<b>{sr:+.1f}R</b> · نجاح <b>{s['win_rate']:.0f}%</b> · <b>{sp:+.1f}p</b> ({s['total']})"
+                f"<b>{sr:+.1f}R</b> · نجاح <b>{s['win_rate']:.0f}%</b> ({s['total']})"
             )
     else:
         strat_lines.append("▎لا توجد صفقات مغلقة خلال هذه الفترة بعد.")

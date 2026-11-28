@@ -861,6 +861,13 @@ async def _route_admin(q, context, uid: int, action: str):
         elif arg == "pg":
             k, _, p = (arg2 or "").partition(":")
             await admin_reports_ui.rep_filter_pick_page(q, uid, context, bot, k, p)
+        elif arg == "cat":
+            k, _, rest = (arg2 or "").partition(":")
+            cat, _, page = rest.partition(":")
+            await admin_reports_ui.rep_filter_pick_category(q, uid, context, bot, k, cat, page)
+        elif arg == "escape":
+            # v8.14.21 — one tap: show EVERYTHING the period actually holds
+            await admin_reports_ui.rep_filter_escape(q, uid, context, bot)
         else:
             await admin_reports_ui.rep_filter_pick(q, uid, context, bot,
                                                    [arg] + ([arg2] if arg2 else []))

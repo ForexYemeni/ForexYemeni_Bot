@@ -109,7 +109,10 @@ def test_all_dimensions_no_mixed_pip_summing():
 def test_empty_slice_reports_truthfully():
     _seed_matrix()
     txt = reports.filtered_signals_report("ETHUSD", None, None)
-    assert "لا إشارات مطابقة" in txt
+    # v8.14.21: the honest empty state — real totals + what you DO have
+    assert "لا إشارات في هذا المقطع" in txt
+    assert "إجمالي سجل البوت" in txt and "الأكثر نشاطاً" in txt
+    assert "كل ما لديك في الفترة" in txt
 
 
 def test_quality_and_rr_are_real_averages_of_the_slice():

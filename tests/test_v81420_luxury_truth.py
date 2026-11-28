@@ -127,8 +127,8 @@ def test_picker_pagination_carries_every_value_across_pages():
     for i in range(45):
         _ins(f"SYM{i:02d}", "TREND", "TP1_HIT", 40.0)
     q, ctx = _fire("a:repf:m")
-    page0 = _labels(page_markup_for(q, ctx))
-    assert any("التالي" in lbl for lbl in page0) and len(page0) < 60
+    hub = _labels(page_markup_for(q, ctx))
+    assert any("كل الأسواق أبجدياً" in lbl for lbl in hub)  # v8.14.21: organized hub offers the full view
     labels = _walk_picker("m", ctx)
     for i in range(45):
         assert any(f"SYM{i:02d}" in lbl for lbl in labels)  # beyond the old LIMIT — real, paginated

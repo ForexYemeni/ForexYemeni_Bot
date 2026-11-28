@@ -39,6 +39,18 @@ ALL_LABEL = "الكل"
 PERIOD_PRESETS = (1, 3, 7, 14, 30, 60, 90, 180, 365)
 PAGE_SIZE = 40  # picker pagination — Telegram caps inline keyboards at 100 buttons
 
+# v8.14.21 — the market picker is ORGANIZED by real catalog categories,
+# not a giant alphabetical wall. Gold-first order, honest Arabic labels.
+MARKET_CATEGORY_AR = (
+    ("metal", "🥇 المعادن"),
+    ("forex", "💱 الفوركس"),
+    ("crypto", "₿ العملات الرقمية"),
+    ("index", "📊 المؤشرات"),
+    ("stock", "📈 الأسهم"),
+    ("commodity", "🛢 السلع"),
+    ("other", "🖥 أخرى"),
+)
+
 _PICK_KINDS = {
     "m": ("market", "symbol", ("market_catalog", "symbol"), "📈 اختر السوق", "a:repf:m:"),
     "s": ("strategy", "strategy", ("strategy_catalog", "code"), "🧠 اختر الاستراتيجية", "a:repf:s:"),
@@ -97,6 +109,44 @@ def _counts_map(col: str, days: int | None) -> dict[str, int]:
     with db.conn() as c:
         rows = c.execute(q + " GROUP BY " + col, params).fetchall()
     return {str(r["v"]): int(r["n"]) for r in rows}
+
+
+def _market_catalog_categories() -> dict[str, list[str]]:
+    """v8.14.21 — symbol → its real catalog category (the organizing spine)."""
+    with db.conn() as c:
+        rows = c.execute("SELECT symbol, COALESCE(category,'') cat FROM market_catalog").fetchall()
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        out.setdefault(str(r["cat"]).strip() or "other", []).append(str(r["symbol"]).strip())
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+def _picker_entries(col: str, table: str, cat_col: str, days: int | None) -> list[tuple[str, int, str]]:
+    """[(value, real_period_count, category)] — the COMPLETE universe sorted
+    active-first (the values you actually trade lead the list)."""
+    universe = _all_values(col, table, cat_col)
+    counts = _counts_map(col, days)
+    cat_of: dict[str, str] = {}
+    if col == "symbol":
+        cats = _market_catalog_categories()
+        cat_of = {s: c for c, syms in cats.items() for s in syms}
+    return sorted(((v, counts.get(v, 0), cat_of.get(v, "other")) for v in universe),
+                  key=lambda t: (-t[1], t[0]))
+
+
+def _market_hub(days: int | None) -> tuple[list[tuple[str, str, int, int]], list[str]]:
+    """(categories [(cat, ar_label, n_markets, n_signals)], live_only_symbols) —
+    real counts inside the period, live-only symbols listed honestly."""
+    cats = _market_catalog_categories()
+    counts = _counts_map("symbol", days)
+    catalog_syms = {s for syms in cats.values() for s in syms}
+    live = _signal_values("symbol")
+    live_only = sorted(set(live) - catalog_syms)
+    out = []
+    for cat, ar in MARKET_CATEGORY_AR:
+        syms = cats.get(cat, [])
+        out.append((cat, ar, len(syms), sum(counts.get(s, 0) for s in syms)))
+    return out, live_only
 
 
 def _matching_count(f: dict) -> int:
@@ -186,9 +236,16 @@ async def rep_filter_pick(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, 
         await render(q, _filter_card_text(f), _filter_kb(f), bot)
         return
 
-    # open the picker: the COMPLETE universe (catalog ∪ live signals), zero LIMIT
-    values = await afn.run(_all_values, col, cat_table, cat_col)
-    counts = await afn.run(_counts_map, col, f.get("days"))
+    if kind == "m":
+        # v8.14.21 — the market picker opens ORGANIZED: real categories, not a wall
+        await rep_filter_market_hub(q, uid, context, bot)
+        return
+
+    # open the picker: the COMPLETE universe (catalog ∪ live signals), zero LIMIT,
+    # sorted ACTIVE-FIRST — what you actually trade leads the list
+    entries = await afn.run(_picker_entries, col, cat_table, cat_col, f.get("days"))
+    values = [v for v, _n, _c in entries]
+    counts = {v: n for v, n, _c in entries}
     await _render_picker(q, bot, f, kind, title, data_prefix, values, counts, page=0)
 
 
@@ -209,6 +266,108 @@ async def rep_filter_pick_page(q, uid: int, context: ContextTypes.DEFAULT_TYPE, 
     values = await afn.run(_all_values, col, cat_table, cat_col)
     counts = await afn.run(_counts_map, col, f.get("days"))
     await _render_picker(q, bot, f, kind, title, data_prefix, values, counts, page=page)
+
+
+async def rep_filter_market_hub(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):
+    """v8.14.21 — the market picker opens ORGANIZED: real catalog categories
+    (المعادن · الفوركس · العملات الرقمية · المؤشرات · الأسهم · السلع) with
+    their REAL market counts and signal counts inside the period — plus the
+    complete alphabetical view and live-only symbols. Nothing is hidden."""
+    f = _get_filter(context.user_data)
+    cats, live_only = await afn.run(_market_hub, f.get("days"))
+    rows: list = []
+    pair: list = []
+    for cat, ar, n_markets, n_signals in cats:
+        if n_markets == 0:
+            continue
+        pair.append(kb.btn(f"{ar} · {n_markets} سوق · {n_signals} إشارة",
+                           f"a:repf:cat:m:{cat}:0", style="primary"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    if live_only:
+        rows.append([kb.btn(f"📡 من السجل الحي فقط · {len(live_only)}",
+                            "a:repf:cat:m:__live__:0", style="success")])
+    rows.append([kb.btn("🖥 كل الأسواق أبجدياً", "a:repf:pg:m:0", style="primary"),
+                 kb.btn(f"🌐 {ALL_LABEL}", "a:repf:m:-", style="success")])
+    rows.append([kb.btn("↩️ بطاقة التصفية", "a:repfilter", style="primary")])
+    await render(
+        q,
+        "📈 <b><u>اختر السوق — مصنّفاً ومرتباً</u></b>\n"
+        "<blockquote>▎الفئات من كتالوج البوت الحقيقي — الأعداد حقيقية وضمن الفترة: "
+        f"<b>{_period_lab(f.get('days'))}</b>\n"
+        "▎كل قيمة داخل الفئة تظهر بعددها الفعلي — والقائمة كاملة بلا أي اقتصاص</blockquote>\n"
+        "<i>اختر فئة ثم سوقاً، أو «🌐 الكل».</i>",
+        kb.admin_nav(rows), bot)
+
+
+async def rep_filter_pick_category(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot,
+                                   kind: str, cat: str, page_s: str):
+    """v8.14.21 — one ORGANIZED category page: only its symbols (catalog ∪ live),
+    active-first, with real counts; paginated when huge; the hub is one tap back."""
+    spec = _PICK_KINDS.get(kind)
+    f = _get_filter(context.user_data)
+    if not spec or kind != "m":
+        await rep_filter_home(q, uid, context, bot)
+        return
+    _key, col, (cat_table, cat_col), title, data_prefix = spec
+    try:
+        page = max(0, int(page_s or 0))
+    except (TypeError, ValueError):
+        page = 0
+    entries = await afn.run(_picker_entries, col, cat_table, cat_col, f.get("days"))
+    counts = {v: n for v, n, _c in entries}
+    if cat == "__live__":
+        catalog_syms = set(await afn.run(_catalog_values, "market_catalog", "symbol"))
+        values = sorted(set(_signal_values("symbol")) - catalog_syms)
+        ar_label = "📡 من السجل الحي فقط (خارج الكتالوج)"
+    else:
+        values = [v for v, _n, c3 in entries if c3 == cat]
+        ar_label = dict(MARKET_CATEGORY_AR).get(cat, cat)
+    last = max(0, (len(values) - 1) // PAGE_SIZE)
+    page = min(page, last)
+    chunk = values[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    rows = [[kb.btn(f"🌐 {ALL_LABEL}", data_prefix + "-", style="success")]]
+    pair: list = []
+    for v in chunk:
+        pair.append(kb.btn(f"{v} · {counts.get(v, 0)}", data_prefix + str(v), style="primary"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    if not values:
+        rows.append([kb.btn("— لا أسواق في هذه الفئة —", "a:repf:none", style="danger")])
+    if last > 0:
+        pager = []
+        if page > 0:
+            pager.append(kb.btn("◀️ السابق", f"a:repf:cat:{kind}:{cat}:{page - 1}", style="primary"))
+        pager.append(kb.btn(f"📄 {page + 1}/{last + 1} — {len(values)} قيمة", "a:repf:none", style="primary"))
+        if page < last:
+            pager.append(kb.btn("التالي ▶️", f"a:repf:cat:{kind}:{cat}:{page + 1}", style="primary"))
+        rows.append(pager)
+    rows.append([kb.btn("↩️ فئات الأسواق", "a:repf:m", style="primary"),
+                 kb.btn(f"🌐 {ALL_LABEL}", "a:repf:m:-", style="success")])
+    await render(
+        q,
+        f"{ar_label}\n"
+        "<blockquote>▎قيم هذه الفئة كاملة 100% — الأعداد حقيقية وضمن الفترة: "
+        f"<b>{_period_lab(f.get('days'))}</b> — مرتبة الأنشط أولاً</blockquote>\n"
+        "<i>اختر سوقاً، أو «🌐 الكل».</i>",
+        kb.admin_nav(rows), bot)
+
+
+async def rep_filter_escape(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):
+    """v8.14.21 — the honest escape hatch: ONE tap clears the slice and shows
+    EVERYTHING the period actually holds. An empty filtered report is never a
+    dead end — the real numbers are one tap away."""
+    f = _get_filter(context.user_data)
+    f["market"] = None
+    f["strategy"] = None
+    f["timeframe"] = None
+    await rep_filter_run(q, uid, context, bot)
 
 
 async def _render_picker(q, bot, f: dict, kind: str, title: str, data_prefix: str,
@@ -297,9 +456,10 @@ async def rep_filter_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot):
          kb.btn("📤 بث لي التقرير", "a:repfme", style="success")],
         [kb.btn("📋 تفاصيل الصفقات المغلقة", "a:repfd", style="primary")],
         [kb.btn("📤 بث هذا التقرير للقنوات", "a:repfb:preview", style="primary")],
-        [kb.btn("🔄 تحديث التقرير", "a:repf:run", style="primary"),
+        [kb.btn("🎲 كل ما لديك في الفترة", "a:repf:escape", style="success"),
          kb.btn("🧭 تعديل التصفية", "a:repfilter", style="primary")],
-        [kb.btn("♻️ تصفير الفلاتر", "a:repf:clear", style="danger")],
+        [kb.btn("🔄 تحديث التقرير", "a:repf:run", style="primary"),
+         kb.btn("♻️ تصفير الفلاتر", "a:repf:clear", style="danger")],
     ]
     await render(q, body, kb.admin_nav(rows), bot)
 

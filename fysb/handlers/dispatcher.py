@@ -94,6 +94,16 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
     except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
+        # v8.14.12 — «عين الأزرار»: the REAL production failure reaches the
+        # admin panel from his phone (no log-file dependence, no guessing).
+        try:
+            import traceback as _tb
+            from fysb.services import ui_diagnostics
+            await afn.run(ui_diagnostics.record_failure, uid, data,
+                          f"{type(exc).__name__}: {exc}", _tb.format_exc()[-1400:],
+                          (time.monotonic() - t0) * 1000)
+        except Exception:
+            pass
         try:
             detail = f" ({type(exc).__name__})" if uid == config.ADMIN_ID else ""
             await q.message.reply_text(f"⚠️ حدث خطأ أثناء تنفيذ الزر{detail}. أعد المحاولة أو راجع سجل الإدارة.")
@@ -103,6 +113,10 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         # Stop the watchdog before waiting for a slow/failed acknowledgement.
         # Neither deadline cancels or retries a financial/business action.
+        # v8.14.12 — capture delivery truth BEFORE close(): close() itself
+        # raises the responded flag, and a press that ended WITHOUT any page
+        # delivered is the exact «لا تفتح شي» — the royal eye must see it.
+        was_delivered = feedback.responded.is_set()
         try:
             await feedback.close()
             await ans_task
@@ -111,6 +125,13 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ans_task.cancel()
                 await asyncio.gather(ans_task, return_exceptions=True)
             callback_feedback.unbind(feedback_token)
+            try:
+                if not was_delivered:
+                    from fysb.services import ui_diagnostics
+                    await afn.run(ui_diagnostics.record_silent, uid, data,
+                                  (time.monotonic() - t0) * 1000)
+            except Exception:
+                pass
         log.info("BUTTON DONE | %.0fms | data=%s",
                  (time.monotonic() - t0) * 1000, data[:32])
 
@@ -736,6 +757,10 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_system.admin_settings(q, uid, context, bot)
     elif act == "toggleuimode":
         await admin_system.admin_toggle_ui_mode(q, uid, context, bot)
+    elif act == "btnfail":
+        await admin_system.admin_button_eye(q, uid, context, bot)
+    elif act == "btnfailclear":
+        await admin_system.admin_button_eye_clear(q, uid, context, bot)
     elif act == "togglestalegate":
         await admin_system.admin_toggle_stale_gate(q, uid, context, bot)
     elif act == "togglerepaint":

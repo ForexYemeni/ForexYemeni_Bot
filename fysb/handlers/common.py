@@ -97,8 +97,13 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
 
     if edit_mode and q.message is not None and hasattr(q.message, "edit_text"):
         try:
+            # v8.14.12 — the edit path honors the same length contract as the
+            # fresh path: a page beyond Telegram's text cap degrades instead
+            # of dying the whole press.
+            from fysb.ui import htmlguard as _hg
+            edit_text_out = _hg.truncate_safe(text, 3900)
             msg = await q.message.edit_text(
-                text=text,
+                text=edit_text_out,
                 reply_markup=markup,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
@@ -111,6 +116,14 @@ async def render(q, text: str, markup=None, bot=None, force_new: bool = False):
             if "message is not modified" in str(e).lower():
                 log.info("PAGE RENDERED | user=%s | method=not_modified | %.0fms",
                          q.from_user.id, (time.monotonic() - t0) * 1000)
+                # v8.14.12 — a visually identical page is a SILENT press for
+                # the owner; the royal button eye must see it.
+                try:
+                    from fysb.services import ui_diagnostics
+                    await afn.run(ui_diagnostics.record_not_modified,
+                                  q.from_user.id, getattr(q, "data", "") or "")
+                except Exception:
+                    pass
                 callback_feedback.page_delivered(q)
                 return q.message
             log.debug("edit_text fallback (%s) -> sending fresh page", e)

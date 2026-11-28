@@ -256,3 +256,14 @@ def test_theme_translations_and_run_lines_stay_royal():
     assert "أسعار غير حية" in theme.ar_reason("data stale (age 942min)")
     line = theme.ar_run_line("STALE_DATA", "last candle x age=942s")
     assert "بيانات أقدم من الحد المسموح" in line
+
+
+@pytest.fixture(autouse=True)
+def _frozen_market_friday():
+    """v8.14.10 — CI crossed the Fri→Sat boundary and the weekend widening
+    reclassified every test's «stale» payload as fresh (mechanics unchanged).
+    Pin the market clock to Friday noon UTC — the suite tests the MECHANICS,
+    never the wall calendar."""
+    from tests.helpers import frozen_market_clock
+    with frozen_market_clock():
+        yield

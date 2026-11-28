@@ -60,7 +60,7 @@ def test_chain_rejects_wrong_series_instead_of_stale_snapshot():
     """A provider answering M15 with daily bars must be treated as a FAILURE:
     the chain returns no payload at all (RuntimeError) rather than an honestly-
     stale 24h-old snapshot that would masquerade as a data verdict."""
-    end = datetime.now(timezone.utc)
+    end = md.datetime.now(timezone.utc)          # frozen Friday clock
     daily = _candles_daily(60, end)
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
          patch.object(md, "_fetch_td_candles", return_value=daily), \
@@ -71,7 +71,7 @@ def test_chain_rejects_wrong_series_instead_of_stale_snapshot():
 
 
 def test_chain_returns_fresh_payload_and_marks_success():
-    end = datetime.now(timezone.utc)
+    end = md.datetime.now(timezone.utc)          # frozen Friday clock
     fresh = _candles_15min(120, end)
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
          patch.object(md, "_fetch_td_candles", return_value=fresh), \
@@ -85,7 +85,7 @@ def test_chain_returns_fresh_payload_and_marks_success():
 def test_stale_fallback_carries_chain_verdict_for_admin_surfaces():
     """All providers stale → the honest stale payload carries the per-provider
     verdict list (engine_runs material — never user-facing prose)."""
-    end = datetime.now(timezone.utc) - timedelta(hours=1.6)
+    end = md.datetime.now(timezone.utc) - timedelta(hours=1.6)
     stale = _candles_15min(120, end)
     with patch.object(md, "_ordered_chain", return_value=["twelvedata"]), \
          patch.object(md, "_fetch_td_candles", return_value=stale), \
@@ -101,7 +101,7 @@ def test_stale_fallback_carries_chain_verdict_for_admin_surfaces():
 def test_deep_pass_bypasses_cooldown_after_recovery():
     """Pass 1: provider A (only chain member) in cooldown → no fresh data.
     Pass 2 bypasses the cooldown, the recovered provider answers fresh."""
-    end = datetime.now(timezone.utc)
+    end = md.datetime.now(timezone.utc)          # frozen Friday clock
     fresh = _candles_15min(120, end)
     calls = {"n": 0}
 
@@ -130,3 +130,14 @@ def test_smt_cache_prevents_repeat_api_calls():
     # second access within TTL must reuse the cache (no fetch)
     hit = se._SMT_CACHE.get(("GBPUSD", "M15"))
     assert hit and hit[1] is series
+
+
+@pytest.fixture(autouse=True)
+def _frozen_market_friday():
+    """v8.14.10 — CI crossed the Fri→Sat boundary and the weekend widening
+    reclassified every test's «stale» payload as fresh (mechanics unchanged).
+    Pin the market clock to Friday noon UTC — the suite tests the MECHANICS,
+    never the wall calendar."""
+    from tests.helpers import frozen_market_clock
+    with frozen_market_clock():
+        yield

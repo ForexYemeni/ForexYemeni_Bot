@@ -5,6 +5,7 @@ DB) and fake credentials, using a dedicated temporary .env file pointed to via
 DOTENV_PATH — config.py loads THAT file with override=True, so no inherited
 shell value or ancestor .env can ever leak into tests (or vice versa).
 """
+import datetime as _dtmod
 import itertools
 import os
 import sys
@@ -25,6 +26,30 @@ _DOTENV.write_text(
 os.environ["DOTENV_PATH"] = str(_DOTENV)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+class FrozenFridayDT(_dtmod.datetime):
+    """v8.14.10 — the time-sensitive mechanics tests must NEVER depend on the
+    real calendar. staleness_limit widens on weekends (honest for production —
+    Friday data IS fresh on Saturday) but poisons relative-timestamp tests the
+    moment CI crosses the Fri→Sat boundary (the v8.14.9→v8.14.10 CI lesson:
+    green Fri 23:50 UTC, red Sat 01:15 UTC, zero code difference). Everything
+    in the time-pinned suites runs on FRIDAY NOON UTC — mid-session, 3 days
+    from any weekend widening. Only `now()` is frozen; every other classmethod
+    (fromisoformat/fromtimestamp/…) stays the real datetime machinery."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _dtmod.datetime(2026, 11, 27, 12, 0, 0, tzinfo=tz or _dtmod.timezone.utc)
+
+
+def frozen_market_clock():
+    """Patch market_data's module clock to the frozen Friday. staleness_limit,
+    fair_age and market_state all read `datetime.now(timezone.utc)` from that
+    module — one pin, every verdict deterministic forever."""
+    from unittest.mock import patch
+    from fysb.engines import market_data as md
+    return patch.object(md, "datetime", FrozenFridayDT)
 
 
 def make_candles(values: list[tuple[float, float, float, float]], start_hour: int = 8) -> list[dict]:

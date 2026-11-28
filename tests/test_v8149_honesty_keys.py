@@ -123,6 +123,11 @@ def test_gate_disarmed_created_signal_carries_the_deferred_stamp():
     cand = StrategyResult("SMC", "BUY", px, px - 2.0, px + 4.0, px + 6.0,
                           px + 9.0, 2.0, 95, ["fresh setup"])
     db.set_setting("honesty_stale_gate", "0")
+    # v8.14.10 — shared-session hygiene: the full-cycle creation must start
+    # from a clean ledger (cross-file rows poison the gates in suite order).
+    with db.conn() as c:
+        c.execute("DELETE FROM signals")
+        c.execute("DELETE FROM engine_runs")
     with patch.object(md, "fetch_candles", return_value=_stale_payload()), \
          patch.object(md, "market_state", return_value=True), \
          patch.object(db, "kill_switch_on", return_value=False), \
@@ -163,6 +168,10 @@ def test_force_bypass_is_stamped_and_traced_even_with_gate_armed():
     cand = StrategyResult("SMC", "BUY", 120.0, 118.0, 124.0, 126.0, 129.0,
                           2.0, 95, ["fresh setup"])
     payload = _stale_payload()
+    # v8.14.10 — shared-session hygiene (same doctrine as above).
+    with db.conn() as c:
+        c.execute("DELETE FROM signals")
+        c.execute("DELETE FROM engine_runs")
     with patch.object(md, "fetch_candles", return_value=payload), \
          patch.object(md, "market_state", return_value=True), \
          patch.object(db, "kill_switch_on", return_value=False), \
@@ -327,3 +336,14 @@ def test_refusal_reasons_stay_royal_in_every_mode():
         res = generate_signal("BTCUSD", "M15", force=False)
     assert res["status"] == "REJECTED"
     assert "مغلق فعلاً 100%" in res["reason"]   # v8.14.7 royal closure truth
+
+
+@pytest.fixture(autouse=True)
+def _frozen_market_friday():
+    """v8.14.10 — CI crossed the Fri→Sat boundary and the weekend widening
+    reclassified every test's «stale» payload as fresh (mechanics unchanged).
+    Pin the market clock to Friday noon UTC — the suite tests the MECHANICS,
+    never the wall calendar."""
+    from tests.helpers import frozen_market_clock
+    with frozen_market_clock():
+        yield

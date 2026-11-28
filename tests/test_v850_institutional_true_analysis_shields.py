@@ -569,7 +569,7 @@ def test_v860_partner_true_analysis_all_markets_and_luxury_dashboards(tmp_path):
 
     # 1. Partner BEFORE True Analysis grant: button not shown yet, Partner Home renders luxury card + Mecca clock
     txt_before, kb_before = asyncio.run(admin_partners._build_partner_home(p))
-    assert "لوحة الشريك الملكي" in txt_before and "بتوقيت مكة" in txt_before
+    assert "لوحة الشريك" in txt_before and "بتوقيت مكة" in txt_before
     assert "u:true_analysis" not in _flat_cbs(kb_before)
 
     # 2. Admin grants «👑 تحليل ForexYemeni الحقيقي» to the Partner!
@@ -598,7 +598,7 @@ def test_v860_partner_true_analysis_all_markets_and_luxury_dashboards(tmp_path):
     bot3 = _CapBot()
     q3, ctx3 = _mk_q(bot3, partner_uid)
     asyncio.run(dispatcher._route_user(q3, ctx3, partner_uid, "plans"))
-    assert bot3.sent and "لوحة الشريك الملكي" in bot3.sent[-1]["text"]
+    assert bot3.sent and "لوحة الشريك" in bot3.sent[-1]["text"]
 
     # 3. Partner «🔬 تحليل الآن» (`p:anl` + `p:anlcat:metal:1`) shows Gold XAUUSD + ALL categories!
     bot4 = _CapBot()
@@ -615,16 +615,16 @@ def test_v860_partner_true_analysis_all_markets_and_luxury_dashboards(tmp_path):
 
     # 4. Luxury User Home + User Dashboard + Luxury Admin Home + Admin Stats Dashboard
     u_home = asyncio.run(user_pages.build_user_home_card(regular_uid, "Trader"))
-    assert "القمرة الملكية للتداول" in u_home and "بتوقيت مكة" in u_home
+    assert "منصة التداول" in u_home and "بتوقيت مكة" in u_home
     bot6 = _CapBot()
     q6, ctx6 = _mk_q(bot6, regular_uid)
     asyncio.run(user_pages.user_page(q6, "dashboard", regular_uid, ctx6))
-    assert "لوحة التحكم الملكية" in bot6.sent[-1]["text"] and "بتوقيت مكة" in bot6.sent[-1]["text"]
+    assert "لوحة التحكم" in bot6.sent[-1]["text"] and "بتوقيت مكة" in bot6.sent[-1]["text"]
 
     a_home = asyncio.run(common.build_admin_home_card())
     assert "SUPER ADMIN" in a_home and "بتوقيت مكة" in a_home
     a_dash = reports.dashboard_view()
-    assert "لوحة المعلومات الملكية المباشرة" in a_dash and "بتوقيت مكة" in a_dash
+    assert "لوحة المعلومات المباشرة" in a_dash and "بتوقيت مكة" in a_dash
 
 
 

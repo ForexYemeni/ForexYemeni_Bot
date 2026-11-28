@@ -15,7 +15,7 @@ from fysb.ui import keyboards as kb
 def render_ctrader_luxury_guide_html() -> str:
     """Ultra-luxury formatted Arabic guide for activating cTrader Demo & Live copy trading."""
     return (
-        "👑 <b><u>الدليل الملكي الفاخر لتفعيل النسخ الآلي عبر cTrader (Demo &amp; Live)</u></b>\n"
+        "👑 <b><u>الدليل الكامل لتفعيل النسخ الآلي عبر cTrader (Demo &amp; Live)</u></b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<blockquote>"
         "⚡ <b>نظام النسخ المباشر 100% مجاني ومن الهاتف بدون VPS وبدون MT5!</b>\n"
@@ -92,7 +92,7 @@ async def render_user_bridge_home(q, uid: int, bot) -> None:
     conns = await afn.run(ab.list_connections, uid, 10)
     g_cid, g_csec = await afn.run(ab.get_global_ctrader_app)
     lines = [
-        "⚡ <b><u>جسر النسخ الملكي للمنصات (Royal Auto-Bridge — مجاني 100%)</u></b>",
+        "⚡ <b><u>جسر النسخ الآلي للمنصات (Royal Auto-Bridge — مجاني 100%)</u></b>",
         "━━━━━━━━━━━━━━━━━━━━━",
         "<blockquote>",
         f"▎🧪 النسخ التجريبي (Broker Demo): <b>{'🟢 متاح' if ok_d else '🔴 غير متاح'}</b> — {esc(msg_d)}",
@@ -124,7 +124,7 @@ async def handle_user_bridge(q, uid: int, action: str, context: ContextTypes.DEF
     if action == "br_guide":
         rows = [
             [kb.btn("👑 ابدأ ربط cTrader الآن", "u:br_new:ctrader", style="success")],
-            [kb.btn("↩️ جسر النسخ الملكي", "u:bridge", style="primary")],
+            [kb.btn("↩️ جسر النسخ", "u:bridge", style="primary")],
         ]
         await render(q, render_ctrader_luxury_guide_html(), _nav_for(uid, rows), bot)
         return True
@@ -345,7 +345,7 @@ async def render_admin_bridge_home(q, bot) -> None:
     mode_ar = {"OFF": "🛑 إيقاف كلي (OFF)", "ALL": "🌐 مفتوح للجميع (ALL)",
                "PLANS": "💎 باقات محددة (PLANS)", "SELECTED": "🎯 محددون فقط (SELECTED)"}.get(mode, mode)
     body = (
-        "⚡ <b><u>مركز التحكم الصارم بجسر النسخ الملكي (Royal Auto-Bridge)</u></b>\n"
+        "⚡ <b><u>مركز التحكم الصارم بجسر النسخ (Royal Auto-Bridge)</u></b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<blockquote>\n"
         f"▎⚡ الحالة العامة: <b>{'🟢 مفعّل' if pol['enabled'] else '🔴 متوقف'}</b>\n"
@@ -375,7 +375,7 @@ async def render_admin_bridge_home(q, bot) -> None:
         [kb.btn(f"🔌 الحسابات المربوطة ({len(conns)})", "a:br_conns", style="primary"),
          kb.btn("📜 سجل أوامر النسخ", "a:br_orders", style="primary")],
         [kb.btn("👑 ربط حسابك الشخصي (cTrader / Demo)", "u:bridge", style="success")],
-        [kb.btn("📖 دليل تفعيل cTrader الفاخر", "a:br_guide", style="primary")],
+        [kb.btn("📖 دليل تفعيل cTrader", "a:br_guide", style="primary")],
     ]
     await render(q, body, kb.admin_nav(rows), bot)
 
@@ -546,12 +546,67 @@ async def handle_admin_bridge(q, uid: int, act: str, arg: str, arg2: str, contex
         return True
 
     if act == "digest_now":
+        # v8.14.17 — «معاينة البث الملكية»: the owner reads the EXACT public
+        # report (chart + caption) BEFORE anything is broadcast, then chooses
+        # the audience himself. Nothing is sent to anyone until he decides.
         from fysb.services import digest as _digest
-        res = await _digest.publish_digest(bot, days=7, include_channels=True, notify_admin=True)
+        d, cap_public, png = await afn.run(_digest.build_digest_bundle, 7)
+        try:
+            if png and len(cap_public) <= 1020:
+                await context.bot.send_photo(chat_id=config.ADMIN_ID, photo=io.BytesIO(png),
+                                             caption=cap_public, parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=config.ADMIN_ID, text=cap_public, parse_mode="HTML")
+        except Exception:
+            pass  # the preview must never fail the control card
+        stats = d.get("signals") or {}
+        preview_card = (
+            "📊 <b><u>معاينة تقرير الأداء الأسبوعي</u></b>\n"
+            "<blockquote>"
+            f"▎الفترة: <b>{esc(d.get('period_ar', '7 أيام'))}</b>\n"
+            f"▎الصفقات المحللة: <b>{d.get('stats', {}).get('total', 0)}</b> · "
+            f"القنوات المشتركة: <b>{await afn.run(_enabled_channels)}</b>"
+            "</blockquote>\n"
+            "<i>↑ التقرير الحقيقي كاملاً معروض لك فوق هذه البطاقة — لم يُبث لأحد بعد. "
+            "اختر الجمهور الآن:</i>"
+        )
+        await render(q, preview_card, InlineKeyboardMarkup([
+            [kb.btn("📤 بث للقنوات + نسخة لي", "a:digestgo:both", style="success")],
+            [kb.btn("📡 بث للقنوات فقط", "a:digestgo:channels", style="primary"),
+             kb.btn("👑 لي أنا فقط", "a:digestgo:me", style="primary")],
+            [kb.btn("❌ إلغاء — لا بث", "a:digestcancel", style="danger")],
+        ]), bot)
+        return True
+
+    if act == "digestgo":
+        from fysb.services import digest as _digest
+        mode = arg or "both"
+        if mode == "me":
+            res = await _digest.publish_digest(bot, days=7, include_channels=False, notify_admin=True)
+        elif mode == "channels":
+            res = await _digest.publish_digest(bot, days=7, include_channels=True, notify_admin=False)
+        else:
+            res = await _digest.publish_digest(bot, days=7, include_channels=True, notify_admin=True)
+        await afn.run(audit_log.log, uid, f"digest_broadcast:{mode}")
+        target_txt = {"me": "👑 سُلّمت نسختك الخاصة فقط — لم يُبث للقنوات",
+                      "channels": "📡 تم البث للقنوات المشتركة (بلا نسخة إضافية لك)",
+                      "both": "📤 تم البث للقنوات + نسخة تشخيصية لك"}.get(mode, "تم البث")
         await render(
             q,
-            f"📊 <b>تم بث تقرير الأداء الأسبوعي الفاخر بنجاح!</b>\n"
-            f"<blockquote>الصفقات المحللة: {res.get('stats', {}).get('total', 0)} · القنوات: {res.get('channels_sent', 0)}</blockquote>",
+            f"✅ <b>تم تنفيذ البث</b>\n"
+            f"<blockquote>▎{target_txt}\n"
+            f"▎الصفقات المحللة: <b>{res.get('stats', {}).get('total', 0)}</b> · "
+            f"القنوات المستلمة: <b>{res.get('channels_sent', 0)}</b> · "
+            f"أخطاء: <b>{res.get('errors', 0)}</b></blockquote>",
+            kb.admin_nav([[kb.btn("↩️ المالية", "a:hub:finance")]]),
+            bot,
+        )
+        return True
+
+    if act == "digestcancel":
+        await render(
+            q,
+            "❌ <b>أُلغي البث</b> — لم يُرسل التقرير لأحد. يمكنك إعادة المعاينة في أي وقت.",
             kb.admin_nav([[kb.btn("↩️ المالية", "a:hub:finance")]]),
             bot,
         )
@@ -735,3 +790,11 @@ async def _finish_user_connect(msg, uid: int, plat: str, amode: str, creds: dict
         parse_mode="HTML",
     )
     return True
+
+def _enabled_channels() -> int:
+    """v8.14.17 — live count for the broadcast-preview control card."""
+    try:
+        with db.conn() as c:
+            return int(c.execute("SELECT COUNT(*) n FROM broadcast_channels WHERE enabled=1").fetchone()["n"])
+    except Exception:
+        return 0

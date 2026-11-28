@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <meta name="theme-color" content="#06080f"/>
-<title>FOREXYEMENI — Super Admin Web Panel v8.14.16</title>
+<title>FOREXYEMENI — Super Admin Web Panel v8.14.17</title>
 <style>
 html{background:#06080f;color:#f1f5f9}
 :root{
@@ -200,7 +200,7 @@ input:focus,select:focus{border-color:var(--gold)}
     <div class="crown-orb">👑</div>
     <div>
       <div class="brand-name">FOREXYEMENI ADMIN</div>
-      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockAdmin">--:--am بتوقيت مكة</span> · v8.14.16</div>
+      <div class="brand-sub"><span class="live-dot"></span> <span id="meccaClockAdmin">--:--am بتوقيت مكة</span> · v8.14.17</div>
     </div>
   </div>
   <div class="top-actions">
@@ -255,7 +255,7 @@ input:focus,select:focus{border-color:var(--gold)}
         <div class="card-hdr"><h3>⚡ مفاتيح التحكم المركزية (1-Tap)</h3><span class="pill">تحكم فوري</span></div>
         <div class="toggles" id="togglesBox"></div>
         <div style="margin-top:11px">
-          <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الفاخرة الآن</button>
+          <button class="btn gold" style="width:100%" onclick="sendLuxuryNewsNow()">📤 بث نشرة الأخبار الاقتصادية الآن</button>
         </div>
       </div>
 
@@ -497,8 +497,8 @@ input:focus,select:focus{border-color:var(--gold)}
           <button class="btn on" onclick="sendDigestNow(30)">📆 بث التقرير الشهري الآن</button>
         </div>
         <div class="btn-row">
-          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=7','📊 التقرير الأسبوعي الفاخر PNG')">🖼 معاينة الأسبوعي PNG</button>
-          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=30','📆 التقرير الشهري الفاخر PNG')">🖼 معاينة الشهري PNG</button>
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=7','📊 التقرير الأسبوعي PNG')">🖼 معاينة الأسبوعي PNG</button>
+          <button class="btn ghost" onclick="previewAdminPng('/api/admin/digest-card?days=30','📆 التقرير الشهري PNG')">🖼 معاينة الشهري PNG</button>
         </div>
       </div>
       <div class="card gold-edge">
@@ -514,7 +514,7 @@ input:focus,select:focus{border-color:var(--gold)}
           <span class="pill red" id="newsCountPill">0 خبر</span>
         </div>
         <div id="adminNewsBox"><div class="empty">—</div></div>
-        <button class="btn gold" style="width:100%;margin-top:10px" onclick="sendLuxuryNewsNow()">📤 بث النشرة الاقتصادية الفاخرة الآن</button>
+        <button class="btn gold" style="width:100%;margin-top:10px" onclick="sendLuxuryNewsNow()">📤 بث النشرة الاقتصادية الآن</button>
       </div>
     </div>
   </div>
@@ -830,7 +830,7 @@ async function toggleKey(key){
 }
 async function sendLuxuryNewsNow(){
   const r = await api('/api/admin/news-broadcast',{method:'POST',body:'{}'});
-  toast(r.ok ? '📤 تم بث نشرة الأخبار الفاخرة بنجاح' : (r.error||'خطأ'), !r.ok);
+  toast(r.ok ? '📤 تم بث نشرة الأخبار بنجاح' : (r.error||'خطأ'), !r.ok);
   loadAdmin();
 }
 let _ccAddSelected = ['ALL'];

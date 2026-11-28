@@ -120,7 +120,7 @@ class TestStatisticsPages(_Base):
             text = page_for(q, ctx)
             self.assertTrue(text, f"page {page} rendered nothing")
             self.assertLessEqual(len(text), 4096, f"page {page} exceeds Telegram limit")
-            self.assertIn("الإحصائيات الملكية", text)
+            self.assertIn("الإحصائيات", text)
             self.assertIn(f"القسم <b>{page + 1}</b> من <b>5</b>", text)
 
     def test_navigation_buttons_present(self):

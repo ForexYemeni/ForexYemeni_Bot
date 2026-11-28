@@ -204,7 +204,7 @@ def user_menu(auto_signals_on: bool | None = None) -> InlineKeyboardMarkup:
          btn("🎧 الدعم والمساعدة", "u:support", style="primary")],
     ]
     if _cfg.webapp_ready():
-        rows.insert(0, [webapp_btn("📱 فتح التطبيق التفاعلي الملكي (Mini App)", _cfg.webapp_page_url("/"), style="success")])
+        rows.insert(0, [webapp_btn("📱 فتح التطبيق التفاعلي (Mini App)", _cfg.webapp_page_url("/"), style="success")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -267,7 +267,7 @@ def admin_menu() -> InlineKeyboardMarkup:
          btn("🖥 حالة النظام", "a:health", style="success")],
     ]
     if _cfg.webapp_ready():
-        rows.insert(0, [webapp_btn("👑 فتح لوحة الإدارة الملكية (WebApp)", _cfg.webapp_page_url("/admin"), style="success")])
+        rows.insert(0, [webapp_btn("👑 فتح لوحة الإدارة (WebApp)", _cfg.webapp_page_url("/admin"), style="success")])
     return InlineKeyboardMarkup(rows)
 
 

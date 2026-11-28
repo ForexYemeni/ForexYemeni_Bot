@@ -103,7 +103,7 @@ def dashboard_view() -> str:
         f"▎🔒 LIVE: <b>{'مفعل ⚠️' if sysd['live_enabled'] else 'مغلق (آمن)'}</b>  ·  🎫 تذاكر مفتوحة: <b>{d['tickets_open']}</b>  ·  📣 حملات نشطة: <b>{d['broadcasts_active']}</b>",
     ])
     head = (
-        f"{ICON['crown']} <b><u>لوحة المعلومات الملكية المباشرة — {esc(config.BRAND)}</u></b>\n"
+        f"{ICON['crown']} <b><u>لوحة المعلومات المباشرة — {esc(config.BRAND)}</u></b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🕒 <code>{esc(config.mecca_dt_12h())}</code> · محدثة لحظياً من قاعدة البيانات"
     )
@@ -141,17 +141,47 @@ def signals_report() -> str:
                              for r in strat) or "▎لا بيانات استراتيجيات."
         lines.append(f"{ICON['brain']} <b>حسب الاستراتيجية</b>")
         lines.append(card(by_strat))
-        pips = c.execute(
-            """SELECT COALESCE(SUM(pips_result), 0) s,
-                      COALESCE(SUM(CASE WHEN pips_result > 0 THEN 1 ELSE 0 END), 0) w,
-                      COALESCE(SUM(CASE WHEN pips_result < 0 THEN 1 ELSE 0 END), 0) l
+        # v8.14.17 — the honest closed ledger: LOCKED_50 is a CLOSED profit
+        # (by construction it only exists when usd_move reached the lock
+        # threshold) — it was silently excluded before. Wins are classified by
+        # STATUS semantics (banked TP / locked), losses by SL_HIT. Pips are
+        # NEVER summed across symbols (a BTC pip ≠ a gold pip) — per-symbol
+        # rows + one USD total via the real usd_move contract at 0.01 lot.
+        closed = c.execute(
+            """SELECT symbol, status, COUNT(*) n, COALESCE(SUM(pips_result), 0) p
                FROM signals
-               WHERE status IN ('TP3_HIT','SL_HIT')
-                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')"""
-        ).fetchone()
-        if pips and (int(pips["w"] or 0) + int(pips["l"] or 0)) > 0:
-            lines.append(card(f"📊 <b>النتائج المغلقة:</b> <b>{float(pips['s'] or 0):+.1f}</b> pips إجمالاً "
-                              f"(رابحة: <b>{int(pips['w'] or 0)}</b> / خاسرة: <b>{int(pips['l'] or 0)}</b>)"))
+               WHERE status IN ('TP3_HIT','SL_HIT','LOCKED_50')
+                  OR (status IN ('TP1_HIT','TP2_HIT') AND closed_at!='')
+               GROUP BY symbol, status"""
+        ).fetchall()
+        from fysb import instruments as _inst
+        if closed:
+            per_symbol: dict[str, dict] = {}
+            for r in closed:
+                sym = r["symbol"] or "?"
+                row = per_symbol.setdefault(sym, {"w": 0, "l": 0, "pips": 0.0})
+                is_win = r["status"] in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "LOCKED_50")
+                is_loss = r["status"] == "SL_HIT"
+                row["w"] += int(r["n"]) if is_win else 0
+                row["l"] += int(r["n"]) if is_loss else 0
+                row["pips"] += float(r["p"] or 0)
+            tot_w = sum(v["w"] for v in per_symbol.values())
+            tot_l = sum(v["l"] for v in per_symbol.values())
+            tot_usd = 0.0
+            body = [f"{ICON['signal']} <b>النتائج المغلقة — الحقيقة كاملة</b>"]
+            for sym in sorted(per_symbol):
+                v = per_symbol[sym]
+                usd = _inst.usd_move(sym, v["pips"], 0.01)
+                tot_usd += usd
+                usd_txt = f" ≈ <b>{usd:+.2f}$</b>" if abs(usd) > 0.005 else ""
+                body.append(f"▎<b>{esc(sym)}</b>: رابحة <b>{v['w']}</b> · "
+                            f"خاسرة <b>{v['l']}</b> · <b>{v['pips']:+.1f}</b> نقطة{usd_txt}")
+            body.append(f"  ─────────────")
+            body.append(f"▎<b>الإجمالي:</b> رابحة <b>{tot_w}</b> · خاسرة <b>{tot_l}</b> · "
+                        f"النتيجة <b>{tot_usd:+.2f}$</b> <i>(عند 0.01 لوت لكل صفقة)</i>")
+            if tot_w + tot_l > 0:
+                body.append(f"▎نسبة الإصابة: <b>{tot_w / (tot_w + tot_l) * 100:.0f}%</b>")
+            lines.append(card("\n".join(body)))
     return "\n".join(lines)
 
 

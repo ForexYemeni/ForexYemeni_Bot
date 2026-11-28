@@ -102,7 +102,7 @@ async def _render_chain_payment(q, bot, req, chain: str) -> None:
         f"⛓ <b><u>تعليمات الدفع على {label}</u></b>",
         "<blockquote>"
         f"▎🧾 الطلب: <b>#{pid}</b> · المبلغ المطلوب: <b>{float(req['amount']):g} USDT</b>\n"
-        f"▎⛓ أرسل المبلغ إلى العنوان الملكي التالي:\n"
+        f"▎⛓ أرسل المبلغ إلى العنوان التالي:\n"
         f"▎<code>{esc(wallet)}</code>\n"
         "▎⚠️ تأكد أن شبكة التحويل في محفظتك هي نفسها المختارة — الإرسال على شبكة خاطئة يعني خسارة الأموال.\n"
         "▎🔗 بعد نجاح التحويل انسخ <b>TXID</b> المعاملة (64 خانة) من محفظتك."
@@ -224,7 +224,7 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
         ta_line = f"▎👑 <b>تحليل ForexYemeni الحقيقي:</b> 🎁 تجربة مجانية <b>{ta_st['trial_days']} أيام</b> متاحة لك\n"
 
     return (
-        f"👑 <b><u>{esc(config.BRAND)} — القمرة الملكية للتداول</u></b>\n"
+        f"👑 <b><u>{esc(config.BRAND)} — منصة التداول</u></b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"✨ {greet}  ·  🕒 <code>{esc(now_ksa)}</code>\n\n"
         "<blockquote>"
@@ -239,7 +239,7 @@ async def build_user_home_card(uid: int, tg_name: str = "", preloaded_u=None) ->
         f"▎🌐 <b>أسواق إشاراتك:</b> <b>{mkts_txt}</b>"
         "</blockquote>\n"
         "✨ <i>ابدأ فوراً بـ <b>⚡ إشارة الآن</b> أو <b>🔬 تحليل الآن</b> من الصف الأول، "
-        "أو افتح <b>🧭 لوحة التحكم</b> لإدارة رادار ForexYemeni الحقيقي وأدواتك الملكية.</i>"
+        "أو افتح <b>🧭 لوحة التحكم</b> لإدارة رادار ForexYemeni الحقيقي وأدواتك.</i>"
     )
 
 
@@ -364,7 +364,7 @@ async def _render_user_markets(q, uid: int, u, bot, notice: str = "", category: 
         f" (+{len(active_set) - 8})" if len(active_set) > 8 else ""
     )
     lines = [
-        "🌐 <b><u>أسواق إشاراتي — الفهرس العالمي الفاخر</u></b>",
+        "🌐 <b><u>أسواق إشاراتي — الفهرس العالمي</u></b>",
         "<blockquote>"
         f"▎💎 باقتك: <b>{esc(plan['title'])}</b> ({len(available)} سوق متاح حالياً)\n"
         f"▎📌 الأسواق النشطة لديك: <b>{esc(summary)}</b>\n"
@@ -648,7 +648,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             (f"🎁 تجربة مجانية ({ta_st['trial_days']} أيام)" if ta_st["trial_available"] else "⚪ غير مفعّل")
         )
         body = (
-            f"👑 <b><u>لوحة التحكم الملكية — {esc(config.BRAND)}</u></b>\n"
+            f"👑 <b><u>لوحة التحكم — {esc(config.BRAND)}</u></b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🕒 <code>{esc(now_ksa)}</code>  ·  💎 <b>الباقة:</b> <b>{plan_title}</b>\n\n"
             "<blockquote>"
@@ -678,13 +678,13 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
              kb.btn("🛡 ملف المخاطرة", "u:risk", style="primary")],
             [kb.btn("📓 مفكرة التداول", "u:journal", style="primary"),
              kb.btn("🔗 منصات الكريبتو API", "u:exchange", style="primary")],
-            [kb.btn("🎓 الأكاديمية الملكية", "u:academy", style="primary"),
+            [kb.btn("🎓 الأكاديمية", "u:academy", style="primary"),
              kb.btn("💎 الباقات والاشتراك", "u:plans", style="success")],
             [kb.btn("🤝 عمولات الشركاء (35%)", "u:affiliate", style="success"),
              kb.btn("🎁 تفعيل كود هدية", "u:redeem", style="success")],
         ]
         if config.webapp_ready():
-            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر الملكي (Mini App)", config.webapp_page_url("/"), style="success")])
+            dash_rows.insert(0, [kb.webapp_btn("📱 فتح التطبيق المصغر (Mini App)", config.webapp_page_url("/"), style="success")])
         await render(q, body, kb.user_nav(dash_rows), bot)
 
     # ---------- Analytics (composite institutional engine, plan-gated) ----------
@@ -1306,7 +1306,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         ast = await afn.run(aff_svc.affiliate_stats, uid)
         share_text = (
             "👑 دعوة خاصة إليك من FOREXYEMENI\n\n"
-            "✨ تحليلات وإشارات تداول ملكية لحظية بالشارت الفاخر\n"
+            "✨ تحليلات وإشارات تداول ملكية لحظية بالشارت\n"
             "🥇 الذهب مفعّل الآن — متابعة لحظية حتى الأهداف\n"
             "💎 باقات لكل مستوى ودعم فاخر\n\n"
             "⬇️ اضغط الرابط وابدأ الآن"
@@ -1549,7 +1549,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
                     "\n\n⛓ <b><u>التفعيل الفوري بالبلوكيشن — المحافظ الموثقة</u></b>\n"
                     "<blockquote>"
                     "▎ادفع USDT على شبكتك الموثقة ← أرسل TXID ← يُفحص البلوكيشن فعلياً\n"
-                    "▎(التأكيد + عقد USDT + العنوان الملكي + المبلغ)\n"
+                    "▎(التأكيد + عقد USDT + العنوان + المبلغ)\n"
                     "▎⚡ تُفتح باقتك فوراً 100% بلا انتظار مراجعة — والـ TXID يُحجب نهائياً بعد القبول\n"
                     f"▎🔗 الشبكات الموثقة الآن: <b>{esc(', '.join(chains))}</b>"
                     "</blockquote>"
@@ -1661,7 +1661,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             chat_id=uid,
             photo=_io.BytesIO(png),
             caption=(
-                f"🏆 <b>بطاقة الربح الملكية — {esc(payload['symbol'])}</b>\n"
+                f"🏆 <b>بطاقة الربح — {esc(payload['symbol'])}</b>\n"
                 f"▎🔗 رابط إحالتك مضمّن على البطاقة: <code>{esc(payload['ref_link'])}</code>\n"
                 "<i>شاركها الآن في قنواتك وحالاتك لجلب مشتركين جدد وكسب عمولتك تلقائياً!</i>"
             ),
@@ -1808,7 +1808,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
         context.user_data["usdt_chain"] = chain
         await render(q, f"⛓ <b>أرسل الآن TXID المعاملة</b> (64 خانة سداسية عشرية)\n"
                         f"انسخها من محفظتك بعد إرسال <b>USDT على شبكة {chain}</b> — سيُفحص البلوكيشن فوراً:\n"
-                        "التأكيد + العنوان الملكي + المبلغ، ثم تُفتح باقتك مباشرة.",
+                        "التأكيد + العنوان + المبلغ، ثم تُفتح باقتك مباشرة.",
                      kb.user_nav([[kb.btn("↩️ الباقات", "u:plans")]]), bot)
 
     elif action == "payments":
@@ -2352,7 +2352,7 @@ async def user_page(q, action: str, uid: int, context, preloaded_u=None) -> None
             )
             return
         cap = (
-            f"{'🏆 شارت إثبات موثّق' if is_proof else '📊 شارت الإشارة الملكي'} — "
+            f"{'🏆 شارت إثبات موثّق' if is_proof else '📊 شارت الإشارة'} — "
             f"<b>{esc(sig['symbol'])}</b> {sig['direction']} · {esc(sig['timeframe'])} · {esc(sig['strategy'])}\n"
             f"{bundle['pips_line']}"
         )

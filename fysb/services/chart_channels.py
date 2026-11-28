@@ -302,7 +302,7 @@ def build_luxury_signal_chart_caption(sig: dict, metrics: dict | None = None, *,
             f" · <b>{dp:+.1f} pips</b>\n"
         )
     return (
-        f"👑 <b><u>الشارت الملكي للإشارة{num_part} — {esc(sym)} {dir_badge(direction)}</u></b>\n"
+        f"👑 <b><u>الشارت الاحترافي للإشارة{num_part} — {esc(sym)} {dir_badge(direction)}</u></b>\n"
         f"<blockquote>"
         f"▎⏱ الفريم: <b>{tf_name(tf)}</b> · 🧠 المنهجية: <b>{esc(strat)}</b>\n"
         f"▎⭐ الجودة: <b>{score}/100</b> · ⚖️ العائد للمخاطرة: <b>1:{rr:.2f}</b>\n"
@@ -336,7 +336,7 @@ def build_luxury_tracking_chart_caption(
 
     headers = {
         "RUNNING": ("🚀", "تفعيل الدخول الحي — الصفقة الآن في السوق"),
-        "HALFWAY": ("💧", "تحديث التتبع الفاخر — 50% نحو الهدف الأول (أمّن صفقتك)"),
+        "HALFWAY": ("💧", "تحديث التتبع — 50% نحو الهدف الأول (أمّن صفقتك)"),
         "TP1_HIT": ("🎯", "تحقق الهدف الأول TP1 — ربح موثّق بالشارت"),
         "TP2_HIT": ("🏆", "تحقق الهدف الثاني TP2 — أداء مؤسسي فاخر"),
         "TP3_HIT": ("👑", "اكتملت الأهداف بالكامل TP3 — نصر ملكي كامل"),
@@ -349,7 +349,7 @@ def build_luxury_tracking_chart_caption(
         "RUNNING": "▎📡 الصفقة قيد المتابعة اللحظية — ستصلك شارتات التتبع تلقائياً عند كل هدف.",
         "HALFWAY": f"▎🛡 <b>تأمين ملكي:</b> انقل الوقف لنقطة الدخول <code>{instruments.fmt_price(sym, entry)}</code> واحجز 50% من الربح.",
         "TP1_HIT": f"▎🛡 <b>إدارة محترفة:</b> انقل الوقف إلى الدخول <code>{instruments.fmt_price(sym, entry)}</code> ودع الباقي يطارد TP2 و TP3.",
-        "TP2_HIT": "▎💎 <b>زخم قوي:</b> أمّن الأرباح عند TP1 واترك الجزء المتبقي نحو الهدف الملكي TP3.",
+        "TP2_HIT": "▎💎 <b>زخم قوي:</b> أمّن الأرباح عند TP1 واترك الجزء المتبقي نحو الهدف الأعلى TP3.",
         "TP3_HIT": "▎👑 <b>جميع الأهداف تحققت بالكامل</b> — موثّق بشموع السوق الحقيقية.",
         "TP1_BE": "▎✅ أُغلق الجزء المتبقي دون أي خسارة مع الاحتفاظ بربح الهدف الأول.",
         "TP2_BE": "▎✅ أُغلق الجزء المتبقي دون أي خسارة مع الاحتفاظ بربح الهدف الثاني.",
@@ -521,7 +521,7 @@ async def send_test_chart(bot, ch: dict) -> dict:
                 png_bytes = _charts.render_analysis_chart(an) or b""
                 if png_bytes:
                     caption = (
-                        f"✅ <b><u>تم ربط واعتماد قناة الشارت الفاخرة بنجاح</u></b>\n"
+                        f"✅ <b><u>تم ربط واعتماد قناة الشارت بنجاح</u></b>\n"
                         f"<blockquote>"
                         f"▎📺 القناة: <b>{esc(title)}</b>\n"
                         f"▎🌐 الأسواق المفعّلة: <b>{esc(mkts_lbl)}</b>\n"
@@ -544,11 +544,11 @@ async def send_test_chart(bot, ch: dict) -> dict:
             return {"ok": True, "kind": "chart", "symbol": sample_sym}
         if hasattr(bot, "send_message"):
             msg = (
-                f"✅ <b><u>تم ربط واعتماد قناة الشارت الفاخرة بنجاح</u></b>\n"
+                f"✅ <b><u>تم ربط واعتماد قناة الشارت بنجاح</u></b>\n"
                 f"<blockquote>"
                 f"▎📺 القناة: <b>{esc(title)}</b>\n"
                 f"▎🌐 الأسواق المفعّلة: <b>{esc(mkts_lbl)}</b>\n"
-                f"▎📡 ستستلم هذه القناة الشارتات الفاخرة تلقائياً فور صدور الإشارات والتحديثات والتحليلات.\n"
+                f"▎📡 ستستلم هذه القناة الشارتات تلقائياً فور صدور الإشارات والتحديثات والتحليلات.\n"
                 f"</blockquote>\n"
                 f"<i>👑 {config.BRAND} Luxury Charts Engine · {config.BOT_SIGNATURE}</i>"
             )

@@ -101,7 +101,7 @@ def test_closure_card_is_royal_and_template_free():
     html = render_no_signal_card(symbol="XAUUSD", timeframe="M15",
                                  strategy_label="جميع المنهجيات", style_label="يومي",
                                  status="REJECTED", reason=ROYAL_CLOSURE)
-    assert "السوق مغلق فعلاً 100% — وفق تقويم الجلسات الملكي" in html
+    assert "السوق مغلق فعلاً 100% — وفق تقويم الجلسات" in html
     assert "مغلق فعلاً 100% وفق تقويم الجلسات" in html   # the diagnosis line, verbatim
     assert OLD_TEMPLATE not in html
     assert "أو يمرّ" not in html
@@ -111,7 +111,7 @@ def test_closure_card_is_royal_and_template_free():
 def test_legacy_market_closed_reason_still_gets_the_closure_card():
     html = render_no_signal_card(status="REJECTED",
                                  reason=theme.ar_reason("market closed"))
-    assert "السوق مغلق فعلاً 100% — وفق تقويم الجلسات الملكي" in html
+    assert "السوق مغلق فعلاً 100% — وفق تقويم الجلسات" in html
 
 
 def test_settlement_pause_card_names_the_pause_only():

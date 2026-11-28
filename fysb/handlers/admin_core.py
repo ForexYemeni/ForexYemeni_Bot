@@ -44,7 +44,7 @@ async def admin_statistics(q, uid, context, bot, page: int = 0):
     page = max(0, min(int(page or 0), len(STAT_SECTIONS) - 1))
     key = STAT_SECTIONS[page]
     section_body = await afn.run(_stat_section_body, key)
-    body = (f"📈 <b><u>الإحصائيات الملكية — {STAT_TITLES[key]}</u></b>\n"
+    body = (f"📈 <b><u>الإحصائيات — {STAT_TITLES[key]}</u></b>\n"
             f"<blockquote>▎📄 القسم <b>{page + 1}</b> من <b>{len(STAT_SECTIONS)}</b>"
             f" · حدّث لحظياً من قاعدة البيانات الحقيقية</blockquote>\n"
             + section_body)
@@ -151,7 +151,7 @@ async def admin_user_delete_go(q, uid, context, bot, target: int):
     total = sum(wiped.values())
     body = (f"✅ <b>تم حذف المستخدم نهائياً</b> · <code>{target}</code>\n"
             f"<blockquote>▎🧹 مُحوِّلات: <b>{total}</b> سجل عبر {len(wiped)} جدول\n"
-            f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>")
+            f"▎🔒 سُجّل في سجل التدقيق</blockquote>")
     await render(q, body, kb.admin_nav([[kb.btn("↩️ دليل المستخدمين", "a:users")]]), bot)
 
 
@@ -299,7 +299,7 @@ async def admin_plans(q, uid, context, bot):
                                f"a:planedit:{r['code']}")])
     rows_kb.append([kb.btn("➕ إنشاء باقة جديدة (موجّه)", "a:plannew")])
     body = (f"{ICON['diamond']} <b><u>مركز إدارة الباقات</u></b>\n"
-            "▎كل القيم قابلة للتعديل بالأزرار — الإنشاء يتم خطوة خطوة بالأزرار الفاخرة.")
+            "▎كل القيم قابلة للتعديل بالأزرار — الإنشاء يتم خطوة خطوة بالأزرار.")
     await render(q, body, kb.admin_nav(rows_kb), bot)
 
 
@@ -309,7 +309,7 @@ async def admin_plan_new(q, uid, context, bot):
     await render(q,
                  "👑 <b><u>إنشاء باقة جديدة — التدفق الملكي الموجّه</u></b>\n"
                  "<blockquote>"
-                 "▎🧭 <b>10 مراحل بالأزرار الفاخرة:</b> الرمز ← العنوان ← السعر ← العملة ← المدة ← الجودة ← "
+                 "▎🧭 <b>10 مراحل بالأزرار:</b> الرمز ← العنوان ← السعر ← العملة ← المدة ← الجودة ← "
                  "حد الإشارات ← حد التحليلات ← الأسواق ← الأطر ← المنهجيات ← الحفظ.\n"
                  "▎✏️ كل مرحلة تقبل قيمة جاهزة بضغطة <b>أو قيمة مخصصة</b> ترسلها رقماً فقط.\n"
                  "▎🌐 الأسواق تعرض المفعلة والموثقة فقط، والمنهجيات تعرض المنفذة والمختبرة فقط — حقيقة 100%."

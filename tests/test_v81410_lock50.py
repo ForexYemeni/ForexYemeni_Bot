@@ -280,7 +280,7 @@ def test_settings_page_shows_the_lock_state():
     asyncio_run = __import__("asyncio").run
     asyncio_run(admin_system.admin_settings(q, 9001, None, None))
     body = q.message.sent[-1]
-    assert "🏅 القفل الملكي +50" in body and "تُحسب رابحة" in body
+    assert "التأمين عند الربح" in body and "النقاط" in body and "تُحسب رابحة" in body
 
 
 def test_dispatcher_knows_the_lock_route():

@@ -155,7 +155,7 @@ def test_luxury_plans_showcase_and_smart_tier_recommender():
     q, rep = _mk_q(uid, data="u:plans")
     asyncio.run(dispatcher.buttons(SimpleNamespace(callback_query=q), ctx))
     txt, mk = rep[-1]
-    assert "باقات الاشتراك الملكية" in txt
+    assert "باقات الاشتراك" in txt
     for code in ("FREE", "PRO", "VIP", "ROYAL"):
         assert code in txt
     btns = [b for row in mk.inline_keyboard for b in row]

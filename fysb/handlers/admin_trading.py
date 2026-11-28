@@ -595,7 +595,7 @@ async def admin_delete_signal_go(q, uid, context, bot, sid: int):
     body = (f"✅ <b>تم حذف الإشارة #{sid} نهائياً</b>"
             + (f" ({esc(sig['symbol'])} {esc(sig['direction'])})" if sig else "")
             + f"\n<blockquote>▎🗑 سجل الإشارة: مُمحى\n▎📬 سجلات التسليم المُمحاة: <b>{d}</b>\n"
-              f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>")
+              f"▎🔒 سُجّل في سجل التدقيق</blockquote>")
     await render(q, body, kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
@@ -623,7 +623,7 @@ async def admin_signal_purge_go(q, uid, context, bot):
     d, s = await afn.run(_signal_purge_tx)
     await afn.run(audit_log.log, uid, f"signals_purged:{s}")
     await render(q, f"✅ <b>تم التنظيف النهائي</b>\n<blockquote>▎🗑 إشارات مُمحاة: <b>{s}</b>\n▎📬 تسليمات مُمحاة: <b>{d}</b>\n"
-                    f"▎🔒 سُجّل في سجل التدقيق الملكي</blockquote>",
+                    f"▎🔒 سُجّل في سجل التدقيق</blockquote>",
                  kb.admin_nav([[kb.btn("↩️ مركز الإشارات", "a:signals")]]), bot)
 
 
@@ -635,9 +635,9 @@ async def admin_cancel_signal(q, uid, context, bot, sid: int):
         from fysb.theme import dir_badge, esc, status_ar
         sig = await afn.run(_signal_row_full, sid)
         seq = await afn.run(seq_of, sid)
-        text = (f"⛔ <b><u>تحديث الإشارة الملكية #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
+        text = (f"⛔ <b><u>تحديث الإشارة #{seq}</u></b> — {esc(sig['symbol'])} {dir_badge(sig['direction'])}\n"
                 f"<blockquote>▎📌 الحالة الجديدة: <b>{status_ar('CANCELLED')}</b>\n"
-                f"▎📌 السبب: قرار إداري موثق من الإدارة الملكية</blockquote>")
+                f"▎📌 السبب: قرار إداري موثق من الإدارة</blockquote>")
         uids = await afn.run(_signal_recipient_uids, sid)
         for note_uid in uids + [config.ADMIN_ID]:
             try:
@@ -1115,7 +1115,7 @@ async def admin_news_guard(q, uid, context, bot, *, force_refresh: bool = False,
             kb.btn(f"🩺 حصر الكاش: {max(6, min(168, db.get_setting_int('news_guard_cache_max_hours', 48)))}س",
                    "a:newscachehrs", style="primary"),
         ],
-        [kb.btn("📤 إرسال نشرة الأخبار الفاخرة الآن", "a:newssendnow", style="success")],
+        [kb.btn("📤 إرسال نشرة الأخبار الآن", "a:newssendnow", style="success")],
         [kb.btn("🔄 تحديث التقويم الآن", "a:newsrefresh", style="primary"), kb.btn("↩️ المحرك", "a:engine")],
     ]
     await render(q, body, kb.admin_nav(rows_kb), bot)

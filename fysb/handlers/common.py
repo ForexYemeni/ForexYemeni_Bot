@@ -427,7 +427,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<blockquote>◆ الإصدار: <b>v{config.VERSION}</b>\n"
         f"◆ المحرك: {engine}\n"
         f"◆ قاعدة البيانات: {db_state}\n"
-        f"◆ وضع الأزرار: {ui_mode} · الألوان الفاخرة: {color_state}\n"
+        f"◆ وضع الأزرار: {ui_mode} · الألوان: {color_state}\n"
         f"◆ مكتبة تلغرام: PTB v{getattr(_tg, '__version__', '?')} · مدة التشغيل: {up_txt}\n"
         f"{valve}</blockquote>\n"
         "✅ معالج الأزرار مفعّل في هذه النسخة.\n"

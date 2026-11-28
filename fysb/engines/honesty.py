@@ -20,12 +20,34 @@ from fysb import db
 STALE_GATE_KEY = "honesty_stale_gate"        # "1" = law active (default)
 CLOSED_ONLY_KEY = "no_repaint_closed_only"   # "1" = law active (default)
 LOCK50_KEY = "lock_50_enabled"               # "1" = royal lock armed (default)
+LOCK_PIPS_KEY = "lock_pips"                  # v8.14.17 — the owner's editable threshold
+
+
+def lock_pips() -> int:
+    """🏅 v8.14.17 — the owner's editable lock threshold in GOLD pips.
+
+    Default 50 (the v8.14.10 contract: 50 gold pips = $5 at 0.01 lot). The
+    owner may set any value 20–500 from the settings page; the USD threshold
+    follows the same per-pip equivalence the lock has always used
+    ($0.1 per gold pip at 0.01 lot → 70 pips = $7). Existing open signals
+    keep their persisted arm state; only the threshold is dynamic."""
+    try:
+        v = int(float(db.get_setting(LOCK_PIPS_KEY, "50") or "50"))
+    except Exception:
+        return 50
+    return 50 if v < 20 or v > 500 else v
+
+
+def lock_usd() -> float:
+    """The lock threshold in USD at 0.01 lot (gold equivalence: $0.1/pip)."""
+    return round(lock_pips() * 0.1, 2)
 
 
 def lock50_enabled() -> bool:
-    """🏅 the royal +$5 lock (0.01 lot, every market) — ON by default: any
-    open signal whose documented favorable excursion reaches $5 at 0.01 lot
-    is LOCKED — it can never close below +$5, whatever the retrace."""
+    """🏅 the royal lock (0.01 lot, every market) — ON by default: any
+    open signal whose documented favorable excursion reaches the lock USD
+    threshold at 0.01 lot is LOCKED — it can never close below it, whatever
+    the retrace."""
     return (db.get_setting(LOCK50_KEY, "1") or "1") == "1"
 
 

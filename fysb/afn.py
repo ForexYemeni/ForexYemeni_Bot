@@ -51,6 +51,31 @@ async def run(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
+def stats() -> dict:
+    """v8.14.13 — live UI-pool depth: the royal main valve's telemetry.
+    queued > 0 for a sustained window = worker starvation (stalled WAN DB
+    calls pinning all 8 workers) — the exact «كل الأزرار لا تفتح شي»."""
+    with _pool_lock:
+        pool = _ui_pool
+    if pool is None:
+        return {"workers": _UI_WORKERS, "active": 0, "queued": 0}
+    return {"workers": _UI_WORKERS,
+            "active": len(getattr(pool, "_threads", []) or []),
+            "queued": getattr(pool, "_work_queue", None).qsize()
+            if getattr(pool, "_work_queue", None) is not None else 0}
+
+
+def recycle() -> None:
+    """v8.14.13 — starved-pool self-heal: drop the executor (idle threads
+    die; stuck threads finish or error on their own) — the next afn.run
+    builds a fresh pool instantly. Never cancels DB writes mid-flight."""
+    global _ui_pool
+    with _pool_lock:
+        pool, _ui_pool = _ui_pool, None
+    if pool is not None:
+        pool.shutdown(wait=False)
+
+
 def shutdown():
     """Release idle UI workers on application shutdown; never cancel DB writes.
 

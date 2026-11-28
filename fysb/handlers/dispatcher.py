@@ -32,6 +32,31 @@ from fysb.ui import keyboards as kb
 
 BOT_REF = None  # set in post_init for background tasks
 ACK_TIMEOUT_SECONDS = 2.0
+# v8.14.13 — «الصمّام الملكي»: NO press may ever die silently again. A route
+# that exceeds this hard budget is cancelled and the owner receives a visible
+# fallback card + the evidence lands in the royal button eye (with UI-pool
+# depth — the starvation tell).
+BUTTON_HARD_TIMEOUT_SECONDS = 20.0
+
+
+class _route_budget:
+    """v8.14.13 — the hard route budget as a SAME-task deadline.
+
+    `asyncio.timeout()` cancels THIS task at the deadline (TimeoutError at the
+    current await point) — the interactive() owner identity, the callback
+    feedback ContextVar and every context-local contract survive intact. A
+    wait_for wrapper would have re-tasked the route and silently stripped all
+    of it (caught by the UI-pool contract test before shipping)."""
+
+    def __init__(self):
+        self._cm = None
+
+    async def __aenter__(self):
+        self._cm = asyncio.timeout(BUTTON_HARD_TIMEOUT_SECONDS)
+        return await self._cm.__aenter__()
+
+    async def __aexit__(self, *exc):
+        return await self._cm.__aexit__(*exc)
 
 
 async def _quiet_answer(q) -> None:
@@ -66,32 +91,65 @@ async def _buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Give the receipt task a scheduling opportunity before route code runs.
-        await asyncio.sleep(0)
-        if data.startswith("u:"):
-            await _route_user(q, context, uid, data[2:])
-        elif data.startswith("a:"):
-            await _route_admin(q, context, uid, data[2:])
-        elif data.startswith("p:"):
-            for k in CLEAR_ON_NAV:
-                context.user_data.pop(k, None)
-            await admin_partners.handle_partner_callback(q, uid, context, context.bot, data[2:])
-        else:
-            from fysb.services import partners as partners_svc
-            active_p = (
-                await afn.run(partners_svc.get_partner_by_user, uid)
-                if uid != config.ADMIN_ID else None
-            )
-            if active_p and active_p.get("enabled"):
-                await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
+        # v8.14.13 — the hard budget uses asyncio.timeout() (SAME-task deadline,
+        # py3.11+) — NEVER wait_for: wait_for re-tasks the route and the fresh
+        # task loses the interactive() owner identity, dropping every button's
+        # DB reads from the reserved UI pool onto the shared default executor
+        # (the exact starvation this valve exists to prevent).
+        async with _route_budget():
+            await asyncio.sleep(0)
+            if data.startswith("u:"):
+                await _route_user(q, context, uid, data[2:])
+            elif data.startswith("a:"):
+                await _route_admin(q, context, uid, data[2:])
+            elif data.startswith("p:"):
+                for k in CLEAR_ON_NAV:
+                    context.user_data.pop(k, None)
+                await admin_partners.handle_partner_callback(q, uid, context, context.bot, data[2:])
             else:
-                from fysb.handlers.common import render
-                await render(
-                    q,
-                    "زر غير معروف. أرسل /start لتحديث القائمة.",
-                    kb.admin_menu() if uid == config.ADMIN_ID else kb.user_menu(),
-                    context.bot,
+                from fysb.services import partners as partners_svc
+                active_p = (
+                    await afn.run(partners_svc.get_partner_by_user, uid)
+                    if uid != config.ADMIN_ID else None
                 )
-            await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
+                if active_p and active_p.get("enabled"):
+                    await admin_partners.handle_partner_callback(q, uid, context, context.bot, "home")
+                else:
+                    from fysb.handlers.common import render
+                    await render(
+                        q,
+                        "زر غير معروف. أرسل /start لتحديث القائمة.",
+                        kb.admin_menu() if uid == config.ADMIN_ID else kb.user_menu(),
+                        context.bot,
+                    )
+                await afn.run(audit_log.log, uid, "unknown_callback:" + data[:40])
+    except asyncio.TimeoutError:
+        # v8.14.13 — the royal main valve: a hung route (stalled WAN DB call
+        # pinning UI workers, provider stall, anything) is cancelled and the
+        # owner gets a VISIBLE card instead of eternal silence — plus the
+        # evidence with the UI-pool depth (starvation tell) in the eye.
+        log.error("BUTTON TIMEOUT | %.0fms | data=%s",
+                  (time.monotonic() - t0) * 1000, data[:64])
+        try:
+            from fysb import afn as _afn_mod
+            from fysb.services import ui_diagnostics
+            depth = _afn_mod.stats()
+            await afn.run(ui_diagnostics.record,
+                          "TIMEOUT", uid, data,
+                          f"تجاوزت الضغطة {BUTTON_HARD_TIMEOUT_SECONDS:.0f} ث — مسار عالق أُلغي "
+                          f"(عمال الواجهة: {depth['active']} · في الطابور: {depth['queued']})",
+                          (time.monotonic() - t0) * 1000)
+        except Exception:
+            pass
+        try:
+            await q.message.reply_text(
+                "⏱ <b>الضغطة تجاوزت المهلة الملكية</b> — المسار كان عالقاً وأُلغي تلقائياً.\n"
+                "✨ السبب الحقيقي سُجّل في «🩺 عين الأزرار» — أعد المحاولة، وإن تكررت "
+                "الضغطات الصامتة أرسل <code>/fix</code> للإصلاح الذاتي الفوري.",
+                parse_mode="HTML")
+            feedback.page_delivered()
+        except Exception:
+            pass
     except Exception as exc:
         log.exception("BUTTON ACTION FAILED | data=%s", data[:64])
         # v8.14.12 — «عين الأزرار»: the REAL production failure reaches the

@@ -118,8 +118,9 @@ def main() -> int:
 
         from fysb.handlers import inputs, admin_partners
         from fysb.handlers import common
-        from fysb.handlers.common import (admin_command, backup_command, error_handler,
-                                          menu_command, ping_command, start, update_command)
+        from fysb.handlers.common import (admin_command, backup_command, btnfail_command,
+                                          error_handler, fix_command, menu_command,
+                                          ping_command, start, update_command)
         from fysb.handlers.dispatcher import buttons
 
         # v6.11.0 — ZERO-WAIT BUTTONS (owner demand: «أزرار تستجيب بشكل أسرع
@@ -149,6 +150,8 @@ def main() -> int:
         app.add_handler(CommandHandler("admin", admin_command, filters=_PRIV))
         app.add_handler(CommandHandler("partner", admin_partners.partner_command, filters=_PRIV))
         app.add_handler(CommandHandler("backup", backup_command, filters=_PRIV))
+        app.add_handler(CommandHandler("btnfail", btnfail_command, filters=_PRIV))
+        app.add_handler(CommandHandler("fix", fix_command, filters=_PRIV))
         app.add_handler(CallbackQueryHandler(buttons))
         app.add_handler(PreCheckoutQueryHandler(inputs.on_pre_checkout))
         app.add_handler(MessageHandler(_PRIV & filters.SUCCESSFUL_PAYMENT, inputs.on_successful_payment))
@@ -156,7 +159,7 @@ def main() -> int:
         app.add_handler(MessageHandler(_PRIV & (filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL), inputs.on_media))
         app.add_handler(MessageHandler(_PRIV & filters.TEXT & ~filters.COMMAND, inputs.on_text))
         app.add_error_handler(error_handler)
-        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup + callbacks + text/photo)",
+        log.info("%s | %s | %s — starting (handlers registered: /start /menu /ping /update /admin /backup /btnfail /fix + callbacks + text/photo)",
                  config.BRAND, config.BUILD_NAME, config.VERSION)
         app.run_polling(drop_pending_updates=False)
         if common.conflict_detected:

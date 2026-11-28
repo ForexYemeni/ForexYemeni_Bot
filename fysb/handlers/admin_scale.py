@@ -165,6 +165,21 @@ async def scale_set(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, kind: 
     await render(q, _card(st), _home_kb(st), bot)
 
 
+def _fetch_chart_candles(sym: str, tf: str, outputsize: int) -> list[dict]:
+    """v8.14.25 — ONE real provider fetch on the engine's own path (provider
+    symbol resolution + closed-candles confirmation) feeding BOTH run_scale
+    and the public chart board — the board draws the very candles the scale
+    measured, never a parallel series. Raises on failure; the caller logs
+    the real reason and the engine then fetches its own history as before."""
+    from fysb.engines import market_data
+    from fysb.engines.analysis import confirmed_candles
+    from fysb.engines.backtest import _market_catalog_defaults
+    _, prov_sym = _market_catalog_defaults(sym)
+    payload = market_data.fetch_candles(prov_sym, market_data.parse_interval(tf),
+                                        "", outputsize=outputsize)
+    return confirmed_candles(payload["values"], tf)
+
+
 async def scale_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, deep: bool = False):
     """v8.14.24 — the button answers INSTANTLY and the scale runs DETACHED:
     the 20-second royal route budget is never spent on a multi-minute
@@ -197,13 +212,21 @@ async def scale_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, deep: 
                   f"royal_scale_start:{sym}:{tf}:{st.get('strategy') or 'ALL'}:{depth}:"
                   f"{'deep' if deep else 'std'}")
 
+    # v8.14.25 — one real fetch shared by the scale AND its public chart board.
+    candles = None
+    try:
+        candles = await afn.run(_fetch_chart_candles, sym, tf, max(200, min(depth, 2000)))
+    except Exception as e:
+        await afn.run(audit_log.log, uid,
+                      f"royal_scale_chart_candles_failed:{sym}:{str(e)[:80]}")
+
     async def _worker():
         t0 = time.monotonic()
         from fysb.services import royal_scale
 
         def _job():
             return royal_scale.run_scale(symbol=sym, timeframe=tf, strategies=strategies,
-                                         outputsize=depth, deep=deep)
+                                         outputsize=depth, deep=deep, candles=candles)
 
         try:
             res = await afn.run(_job)
@@ -214,6 +237,51 @@ async def scale_run(q, uid: int, context: ContextTypes.DEFAULT_TYPE, bot, deep: 
             await afn.run(audit_log.log, uid,
                           f"royal_scale_done:{sym}:{tf}:{st.get('strategy') or 'ALL'}:{depth}:"
                           f"{'deep' if deep else 'std'}:{elapsed:.0f}s")
+
+            # v8.14.25 — the LUXURY PUBLIC REPORT: a measured-stats board over the
+            # very candles the scale measured → photo to the owner's chat + honest
+            # publication to public chart channels opted into the scale. A failed
+            # scale is never published; every failure logs its real reason.
+            pub_line = ""
+            if candles and len(candles) >= 60:
+                from fysb.services import chart_channels as cch
+                from fysb.ui import charts
+                png = None
+                try:
+                    png = await afn.run(charts.render_scale_board, res, candles,
+                                        elapsed=elapsed, deep=deep)
+                except Exception as e:
+                    await afn.run(audit_log.log, uid,
+                                  f"royal_scale_chart_render_failed:{str(e)[:120]}")
+                if png:
+                    cap_owner = (f"⚖️ <b>لوحة الميزان الملكي — {sym} · {tf}</b>\n"
+                                 "▎القياس اكتمل — التقرير الكامل في الرسالة التالية")
+                    try:
+                        from fysb.handlers.admin_reports_ui import await_bot_photo
+                        await await_bot_photo(bot, config.ADMIN_ID, png, caption=cap_owner)
+                    except Exception as e:
+                        await afn.run(audit_log.log, uid,
+                                      f"royal_scale_photo_delivery_failed:{str(e)[:120]}")
+                    try:
+                        cap = await afn.run(cch.build_luxury_scale_caption, res,
+                                            elapsed=elapsed, deep=deep)
+                        nsent = (await cch.deliver_scale_report(bot, sym, png, cap)) if cap else 0
+                        await afn.run(audit_log.log, uid,
+                                      f"royal_scale_public:{sym}:{nsent}ch:{len(candles)}c")
+                        if nsent:
+                            pub_line = (f"📡 <b>التقرير العام:</b> نُشرت لوحة الشارت الفاخرة "
+                                        f"على <b>{nsent}</b> قناة عامة مفعّلة لتقارير الميزان")
+                        else:
+                            pub_line = ("📡 <b>التقرير العام:</b> لا قنوات مفعّلة لتقارير "
+                                        "الميزان بعد — أضفها من مركز قنوات الشارتات "
+                                        "(خيار «⚖️ عند الميزان»)")
+                    except Exception as e:
+                        pub_line = ("📡 تعذر النشر العام — السبب الحقيقي: "
+                                    + str(e).replace("<", "")[:140])
+                        await afn.run(audit_log.log, uid,
+                                      f"royal_scale_public_failed:{str(e)[:120]}")
+            if pub_line:
+                body += f"\n\n{pub_line}"
         except Exception as e:
             body = ("⛔ <b>تعذر إتمام القياس — السبب الحقيقي:</b>\n"
                     f"<blockquote>▎{str(e)[:200]}</blockquote>\n"

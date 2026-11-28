@@ -6,3 +6,7 @@ python-dotenv==1.2.4
 psycopg[binary]==3.3.9
 # Local zero-cost institutional chart & certificate rendering (v6.26.0)
 Pillow>=10.4.0
+
+# Arabic shaping for Pillow boards (v8.14.25 — luxury Arabic text in PNGs)
+arabic-reshaper==3.0.0
+python-bidi==0.6.6

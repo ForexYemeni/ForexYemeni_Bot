@@ -7,6 +7,7 @@ posts) to each channel whenever:
   * mode='signal'   — a new signal is born on a matching market
   * mode='tracking' — a live lifecycle milestone hits (RUNNING/HALFWAY/TP/SL/BE)
   * mode='schedule' — the scheduled periodic chart ticker runs (5/10/15/30/60m)
+  * mode='scale'    — v8.14.25 the Royal Scale public report (luxury board PNG)
 """
 from __future__ import annotations
 
@@ -158,7 +159,8 @@ def toggle_channel(cid: int) -> bool:
 
 
 def toggle_flag(cid: int, field: str) -> bool:
-    if field not in ("send_on_signal", "send_on_tracking", "send_on_schedule"):
+    if field not in ("send_on_signal", "send_on_tracking", "send_on_schedule",
+                     "send_on_scale"):
         return False
     row = get_channel(cid)
     if not row:
@@ -251,6 +253,7 @@ def matching_channels(symbol: str, *, mode: str = "schedule") -> list[dict]:
         "signal": "send_on_signal",
         "tracking": "send_on_tracking",
         "schedule": "send_on_schedule",
+        "scale": "send_on_scale",
     }
     flag_col = flag_map.get(mode, "send_on_schedule")
     out: list[dict] = []
@@ -404,6 +407,66 @@ async def deliver_chart_to_matching_channels(
             sent_ids.append(int(ch["id"]))
         except Exception as exc:
             log.warning("chart_channel send failed id=%s chat=%s: %s", ch.get("id"), ch.get("chat_id"), exc)
+    if sent_ids:
+        touch_last_sent(sent_ids)
+    return sent
+
+
+def build_luxury_scale_caption(res: dict, *, elapsed: float = 0.0, deep: bool = False) -> str:
+    """v8.14.25 — the luxury honest Arabic caption for the PUBLIC Royal Scale
+    board. Every figure shown is MEASURED (baseline / TP1-bank floor / quarantine
+    drop) and the mandatory honesty lines are always attached: the numbers are
+    historical samples, no profit is guaranteed, no guaranteed ratio exists.
+    A FAILED scale is never published — an empty caption is the guard."""
+    if not res or res.get("error"):
+        return ""
+    sym = str(res.get("symbol") or "XAUUSD").upper()
+    tf = str(res.get("timeframe") or "M15").upper()
+    base = res.get("baseline") or {}
+    quar = res.get("quarantine") or {}
+    n = int(base.get("n") or 0)
+    wr = float(base.get("wr") or 0.0)
+    pf = float(base.get("pf") or 0.0)
+    net_r = float(base.get("net_r") or 0.0)
+    floor = float(res.get("tp1_bank_rate") or 0.0)
+    nd = len(quar.get("dropped") or [])
+    bars = int(res.get("bars_tested") or 0)
+    pf_txt = "∞" if pf >= 99.0 else f"{pf:.2f}"
+    deep_txt = " · <b>قياس عميق</b>" if deep else ""
+    return (
+        f"⚖️ <b><u>لوحة الميزان الملكي — {esc(sym)} · {tf_name(tf)}</u></b>\n"
+        f"<blockquote>"
+        f"▎📊 شموع مقاسة: <b>{bars}</b> · ⏱ زمن القياس: <b>{elapsed:.0f} ثانية</b>{deep_txt}\n"
+        f"▎🟡 الأرضية الصادقة (ربح TP1 قبل أي وقف): <b>{floor:.1f}%</b> على <b>{n}</b> صفقة\n"
+        f"▎📈 نسبة النجاح المقاسة: <b>{wr:.1f}%</b> · عامل الربح: <b>{pf_txt}</b> · صافي: <b>{net_r:+.1f}R</b>\n"
+        f"▎🪨 الحجر الحاد أسقط <b>{nd}</b> نظاماً متعثراً — الباقي مقاس بعد الحجر\n"
+        f"</blockquote>\n"
+        f"<i>⚖️ أرقام نموذجية على التاريخ — لا ضمان ربح ولا رقم نسبة مضمون · "
+        f"الدرجة استيفاء شروط وليست احتمال فوز</i>\n"
+        f"<i>📊 قيس قبل الثقة — محرك {config.BRAND} الحقيقي · {config.BOT_SIGNATURE}</i>"
+    )
+
+
+async def deliver_scale_report(bot, symbol: str, png_bytes: bytes, caption: str) -> int:
+    """v8.14.25 — publish the Royal Scale luxury board to the public chart
+    channels opted into `send_on_scale` (mode='scale'). Returns the HONEST
+    count of channels actually served; per-channel failures are logged with
+    their real reason, never faked as success."""
+    if not bot or not png_bytes or not caption:
+        return 0
+    sym = str(symbol or "").upper()
+    sent = 0
+    sent_ids: list[int] = []
+    for ch in matching_channels(sym, mode="scale"):
+        try:
+            target = _norm_chat_target(ch["chat_id"])
+            await bot.send_photo(chat_id=target, photo=io.BytesIO(png_bytes),
+                                 caption=caption[:1024], parse_mode="HTML")
+            sent += 1
+            sent_ids.append(int(ch["id"]))
+        except Exception as exc:
+            log.warning("scale_report send failed id=%s chat=%s: %s",
+                        ch.get("id"), ch.get("chat_id"), exc)
     if sent_ids:
         touch_last_sent(sent_ids)
     return sent

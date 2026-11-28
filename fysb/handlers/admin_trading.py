@@ -1406,6 +1406,7 @@ async def admin_chart_channel_view(q, uid, context, bot, cid: int, notice: str =
     s_sig = int(ch.get("send_on_signal") or 0) == 1
     s_trk = int(ch.get("send_on_tracking") or 0) == 1
     s_sch = int(ch.get("send_on_schedule") or 0) == 1
+    s_scale = int(ch.get("send_on_scale") or 0) == 1
     mkts = _cch.format_markets_label(ch.get("markets") or "ALL")
     body = (
         f"📺 <b><u>إدارة قناة الشارت — {esc(ch.get('title') or ch['chat_id'])}</u></b>\n"
@@ -1429,6 +1430,9 @@ async def admin_chart_channel_view(q, uid, context, bot, cid: int, notice: str =
             kb.btn(f"{'🟢' if s_sig else '⚪'} عند الإشارة", f"a:chartch_flg:{cid}:send_on_signal"),
             kb.btn(f"{'🟢' if s_trk else '⚪'} عند التتبع", f"a:chartch_flg:{cid}:send_on_tracking"),
             kb.btn(f"{'🟢' if s_sch else '⚪'} المجدول", f"a:chartch_flg:{cid}:send_on_schedule"),
+        ],
+        [
+            kb.btn(f"{'🟢' if s_scale else '⚪'} ⚖️ عند الميزان (التقرير العام)", f"a:chartch_flg:{cid}:send_on_scale"),
         ],
         [kb.btn("🗑 حذف القناة", f"a:chartch_del:{cid}", style="danger")],
         [kb.btn("↩️ قنوات الشارتات", "a:chartchs")],

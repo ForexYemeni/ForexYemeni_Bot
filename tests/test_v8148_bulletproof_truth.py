@@ -157,7 +157,12 @@ def test_yahoo_crypto_leg_serves_real_spot_payload():
     vals = _mk([(100 + i * 0.05, 100 + i * 0.05 + 0.4,
                  100 + i * 0.05 - 0.3, 100 + i * 0.05 + 0.1) for i in range(60)],
                t0=t0.strftime("%Y-%m-%d %H:%M:%S"))
-    with patch.object(md, "_fetch_yahoo_candles", return_value=vals) as y:
+    # v8.14.10 — full network isolation: the venue legs must FAIL here, or a
+    # lucky live Binance/Bybit answer on a CI runner wins the chain and the
+    # yahoo leg is never reached (the flaky red that bit the PR run).
+    with patch.object(md, "_fetch_binance_candles", side_effect=RuntimeError("isolated")), \
+         patch.object(md, "_fetch_bybit_candles", side_effect=RuntimeError("isolated")), \
+         patch.object(md, "_fetch_yahoo_candles", return_value=vals) as y:
         out = md.fetch_candles("BTCUSD", "15min", "", 60, use_cache=False)
     assert any("BTC-USD" in str(c) for c in y.call_args_list)
     assert len(out["values"]) == 60

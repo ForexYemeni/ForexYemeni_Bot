@@ -448,6 +448,8 @@ async def _route_admin(q, context, uid: int, action: str):
         await admin_trading.admin_signals_day(q, uid, context, bot, arg or "today", day_cat, day_page)
     elif act == "sigdates":
         await admin_trading.admin_signals_dates(q, uid, context, bot, int(arg or 0))
+    elif act == "royallocks":
+        await admin_trading.admin_royal_locks(q, uid, context, bot)
     elif act == "sigpl":
         await admin_trading.admin_signal_pl(q, uid, context, bot, arg or "all")
     elif act == "sigplcat":

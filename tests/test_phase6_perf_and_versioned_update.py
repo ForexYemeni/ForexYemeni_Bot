@@ -1,7 +1,8 @@
 """Phase 6 (v6.16.0) regression & contract suite:
   1. Performance: touch_and_get / touch 60s in-memory write throttle,
      subscriptions.plans_for_users O(1) batch plan resolution,
-     signal_engine.emit_to_users card-first delivery + offloaded auto_execute,
+     signal_engine.emit_to_users card-first delivery (v8.14.11: the demo
+     position opens ONLY at the tracker's true market fill),
      tracker._card_refresh_edits batch account loading & channel safety.
   2. Versioned /update + Instant Rollback:
      updater.normalize_tag, self_update(target_tag=...) downgrade/reinstall,
@@ -120,8 +121,11 @@ class TestPhase6BatchPlansAndOffload(unittest.TestCase):
         self.assertEqual(batch[880202]["code"], "FREE")
         self.assertEqual(batch[880203]["code"], "FREE")
 
-    def test_emit_to_users_delivers_all_cards_before_offloaded_auto_execute(self):
-        # Enable auto_trade for 880201 and 880202
+    def test_demo_never_opens_at_creation_but_at_true_fill(self):
+        """v8.14.11 — the royal fill gate (owner decree): the demo position
+        opens ONLY when the tracker confirms the true market fill, NEVER at
+        signal creation — and exactly once per user."""
+        from fysb.services import user_trade
         for uid in (880201, 880202):
             subs_service.grant_subscription(uid, "VIP", source="ADMIN", actor=ADMIN_ID, override_days=30)
             demo_engine.set_balance(uid, 10000.0)
@@ -131,7 +135,7 @@ class TestPhase6BatchPlansAndOffload(unittest.TestCase):
                          targets,rr,score,strategy,reason,status,source,created_by,created_at,
                          data_source,data_time,strategy_scores,expires_at)
                          VALUES('XAUUSD','BUY','M15',3500,3480,3540,3560,3580,'t',2.0,95,'SMC','x',
-                         'RUNNING','AUTO',0,?,'LIVE','t','{}','')""", (config.now(),))
+                         'ACTIVE','AUTO',0,?,'LIVE','t','{}','')""", (config.now(),))
             sid = cur.lastrowid
             sig = dict(c.execute("SELECT * FROM signals WHERE id=?", (sid,)).fetchone())
 
@@ -142,18 +146,35 @@ class TestPhase6BatchPlansAndOffload(unittest.TestCase):
             events.append((kind, uid))
             return type("M", (), {"message_id": len(events), "chat_id": uid})()
 
+        # record the deliveries the fill gate depends on
+        async def _record(uid, text):
+            events.append(("CARD", uid))
+            with db.conn() as c:
+                c.execute("INSERT OR IGNORE INTO signal_deliveries(signal_id,user_id,delivered_at) VALUES(?,?,?)",
+                          (sig["id"], uid, config.now()))
+            return type("M", (), {"message_id": len(events), "chat_id": uid})()
+
         with patch.object(demo_engine.market_data, "fetch_price",
                           return_value={"price": 3500.0, "fetched_at": config.now(), "source": "LIVE"}):
-            stats = asyncio.run(signal_engine.emit_to_users(sig, fake_send, include_channels=False))
+            stats = asyncio.run(signal_engine.emit_to_users(sig, _record, include_channels=False))
 
-        self.assertGreaterEqual(stats["sent"], 2)
-        self.assertEqual(stats["auto_executed"], 2)
-        card_indices = [i for i, (k, u) in enumerate(events) if k == "CARD" and u in (880201, 880202)]
-        exec_indices = [i for i, (k, u) in enumerate(events) if k == "EXEC" and u in (880201, 880202)]
-        self.assertEqual(len(card_indices), 2)
-        self.assertEqual(len(exec_indices), 2)
-        # Critical-path guarantee: ALL signal cards arrived BEFORE any offloaded auto_execute card!
-        self.assertLess(max(card_indices), min(exec_indices))
+            self.assertGreaterEqual(stats["sent"], 2)
+        # ① NO demo execution at creation — zero exec cards, zero positions
+            exec_at_creation = [e for e in events if e[0] == "EXEC"]
+            self.assertEqual(exec_at_creation, [])
+            with db.conn() as c:
+                n_pos = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE signal_id=?", (sig["id"],)).fetchone()["n"]
+            self.assertEqual(n_pos, 0)
+            # ② the true market fill opens exactly one position per eligible user
+            notes = user_trade.dispatch_demo_fills(sig)
+            self.assertEqual(len(notes), 2)
+            self.assertTrue(all("نُفّذت الصفقة تلقائياً" in txt for _, txt in notes))
+            # ③ idempotent: a second fill pass never duplicates
+            notes2 = user_trade.dispatch_demo_fills(sig)
+            self.assertEqual(notes2, [])
+            with db.conn() as c:
+                n_pos = c.execute("SELECT COUNT(*) n FROM demo_positions WHERE signal_id=?", (sig["id"],)).fetchone()["n"]
+            self.assertEqual(n_pos, 2)
 
     def test_tracker_card_refresh_edits_handles_users_and_channels_in_batch(self):
         sig = {"id": 77, "symbol": "XAUUSD", "direction": "BUY", "timeframe": "M15",

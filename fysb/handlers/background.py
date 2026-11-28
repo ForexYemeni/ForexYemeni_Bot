@@ -1070,6 +1070,33 @@ async def webapp_tunnel_loop(app):
         await asyncio.sleep(20)
 
 
+async def _send_personal_royal_digests(bot) -> int:
+    """v8.14.11 — the royal personal digest: every paid subscriber gets HIS
+    OWN closed-trades summary daily (wins, royal locks, honest stops, net
+    pips — all from recorded rows). Subscribers with zero closed activity in
+    the window receive nothing — no vanity empty cards, ever."""
+    from fysb.services import digest as _digest
+
+    def _paid_active_user_ids() -> list[int]:
+        now_iso = config.now()
+        with db.conn() as c:
+            rows = c.execute("""SELECT DISTINCT user_id FROM subscriptions
+                                WHERE status='ACTIVE' AND ends_at IS NOT NULL AND ends_at>?
+                                AND plan_code != 'FREE'""", (now_iso,)).fetchall()
+        return [int(r["user_id"]) for r in rows]
+
+    sent = 0
+    for uid in await afn.run(_paid_active_user_ids):
+        try:
+            txt = await afn.run(_digest.personal_royal_digest, uid, 1)
+            if txt:
+                await bot.send_message(uid, txt, parse_mode="HTML")
+                sent += 1
+        except Exception:
+            continue
+    return sent
+
+
 async def auto_digest_loop(app):
     """v8.5.3 — Hourly check for automated Weekly (Sunday 10:00pm Mecca) & Monthly (Day 1 11:00am Mecca) luxury digests."""
     from fysb.services import digest as _digest
@@ -1096,6 +1123,13 @@ async def auto_digest_loop(app):
                             app.bot, days=30, include_channels=True, notify_admin=True, auto_scheduled=True
                         )
                         log.info("auto monthly performance digest published (%s)", today)
+            # v8.14.11 — the royal personal digest: daily at/after 9:00pm Mecca.
+            if now_dt.hour >= 21:
+                last_p = await afn.run(db.get_setting, "last_personal_digest_day", "")
+                if last_p != today:
+                    n = await _send_personal_royal_digests(app.bot)
+                    await afn.run(db.set_setting, "last_personal_digest_day", today)
+                    log.info("royal personal digests sent (%s)", n)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1148,6 +1182,16 @@ async def post_init(app):
     _TASKS.append(asyncio.create_task(auto_digest_loop(app), name="fysb-auto-digest"))
     post_init._tasks_ref = _TASKS
     log.info("background loops started (%d)", len(_TASKS))
+    # v8.14.11 — «سجل الغياب الصادق»: if the last heartbeat is far behind,
+    # the owner gets ONE honest report of everything that closed in the gap.
+    try:
+        from fysb.services import absence as _absence
+        report, gap = await afn.run(_absence.build_absence_report)
+        if report:
+            await _safe_send(app.bot, config.ADMIN_ID, report)
+            log.warning("ABSENCE: %s seconds since the last heartbeat — report sent", int(gap))
+    except Exception:
+        log.debug("absence report skipped")
 
 
 def _warm_pg() -> None:

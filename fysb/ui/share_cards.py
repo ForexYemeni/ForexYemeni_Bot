@@ -14,6 +14,7 @@ import io
 from datetime import datetime, timezone
 
 from fysb import config
+from fysb.ui.charts import live_signal_metrics
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -127,6 +128,57 @@ def _fmt_px(v) -> str:
         return f"{f:.5f}"
     except Exception:
         return "—"
+
+
+def signal_share_payload(sig_d: dict, bot_un: str, ref_uid: int) -> dict:
+    """v8.14.11 — the royal profit share card must NEVER lie.
+
+    The old inline payload read `m.get("pips")` — a key live_signal_metrics
+    has never returned — so every RUNNING trade shared at 0 pips and every
+    closed card used the live drift instead of the DOCUMENTED result. The
+    honest law: closed trades speak their recorded pips_result and their
+    real close level (LOCKED_50 → locked_sl, SL → stop, TP → the banked
+    target); open trades speak their true floating value."""
+    m = live_signal_metrics(sig_d)
+    status = str(sig_d.get("status") or "ACTIVE").upper()
+    is_closed = bool(m.get("is_closed"))
+    if is_closed:
+        pips = float(sig_d.get("pips_result") or 0.0)
+        tp_map = {"TP1_HIT": "tp1", "TP2_HIT": "tp2", "TP3_HIT": "tp3"}
+        if status == "LOCKED_50" and float(sig_d.get("locked_sl") or 0) > 0:
+            exit_price = float(sig_d["locked_sl"])
+        elif status == "SL_HIT" and float(sig_d.get("stop") or 0) > 0:
+            exit_price = float(sig_d["stop"])
+        elif status in tp_map and float(sig_d.get(tp_map[status]) or 0) > 0:
+            exit_price = float(sig_d[tp_map[status]])
+        else:
+            exit_price = float(m.get("live_px") or sig_d.get("tp1")
+                               or sig_d.get("entry") or 0.0)
+    else:
+        pips = float(m.get("display_pips") or 0.0)
+        exit_price = float(m.get("live_px") or sig_d.get("tp1")
+                           or sig_d.get("entry") or 0.0)
+    label = ("LOCKED +5$" if status == "LOCKED_50"
+             else status.replace("_HIT", " HIT") if status.endswith("_HIT")
+             else status)
+    bn = (bot_un or config.BRAND or "ForexYemeniBot").lstrip("@")
+    return {
+        "kind": "signal",
+        "symbol": str(sig_d.get("symbol") or "XAUUSD"),
+        "direction": str(sig_d.get("direction") or "BUY"),
+        "strategy": str(sig_d.get("strategy") or "ROYAL"),
+        "timeframe": str(sig_d.get("timeframe") or "M15"),
+        "entry": float(sig_d.get("entry") or 0),
+        "exit_price": exit_price,
+        "tp3": float(sig_d.get("tp3") or sig_d.get("tp1") or 0),
+        "tp_label": label,
+        "pips": pips,
+        "rr": float(sig_d.get("rr") or 0),
+        "score": int(sig_d.get("score") or 0),
+        "ref_link": f"t.me/{bn}?start=ref_{ref_uid}",
+        "ref_label": f"SHARED VIA {config.BRAND} • REF #{ref_uid}",
+        "timestamp": str(sig_d.get("closed_at") or sig_d.get("created_at") or config.now()),
+    }
 
 
 def render_pnl_share_card(payload: dict) -> bytes | None:

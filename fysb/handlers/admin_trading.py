@@ -2,6 +2,7 @@
 Timeframes, Brokers, Accounts, Demo, Live — everything wired to real logic."""
 import asyncio
 import json
+from datetime import timedelta
 
 from telegram.ext import ContextTypes
 
@@ -238,6 +239,72 @@ def _pl_exec_card(b: dict, title: str = "الملخص التنفيذي العا�
     )
 
 
+def royal_locks_board() -> str:
+    """v8.14.11 — «القفلات الملكية»: the owner's private vision of the royal
+    lock law — every armed trade, its floor, its live distance in REAL
+    dollars, and the honest ledger of closed locks. Zero counters, zero
+    fabricated percentages — everything read from the recorded truth."""
+    from fysb.services.signal_archive import today_iso, date_bounds
+    from fysb import instruments as _ins
+    lo, hi = date_bounds(today_iso())
+    week_lo = date_bounds((config.mecca_now() - timedelta(days=6)).strftime("%Y-%m-%d"))[0]
+    with db.conn() as c:
+        armed = c.execute("""SELECT id, symbol, direction, timeframe, strategy, entry,
+                             locked_sl, locked_pips, live_px, profit_50_at, status
+                             FROM signals WHERE profit_50_hit=1
+                             AND status IN ('RUNNING','TP1_HIT','TP2_HIT')
+                             ORDER BY profit_50_at DESC LIMIT 20""").fetchall()
+        n_today = c.execute("SELECT COUNT(*) n FROM signals WHERE status='LOCKED_50' AND closed_at>=? AND closed_at<?",
+                            (lo, hi)).fetchone()["n"]
+        n_week = c.execute("SELECT COUNT(*) n FROM signals WHERE status='LOCKED_50' AND closed_at>=?",
+                           (week_lo,)).fetchone()["n"]
+        n_all = c.execute("SELECT COUNT(*) n FROM signals WHERE status='LOCKED_50'").fetchone()["n"]
+        recent = c.execute("""SELECT id, symbol, direction, pips_result, closed_at FROM signals
+                             WHERE status='LOCKED_50' ORDER BY closed_at DESC LIMIT 10""").fetchall()
+    lines = [
+        "🏅 <b><u>القفلات الملكية — لوحة رؤية القانون</u></b>",
+        "✨ العتبة الموثقة: <b>+5.00 $</b> بـ 0.01 لوت لكل الأدوات (بالدولار الحقيقي لكل سوق)",
+        "<blockquote>"
+        f"▎🔒 صفقات مؤمّنة الآن: <b>{len(armed)}</b>\n"
+        f"▎🏆 قفلات مكتملة: اليوم <b>{n_today}</b> · 7 أيام <b>{n_week}</b> · الإجمالي <b>{n_all}</b> "
+        "(كل قفلة = <b>+5.00 $</b> / 0.01 لوت بلا استثناء)"
+        "</blockquote>",
+    ]
+    if armed:
+        lines.append("👑 <b>الأرضيات الحية</b> (السعر فوق الأرضية = القفل يحرس):")
+        for r in armed:
+            sym, floor, live = r["symbol"], float(r["locked_sl"] or 0), float(r["live_px"] or 0)
+            if live > 0 and floor > 0:
+                raw = (live - floor) if r["direction"] == "BUY" else (floor - live)
+                pips_gap = _ins.pips(sym, floor, live) if raw > 0 else -_ins.pips(sym, live, floor)
+                usd_gap = _ins.usd_move(sym, pips_gap, 0.01, px=live)
+                dist = (f"ارتفاع <b>{pips_gap:+.1f} pips</b> (<code>{usd_gap:+,.2f} $</code> فوق الأرضية / 0.01)"
+                        if pips_gap >= 0 else
+                        f"⚠️ تحت الأرضية بـ<b>{-pips_gap:.1f} pips</b> — القفل سيلتقط عند العودة")
+            else:
+                dist = "بانتظار نبضة السعر"
+            lines.append(
+                f"▎🏅 <code>#{r['id']}</code> <b>{esc(r['symbol'])}</b> "
+                f"{'🟢 شراء' if r['direction'] == 'BUY' else '🔴 بيع'} ⏱ {esc(r['timeframe'])} — "
+                f"الأرضية <code>{_ins.fmt_price(sym, floor) if floor else '—'}</code> · {dist}")
+    else:
+        lines.append("<blockquote>▎لا صفقات مؤمّنة الآن — كل إشارة تلمس +5$ موثقاً ستظهر هنا فوراً بأرضيتها الحية.</blockquote>")
+    if recent:
+        lines.append("📜 <b>آخر القفلات المكتملة</b> (كلها فوز موثق لا خسارة):")
+        for r in recent:
+            lines.append(
+                f"▎🏆 <code>#{r['id']}</code> <b>{esc(r['symbol'])}</b> "
+                f"{'🟢' if r['direction'] == 'BUY' else '🔴'} <b>+{float(r['pips_result'] or 0):+.1f} pips</b> "
+                f"— {esc(str(r['closed_at'] or '').replace('T', ' ')[:16])}")
+    return "\n".join(lines)
+
+
+async def admin_royal_locks(q, uid, context, bot):
+    body = await afn.run(royal_locks_board)
+    rows_kb = [[kb.btn("💰 محاسبة P/L", "a:sigpl:all")]]
+    await render(q, body, kb.admin_nav(rows_kb), bot)
+
+
 async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
     """v6.20.5 — Luxury Institutional P/L Hub grouped cleanly by Market Sector
     (Metals / Forex / Crypto / Indices) with apples-to-apples USD totals,
@@ -254,6 +321,7 @@ async def admin_signal_pl(q, uid, context, bot, period: str = "all"):
         f"✨ <b>{esc(p_label)}</b>",
     ]
     rows_kb = [_pl_period_row(period, "a:sigpl")]
+    rows_kb.append([kb.btn("🏅 القفلات الملكية", "a:royallocks", style="primary")])
 
     if grand["total"] == 0:
         lines.append(
@@ -327,6 +395,7 @@ async def admin_signal_pl_sector(q, uid, context, bot, sector: str, period: str 
         f"✨ <b>{esc(p_label)}</b>",
     ]
     rows_kb = [_pl_period_row(period, f"a:sigplcat:{sec_key}")]
+    rows_kb.append([kb.btn("🏅 القفلات الملكية", "a:royallocks", style="primary")])
 
     if grand["total"] == 0 or not sec_list:
         lines.append("<blockquote>▎لا توجد إشارات مغلقة في هذا السوق خلال الفترة المختارة.</blockquote>")
@@ -375,6 +444,7 @@ async def admin_signal_pl_symbol(q, uid, context, bot, symbol: str, period: str 
         f"✨ سوق {sec_title} · <b>{esc(p_label)}</b>",
     ]
     rows_kb = [_pl_period_row(period, f"a:sigplsym:{sym}")]
+    rows_kb.append([kb.btn("🏅 القفلات الملكية", "a:royallocks", style="primary")])
 
     if not s or s["total"] == 0:
         lines.append("<blockquote>▎لا توجد صفقات مغلقة لهذه الأداة خلال الفترة المختارة.</blockquote>")

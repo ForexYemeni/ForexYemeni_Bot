@@ -86,6 +86,14 @@ def set_auto_trade(user_id: int, enabled: bool) -> None:
         c.execute("UPDATE demo_accounts SET auto_trade=? WHERE id=?", (1 if enabled else 0, acc["id"]))
 
 
+def set_opposite_alert(user_id: int, enabled: bool) -> None:
+    """v8.14.11 — the royal opposite-trade alert toggle (default ON)."""
+    acc = get_or_create_account(user_id)
+    with db.conn() as c:
+        c.execute("UPDATE demo_accounts SET opposite_alert=? WHERE id=?",
+                  (1 if enabled else 0, acc["id"]))
+
+
 def set_partial_tp_be(user_id: int, enabled: bool) -> None:
     """Toggle Smart 50% Partial TP1 + Automatic Breakeven protection."""
     acc = get_or_create_account(user_id)

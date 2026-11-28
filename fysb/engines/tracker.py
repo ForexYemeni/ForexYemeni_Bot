@@ -24,7 +24,8 @@ from fysb.engines import honesty, market_data
 from fysb.config import log
 
 TERMINAL = ("SL_HIT", "TP3_HIT", "CANCELLED", "EXPIRED", "LOCKED_50")
-LOCK50_USD = 5.0   # 🏅 the royal lock: +$5 at 0.01 lot — 50 gold pips, 500 BTC pips, one truth
+LOCK50_USD = 5.0
+NEAR50_USD = 4.0   # v8.14.11 — the documented «one dollar away» royal whisper   # 🏅 the royal lock: +$5 at 0.01 lot — 50 gold pips, 500 BTC pips, one truth
 
 # v6.8.0 — CONSERVATIVE target confirmation: a target is banked only when the
 # provider candle PENETRATES the level by this margin, not merely grazes it.
@@ -283,6 +284,13 @@ def check_open_signals(api_key: str) -> dict:
                 notifications.extend(notes)
                 edits.extend(new_edits)
                 sig["status"] = "RUNNING"
+                # v8.14.11 — the royal fill gate: demo auto-execution fires
+                # HERE (true market fill), never at signal creation.
+                try:
+                    from fysb.services import user_trade as _ut
+                    notifications.extend(_ut.dispatch_demo_fills(sig))
+                except Exception:
+                    pass
                 # Same-pass half-TP1 check (post-fill candles only) — mirrors
                 # the standing pass below; the activation edit already
                 # refreshed the card, so only notes are extended.
@@ -386,6 +394,13 @@ def check_open_signals(api_key: str) -> dict:
                     c.execute("UPDATE signals SET live_px=?, data_time=? WHERE id=?",
                               (live_px, payload["last_candle_iso"], sig["id"]))
                 stats["refreshed"] += 1
+    # v8.14.11 — the honest heartbeat: one stamp per cycle feeds the
+    # boot-time Absence Ledger (the bot never pretends it was always there).
+    try:
+        from fysb.services.absence import stamp_cycle
+        stamp_cycle()
+    except Exception:
+        pass
     return {"stats": stats, "notifications": notifications,
             "admin_notice": admin_notice, "edits": edits,
             "proof_signals": proof_signals, "chart_events": chart_events}
@@ -895,6 +910,13 @@ def _evaluate_signal(sig: dict, candles: list[dict], cutoff: str = "", live_px: 
                         else (entry - p50 * lock_pip)
                     lock_out.update({"armed": True, "locked_sl": locked_price,
                                      "locked_pips": p50, "armed_iso": c["datetime"]})
+                elif per_pip_usd > 0 and exc_pips * per_pip_usd >= NEAR50_USD \
+                        and not str(sig.get("near_50_at") or ""):
+                    # v8.14.11 — the honest whisper: one documented touch at
+                    # >=$4 (never >=$5 — that arms the full lock) on a pure
+                    # survival bar, ONCE per signal's lifetime.
+                    lock_out.update({"near": True, "near_iso": c["datetime"],
+                                     "away_usd": LOCK50_USD - exc_pips * per_pip_usd})
     if progress_tp > hit_tp:
         if progress_tp == 3:
             return "TP3_HIT"
@@ -1040,9 +1062,42 @@ def _handle_lock_arm(sig: dict, lock_info: dict, transition: str | None,
     """v8.14.10 — first documented +$5 touch on an unbanked signal: persist the
     royal lock (locked_sl/locked_pips/profit_50_hit) and send the luxury 🏅
     alert ONCE. LOCKED_50 closes are persisted by _apply_transition itself."""
-    if not lock_info.get("armed") or transition == "LOCKED_50":
+    if transition == "LOCKED_50":
         return
+    if not lock_info.get("armed") and not lock_info.get("near"):
+        return
+    near = lock_info.get("near")
+    if near and not int(sig.get("profit_50_hit") or 0) \
+            and not str(sig.get("near_50_at") or ""):
+        # v8.14.11 — «قرب التأمين» — one-time royal whisper, persisted.
+        try:
+            from fysb.theme import dir_badge, esc, tf_name
+            with db.conn() as c:
+                c.execute("UPDATE signals SET near_50_at=? WHERE id=? AND near_50_at=''",
+                          (str(lock_info.get("near_iso") or config.now()), int(sig["id"])))
+            sig["near_50_at"] = str(lock_info.get("near_iso") or config.now())
+            away = float(lock_info.get("away_usd") or 1.0)
+            seq = seq_of(int(sig["id"]))
+            txt = (
+                f"⏳ <b><u>على بُعد خطوة من التأمين الملكي 🏅</u></b> — {esc(sig['symbol'])} "
+                f"{dir_badge(sig['direction'])} ⏱ {tf_name(sig['timeframe'])}\n"
+                "<blockquote>"
+                f"▎📌 إشارتك <b>#{seq}</b> لمست مبلغاً موثقاً بقيمة <b>+{LOCK50_USD - away:.2f} $</b> بـ 0.01 لوت "
+                f"— أنت على بُعد <b>{away:.2f} $</b> فقط من التأمين الملكي عند +5 $.\n"
+                "▎🛡 اللمسة القادمة إلى +5 $ تُقفل الصفقة للأبد: لا خسارة ممكنة بعدها مهما ارتد السعر."
+                "</blockquote>\n"
+                "<i>لمسة موثقة بشمعة مغلقة حقيقية — تنبيه واحد صادق لا يُكرر.</i>"
+            )
+            notifications.extend(_alert_targets(sig, txt))
+            _log(sig["symbol"], sig["timeframe"], "NEAR50",
+                 f"signal #{sig['id']} touched +{LOCK50_USD - away:.2f}$ (away {away:.2f}$)")
+        except Exception:
+            pass
     if int(sig.get("profit_50_hit") or 0):
+        return
+    if not lock_info.get("armed"):
+        # v8.14.11 — a near-only touch ($4 band) must NEVER take the full
+        # lock path: the 🏅 arming alert fires at the documented +$5 only.
         return
     try:
         from fysb.theme import dir_badge, esc, tf_name

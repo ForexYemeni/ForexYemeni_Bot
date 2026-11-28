@@ -683,6 +683,7 @@ ADD_COLUMNS = {
         "profit_50_at": "TEXT DEFAULT ''",
         "locked_sl": "REAL DEFAULT 0",
         "locked_pips": "REAL DEFAULT 0",
+        "near_50_at": "TEXT DEFAULT ''",
     },
     "signal_deliveries": {
         "chat_id": "TEXT DEFAULT ''",
@@ -715,6 +716,7 @@ ADD_COLUMNS = {
         "fixed_lot": "REAL DEFAULT 0.01",
         "auto_trade": "INTEGER DEFAULT 0",
         "partial_tp_be": "INTEGER DEFAULT 1",
+        "opposite_alert": "INTEGER DEFAULT 1",
     },
     "demo_positions": {
         "signal_id": "INTEGER DEFAULT 0",

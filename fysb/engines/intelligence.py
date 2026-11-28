@@ -107,7 +107,15 @@ def strategy_quarantine_status(
         return {"quarantined": False, "trades": 0, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
 
     n = len(rows)
-    if n < 6:
+    # v8.14.23 — THE OWNER'S SHARP QUARANTINE: thresholds are ROYAL SETTINGS,
+    # not magic numbers in code — quarantine_n (default 20), quarantine_wr_floor
+    # (default 40.0), quarantine_pf_floor (default 0.9). A strategy that fails
+    # EITHER floor (WR or PF) with enough sample is quarantined — the old
+    # soft AND (35% AND 0.85 on 6 trades) let bleeding strategies keep firing.
+    n_min = max(3, db.get_setting_int("quarantine_n", 20))
+    wr_floor = db.get_setting_float("quarantine_wr_floor", 40.0)
+    pf_floor = db.get_setting_float("quarantine_pf_floor", 0.9)
+    if n < n_min:
         return {"quarantined": False, "trades": n, "win_rate": 0.0, "pf": 0.0, "net_r": 0.0, "reason": ""}
 
     wins = 0
@@ -125,10 +133,11 @@ def strategy_quarantine_status(
     wr = (wins / n) * 100.0
     pf = (gross_win_r / gross_loss_r) if gross_loss_r > 0 else 3.0
     net_r = round(gross_win_r - gross_loss_r, 2)
-    quarantined = (wr < 35.0 and pf < 0.85)
+    quarantined = (wr < wr_floor or pf < pf_floor)
     reason = (
-        f"حماية ذكية (Auto-Quarantine): استراتيجية {code} موقوفة مؤقتاً "
-        f"(نجاح {wr:.0f}% · PF {pf:.2f} · صافي {net_r:+.1f}R من {n} صفقات)"
+        f"الحجر الصحي الملكي (Auto-Quarantine): استراتيجية {code} موقوفة مؤقتاً "
+        f"(نجاح {wr:.0f}% · PF {pf:.2f} · صافي {net_r:+.1f}R من {n} صفقات — "
+        f"العتبات: نجاح <{wr_floor:.0f}% أو PF <{pf_floor:.2f} على {n_min}+)"
         if quarantined else ""
     )
     return {

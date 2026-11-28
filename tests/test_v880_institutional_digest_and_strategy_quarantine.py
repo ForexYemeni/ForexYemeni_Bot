@@ -133,9 +133,11 @@ def test_auto_scheduled_channel_broadcast_quality_guard(tmp_path, monkeypatch):
 def test_institutional_strategy_auto_quarantine_blocks_bleeding_and_keeps_winners(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
 
-    # Bleeding strategy: 1 win (+2R) and 6 losses (-6R) -> WR 14.3%, PF 0.33 -> MUST QUARANTINE!
+    # v8.14.23 — the SHARP royal floors: n>=20 AND (WR<40 OR PF<0.9).
+    # Bleeding strategy: 2 wins (+4R) and 18 losses (-18R) -> WR 10%, PF 0.22 -> MUST QUARANTINE!
     _ins_sig(strategy="BLEEDER", status="TP1_HIT", pips_result=200.0)
-    for _ in range(6):
+    _ins_sig(strategy="BLEEDER", status="TP1_HIT", pips_result=200.0)
+    for _ in range(18):
         _ins_sig(strategy="BLEEDER", status="SL_HIT", pips_result=-100.0)
 
     # Winning strategy: 3 wins (+9R) and 3 losses (-3R) -> WR 50%, PF 3.0 -> MUST STAY ACTIVE!
@@ -146,7 +148,8 @@ def test_institutional_strategy_auto_quarantine_blocks_bleeding_and_keeps_winner
     q_bad = intelligence.strategy_quarantine_status("BLEEDER", "XAUUSD")
     q_good = intelligence.strategy_quarantine_status("ICHIMOKU", "XAUUSD")
     assert q_bad["quarantined"] is True
-    assert q_bad["win_rate"] < 35.0 and q_bad["pf"] < 0.85
+    assert q_bad["win_rate"] < 40.0 or q_bad["pf"] < 0.9
+    assert "العتبات" in (q_bad.get("reason") or "")  # the sharp floors are DISCLOSED
     assert q_good["quarantined"] is False
 
     q_list = intelligence.list_quarantined_strategies(14)

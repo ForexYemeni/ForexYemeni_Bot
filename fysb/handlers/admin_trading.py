@@ -2019,6 +2019,9 @@ def risk_board_text() -> str:
         ("max_correlated_signals", "أقصى صفقات مترابطة بنفس الاتجاه"),
         ("min_rr", "أدنى عائد/مخاطرة"),
         ("atr_pct_max", "أقصى تقلب ATR%"),
+        ("quarantine_wr_floor", "حجر: أدنى نجاح %"),
+        ("quarantine_pf_floor", "حجر: أدنى PF"),
+        ("quarantine_n", "حجر: أدنى عينة"),
     ]
     lines = ["🛡 <b>محرك إدارة المخاطر</b>",
              f"⛔ Kill Switch: <b>{'مفعل — يمنع أي إشارة جديدة' if ks else 'غير مفعل'}</b>",
@@ -2048,6 +2051,10 @@ async def admin_risk(q, uid, context, bot):
         ("max_correlated_signals", "أقصى صفقات مترابطة بنفس الاتجاه", 1, 3),
         ("min_rr", "أدنى عائد/مخاطرة", 0.1, 0.5),
         ("atr_pct_max", "أقصى تقلب ATR%", 0.5, 1.0),
+        # v8.14.23 — the owner's sharp quarantine floors (royal settings)
+        ("quarantine_wr_floor", "حجر: أدنى نجاح استراتيجية %", 5.0, 40.0),
+        ("quarantine_pf_floor", "حجر: أدنى معامل ربح", 0.05, 0.9),
+        ("quarantine_n", "حجر: أدنى عدد صفقات", 1, 20),
     ]
     rows_kb = []
     for key, title, step, _d in keys:
@@ -2111,7 +2118,9 @@ async def admin_risk_adjust(q, uid, context, bot, key: str, delta: float):
     bounds = {"risk_per_signal_pct": (0.1, 5.0), "max_daily_risk_pct": (1.0, 20.0),
               "max_daily_loss_pct": (1.0, 30.0), "max_open_per_symbol": (1, 10),
               "max_open_signals": (1, 50), "max_correlated_signals": (1, 10),
-              "min_rr": (1.0, 10.0), "atr_pct_max": (1.0, 15.0)}
+              "min_rr": (1.0, 10.0), "atr_pct_max": (1.0, 15.0),
+              "quarantine_wr_floor": (10.0, 80.0), "quarantine_pf_floor": (0.3, 2.0),
+              "quarantine_n": (3.0, 60.0)}
     if key not in bounds:
         await render(q, "إعداد غير صالح.", kb.admin_nav(), bot)
         return

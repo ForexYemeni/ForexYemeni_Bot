@@ -883,6 +883,20 @@ async def _route_admin(q, context, uid: int, action: str):
     elif act == "repfb":
         # v8.14.19 — preview-to-owner then broadcast the EXACT filtered report
         await admin_reports_ui.rep_filter_broadcast(q, uid, context, bot, arg)
+    elif act == "scale":
+        # v8.14.23 — ⚖️ the Royal Scale: measure-before-trust backtest board
+        from fysb.handlers import admin_scale
+        if arg == "run":
+            await admin_scale.scale_run(q, uid, context, bot, deep=False)
+        elif arg == "deep":
+            await admin_scale.scale_run(q, uid, context, bot, deep=True)
+        elif arg in ("m", "t", "d", "s"):
+            await admin_scale.scale_pick(q, uid, context, bot, arg)
+        elif arg == "set":
+            k, _, v = (arg2 or "").partition(":")
+            await admin_scale.scale_set(q, uid, context, bot, k, v)
+        else:
+            await admin_scale.scale_home(q, uid, context, bot)
     elif act == "repusers":
         await admin_system.admin_rep_users(q, uid, context, bot)
     elif act == "repsignals":
